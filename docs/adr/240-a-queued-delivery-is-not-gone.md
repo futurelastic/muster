@@ -96,9 +96,56 @@ remains open as a follow-up, to be decided on the counters above.
 
 ## Not covered
 
-- A delivery through an optional delivery module or the inbox lane writes no
-  composer record on its own path; a module confirming a queue entry is the
-  same shape and is not changed here.
+- The delivery-module and inbox lanes keep no record, on purpose; see
+  "Module and inbox lanes" below.
 - A hand-back rendered as a collapsed paste marker, or several queued messages
   returned joined, will not match the recorded text; they stay refused (fail
   safe) and are counted as unexplained when they carry the sender label.
+
+## Module and inbox lanes (#249, re-cut after #257)
+
+This ADR first listed both lanes as a gap: a module confirming a queue entry
+was assumed to have the same shape as the terminal path's weak confirmation.
+That premise does not hold, and after #257 the record would have no consumer.
+Nothing is built on either lane. The reasons, so the question is not filed
+again:
+
+**Module lane.**
+- A `queued` receipt on this lane follows only the module's `confirmed`
+  verdict: a user-origin turn the runtime accepted. That is the terminal path's
+  turn-proven case, where this ADR keeps no record either.
+- The weak case, the module's own `queued` verdict (enqueued, the turn has not
+  started), is answered `unknown` with a ledger entry, never `queued`. No
+  `queued` receipt on this lane rests on weak evidence.
+- On a live lane `resumeIfStranded` and `replaceIfStranded` are refused before
+  any record is read (#257), so a record would feed a path that is closed. The
+  recovery is `discard` with `expect`, then a fresh send.
+- The module's transcript path is carried but never opened by the driver, so a
+  record kept here would lack the "did the transcript show a turn start" check
+  this ADR's proof depends on. It would then prove any later recall of the same
+  words to be the driver's own, including after a turn that did start.
+- A degraded lane sends to the terminal, where this ADR's record applies. It
+  exists only after a weak `queued`, which the module lane does not produce.
+
+**Inbox lane.**
+- `auto` never tries the inbox since #257; it is used only when named.
+- Its one success outcome, `delivered`, needs the receiver's transcript to
+  record the exact envelope. The weak case is `unknown` with a ledger hold, and
+  a resume is not how that is retried.
+- Even if a runtime handed a queued peer message back, it would not return in
+  the form a record keys on. A record holds the terminal-labelled text, while
+  the inbox carries the label in the envelope's sender-name field, so a record
+  could never match. This is the same fail-safe as the collapsed-paste case
+  above.
+
+**Reopen when** a session whose `delivery.clientConnected` is true reads
+`waitingOn: unsent-input` with a composer opening `[from: `, or a module is
+found to report `confirmed` for a bare enqueue. The module side then has the
+same shape as the terminal path and this section is wrong.
+
+**The field signal does not see these sessions.**
+`stranded.unexplained_labelled_composer` fires only from the terminal send path.
+After #257 no `/input` reaches that path on a session with a live lane, so the
+counter cannot fire for them. Watch `state` for the pattern above instead.
+
+`TestModuleLaneKeepsNoProvisionalRecord` pins the module-lane facts.

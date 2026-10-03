@@ -1581,6 +1581,12 @@ returns, the session reports `waiting_input` with `waitingOn: unsent-input` and
 `strandedDelivery: true`, and the sender's own `resumeIfStranded` (same text,
 same `from`) finishes it. See `docs/adr/240-a-queued-delivery-is-not-gone.md`.
 
+This record belongs to the terminal path. A delivery module answers `unknown`
+for a bare enqueue and `queued` only for a turn the runtime accepted, so no
+provisional record is kept on that lane; and on a live lane a resume is refused
+(#257), the recovery being `discard` with `expect`, then a fresh send. The inbox
+lane keeps none for the same reasons. See the ADR's "Module and inbox lanes".
+
 `discard` removes unsent composer text **without submitting it** — the verb
 between "run it" and "destroy the session holding it", which was missing. `send`
 refuses to append to a busy composer (§2.4), which is right and left a caller
