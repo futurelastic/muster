@@ -144,7 +144,18 @@ jobs:
         run: |
           set -uo pipefail
           # Visibility from the API, never assumed: unknown is refused like private.
-          PRIVATE="$(gh api "repos/$REPO" --jq '.private' 2> /dev/null || echo unknown)"
+          # A transient error (a 5xx from the API, a dropped connection) is retried
+          # before it counts as "unknown" — one blip must not fail a release (#260).
+          # Only a read that keeps failing falls through to unknown; a read that
+          # answers is taken at once, so a real `true` is never retried away.
+          PRIVATE=unknown
+          for attempt in 1 2 3 4 5; do
+            if READ="$(gh api "repos/$REPO" --jq '.private' 2> /dev/null)" && { [ "$READ" = "true" ] || [ "$READ" = "false" ]; }; then
+              PRIVATE="$READ"
+              break
+            fi
+            [ "$attempt" -lt 5 ] && sleep $((attempt * 3))
+          done
           if [ "$PRIVATE" != "false" ]; then
             echo "::error::$REPO is private (or its visibility could not be read: $PRIVATE) — a private repository never publishes to public npm."
             exit 1
