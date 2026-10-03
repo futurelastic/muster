@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	fleet "github.com/futurelastic/muster"
+	"github.com/futurelastic/muster/internal/delivery/modclient/modtest"
 	"github.com/futurelastic/muster/internal/driver"
 	"github.com/futurelastic/muster/internal/state"
 )
@@ -195,4 +197,68 @@ func TestHandedBackAfterAnEnqueueSurvivesARestart(t *testing.T) {
 	if got.StrandedDelivery {
 		t.Fatal("the runtime ran this text after the delivery; a copy in the composer is not proven to be ours")
 	}
+}
+
+// #249, re-cut after #257: the delivery-module lane keeps no provisional record,
+// and that is deliberate. A `queued` receipt on this lane follows only a
+// module verdict of `confirmed` (a user-origin turn the runtime accepted, the
+// terminal path's turn-proven case, where #240 keeps no record either); a bare
+// enqueue is answered `unknown`, never `queued`. And on a live lane a resume is
+// refused before any record would be read, so a record would have no consumer.
+// This test pins those three facts so that adding a record here later has to
+// confront the reasons in docs/adr/240-a-queued-delivery-is-not-gone.md.
+func TestModuleLaneKeepsNoProvisionalRecord(t *testing.T) {
+	const text = "release is green, please merge when you are ready"
+
+	t.Run("confirmed is a started turn, so no record", func(t *testing.T) {
+		r, id := liveRig(t, modtest.Behaviour{})
+		got := r.sendLive(id, text, driver.SendOptions{Submit: true})
+		if got.Outcome != fleet.OutcomeQueued || got.ModuleOf() != modName {
+			t.Fatalf("receipt = %+v, want queued naming the module", got)
+		}
+		if n := r.counter(counterStrandedProvisionalKept); n != 0 {
+			t.Errorf("provisional_kept = %d, want 0: confirmed means a turn started", n)
+		}
+
+		// The runtime hands the text back; nothing remembers it as ours.
+		r.mux.setCapture("%"+intToStr(r.pids), composerHoldingRows(strings.Split(paneLabelled(text, agentFrom), "\n")))
+		st, err := r.d.State(context.Background(), testCaller, fleet.SessionRef{Machine: "testbox", ID: id})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.StrandedDelivery {
+			t.Error("state claims a module-lane delivery as this driver's own stranded text; no record was kept")
+		}
+
+		// And resume is refused on the live lane with nothing written, so a record
+		// would have had no consumer.
+		sends, pastes := r.sends(), r.pastes()
+		res := r.sendLive(id, text, driver.SendOptions{Submit: true, ResumeIfStranded: true})
+		if res.Outcome != fleet.OutcomeRefused || !strings.Contains(res.Reason, "live") {
+			t.Fatalf("resume on a live lane: receipt = %+v, want refused naming the live lane", res)
+		}
+		if r.sends() != sends || r.pastes() != pastes {
+			t.Errorf("sends %d -> %d, pastes %d -> %d: a refused resume wrote something", sends, r.sends(), pastes, r.pastes())
+		}
+	})
+
+	t.Run("a bare enqueue is unknown, never queued, and keeps no record", func(t *testing.T) {
+		queued := modtest.JSON(map[string]any{"verdict": "queued", "enqueued": true, "elapsedMs": 5, "final": false})
+		r, id := liveRig(t, modtest.Behaviour{Ops: map[string]modtest.OpScript{
+			"confirm": {Results: []json.RawMessage{queued}, DelayMs: 60},
+		}})
+		ctx, cancel := short(t)
+		defer cancel()
+		o := driver.SendOptions{Submit: true, LiveLaneOnly: true, From: agentFrom}
+		got, err := r.d.Send(ctx, testCaller, fleet.SessionRef{Machine: "testbox", ID: id}, text, o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Outcome != fleet.OutcomeUnknown || got.ModuleOf() != modName {
+			t.Fatalf("receipt = %+v, want unknown naming the module", got)
+		}
+		if n := r.counter(counterStrandedProvisionalKept); n != 0 {
+			t.Errorf("provisional_kept = %d, want 0: the module lane reports an enqueue as unknown, not queued", n)
+		}
+	})
 }
