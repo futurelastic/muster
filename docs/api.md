@@ -337,6 +337,44 @@ Rules:
   A peer that carries only #247 lacks the list, and a non-bypass create is
   refused `unsupported` before it is sent there rather than relayed into a `400`.
 
+**Resume carries the launch posture** (#256). A create with `resume: <conversation id>`
+that names no `permissionMode` launches with the mode the conversation's previous
+session last reported (`state.permissionMode`), and one that names no `settings`
+launches with the settings that session was created with. The service holds that
+record itself, so a restart tool does not have to remember to resend it, and it
+outlives the session: it is kept for the closed-session retention period.
+
+- **Only `bypass` is carried.** It is the one non-ordinary mode a create can ask
+  for. A conversation whose last session read back as any other mode (the ordinary
+  one, `acceptEdits`, `plan`, `auto`) carries nothing: the new session starts the
+  way an absent `permissionMode` always starts. A mode the driver could not read
+  (`unknown`, or absent) is silence, not a report — the launch's own mode stands.
+- **Settings outside bypass keep only the allow-listed keys.** A bypass launch's
+  other keys stop travelling with the mode.
+- **An explicit value wins.** `permissionMode: "bypass"` over a conversation that
+  ran in the ordinary mode launches in bypass; **`permissionMode: "default"`** asks
+  for the ordinary mode over one that ran in bypass. `default` is only that
+  request — it needs no `send`, and no driver is ever handed it. Explicit
+  `settings` replace the carried ones.
+- **The response says what was carried:** `"carried": {"permissionMode": "bypass",
+  "settings": {…}}`, each key present only when it was carried and not named by the
+  request. The field is absent when nothing was.
+- **`send` still gates the widening.** Carrying bypass or settings forward is
+  allowed when the caller holds `send`, or when the original launch was made
+  through this service by a principal that did. A bypass session this service did
+  not launch has no such record, so a caller without `send` resuming it is `401`
+  naming the grant and `permissionMode: "default"` as the way to proceed — never a
+  silently ordinary session.
+- **Consents are not carried.** A bypass launch raises the runtime's acceptance
+  screen on a machine that has not accepted it yet; answering it is still the
+  `consents` field's job, on every create that needs it.
+- **Relayed creates** are carried by the machine that holds the conversation: the
+  peer applies the same rule and its response comes back unchanged. `"default"`
+  reaches a peer that predates this as an unknown mode, refused before anything is
+  started there.
+- An `Idempotency-Key` replay returns the session the first call made; its
+  `carried` is whatever that first call reported, not a fresh decision.
+
 Replaying a spent `Idempotency-Key` against a session that has since ended is
 `409` (`reason: "replay-of-ended-session"`), not `201` — muster #234. The
 key stays spent regardless; mint a new one rather than retrying this call.

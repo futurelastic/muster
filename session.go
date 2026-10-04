@@ -520,6 +520,15 @@ type Session struct {
 	// "no record".
 	ResumeOutcome *ResumeOutcome `json:"resumeOutcome,omitempty"`
 
+	// Carried is what this create took from the conversation it resumed
+	// because the request itself did not say (muster #256; see
+	// CarriedLaunch). Nil means nothing was carried — a create that did not
+	// resume, a conversation this service holds no record of, or a request
+	// that named everything itself. It is never a claim that the session
+	// launched in the runtime's ordinary mode; read state.permissionMode for
+	// what the session actually is.
+	Carried *CarriedLaunch `json:"carried,omitempty"`
+
 	// PromptDelivery is what became of a prompt this session's create carried
 	// (muster #86; see PromptDelivery). Nil means this create carried no
 	// prompt — never a claim that one was carried and delivered, the same

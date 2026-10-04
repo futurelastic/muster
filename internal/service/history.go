@@ -1,7 +1,9 @@
 package service
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -92,17 +94,59 @@ type seenRecord struct {
 	StartedAt    *fleet.Timestamp       `json:"startedAt,omitempty"`
 	Conversation *fleet.ConversationRef `json:"conversation,omitempty"`
 	LastSeen     time.Time              `json:"lastSeen"`
+
+	// ObsMode is the permission mode this session last reported
+	// (state.permissionMode), kept only when the driver actually read one.
+	// muster #256: the half of a launch record that a listing teaches.
+	ObsMode string `json:"obsMode,omitempty"`
+	// Launch is what this service launched the session with, when it
+	// launched it. Absent for a session started some other way.
+	Launch *launchFacts `json:"launch,omitempty"`
+}
+
+// launchFacts is what a create through this service gave a session at launch
+// (muster #256) — the half of a launch record that only the create knows.
+type launchFacts struct {
+	// Mode is the permission mode the create asked for: "bypass" or "".
+	Mode string `json:"mode,omitempty"`
+	// Settings is the compact launch-time settings object the create carried.
+	Settings json.RawMessage `json:"settings,omitempty"`
+	// SendAuth records that whoever made this launch held the `send` grant,
+	// which is what a bypass mode or a settings object needs on top of
+	// `create`. A later resume by a principal without it may carry them
+	// forward only because this is true.
+	SendAuth bool `json:"sendAuth,omitempty"`
+	// Conversation is the conversation the create named (resume or
+	// conversationId), known before the session's own record shows up.
+	Conversation string `json:"conversation,omitempty"`
+}
+
+// launchRecord is what a conversation's last session launched with and last
+// reported (muster #256), keyed by runtime and conversation id. It outlives
+// the session and its tombstone's seen record: a restart-resume asks for it
+// after the old process is gone, which is the whole point.
+type launchRecord struct {
+	Runtime      fleet.RuntimeId `json:"runtime,omitempty"`
+	Conversation string          `json:"conversation"`
+	// Mode is the permission mode the conversation's last session reported,
+	// or — when no listing has yet read one — the mode it was launched with.
+	Mode     string          `json:"mode,omitempty"`
+	Settings json.RawMessage `json:"settings,omitempty"`
+	SendAuth bool            `json:"sendAuth,omitempty"`
+	At       time.Time       `json:"at"`
 }
 
 type historyDoc struct {
-	Seen   []seenRecord          `json:"seen"`
-	Closed []fleet.ClosedSession `json:"closed"`
+	Seen     []seenRecord          `json:"seen"`
+	Closed   []fleet.ClosedSession `json:"closed"`
+	Launches []launchRecord        `json:"launches,omitempty"`
 }
 
 type historyStore struct {
 	mu        sync.Mutex
 	self      fleet.MachineId
 	seen      map[labelKey]*seenRecord
+	launches  map[labelKey]*launchRecord
 	closed    []fleet.ClosedSession
 	retention time.Duration
 	st        *state.Store
@@ -114,6 +158,7 @@ func newHistoryStore(self fleet.MachineId) *historyStore {
 	return &historyStore{
 		self:      self,
 		seen:      map[labelKey]*seenRecord{},
+		launches:  map[labelKey]*launchRecord{},
 		retention: DefaultClosedRetention,
 		now:       time.Now,
 	}
@@ -146,6 +191,19 @@ func (h *historyStore) load(st *state.Store) error {
 		h.seen[labelKey{r.Runtime, r.ID}] = &r
 	}
 	h.closed = doc.Closed
+	for i := range doc.Launches {
+		l := doc.Launches[i]
+		if l.Conversation == "" {
+			continue
+		}
+		// The state store writes indented JSON; settings are compared and put on
+		// argv compact, so they are read back compact.
+		var buf bytes.Buffer
+		if json.Compact(&buf, l.Settings) == nil {
+			l.Settings = buf.Bytes()
+		}
+		h.launches[labelKey{l.Runtime, l.Conversation}] = &l
+	}
 	h.savedAt = h.now()
 	h.sweepOrphanExitScreensLocked()
 	return nil
@@ -241,6 +299,12 @@ func (h *historyStore) pruneLocked(now time.Time) bool {
 			changed = true
 		}
 	}
+	for k, l := range h.launches {
+		if l.At.Before(cut) {
+			delete(h.launches, k)
+			changed = true
+		}
+	}
 	return changed
 }
 
@@ -254,6 +318,15 @@ func (h *historyStore) saveLocked(now time.Time) {
 		return
 	}
 	doc := historyDoc{Seen: make([]seenRecord, 0, len(h.seen)), Closed: h.closed}
+	for _, l := range h.launches {
+		doc.Launches = append(doc.Launches, *l)
+	}
+	sort.Slice(doc.Launches, func(i, j int) bool {
+		if doc.Launches[i].Runtime != doc.Launches[j].Runtime {
+			return doc.Launches[i].Runtime < doc.Launches[j].Runtime
+		}
+		return doc.Launches[i].Conversation < doc.Launches[j].Conversation
+	})
 	if doc.Closed == nil {
 		doc.Closed = []fleet.ClosedSession{}
 	}
@@ -283,13 +356,19 @@ func knownConversation(c *fleet.ConversationRef) *fleet.ConversationRef {
 func (h *historyStore) sightLocked(rt fleet.RuntimeId, s fleet.Session, at time.Time) bool {
 	k := labelKey{rt, s.ID}
 	conv := knownConversation(s.Conversation)
+	mode := observedMode(s)
 	r, had := h.seen[k]
 	if !had {
-		h.seen[k] = &seenRecord{Runtime: rt, ID: s.ID, Name: s.Name, Cwd: s.Cwd,
-			StartedAt: s.StartedAt, Conversation: conv, LastSeen: at}
+		r = &seenRecord{Runtime: rt, ID: s.ID, Name: s.Name, Cwd: s.Cwd,
+			StartedAt: s.StartedAt, Conversation: conv, LastSeen: at, ObsMode: mode}
+		h.seen[k] = r
+		h.syncLaunchLocked(r, at)
 		return true
 	}
 	changed := false
+	if mode != "" && mode != r.ObsMode {
+		r.ObsMode, changed = mode, true
+	}
 	if s.Name != "" && s.Name != r.Name {
 		r.Name, changed = s.Name, true
 	}
@@ -305,7 +384,81 @@ func (h *historyStore) sightLocked(rt fleet.RuntimeId, s fleet.Session, at time.
 	if at.After(r.LastSeen) {
 		r.LastSeen = at
 	}
+	if h.syncLaunchLocked(r, at) {
+		changed = true
+	}
 	return changed
+}
+
+// observedMode is the permission mode a listing read for s, or "" when the
+// driver read none (absent) or could not name it (unknown). Only a mode the
+// driver actually read may overwrite what the launch asked for — silence is
+// not a report (§5.7).
+func observedMode(s fleet.Session) string {
+	m := s.State.PermissionMode
+	if m == "" || m == fleet.PermissionModeUnknown {
+		return ""
+	}
+	return string(m)
+}
+
+// syncLaunchLocked folds a seen record into the launch record of the
+// conversation it belongs to (muster #256), and reports whether that record
+// changed. A session whose conversation is not yet known — neither resolved
+// nor named by its create — contributes nothing; the next sighting tries again.
+//
+// The mode is the last one the session reported, falling back to the one it
+// was launched with while no listing has read one, and finally to what the
+// conversation's previous record said. Settings and the send flag are facts
+// only a create knows, so a session this service did not launch (Launch nil)
+// leaves the conversation's earlier ones standing instead of erasing them.
+func (h *historyStore) syncLaunchLocked(r *seenRecord, at time.Time) bool {
+	conv := ""
+	switch {
+	case r.Conversation != nil && r.Conversation.ID != "":
+		conv = r.Conversation.ID
+	case r.Launch != nil:
+		conv = r.Launch.Conversation
+	}
+	if conv == "" {
+		return false
+	}
+	k := labelKey{r.Runtime, conv}
+	prev := h.launches[k]
+	next := launchRecord{Runtime: r.Runtime, Conversation: conv, At: at}
+	if prev != nil {
+		next.Mode, next.Settings, next.SendAuth = prev.Mode, prev.Settings, prev.SendAuth
+	}
+	if r.Launch != nil {
+		next.Mode, next.Settings, next.SendAuth = r.Launch.Mode, r.Launch.Settings, r.Launch.SendAuth
+	}
+	if r.ObsMode != "" {
+		next.Mode = r.ObsMode
+	}
+	if prev != nil && prev.Mode == next.Mode && prev.SendAuth == next.SendAuth &&
+		string(prev.Settings) == string(next.Settings) {
+		// Nothing a resume would read has changed, so this is not a reason to
+		// write — but the conversation is still being seen, and its record must
+		// not age out of retention underneath a live session.
+		if at.After(prev.At) {
+			prev.At = at
+		}
+		return false
+	}
+	h.launches[k] = &next
+	return true
+}
+
+// launchFor returns the launch record of a conversation, if one is held and
+// still inside the retention period.
+func (h *historyStore) launchFor(rt fleet.RuntimeId, conversation string) (launchRecord, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	l, ok := h.launches[labelKey{rt, conversation}]
+	if !ok || l.At.Before(h.now().Add(-h.retention)) {
+		return launchRecord{}, false
+	}
+	return *l, true
 }
 
 func (h *historyStore) tombstoneLocked(r *seenRecord, at time.Time, by fleet.ClosureKind, evidence string) {
@@ -354,7 +507,11 @@ func (h *historyStore) tombstoneExitLocked(r *seenRecord, e driver.CapturedExit)
 
 // created records a session this service just started, so a close that
 // arrives before any listing still has something to describe.
-func (h *historyStore) created(rt fleet.RuntimeId, s fleet.Session) {
+//
+// launch is what this create gave the session (muster #256), recorded so a later
+// resume of the conversation can carry it. Nil for a caller with nothing to
+// record.
+func (h *historyStore) created(rt fleet.RuntimeId, s fleet.Session, launch *launchFacts) {
 	if s.ID == "" {
 		return
 	}
@@ -362,6 +519,12 @@ func (h *historyStore) created(rt fleet.RuntimeId, s fleet.Session) {
 	defer h.mu.Unlock()
 	now := h.now()
 	h.sightLocked(rt, s, now)
+	if launch != nil {
+		if r, ok := h.seen[labelKey{rt, s.ID}]; ok {
+			r.Launch = launch
+			h.syncLaunchLocked(r, now)
+		}
+	}
 	h.saveLocked(now)
 }
 
