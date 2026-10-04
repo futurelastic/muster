@@ -244,10 +244,35 @@ jobs:
   publish-existing:
     name: Publish the existing tag
     needs: existing-tag
-    if: needs.existing-tag.outputs.tag != ''
+    # always(): the implicit success() a bare `if:` gets is evaluated over EVERY
+    # ancestor, and `release` (two hops up) is skipped on exactly the runs this job
+    # exists for — a publish-tag dispatch, a reconcile — so without it the job was
+    # skipped though its direct dependency succeeded and its output was set (#265).
+    if: always() && !cancelled() && needs.existing-tag.result == 'success' && needs.existing-tag.outputs.tag != ''
     permissions:
       contents: read
       id-token: write
     uses: ./.github/workflows/release-npm.yml
     with:
       tag: ${{ needs.existing-tag.outputs.tag }}
+
+  # A green run that resolved a tag and published nothing must not read as success
+  # (#265): the skip above looked exactly like a no-op. This job is the run's
+  # verdict — it fails when a tag was resolved and its publish did not succeed.
+  publish-existing-verdict:
+    name: Check the existing tag was published
+    needs: [existing-tag, publish-existing]
+    if: always() && needs.existing-tag.outputs.tag != ''
+    runs-on: ubuntu-latest
+    permissions: {}
+    env:
+      TAG: ${{ needs.existing-tag.outputs.tag }}
+      RESULT: ${{ needs.publish-existing.result }}
+    steps:
+      - run: |
+          set -euo pipefail
+          if [ "$RESULT" != "success" ]; then
+            echo "::error::$TAG was resolved for publishing but the publish job ended '$RESULT', not 'success'"
+            exit 1
+          fi
+          echo "$TAG published (publish-existing: success)" | tee -a "$GITHUB_STEP_SUMMARY"
