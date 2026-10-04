@@ -362,7 +362,7 @@ func extractTranscriptCandidate(line []byte) (kind, text, promptSource string, o
 		// it; the others are not candidates at all.
 		trimmed := strings.TrimSpace(text)
 		switch {
-		case strings.HasPrefix(trimmed, "<command-name>"):
+		case isCommandMarkup(trimmed):
 			return "command", commandLine(trimmed), promptSource, true
 		case strings.HasPrefix(trimmed, "<local-command-"), strings.HasPrefix(trimmed, "<bash-"):
 			return "", "", "", false
@@ -376,6 +376,19 @@ func extractTranscriptCandidate(line []byte) (kind, text, promptSource string, o
 // that text as sitting in the composer.
 const differentTurnComposerEmptied = "the composer emptied, but the runtime's own transcript " +
 	"recorded a DIFFERENT turn instead of this text, so whether this text arrived is unknown"
+
+// isCommandMarkup reports whether an entry's text is slash-command markup.
+//
+// The runtime leads with a different tag depending on the command's kind,
+// measured on real transcripts: a built-in command (/context, /rename) leads
+// with <command-name>, a skill command (/wrap, /code-wrap) leads with
+// <command-message> and carries <command-name> after it (#262). Both are the
+// same human-typed slash command, so both open command markup; commandLine
+// reads the tags by name and does not care which came first. An entry that
+// leads with neither (a <local-command-…> output, a <bash-…> line) is not.
+func isCommandMarkup(trimmed string) bool {
+	return strings.HasPrefix(trimmed, "<command-name>") || strings.HasPrefix(trimmed, "<command-message>")
+}
 
 // commandLine rebuilds "/name args" from a command entry's tags.
 func commandLine(entry string) string {
@@ -433,7 +446,7 @@ func localCommandLine(obj map[string]any) (string, bool) {
 	}
 	content, _ := obj["content"].(string)
 	trimmed := strings.TrimSpace(content)
-	if !strings.HasPrefix(trimmed, "<command-name>") {
+	if !isCommandMarkup(trimmed) {
 		return "", false
 	}
 	if line := commandLine(trimmed); strings.HasPrefix(line, "/") {
