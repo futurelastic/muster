@@ -896,7 +896,8 @@ func createNeedsSend(body createSessionBody) string {
 		return "trustCwd"
 	case len(body.Consents) > 0:
 		return "consents"
-	case body.PermissionMode != "":
+	case body.PermissionMode != "" && body.PermissionMode != permissionModeDefaultRequest:
+		// The explicit ordinary mode (#256) asks for nothing beyond a create.
 		return "permissionMode"
 	case len(body.McpConfig) > 0:
 		// A tool-server configuration names processes the session will LAUNCH.
@@ -1094,6 +1095,25 @@ func handleCreateSession(svc *Service) http.HandlerFunc {
 			}
 		}
 
+		// muster #256: a resume that names no permissionMode (or no settings)
+		// launches with what the conversation's previous session ran in. Only for
+		// a create this machine serves — a relayed one is carried by the peer that
+		// holds the conversation's record, and the answer comes back in its response.
+		var launch resumeLaunch
+		if via != resolvedPeer {
+			var cerr *fleet.Error
+			launch, cerr = svc.carryResumeLaunch(r, machine, resolvedRuntime, &body)
+			if cerr != nil {
+				writeError(w, cerr)
+				return
+			}
+			// The explicit ordinary mode is spelled "default" on the wire and
+			// empty everywhere below the handler: no driver learns a new value.
+			if body.PermissionMode == permissionModeDefaultRequest {
+				body.PermissionMode = ""
+			}
+		}
+
 		spec := fleet.SessionSpec{
 			// Machine is filled from the URL path, not the request body
 			// (session.go's SessionSpec doc comment) — the wire body
@@ -1156,7 +1176,10 @@ func handleCreateSession(svc *Service) http.HandlerFunc {
 		// Labels (muster #153). A local session's are this service's to
 		// store; a relayed create's are the peer's, and arrive on its answer.
 		if via != resolvedPeer {
-			svc.history.created(resolvedRuntime, sess)
+			svc.history.created(resolvedRuntime, sess, launch.facts)
+			if sess.Carried == nil {
+				sess.Carried = launch.carried
+			}
 			stored, added := svc.labels.setIfAbsent(resolvedRuntime, sess.ID, sess.StartedAt, body.Labels)
 			sess.Labels = stored
 			if added {

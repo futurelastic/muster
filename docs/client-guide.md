@@ -990,10 +990,14 @@ of its own. If a later read ever disagrees with the id you asked for, that
 shows up as a fresh, named mismatch on `conversation` — never a quiet
 overwrite.
 
-**`permissionMode`** takes one value, `bypass`. It needs the `send` grant like a
-consent does: a session in that mode acts without asking, which is a larger
-authority than starting one. An unrecognised value is refused, not passed
-through to the runtime.
+**`permissionMode`** takes `bypass`, or `default` for the runtime's ordinary
+mode. `bypass` needs the `send` grant like a consent does: a session in that mode
+acts without asking, which is a larger authority than starting one. An
+unrecognised value is refused, not passed through to the runtime. When you
+`resume` a conversation and send neither, the service launches the new session in
+the mode the old one last ran in — `bypass` included — and says so in the
+response's `carried`; send `default` to opt out. See `docs/api.md`, *Resume
+carries the launch posture* (#256).
 
 **`mcpConfig`** is a list of absolute PATHS to tool-server configuration files,
 one flag per entry. Paths and not content, for the same reason `env` stages
