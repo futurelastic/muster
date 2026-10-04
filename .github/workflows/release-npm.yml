@@ -140,36 +140,27 @@ jobs:
       TAG: ${{ inputs.tag }}
       DRY_RUN: ${{ inputs.dry_run }}
     steps:
+      # The scripts come from the ref that started this run. Checking them out is
+      # the only thing that runs before the guard below, and the repository is
+      # public by the time anything reads it — a private one is refused next.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false # nothing here pushes
+
       - name: Refuse a private repository, and any npm token
         run: |
           set -uo pipefail
-          # Visibility from the API, never assumed: unknown is refused like private.
-          # A transient error (a 5xx from the API, a dropped connection) is retried
-          # before it counts as "unknown" — one blip must not fail a release (#260).
-          # Only a read that keeps failing falls through to unknown; a read that
-          # answers is taken at once, so a real `true` is never retried away.
-          PRIVATE=unknown
-          for attempt in 1 2 3 4 5; do
-            if READ="$(gh api "repos/$REPO" --jq '.private' 2> /dev/null)" && { [ "$READ" = "true" ] || [ "$READ" = "false" ]; }; then
-              PRIVATE="$READ"
-              break
-            fi
-            [ "$attempt" -lt 5 ] && sleep $((attempt * 3))
-          done
-          if [ "$PRIVATE" != "false" ]; then
-            echo "::error::$REPO is private (or its visibility could not be read: $PRIVATE) — a private repository never publishes to public npm."
-            exit 1
-          fi
+          # Visibility from the API, never assumed: anything but an explicit
+          # `false` is refused like private. A transient error (a 5xx, a 429, a
+          # dropped connection) is retried before it counts (#260, #261); the log
+          # names which of "transient, retried N" / "private" / "persistent error"
+          # it was. The policy lives in scripts/release-npm-guard.sh, where
+          # release_workflow_test.go runs it against a fake `gh`.
+          scripts/release-npm-guard.sh visibility || exit 1
           if [ -n "${NODE_AUTH_TOKEN:-}${NPM_TOKEN:-}" ]; then
             echo "::error::an npm token is set in this job's environment — this workflow publishes through trusted publishing (OIDC) only and never with a token. Remove it."
             exit 1
           fi
-
-      # The assembly script and the packaging tests, from the ref that started
-      # this run — not the tag, so a tag cut before they existed can be published.
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          persist-credentials: false # nothing here pushes
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
@@ -188,6 +179,9 @@ jobs:
           name: muster-binaries
           path: ${{ runner.temp }}/dist
 
+      # The assembly script and the packaging tests come from the checkout at the
+      # top of this job (the ref that started this run) — not the tag, so a tag
+      # cut before they existed can be published.
       - name: Check the binaries, assemble the packages, test the packaging
         run: |
           set -euo pipefail
@@ -212,10 +206,7 @@ jobs:
               echo "DRY RUN: $NAME@$VERSION would be published (dist-tag $DIST)" | tee -a "$GITHUB_STEP_SUMMARY"
               continue
             fi
-            if npm view "$NAME@$VERSION" version > /dev/null 2>&1; then
-              echo "$NAME@$VERSION is already on npm — skipping" | tee -a "$GITHUB_STEP_SUMMARY"
-              continue
-            fi
-            (cd "$RUNNER_TEMP/pkgs/$dir" && npm publish --tag "$DIST" --provenance --access public --ignore-scripts)
-            echo "Published $NAME@$VERSION to npm (dist-tag $DIST)" | tee -a "$GITHUB_STEP_SUMMARY"
+            # Skips a version already on npm, retries a transient registry error, and
+            # counts a publish that lost a race to an earlier attempt as done (#261).
+            scripts/release-npm-guard.sh publish "$NAME" "$VERSION" "$DIST" "$RUNNER_TEMP/pkgs/$dir" | tee -a "$GITHUB_STEP_SUMMARY"
           done < "$RUNNER_TEMP/pkgs/PUBLISH_ORDER"
