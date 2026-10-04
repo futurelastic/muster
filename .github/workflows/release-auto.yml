@@ -7,6 +7,8 @@ name: Release (auto)
 #   the daily schedule               colab release cut --auto       (a head held back by a window)
 #                                    colab release finalize --auto  -> vX.Y.Z after the test period
 #   workflow_dispatch                both, in that order
+#   workflow_dispatch + publish-tag  neither: publish a tag that already exists (#263)
+#   the daily schedule, last         publish the newest final tag npm does not have (#263)
 #
 # Every decision (is a candidate owed, which bump, did the test period stay
 # clean) is the colab CLI's, read from .github/project.yml. This file schedules
@@ -20,10 +22,17 @@ name: Release (auto)
 # NO GITHUB RELEASE. Nothing is attached to a Release and nothing installs from
 # one: npx is the one install surface (see release-npm.yml).
 #
-# TRUSTED PUBLISHING. npm matches the CALLING workflow, so the trusted publisher
-# on each of the five packages must name `release-auto.yml`. A manual
-# `release-npm.yml` dispatch needs it to name `release-npm.yml` instead; the
-# package setting holds one workflow name, so see #250 for which is configured.
+# TRUSTED PUBLISHING. npm matches the workflow that STARTS the run, and each of
+# the five packages holds one trusted publisher: `release-auto.yml`, permanently.
+# That is why every route to npm goes through THIS file — a tag this run cut, a
+# tag named by `publish-tag`, or the unpublished final the schedule finds — and
+# never through a `release-npm.yml` dispatch, which can only dry-run (#263).
+# Nobody has to repoint a package setting to publish out-of-band.
+#
+# PUBLISH AN EXISTING TAG: Actions -> Release (auto) -> Run workflow ->
+# publish-tag = vX.Y.Z[-rc.N]  (or `gh workflow run release-auto.yml -f
+# publish-tag=v0.3.0`). The tag must exist on origin and be reachable from main;
+# an rc goes to `next`, a final to `latest`; a version already on npm is skipped.
 #
 # IT NEVER WRITES A COMMIT. The only refs pushed are the annotated tags
 # `colab release cut` / `finalize` create.
@@ -36,6 +45,14 @@ on:
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
+    inputs:
+      publish-tag:
+        description: >-
+          Publish this EXISTING tag (vX.Y.Z or vX.Y.Z-rc.N) instead of cutting or
+          finalizing. Leave empty for the ordinary cut-and-finalize run.
+        required: false
+        type: string
+        default: ""
 
 # One release run at a time; never cancelled mid-run (a half-finished run may
 # have pushed a tag without publishing it).
@@ -56,8 +73,11 @@ env:
 jobs:
   release:
     name: Cut and finalize
-    # A red CI run on main is not a candidate; skip rather than refuse.
-    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    # A red CI run on main is not a candidate; skip rather than refuse. A dispatch
+    # that names a tag to publish cuts and finalizes nothing (#263).
+    if: >-
+      (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
+      && inputs.publish-tag == ''
     runs-on: ubuntu-latest
     permissions:
       contents: write # push the tags
@@ -174,3 +194,60 @@ jobs:
     uses: ./.github/workflows/release-npm.yml
     with:
       tag: ${{ needs.release.outputs.final-tag }}
+
+  # An existing tag (#263): the one a dispatch names, or — on the daily schedule —
+  # the newest final tag whose version npm does not have yet (a final tagged
+  # outside this workflow, a publish that failed after its tag was pushed). It runs
+  # after the jobs above so it sees a final this run just created, and skips that
+  # one: publish-final already owns it. Only the NEWEST final is ever a candidate,
+  # so a reconcile can never move `latest` backwards.
+  existing-tag:
+    name: Resolve an existing tag to publish
+    needs: [release, publish-candidate, publish-final]
+    # always(): the three jobs above are skipped on a dispatch that names a tag.
+    if: >-
+      always() && !cancelled()
+      && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.publish-tag != ''))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+    env:
+      PUBLISH_TAG: ${{ inputs.publish-tag }} # caller-controlled text: through env, never into a script
+      JUST_FINALIZED: ${{ needs.release.outputs.final-tag }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: main
+          fetch-depth: 0 # the guard asks whether a tag's commit is reachable from main
+          persist-credentials: false
+
+      - name: Resolve
+        id: resolve
+        run: |
+          set -euo pipefail
+          if [ -n "$PUBLISH_TAG" ]; then
+            DIST="$(scripts/release-npm-guard.sh check-tag "$PUBLISH_TAG")"
+            TAG="$PUBLISH_TAG"
+            echo "Publishing the existing tag $TAG to npm dist-tag $DIST" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            TAG="$(scripts/release-npm-guard.sh unpublished-final "$JUST_FINALIZED")"
+            if [ -n "$TAG" ]; then
+              echo "Reconcile: $TAG is the newest final and npm does not have it — publishing" | tee -a "$GITHUB_STEP_SUMMARY"
+            else
+              echo "Reconcile: the newest final is on npm (or this run just finalized it)." | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+  publish-existing:
+    name: Publish the existing tag
+    needs: existing-tag
+    if: needs.existing-tag.outputs.tag != ''
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/release-npm.yml
+    with:
+      tag: ${{ needs.existing-tag.outputs.tag }}

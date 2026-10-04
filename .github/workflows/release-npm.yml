@@ -16,23 +16,26 @@ name: Release npm
 #
 # TWO ENTRY POINTS, ONE PIPELINE
 #
-#   workflow_call      for a release workflow to call from the SAME run that
-#                      creates the tag. This is the reason this is a reusable
-#                      workflow and not `on: push: tags` / `on: release`: a tag
-#                      created with GITHUB_TOKEN does not trigger other
-#                      workflows, so a listener would never fire for an
-#                      automated release. release-auto.yml calls this file from
-#                      the run that cuts or finalizes the tag (#250).
-#   workflow_dispatch  publish (or dry-run) an existing tag by hand — also how
-#                      a tag cut before this workflow existed is backfilled.
+#   workflow_call      the ONLY way anything is published. release-auto.yml
+#                      calls this file, from the run that cuts or finalizes a
+#                      tag, or — for a tag that already exists — from its
+#                      `publish-tag` dispatch or its daily reconcile (#263).
+#                      This is the reason this is a reusable workflow and not
+#                      `on: push: tags` / `on: release`: a tag created with
+#                      GITHUB_TOKEN does not trigger other workflows, so a
+#                      listener would never fire for an automated release.
+#   workflow_dispatch  DRY RUN ONLY: prove that a change to this file or to the
+#                      packaging still builds and packs. `dry_run: false` is
+#                      refused before anything is built — see below.
 #
 # TRUSTED PUBLISHING (OIDC) ONLY. No npm token is stored, read or accepted, and
-# the job refuses to run if one is in its environment. One-time setup on
+# the job refuses to run if one is in its environment. npm matches the workflow
+# that STARTS the run, and each package holds ONE trusted publisher. Setup on
 # npmjs.com, for EACH of the five packages: Settings -> Trusted publishing ->
-# GitHub Actions, this repository, workflow file name = the file that STARTS the
-# run. For a manual dispatch that is `release-npm.yml`; when release-auto.yml
-# calls this one it is `release-auto.yml` — npm is expected to check the caller,
-# not the called workflow (#250 records what the first real publish showed).
+# GitHub Actions, this repository, workflow file name = `release-auto.yml`.
+# That setting is permanent. Do NOT switch it to `release-npm.yml` to publish
+# something by hand — a dispatch here can no longer publish, and the way to
+# publish an existing tag is Release (auto) -> Run workflow -> publish-tag (#263).
 #
 # GITHUB-HOSTED, ALWAYS. npm trusted publishing does not support self-hosted
 # runners. The repo is public, so this costs nothing.
@@ -64,7 +67,7 @@ on:
         required: true
         type: string
       dry_run:
-        description: Build and `npm publish --dry-run`; publish nothing
+        description: Must stay true here. A real publish goes through Release (auto) -> publish-tag.
         required: false
         type: boolean
         default: true
@@ -82,6 +85,18 @@ jobs:
       # caller-controlled text.
       TAG: ${{ inputs.tag }}
     steps:
+      # A manual dispatch cannot authenticate to npm: the trusted publisher names
+      # release-auto.yml. Say so now, before any build, instead of failing late
+      # with ENEEDAUTH (#263). Only a run STARTED by this file is refused: inside a
+      # workflow_call, github.event_name and github.workflow_ref are the CALLER's
+      # (release-auto.yml dispatched with publish-tag is a `workflow_dispatch`
+      # event too, and must not be mistaken for a manual dispatch of this file).
+      - name: Refuse a manual publish
+        if: github.event_name == 'workflow_dispatch' && contains(github.workflow_ref, '/release-npm.yml@') && !inputs.dry_run
+        run: |
+          echo "::error::a manual dispatch of release-npm.yml can only dry-run: npm's trusted publisher is release-auto.yml, so this would fail to authenticate. To publish $TAG use Actions -> Release (auto) -> Run workflow -> publish-tag = $TAG (or: gh workflow run release-auto.yml -f publish-tag=$TAG)."
+          exit 1
+
       - name: Check the tag shape
         run: |
           case "$TAG" in

@@ -570,6 +570,31 @@ in this service, so a restart costs a moment of unavailability against this
 service's own API — not lost work. Nothing about a session's own state needs
 attention before you restart.
 
+## Publishing to npm
+
+Every publish goes through `release-auto.yml`, and only that. npm trusted
+publishing matches the workflow that **starts** a run, each of the five packages
+holds exactly one trusted publisher, and it is `release-auto.yml` — permanently.
+Nobody repoints it to publish something by hand.
+
+| You want | Do this |
+|---|---|
+| A candidate / final cut by the pipeline | Nothing — the run that cuts the tag publishes it (`next` for an rc, `latest` for a final). |
+| A tag that already exists reaches npm (for example a final tagged by hand) | Actions → **Release (auto)** → Run workflow → `publish-tag` = the tag, or `gh workflow run release-auto.yml -f publish-tag=v0.3.0`. |
+| A final tagged outside the workflow, and nobody remembers | Wait for the daily run: it publishes the **newest** final tag whose version the launcher package lacks on npm. |
+| To prove a packaging change builds | Dispatch `release-npm.yml` with `dry_run: true`. It publishes nothing and needs no npm identity. |
+
+`publish-tag` refuses, before building anything, a tag that is not
+`vX.Y.Z` or `vX.Y.Z-rc.N`, does not exist on origin, or is not reachable from
+`main`. An rc goes to `next`, a final to `latest`. A version already on npm is
+skipped per package, so naming an already-published tag ends green with every
+package reported as skipped, and re-running a half-finished publish completes it.
+
+A `release-npm.yml` dispatch with `dry_run: false` fails at once with a message
+naming the route above — it could only ever fail to authenticate (`ENEEDAUTH`).
+The reconcile only ever considers the newest final, never an older one: publishing
+an older version to `latest` after a newer one would move `latest` backwards.
+
 ## Why this is the procedure the descriptor means
 
 `.github/project.yml`'s `exposure: self` comment and this repository's
