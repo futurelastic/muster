@@ -264,3 +264,216 @@ func TestReleaseNpmWorkflowUsesTheGuardScript(t *testing.T) {
 		t.Error("release-npm.yml carries an inline read the script now owns")
 	}
 }
+
+// ---- publishing a tag that already exists (#263) ----------------------------
+//
+// release-auto.yml resolves which existing tag to publish with two reads in the
+// guard script. They run against a real bare "origin" built here, so the tag
+// shapes, the peeled commit of an annotated tag and the reachable-from-main test
+// are git's own answers, not a fake's.
+
+// gitIn runs git in dir and returns its trimmed stdout.
+func gitIn(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.invalid",
+		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.invalid",
+		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// tagFixture returns a clone whose origin has main with annotated tags
+// v0.3.0-rc.8 and v0.3.0 on one commit, a later v0.3.1-rc.1 on main, and a
+// branch commit that never reached main tagged v9.0.0-rc.1 and v9.0.0.
+func tagFixture(t *testing.T) string {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	root := t.TempDir()
+	origin, work := filepath.Join(root, "origin.git"), filepath.Join(root, "work")
+	gitIn(t, root, "init", "--bare", "-b", "main", origin)
+	gitIn(t, root, "init", "-b", "main", work)
+	gitIn(t, work, "remote", "add", "origin", origin)
+	commit := func(msg string) {
+		if err := os.WriteFile(filepath.Join(work, "f"), []byte(msg), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitIn(t, work, "add", "f")
+		gitIn(t, work, "commit", "-m", msg)
+	}
+	commit("one")
+	gitIn(t, work, "tag", "-a", "v0.3.0-rc.8", "-m", "rc")
+	gitIn(t, work, "tag", "-a", "v0.3.0", "-m", "final", "v0.3.0-rc.8")
+	commit("two")
+	gitIn(t, work, "tag", "v0.3.1-rc.1") // lightweight
+	gitIn(t, work, "push", "origin", "main", "--tags")
+	gitIn(t, work, "checkout", "-b", "side")
+	commit("side")
+	gitIn(t, work, "tag", "-a", "v9.0.0-rc.1", "-m", "x")
+	gitIn(t, work, "tag", "-a", "v9.0.0", "-m", "x")
+	gitIn(t, work, "push", "origin", "side", "--tags")
+	gitIn(t, work, "checkout", "main")
+	gitIn(t, work, "fetch", "origin")
+	return work
+}
+
+func runGuardIn(t *testing.T, work, pathDir string, args ...string) (string, int) {
+	t.Helper()
+	script, err := filepath.Abs("scripts/release-npm-guard.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", append([]string{script}, args...)...)
+	cmd.Dir = work
+	cmd.Env = append(os.Environ(), "PATH="+pathDir+":"+os.Getenv("PATH"), "RETRY_UNIT=0", "RETRY_MAX=2")
+	out, err := cmd.CombinedOutput()
+	code := 0
+	if ee, ok := err.(*exec.ExitError); ok {
+		code = ee.ExitCode()
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	return string(out), code
+}
+
+func TestCheckTagAcceptsATagOnMainAndNamesItsDistTag(t *testing.T) {
+	requireBash(t)
+	work := tagFixture(t)
+	for tag, want := range map[string]string{
+		"v0.3.0":      "latest", // annotated, peeled to a commit on main
+		"v0.3.0-rc.8": "next",
+		"v0.3.1-rc.1": "next", // lightweight
+	} {
+		out, code := runGuardIn(t, work, t.TempDir(), "check-tag", tag)
+		if code != 0 || strings.TrimSpace(out) != want {
+			t.Errorf("%s: exit %d, output %q, want dist-tag %q", tag, code, out, want)
+		}
+	}
+}
+
+func TestCheckTagRefusesAnythingNotAPublishableTag(t *testing.T) {
+	requireBash(t)
+	work := tagFixture(t)
+	for tag, why := range map[string]string{
+		"0.3.0":          "is not a release tag",
+		"v0.3":           "is not a release tag",
+		"v0.3.0-beta.1":  "is not a release tag",
+		"v0.3.0; rm -rf": "is not a release tag",
+		"":               "is not a release tag",
+		"v0.4.0":         "does not exist on origin",
+		"v9.0.0":         "is not on main",
+		"v9.0.0-rc.1":    "is not on main",
+	} {
+		out, code := runGuardIn(t, work, t.TempDir(), "check-tag", tag)
+		if code == 0 {
+			t.Errorf("%q must be refused:\n%s", tag, out)
+		}
+		if !strings.Contains(out, why) {
+			t.Errorf("%q: log must say %q:\n%s", tag, why, out)
+		}
+	}
+}
+
+func TestUnpublishedFinalNamesTheNewestFinalNpmLacks(t *testing.T) {
+	requireBash(t)
+	work := tagFixture(t)
+	dir := t.TempDir()
+	fakeTool(t, dir, "npm", npm404)
+	out, code := runGuardIn(t, work, dir, "unpublished-final")
+	if code != 0 || strings.TrimSpace(out) != "v0.3.0" {
+		t.Fatalf("exit %d, output %q, want v0.3.0 (v9.0.0 is newer but off main — never reached)", code, out)
+	}
+}
+
+func TestUnpublishedFinalIsEmptyWhenTheNewestFinalIsOnNpm(t *testing.T) {
+	requireBash(t)
+	work := tagFixture(t)
+	dir := t.TempDir()
+	fakeTool(t, dir, "npm", "0|0.3.0")
+	out, code := runGuardIn(t, work, dir, "unpublished-final")
+	if code != 0 || strings.TrimSpace(out) != "" {
+		t.Fatalf("exit %d, output %q, want nothing", code, out)
+	}
+	if n := calls(t, dir, "npm"); n != 1 {
+		t.Errorf("npm read %d times, want 1 (the launcher only)", n)
+	}
+}
+
+// The run that just finalized a tag publishes it itself; the reconcile must not
+// publish it a second time.
+func TestUnpublishedFinalSkipsTheTagThisRunFinalized(t *testing.T) {
+	requireBash(t)
+	work := tagFixture(t)
+	dir := t.TempDir()
+	fakeTool(t, dir, "npm", npm404)
+	out, code := runGuardIn(t, work, dir, "unpublished-final", "v0.3.0")
+	if code != 0 || strings.TrimSpace(out) != "" {
+		t.Fatalf("exit %d, output %q, want nothing", code, out)
+	}
+	if n := calls(t, dir, "npm"); n != 0 {
+		t.Errorf("npm read %d times, want 0 — a skipped tag is not looked up", n)
+	}
+}
+
+// Only the NEWEST final is ever reported: an older missing one would be published
+// to `latest` after a newer one and move it backwards.
+func TestUnpublishedFinalNeverReportsAnOlderFinal(t *testing.T) {
+	requireBash(t)
+	work := tagFixture(t)
+	gitIn(t, work, "tag", "-a", "v0.3.1", "-m", "final", "v0.3.1-rc.1")
+	gitIn(t, work, "push", "origin", "v0.3.1")
+	dir := t.TempDir()
+	fakeTool(t, dir, "npm", "0|0.3.1") // the newest is there; v0.3.0 is not asked about
+	out, code := runGuardIn(t, work, dir, "unpublished-final")
+	if code != 0 || strings.TrimSpace(out) != "" {
+		t.Fatalf("exit %d, output %q, want nothing", code, out)
+	}
+}
+
+func TestUnpublishedFinalFailsClosedWhenNpmCannotBeRead(t *testing.T) {
+	requireBash(t)
+	work := tagFixture(t)
+	dir := t.TempDir()
+	fakeTool(t, dir, "npm", "1|npm error code E503")
+	out, code := runGuardIn(t, work, dir, "unpublished-final")
+	if code == 0 || strings.TrimSpace(out) == "v0.3.0" {
+		t.Fatalf("an unreadable registry must fail, not read as missing (exit %d):\n%s", code, out)
+	}
+	if !strings.Contains(out, "persistent error") {
+		t.Errorf("log must say persistent error:\n%s", out)
+	}
+}
+
+// The two workflows' contract: release-auto owns every publish, release-npm only
+// dry-runs when started by hand (#263).
+func TestReleaseWorkflowsKeepTheManualPathDryRunOnly(t *testing.T) {
+	auto, err := os.ReadFile(".github/workflows/release-auto.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	npm, err := os.ReadFile(".github/workflows/release-npm.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"publish-tag:", "check-tag", "unpublished-final", "release-npm.yml"} {
+		if !strings.Contains(string(auto), want) {
+			t.Errorf("release-auto.yml must carry %q", want)
+		}
+	}
+	for _, want := range []string{"Refuse a manual publish", "release-npm.yml@", "publish-tag"} {
+		if !strings.Contains(string(npm), want) {
+			t.Errorf("release-npm.yml must carry %q", want)
+		}
+	}
+	if strings.Contains(string(npm), "workflow file name = the file that STARTS") ||
+		strings.Contains(string(npm), "For a manual dispatch that is `release-npm.yml`") {
+		t.Error("release-npm.yml header still invites switching the trusted publisher")
+	}
+}
