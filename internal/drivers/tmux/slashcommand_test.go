@@ -295,3 +295,74 @@ func TestSlashCommandSendConfirmsFromLocalCommandEntries(t *testing.T) {
 		})
 	}
 }
+
+// --- #262: a skill command's markup leads with <command-message> ---
+//
+// The runtime writes a built-in command's user entry with <command-name> first
+// and a skill command's with <command-message> first (measured on real
+// transcripts; synthetic values here). Both are command candidates, and both
+// confirm the send that named them.
+
+func commandUserEntry(content string) map[string]any {
+	return map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": content}}
+}
+
+const (
+	builtinForm = "<command-name>/rename</command-name>\n            <command-message>rename</command-message>\n            <command-args>alpha</command-args>"
+	skillForm   = "<command-message>wrap</command-message>\n<command-name>/wrap</command-name>\n<command-args>now please</command-args>"
+	skillBare   = "<command-message>wrap</command-message>\n<command-name>/wrap</command-name>\n<command-args></command-args>"
+)
+
+func TestSkillCommandMarkupIsACommandCandidate(t *testing.T) {
+	for name, tc := range map[string]struct{ content, want string }{
+		"built-in form, name first":          {builtinForm, "/rename alpha"},
+		"skill form, message first, args":    {skillForm, "/wrap now please"},
+		"skill form, message first, no args": {skillBare, "/wrap"},
+	} {
+		b, _ := json.Marshal(commandUserEntry(tc.content))
+		kind, text, _, ok := extractTranscriptCandidate(b)
+		if !ok || kind != "command" || text != tc.want {
+			t.Errorf("%s: got (%q, %q, ok=%v), want (\"command\", %q, true)", name, kind, text, ok, tc.want)
+		}
+		if !commandMatches(text, tc.want) {
+			t.Errorf("%s: %q does not confirm its own send", name, text)
+		}
+	}
+	// The same markup as a runtime-run command's system echo.
+	b, _ := json.Marshal(map[string]any{"type": "system", "subtype": "local_command", "content": skillForm})
+	if kind, text, _, ok := extractTranscriptCandidate(b); !ok || kind != "command" || text != "/wrap now please" {
+		t.Errorf("system echo, message first: got (%q, %q, ok=%v)", kind, text, ok)
+	}
+	// A different name does not confirm.
+	if commandMatches("/wrap now please", "/rename now please") || commandMatches("/wrap now please", "/wrap other args") {
+		t.Fatal("a different command or different args confirmed a send")
+	}
+}
+
+// A model-invoked skill records the same tags without a leading slash in
+// <command-name>; that is the model acting, never a human slash send.
+func TestModelInvokedSkillIsNotAHumanSlashSend(t *testing.T) {
+	content := "<command-message>wrap</command-message>\n<command-name>wrap</command-name>"
+	b, _ := json.Marshal(commandUserEntry(content))
+	_, text, _, ok := extractTranscriptCandidate(b)
+	if ok && commandMatches(text, "/wrap") {
+		t.Fatalf("model-invoked entry %q confirmed a human /wrap", text)
+	}
+	if _, ok := localCommandLine(map[string]any{"content": content}); ok {
+		t.Fatal("system echo without a leading slash was taken as a slash command")
+	}
+}
+
+func TestSkillSlashCommandSendConfirmsFromTranscript(t *testing.T) {
+	d, _, ref, recordOnSubmit := transcriptSession(t)
+	recordOnSubmit(commandUserEntry(skillForm))
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	got, err := d.Send(ctx, testCaller, ref, "/wrap now please", driver.SendOptions{Submit: true, HumanRelay: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Outcome != fleet.OutcomeQueued || !strings.Contains(got.Reason, "transcript") {
+		t.Fatalf("outcome = %s (%s), want queued, confirmed by the transcript", got.Outcome, got.Reason)
+	}
+}
