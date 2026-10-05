@@ -60,6 +60,44 @@ const confirmReserve = time.Second
 
 const counterRouteGuardModuleUnconfirmed = "route.guard.module_unconfirmed"
 
+// #264: sends a module enqueued on an idle session that never started a turn, and
+// the lanes degraded for it.
+const (
+	counterLaneStall         = "lane.stall"
+	counterLaneStallDegraded = "lane.stall_degraded"
+)
+
+// idleStatus is the two statuses that say no turn is running and none is being
+// answered: a finished turn reads idle or waiting_input depending on how the
+// screen settled.
+func idleStatus(s fleet.Status) bool {
+	return s == fleet.StatusIdle || s == fleet.StatusWaitingInput
+}
+
+// idleBeforeSend reports whether the last observation of the session was idle,
+// and since when. No observation reads as not idle: the check
+// then never fires, which keeps the lane rather than degrade it on a guess.
+func (d *Driver) idleBeforeSend(id string) (bool, time.Time) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	o, ok := d.observed[id]
+	if !ok || !idleStatus(o.status) {
+		return false, time.Time{}
+	}
+	return true, o.statusSince
+}
+
+// stillIdleSince re-reads the session and reports whether it is still idle with
+// the same `since`. A dialog waiting on an answer is not idle: a message queued
+// behind one is ordinary. A failed read says no.
+func (d *Driver) stillIdleSince(ctx context.Context, req fleet.Request, ref fleet.SessionRef, since time.Time) bool {
+	st, err := d.State(ctx, req, ref)
+	if err != nil || st.Since == nil {
+		return false
+	}
+	return idleStatus(st.Status) && st.WaitingOn != fleet.WaitingPrompt && st.Since.Equal(since)
+}
+
 // extModule is one external module seen through the delivery seam.
 type extModule struct {
 	d    *Driver
@@ -114,6 +152,11 @@ func (m extModule) deliver(ctx context.Context, in delivery.Delivery, tr *module
 	m.h.count(m.name, "send_written")
 	tr.sendID = res.SendID
 
+	// #264: whether the session was idle when this send went in. An enqueue is
+	// ordinary on a busy session; only an idle one that stays idle says the
+	// lane takes messages and never starts a turn.
+	idleBefore, sinceBefore := m.d.idleBeforeSend(in.Ref.ID)
+
 	verdict, err := m.awaitVerdict(ctx, c, key, res)
 	switch {
 	case err != nil:
@@ -125,6 +168,7 @@ func (m extModule) deliver(ctx context.Context, in delivery.Delivery, tr *module
 		return unknownResult(m.name, "the module did not answer the confirm request"), nil
 	case verdict == "confirmed":
 		m.h.count(m.name, "send_confirmed")
+		m.h.clearStalls(in.Ref.ID)
 		// The SAME bar as the built-in transcript confirmation: the runtime
 		// accepted a user-origin turn. That is not an acknowledgement from the
 		// agent, so it is never reported as submitted.
@@ -150,11 +194,30 @@ func (m extModule) deliver(ctx context.Context, in delivery.Delivery, tr *module
 			Class: delivery.Refused,
 		}, nil
 	case verdict == "queued":
-		// Enqueued; the turn had not started when the window ended. Not a
-		// fault of the lane, so it is not degraded.
+		// Enqueued; the turn had not started when the window ended. One of
+		// these is not a fault of the lane, so it is not degraded by itself.
 		m.h.count(m.name, "send_unknown")
-		return unknownResult(m.name, "the module saw the message enqueued but the turn had not started when the "+
-			"window ended"), nil
+		why := "the module saw the message enqueued but the turn had not started when the window ended"
+		if idleBefore && m.d.stillIdleSince(ctx, in.Req, in.Ref, sinceBefore) {
+			// #264: the session was idle before the send and still is, with the
+			// same `since`: nothing started. Repeated, the lane is a path that
+			// takes messages and delivers none, and as the only input path
+			// (#257) it would make the session unreachable while it looks
+			// healthy. After laneStallLimit in a row it is treated as not live,
+			// so the next send takes the built-in path.
+			m.d.counters.incr(counterLaneStall)
+			if n, degraded := m.h.noteStall(in.Ref.ID); degraded {
+				m.d.counters.incr(counterLaneStallDegraded)
+				why += fmt.Sprintf(". This is the %dth enqueued send on this idle session with no turn started, so the "+
+					"lane is now marked not live and the next send takes the built-in path. The messages already "+
+					"enqueued may still arrive later", n)
+			} else {
+				why += ". The session was idle before the send and still is"
+			}
+		} else {
+			m.h.clearStalls(in.Ref.ID)
+		}
+		return unknownResult(m.name, why), nil
 	default: // silent
 		m.h.count(m.name, "send_unknown")
 		m.h.degrade(in.Ref.ID, "the module saw no evidence the runtime took a message", false)
