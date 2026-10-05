@@ -1228,6 +1228,16 @@ What you get, and what you do not:
   `200` with `turns: []`; do not treat the two alike. A `409` on `since` means the
   conversation was replaced (a `/clear`, a relaunch) — read without `since` to
   start again.
+- **A question's own explanation is not in `turns` yet.** An agent that writes
+  prose and then asks a question in one message has neither recorded until you
+  answer, so `state.prompt` shows the question without the text it refers to.
+  While the prompt is open the page carries `pending` (muster #266): the agent's
+  prose drawn above the dialog, with the prompt's `nonce`. Render it with the
+  prompt card, key it by that nonce, and replace it with the real turn once the
+  prompt resolves — never show both. It is read off the screen and fails to
+  absent: no `pending` means "not readable", not "the agent said nothing", and
+  the same goes for a tool-permission dialog, which never has one. The wrapped
+  rows of a paragraph are separate lines in it.
 - **A page can be empty while `next` still moves** when a long stretch of the
   record held no agent text; call again until `next` stops moving.
 

@@ -1005,6 +1005,7 @@ func parseMenuShape(s screen) (p *fleet.SessionPrompt, shape menuShape) {
 	}
 	p.Question = strings.Join(question, " ")
 	if headerRow >= 0 {
+		shape.headerAt = headerRow + 1
 		rawHeader := header // no escapes to read a highlight from: the position stays unread
 		if headerRow < len(s.raw) {
 			rawHeader = s.raw[headerRow]

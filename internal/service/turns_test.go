@@ -99,7 +99,7 @@ func TestTurns_ServesThePageAndForwardsTheQuery(t *testing.T) {
 	}
 
 	line := logs.String()
-	for _, want := range []string{"audit:", "verb=read-turns", "owner/s1", "turns=1", "outcome=performed"} {
+	for _, want := range []string{"audit:", "verb=read-turns", "owner/s1", "turns=1", "pending=0", "outcome=performed"} {
 		if !strings.Contains(line, want) {
 			t.Errorf("audit line lacks %q:\n%s", want, line)
 		}
@@ -198,5 +198,39 @@ func TestTurns_RequiresTheSendGrantUnderAPrincipalTable(t *testing.T) {
 	}
 	if resp, _ := getTurns(t, srv, "wrong", ""); resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("unknown token: status = %d", resp.StatusCode)
+	}
+}
+
+// muster#266: the pending entry rides on the same route, behind the same
+// grant, and its audit line says THAT a pending entry left, never what it said.
+func TestTurns_PendingTextIsServedAndAuditedWithoutItsContent(t *testing.T) {
+	observed := time.Date(2026, 10, 5, 3, 0, 0, 0, time.UTC)
+	d := &turnsDriver{Driver: stub.Driver{DeadlineMs: 500}, page: fleet.TurnsPage{Next: "cur", Pending: &fleet.PendingTurn{
+		ObservedAt: observed, Text: "words above the question", Source: fleet.PendingSourceScreen, Nonce: "n-1"}}}
+	logs := captureLog(t)
+	resp, body := getTurns(t, turnsServer(t, d, Config{}), testToken, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d: %s", resp.StatusCode, body)
+	}
+	var page fleet.TurnsPage
+	if err := json.Unmarshal(body, &page); err != nil {
+		t.Fatal(err)
+	}
+	if page.Pending == nil || page.Pending.Text != "words above the question" || page.Pending.Source != "screen" ||
+		page.Pending.Nonce != "n-1" || !page.Pending.ObservedAt.Equal(observed) {
+		t.Fatalf("pending = %+v", page.Pending)
+	}
+	if !strings.Contains(string(body), `"turns":[]`) {
+		t.Errorf("a page with only a pending entry must still carry an empty turns list: %s", body)
+	}
+	if line := logs.String(); !strings.Contains(line, "pending=1") || strings.Contains(line, "words above the question") {
+		t.Errorf("audit line:\n%s", line)
+	}
+
+	// No prompt open: no field at all, not a null.
+	d.page = fleet.TurnsPage{Next: "cur"}
+	_, body = getTurns(t, turnsServer(t, d, Config{}), testToken, "")
+	if strings.Contains(string(body), "pending") {
+		t.Errorf("body mentions pending with no prompt open: %s", body)
 	}
 }

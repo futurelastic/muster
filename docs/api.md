@@ -271,9 +271,38 @@ whose conversation record cannot be identified yet is `404` with `retryable`,
 which is not the same as an agent that has said nothing (`200`, `turns: []`).
 A turn over 64 KiB is cut and marked `"truncated": true`.
 
+**`pending` — the text above an open prompt (muster #266).** A message that holds
+prose and then an open question is written to the record only once the question
+is answered, so while the dialog is up `turns` holds neither. When a prompt is
+open and its question dialog is on screen, the page also carries
+`"pending": {"observedAt", "text", "source": "screen", "nonce", "truncated"?}`:
+the agent's own prose drawn directly above the dialog, read off the screen.
+
+- **Same boundary as `turns`, read from a different place.** Only the contiguous
+  block of the agent's own text immediately above the dialog's opening rule. A
+  block holding a tool call, tool output, an inbound message, a status line or
+  anything else not tied to the agent's own writing is left out whole — `pending`
+  fails to absent, never to a guess. A screen the classifier cannot read, a
+  prompt with no tabbed header (a tool-permission dialog) and an unnumbered or
+  preview-pane menu carry none, and that is not an error.
+- **`nonce` is the prompt's own** (`state.prompt.nonce`): tie the text to the
+  card it explains, and drop it when the nonce changes. It is absent from the
+  page — the field is omitted, not `null` — the moment the prompt resolves, and
+  the real turn then arrives through `turns`. Replace it with that turn; never
+  merge the two.
+- **It is the screen's text, not the record's.** One line per screen row, the
+  runtime's indentation removed, so a paragraph the pane wrapped is several lines
+  and the recorded turn can differ in its line breaks. `observedAt` is when this
+  service read the screen — the runtime wrote no timestamp for text it has not
+  recorded, which is why it is not called `at`.
+- **`truncated: true`** says the block is not the whole of it: its head ran above
+  the captured window (what is visible is returned) or it was cut at 64 KiB.
+- A peer built before this field simply omits it.
+
 Needs the `send` grant under a principal table (the one `input` and `respond`
 use; there is no separate grant) and not `relay` for a peer target. Each read is
-audited — who, which session, how many turns, never the text. **The text is
+audited — who, which session, how many turns, whether a `pending` entry left
+(`pending=0|1`), never the text. **The text is
 whatever the agent chose to write**: an agent that echoes a secret into its own
 prose has put it where this route can return it. Reason it is allowed, and what
 it costs: `docs/adr/258-assistant-turns-read.md`.

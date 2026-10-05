@@ -58,9 +58,10 @@ func handleTurns(svc *Service) http.HandlerFunc {
 		aw := &auditWriter{ResponseWriter: w}
 		w = aw
 		count := 0
+		pending := 0
 		defer func() {
-			log.Printf("audit: actor=%q verb=read-turns route=%s target=%s/%s turns=%d outcome=%s status=%d",
-				callerFrom(r).Principal, routeOf(r), machine, id, count, outcomeOf(aw.status), aw.status)
+			log.Printf("audit: actor=%q verb=read-turns route=%s target=%s/%s turns=%d pending=%d outcome=%s status=%d",
+				callerFrom(r).Principal, routeOf(r), machine, id, count, pending, outcomeOf(aw.status), aw.status)
 		}()
 
 		q := fleet.TurnsQuery{Since: query.Get("since")}
@@ -114,6 +115,9 @@ func handleTurns(svc *Service) http.HandlerFunc {
 			page.Turns = []fleet.Turn{}
 		}
 		count = len(page.Turns)
+		if page.Pending != nil {
+			pending = 1
+		}
 		writeJSON(w, http.StatusOK, page)
 	}
 }
