@@ -163,6 +163,11 @@ type laneRecord struct {
 	// running for one session.
 	gen       uint64
 	attaching bool
+	// stalls counts consecutive sends the module saw enqueued on an idle session
+	// without a turn ever starting (#264). In memory only: a restart of this
+	// service starts the count again, which errs toward trying the lane once more.
+	// A confirmed send or a fresh live attach resets it.
+	stalls int
 	// flushing marks a `close` in flight, so the several places that can
 	// notice a closing lane (the close itself, the ready callback, the
 	// background pass) send it once, not once each.
@@ -594,6 +599,47 @@ func (h *moduleHost) liveLane(id, name string) (module, laneKey string, c *modcl
 	return rec.Module, rec.LaneKey, h.clients[rec.Module], ""
 }
 
+// laneStallLimit is how many consecutive enqueued-but-never-started sends on an
+// idle session a lane is given before it is treated as not live (#264). One is
+// not enough: a runtime can be slow to begin a turn.
+const laneStallLimit = 2
+
+// noteStall records one send that the module saw enqueued while the session sat
+// idle and stayed idle, and reports the run length and whether the lane has now
+// been degraded. The caller says what the receipt should tell the sender.
+func (h *moduleHost) noteStall(id string) (n int, degraded bool) {
+	if h == nil {
+		return 0, false
+	}
+	h.mu.Lock()
+	rec := h.lanes[id]
+	if rec == nil {
+		h.mu.Unlock()
+		return 0, false
+	}
+	rec.stalls++
+	n = rec.stalls
+	h.mu.Unlock()
+	if n < laneStallLimit {
+		return n, false
+	}
+	h.degrade(id, fmt.Sprintf("the module enqueued %d sends in a row on an idle session and no turn started", n), false)
+	return n, true
+}
+
+// clearStalls ends a run of stalls: a send the runtime accepted proves the lane
+// delivers.
+func (h *moduleHost) clearStalls(id string) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	if rec := h.lanes[id]; rec != nil {
+		rec.stalls = 0
+	}
+	h.mu.Unlock()
+}
+
 // degrade marks a lane not usable until a later attach reports it live. gone
 // says the module no longer knows the lane at all.
 func (h *moduleHost) degrade(id, reason string, gone bool) {
@@ -921,6 +967,7 @@ func (h *moduleHost) applyAttach(id, module string, gen uint64, pid int, res mod
 	case res.Live:
 		h.count(module, "attach_live")
 		rec.Live, rec.gen = true, gen
+		rec.stalls = 0
 		rec.State = res.State
 		if rec.State == "" || rec.State == laneStatePrepared || rec.State == laneStateConnecting {
 			rec.State = laneStateLive

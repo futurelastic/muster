@@ -476,7 +476,10 @@ resolved.
 module that confirmed the runtime took the message answers **`queued`**, never
 `submitted`, and one that wrote it and cannot say whether it landed answers
 **`unknown` and is never followed by a second send of the same text on any
-path**, for the same 30 minutes the inbox holds. It is **absent** when the receipt names no path — a refusal made
+path**, for the same 30 minutes the inbox holds. A lane that keeps enqueuing on an idle
+session without a turn ever starting (two sends in a row, #264) is treated as not live:
+the session's `delivery` field then reads `terminal` with the reason, and the next send is
+carried by the built-in path; messages the module already enqueued may still arrive. It is **absent** when the receipt names no path — a refusal made
 before any path was chosen (a busy composer, the runtime-syntax guard,
 contradictory flags, a live lane refusing a composer shape), or a peer built
 before the field. Treat absent as "not stated"; it is never either value.

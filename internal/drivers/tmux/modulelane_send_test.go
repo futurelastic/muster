@@ -584,3 +584,93 @@ func TestModuleSend_ManySessionsConcurrent(t *testing.T) {
 		t.Errorf("the module saw %d distinct texts on %d lanes, want %d of each", len(seen), len(lanes), n)
 	}
 }
+
+// #264: a lane that enqueues on an idle session and never starts a turn is
+// degraded after laneStallLimit sends in a row, so the next send takes the
+// built-in path instead of the session staying unreachable behind a lane that
+// looks live.
+func TestModuleSend_StalledLaneIsDegraded(t *testing.T) {
+	queued := modtest.JSON(map[string]any{"verdict": "queued", "enqueued": true, "elapsedMs": 5, "final": false})
+	r, id := liveRig(t, modtest.Behaviour{Ops: map[string]modtest.OpScript{
+		"confirm": {Results: []json.RawMessage{queued}, DelayMs: 60},
+	}})
+	// The session is idle, and the driver has seen it so.
+	if st, err := r.d.State(context.Background(), testCaller, fleet.SessionRef{Machine: "testbox", ID: id}); err != nil || !idleStatus(st.Status) {
+		t.Fatalf("setup: state = %+v, err = %v; the rig's pane must read idle", st, err)
+	}
+
+	ctx, cancel := short(t)
+	first := r.sendCtx(ctx, id, "first", driver.SendOptions{})
+	cancel()
+	if first.Outcome != fleet.OutcomeUnknown {
+		t.Fatalf("first = %+v, want unknown", first)
+	}
+	if v := r.view(id); !v.ClientConnected {
+		t.Fatalf("one stalled send degraded the lane: %+v", v)
+	}
+
+	ctx, cancel = short(t)
+	second := r.sendCtx(ctx, id, "second, different text", driver.SendOptions{})
+	cancel()
+	if second.Outcome != fleet.OutcomeUnknown || !strings.Contains(second.Reason, "now marked not live") {
+		t.Fatalf("second = %+v, want unknown naming the degrade", second)
+	}
+	v := r.view(id)
+	if v.ClientConnected || v.Lane != fleet.DeliveryLaneTerminal {
+		t.Fatalf("lane after two stalls = %+v, want terminal and not connected", v)
+	}
+	if r.counter(counterLaneStallDegraded) != 1 {
+		t.Errorf("counters: %v", r.d.Counters())
+	}
+
+	// The next send reaches the session by the built-in path.
+	before := r.sends()
+	third := r.send(id, "third", driver.SendOptions{})
+	if third.RouteOf() == fleet.RouteModule || r.pastes() == 0 {
+		t.Fatalf("third = %+v, pastes = %d; want the built-in path", third, r.pastes())
+	}
+	if r.sends() != before {
+		t.Errorf("the degraded lane took another send")
+	}
+}
+
+// A queued send on a session that was NOT idle when it went in is an ordinary
+// enqueue and never counts toward degrading the lane.
+func TestModuleSend_QueuedOnBusySessionNeverDegrades(t *testing.T) {
+	queued := modtest.JSON(map[string]any{"verdict": "queued", "enqueued": true, "elapsedMs": 5, "final": false})
+	r, id := liveRig(t, modtest.Behaviour{Ops: map[string]modtest.OpScript{
+		"confirm": {Results: []json.RawMessage{queued}, DelayMs: 60},
+	}})
+	for i := 0; i < laneStallLimit+1; i++ {
+		r.d.mu.Lock()
+		r.d.observed[id] = observation{status: fleet.StatusWorking, statusSince: r.d.now()}
+		r.d.mu.Unlock()
+		ctx, cancel := short(t)
+		got := r.sendCtx(ctx, id, fmt.Sprintf("while busy %d", i), driver.SendOptions{})
+		cancel()
+		if got.Outcome != fleet.OutcomeUnknown {
+			t.Fatalf("send %d = %+v, want unknown", i, got)
+		}
+	}
+	if v := r.view(id); !v.ClientConnected {
+		t.Errorf("enqueues on a busy session degraded the lane: %+v", v)
+	}
+	if r.counter(counterLaneStall) != 0 {
+		t.Errorf("counters: %v", r.d.Counters())
+	}
+}
+
+// A confirmed send ends a run of stalls.
+func TestModuleSend_ConfirmedResetsStallRun(t *testing.T) {
+	r, id := liveRig(t, modtest.Behaviour{})
+	if n, deg := r.d.mods.noteStall(id); n != 1 || deg {
+		t.Fatalf("n=%d degraded=%v", n, deg)
+	}
+	got := r.send(id, "lands", driver.SendOptions{})
+	if got.Outcome != fleet.OutcomeQueued {
+		t.Fatalf("got = %+v", got)
+	}
+	if n, deg := r.d.mods.noteStall(id); n != 1 || deg {
+		t.Fatalf("after a confirmed send the run restarted at n=%d degraded=%v, want 1/false", n, deg)
+	}
+}
