@@ -48,7 +48,62 @@ type TurnsPage struct {
 	// wrote after this page. It is returned even when Turns is empty, so a
 	// poller always has a place to resume from. Do not parse it.
 	Next string `json:"next"`
+
+	// Pending is the agent's own text drawn directly above a prompt that is open
+	// right now (muster #266). Absent whenever no prompt is open, and whenever
+	// the screen cannot be read as agent text with certainty.
+	Pending *PendingTurn `json:"pending,omitempty"`
 }
+
+// PendingTurn is agent text the runtime has drawn but not yet recorded.
+//
+// # Why it exists
+//
+// An assistant message that holds a text block and an open question is written
+// to the record only once the question is answered, so a client rendering the
+// conversation from Turns shows the question without the explanation it refers
+// to. The text is on the screen, directly above the dialog; this is that text,
+// for as long as the dialog is up.
+//
+// # The boundary is Turn's, read from a different place
+//
+// Only the contiguous block of the agent's own prose immediately above the
+// dialog's opening rule. A block that holds a tool call, tool output, an
+// inbound message, a status line or anything else the classifier cannot tie to
+// the agent's own writing is left out whole: this fails to absent, never to a
+// guess. Like Turn, there is deliberately no Kind and no Raw.
+//
+// It is NOT a transcript entry. The text is as the screen draws it — one row
+// per line, the runtime's own indentation removed — so a paragraph the pane
+// wrapped is several lines here, and the text the record later holds can differ
+// in its line breaks and markup. A client that renders both must replace this
+// with the real turn when the prompt resolves, and never merge them.
+type PendingTurn struct {
+	// ObservedAt is when this service read the screen. Not a timestamp the
+	// runtime wrote — there is none for text it has not recorded — which is why
+	// it is not called At.
+	ObservedAt time.Time `json:"observedAt"`
+
+	// Text is the agent's text above the prompt, bounded by MaxTurnTextBytes.
+	Text string `json:"text"`
+
+	// Truncated is true when Text is not the whole block: its head ran above the
+	// captured window, or it was cut at MaxTurnTextBytes. Absent otherwise.
+	Truncated bool `json:"truncated,omitempty"`
+
+	// Source is always "screen". It is a field so a client can tell this from a
+	// Turn without knowing which list it came out of, and so a later source (the
+	// record itself, once written) has somewhere to differ.
+	Source string `json:"source"`
+
+	// Nonce is the open prompt's own nonce (SessionPrompt.Nonce), so a client can
+	// tie this text to the prompt card it explains, and drop it when the nonce
+	// changes.
+	Nonce string `json:"nonce"`
+}
+
+// PendingSourceScreen is PendingTurn.Source for text read off the screen.
+const PendingSourceScreen = "screen"
 
 // TurnsQuery is what a caller asks of a session's assistant turns.
 type TurnsQuery struct {

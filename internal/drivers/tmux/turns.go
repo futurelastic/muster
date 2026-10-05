@@ -116,7 +116,26 @@ func (d *Driver) Turns(ctx context.Context, req fleet.Request, ref fleet.Session
 	if !ok {
 		return fleet.TurnsPage{}, fmt.Errorf("%w: %q", fleet.ErrNoTurnRecord, ref.ID)
 	}
-	return readTurns(src.path, q.Since, limit)
+	page, err := readTurns(src.path, q.Since, limit)
+	if err != nil {
+		return page, err
+	}
+	// The record is read BEFORE the screen, on purpose (muster #266): a prompt
+	// answered between the two reads then costs this call a pending entry it
+	// would have had, where the other order would show the same text twice, once
+	// as pending and once as the turn the answer just made the runtime write.
+	if scr, ok := d.captureForClassify(ctx, target.paneID); ok {
+		if text, truncated, nonce, ok := pendingAgentText(scr); ok {
+			page.Pending = &fleet.PendingTurn{
+				ObservedAt: d.now().UTC(),
+				Text:       text,
+				Truncated:  truncated,
+				Source:     fleet.PendingSourceScreen,
+				Nonce:      nonce,
+			}
+		}
+	}
+	return page, nil
 }
 
 // readTurns answers one query against one record file. Split from Turns so the

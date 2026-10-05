@@ -425,6 +425,12 @@ type menuShape struct {
 	preview bool
 	// tab is where the current question sits in a tabbed dialog.
 	tab tabPosition
+	// headerAt is the 1-based screen row of the dialog's header (its tab bar or
+	// chip), or 0 when none was found. It is what pendingAgentText measures
+	// from: the header sits directly under the dialog's opening rule, so the
+	// rows above that rule are the transcript the dialog was drawn under
+	// (muster#266). One-based so the zero value means "no header".
+	headerAt int
 	// shortcuts is the key that answers each option, aligned with the options,
 	// for a prompt whose keys are not its options' positions: the feedback-draft
 	// card offers ["review","send","dismiss"] and answers them with 1, 2 and 0
