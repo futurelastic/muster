@@ -134,7 +134,7 @@ func (d *Driver) Keys(ctx context.Context, req fleet.Request, ref fleet.SessionR
 		}
 	}
 	if live == nil {
-		return fleet.DeliveryReceipt{}, fmt.Errorf("%w: %q", fleet.ErrNoSuchSession, ref.ID)
+		return fleet.DeliveryReceipt{}, d.noSuchSession(ctx, rows, ref.ID)
 	}
 	if want := req.Expect.StartedAt; want != nil && !live.created.Equal(*want) {
 		return fleet.DeliveryReceipt{}, fmt.Errorf(

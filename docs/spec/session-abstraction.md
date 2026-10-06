@@ -491,6 +491,7 @@ DeliveryReceipt {
           | "delivered" | "held" | "denied" | "expired" | "dropped"
   reason? : string
   delivery? : DeliveryPath
+  sessionIds? : string[]     // refused only: the address was a conversation id, and these are the live sessions holding it (api-http.md §2)
 }
 
 DeliveryPath {
