@@ -2182,7 +2182,7 @@ func (d *Driver) State(ctx context.Context, req fleet.Request, ref fleet.Session
 	prior, seen := d.observed[ref.ID]
 	d.mu.Unlock()
 	if !seen {
-		return fleet.SessionState{}, fmt.Errorf("%w: %q", fleet.ErrNoSuchSession, ref.ID)
+		return fleet.SessionState{}, d.noSuchSession(ctx, rows, ref.ID)
 	}
 	evidence := "session was present in the multiplexer and is no longer"
 	if prior.cwd != "" {
@@ -2477,10 +2477,7 @@ func (d *Driver) deliverViaPane(ctx context.Context, ref fleet.SessionRef, text 
 		}
 	}
 	if target == nil {
-		return fleet.DeliveryReceipt{
-			Outcome: fleet.OutcomeRefused,
-			Reason:  "no session with this id",
-		}, nil
+		return d.noSuchSessionReceipt(ctx, rows, ref.ID), nil
 	}
 	if target.dead {
 		return fleet.DeliveryReceipt{
@@ -3493,7 +3490,7 @@ func (d *Driver) Discard(ctx context.Context, req fleet.Request, ref fleet.Sessi
 		}
 	}
 	if live == nil {
-		return fleet.Ack{}, fmt.Errorf("%w: %q", fleet.ErrNoSuchSession, ref.ID)
+		return fleet.Ack{}, d.noSuchSession(ctx, rows, ref.ID)
 	}
 	if want := req.Expect.StartedAt; want != nil && !live.created.Equal(*want) {
 		return fleet.Ack{}, fmt.Errorf(
@@ -4267,7 +4264,7 @@ func (d *Driver) Rename(ctx context.Context, req fleet.Request, ref fleet.Sessio
 		}
 	}
 	if live == nil {
-		return fleet.RenameAck{}, fmt.Errorf("%w: %q", fleet.ErrNoSuchSession, ref.ID)
+		return fleet.RenameAck{}, d.noSuchSession(ctx, rows, ref.ID)
 	}
 
 	if want := req.Expect.StartedAt; want != nil {
@@ -5132,7 +5129,7 @@ func (d *Driver) Respond(ctx context.Context, req fleet.Request, ref fleet.Sessi
 		}
 	}
 	if target == nil {
-		return fleet.DeliveryReceipt{Outcome: fleet.OutcomeRefused, Reason: "no session with this id"}, nil
+		return d.noSuchSessionReceipt(ctx, rows, ref.ID), nil
 	}
 	if target.dead {
 		return fleet.DeliveryReceipt{Outcome: fleet.OutcomeRefused, Reason: "session process has exited"}, nil

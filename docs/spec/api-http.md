@@ -62,6 +62,31 @@ session's own ref) and `closedAt` (when this machine observed the absence, an
 upper bound on the true end — the same rule `GET .../sessions/closed`'s own
 `closedAt` follows for a `ClosedByAbsent` tombstone, §3.2).
 
+**An id that is a live session's conversation id (muster #268).** `{id}` is
+always this service's session `id`; a session's *conversation* id (the runtime's
+own, `conversation.id` on a session read) is not an address and is never
+accepted as one — it is not a stable handle, because a runtime can start a new
+conversation inside the same process and two live sessions can hold one
+conversation after a resume. But a session knows its own conversation id and not
+its session id, so a reply-to address written by one session tends to carry the
+wrong kind, and a bare "no session with this id" reads as "the session is gone".
+So when `{id}` matches no session id, is UUID-shaped, and equals the
+`conversation.id` of one or more **live** sessions on that machine, the refusal
+says so and names the id to use. It applies to every route keyed by a session id.
+
+- A **send** (`/input`, `/respond`) is still `200 { "outcome": "refused" }`
+  with nothing written. `reason` is prose (do not parse it) saying the value is
+  a conversation id and naming the session id(s); the same ids arrive in
+  `sessionIds` (sorted, every candidate when several sessions hold the
+  conversation). Retry with one of them.
+- A **read** (the single-session GET, `/turns`, `/keys`, close, rename) is still
+  `404 not_found`, with `reason: "conversation-id"` and `sessionIds`.
+- An id that matches neither a session id nor a live session's conversation —
+  including a UUID that is nobody's — keeps today's answer: reason
+  `"no session with this id"` on a send, plain `not_found` on a read, and
+  neither `sessionIds` nor the `conversation-id` reason. A client may rely on
+  that: the session-gone-or-never-existed answer is the only one without them.
+
 ## 3. Endpoints
 
 ### 3.1 Service and topology
@@ -1252,7 +1277,8 @@ POST /v1/machines/{machine}/sessions/{id}/input?runtime=
 → 200 { "outcome": "submitted" | "queued" | "refused" | "unknown",
         "reason": "prompt holds unsent input",
         "delivery": { "route": "terminal" | "inbox" | "module",
-                      "module"?: "<name>" } }
+                      "module"?: "<name>" },
+        "sessionIds"?: ["<session id>", ...] }   (refused: `{id}` was a conversation id, §2)
 ```
 
 **`delivery.route` (muster #184) names the path that made the receipt.** It

@@ -102,7 +102,7 @@ func (d *Driver) Turns(ctx context.Context, req fleet.Request, ref fleet.Session
 		}
 	}
 	if target == nil {
-		return fleet.TurnsPage{}, fmt.Errorf("%w: %q", fleet.ErrNoSuchSession, ref.ID)
+		return fleet.TurnsPage{}, d.noSuchSession(ctx, rows, ref.ID)
 	}
 	// §5.4, before anything is read: a recycled id must not hand one session's
 	// words to a caller who meant another's.

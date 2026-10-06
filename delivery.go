@@ -109,6 +109,13 @@ type DeliveryReceipt struct {
 	// existed. It is never a guess: a consumer that needs to know which path
 	// delivered reads it, and treats nil as "not stated".
 	Delivery *DeliveryPath `json:"delivery,omitempty"`
+
+	// SessionIds is set on a refusal whose address was not a session id but
+	// the conversation id of live sessions (muster #268): the ids of those
+	// sessions, so a caller retries with one of them instead of parsing
+	// Reason. Absent on every other receipt, including the refusal for an id
+	// that matches nothing at all.
+	SessionIds []string `json:"sessionIds,omitempty"`
 }
 
 // Route names a delivery path, and — on the request side — the caller's choice

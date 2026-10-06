@@ -393,6 +393,14 @@ func writeDriverError(w http.ResponseWriter, machine fleet.MachineId, deadline t
 	}
 
 	switch {
+	case isConversationIdError(err):
+		// #268: the session exists; the caller addressed it by its
+		// conversation id. Still not_found (no session HAS this id), but the
+		// message says what the id is and the ids to use travel structured.
+		var ce *fleet.ConversationIdError
+		errors.As(err, &ce)
+		writeError(w, &fleet.Error{Kind: fleet.ErrorNotFound, Message: ce.Error(), Machine: machine,
+			Reason: fleet.ReasonConversationId, SessionIds: ce.SessionIds})
 	case errors.Is(err, fleet.ErrNoSuchSession):
 		// The machine answered, and there is no such session. Distinct from
 		// unreachable, which is the machine not answering at all — see
@@ -2074,4 +2082,9 @@ type eventEnvelope struct {
 	// keeps the stream's shape in one place, but only if it is kept in step
 	// with what it encodes.
 	Origin *fleet.EventOrigin `json:"origin,omitempty"`
+}
+
+func isConversationIdError(err error) bool {
+	var ce *fleet.ConversationIdError
+	return errors.As(err, &ce)
 }

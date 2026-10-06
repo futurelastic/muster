@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -232,5 +233,30 @@ func TestTurns_PendingTextIsServedAndAuditedWithoutItsContent(t *testing.T) {
 	_, body = getTurns(t, turnsServer(t, d, Config{}), testToken, "")
 	if strings.Contains(string(body), "pending") {
 		t.Errorf("body mentions pending with no prompt open: %s", body)
+	}
+}
+
+// #268: a driver that recognises the addressed id as a live session's
+// conversation id answers not_found with a reason a client can branch on and
+// the session ids to use — the message never claims the session is gone.
+func TestTurns_ConversationIdAddressNamesTheSessionIds(t *testing.T) {
+	d := &turnsDriver{Driver: stub.Driver{DeadlineMs: 500}, err: fmt.Errorf("probe: %w",
+		&fleet.ConversationIdError{ID: "7f3a1c22-0b9e-4d51-9f2a-8e6b1d4c5a70", SessionIds: []string{"alpha"}})}
+	resp, body := getTurns(t, turnsServer(t, d, Config{}), testToken, "")
+	var env fleet.ErrorEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("%d %s", resp.StatusCode, body)
+	}
+	if env.Error.Kind != fleet.ErrorNotFound || resp.StatusCode != http.StatusNotFound {
+		t.Errorf("kind = %s (%d), want not_found", env.Error.Kind, resp.StatusCode)
+	}
+	if env.Error.Reason != fleet.ReasonConversationId {
+		t.Errorf("reason = %q, want %q", env.Error.Reason, fleet.ReasonConversationId)
+	}
+	if len(env.Error.SessionIds) != 1 || env.Error.SessionIds[0] != "alpha" {
+		t.Errorf("sessionIds = %v, want [alpha]", env.Error.SessionIds)
+	}
+	if !strings.Contains(env.Error.Message, `"alpha"`) || !strings.Contains(env.Error.Message, "conversation id") {
+		t.Errorf("message = %q, want it to name the session id", env.Error.Message)
 	}
 }

@@ -3,6 +3,7 @@ package fleet
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // ErrorKind is the closed set of wire error kinds (api-http.md §2).
@@ -108,6 +109,55 @@ type Error struct {
 	// (closed.go).
 	Session  *SessionRef `json:"session,omitempty"`
 	ClosedAt *Timestamp  `json:"closedAt,omitempty"`
+
+	// SessionIds is set together with Reason == ReasonConversationId
+	// (muster #268): the ids of the live sessions whose conversation id the
+	// caller addressed. A client reads it instead of parsing Message.
+	SessionIds []string `json:"sessionIds,omitempty"`
+}
+
+// ReasonConversationId marks the ErrorNotFound a session-keyed read returns
+// when the id it was given is not a session id but IS the conversation id of a
+// live session (api-http.md, muster #268). The session exists; the caller
+// addressed it by the wrong kind of id. Error.SessionIds carries the right
+// ones.
+const ReasonConversationId = "conversation-id"
+
+// ConversationIdError is what a driver returns, in place of a bare
+// ErrNoSuchSession, when the id it was asked about matches no session id but
+// equals the conversation id of one or more live sessions (muster #268).
+//
+// It still answers errors.Is(err, ErrNoSuchSession) — the id is not a session
+// id, and a service probing drivers for ownership must read it as "not mine"
+// — but its message says what the id actually is, and never reads like "the
+// session is gone".
+type ConversationIdError struct {
+	ID         string   // the id the caller addressed
+	SessionIds []string // ids of the live sessions holding it, sorted
+}
+
+func (e *ConversationIdError) Error() string { return ConversationIdReason(e.ID, e.SessionIds) }
+
+// Is makes the error a refinement of ErrNoSuchSession rather than a sibling.
+func (e *ConversationIdError) Is(target error) bool { return target == ErrNoSuchSession }
+
+// ConversationIdReason is the one sentence every route uses for this refusal,
+// so the receipt reason and the error message cannot drift apart. The text is
+// for people; the ids a program should use travel in a structured field
+// (DeliveryReceipt.SessionIds, Error.SessionIds).
+func ConversationIdReason(id string, sessionIds []string) string {
+	if len(sessionIds) == 1 {
+		return fmt.Sprintf("%q is a conversation id, not a session id: it is the conversation of the live session whose id is %q — address that id instead", id, sessionIds[0])
+	}
+	return fmt.Sprintf("%q is a conversation id, not a session id: it is the conversation of %d live sessions, whose ids are %s — address one of those ids instead", id, len(sessionIds), strings.Join(quoteAll(sessionIds), ", "))
+}
+
+func quoteAll(in []string) []string {
+	out := make([]string, len(in))
+	for i, s := range in {
+		out[i] = fmt.Sprintf("%q", s)
+	}
+	return out
 }
 
 // ReasonReplayOfEndedSession marks the ErrorConflict a create's
