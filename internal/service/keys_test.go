@@ -296,7 +296,7 @@ func TestGrants_AreDefinedInExactlyOnePlace(t *testing.T) {
 	if ValidGrant(Grant("not-a-grant")) {
 		t.Error("an unknown grant was accepted")
 	}
-	if !ValidGrant(GrantKeys) {
+	if !ValidGrant(GrantRemoteControl) {
 		t.Error("the newest grant is the one most likely to be missing from a second list")
 	}
 }

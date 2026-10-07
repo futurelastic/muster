@@ -391,6 +391,9 @@ type fakeSession struct {
 	// this driver starts (muster #236, managedSessionOption). Defaults
 	// to false, matching a real session nobody ever set the option on.
 	managed bool
+	// launchRC models launchRemoteControlOption (muster #269): "1", "0" or ""
+	// (never recorded). Emitted as the listing's tenth field.
+	launchRC string
 }
 
 const testNonce = "0badc0de"
@@ -504,7 +507,7 @@ func (f *fakeMux) exec(ctx context.Context, name string, args ...string) ([]byte
 			}
 			b.WriteString(strings.Join([]string{
 				s.name, s.paneID, s.cwd, itoa(s.pid), itoa64(s.created), dead,
-				itoa(s.deadStatus), s.title, managed,
+				itoa(s.deadStatus), s.title, managed, s.launchRC,
 			}, sep))
 			b.WriteString("\n")
 		}

@@ -127,6 +127,8 @@ GET /v1/runtimes
                                        "supportsPin": { "model": true,
                                                         "effort": false,
                                                         "agent": true },
+                                       "remoteControl": { "toggle": true,
+                                                          "off": true },
                                        "source": "observed",
                                        "observedAt": "..." } } ],
         "sources": [...], "complete": true }
@@ -1214,6 +1216,45 @@ answers with its router's bare `404`; a relaying service **must** report that as
 `unsupported`, never as `not_found` — the session may be alive, and the peer
 simply cannot store labels.
 
+```
+POST /v1/machines/{machine}/sessions/{id}/remote-control?runtime=
+{ "enabled": true }
+→ 202 { "accepted": true }
+→ 400 if "enabled" is missing
+→ 409 (retryable) if the driver cannot act safely: the channel's state could
+      not be read, the session is not idle, a prompt is open, or the composer
+      holds unsent text
+→ 501 unsupported if the runtime does not declare capabilities.remoteControl,
+      or enabled is false and its `off` is false
+```
+
+**Turns a RUNNING session's remote control on or off** (muster #269). `202` is
+intent only, like `interrupt`: the confirmation is `state.controlChannel`
+changing (§2.3), which fires `session.state`. The wire carries one concept in
+three places — the `remoteControl` flag at create, `state.controlChannel`, and
+this verb — and they agree: a session created with `remoteControl: false` reads
+`off`, and so does one this verb turned off.
+
+`enabled: true` on a `failed` channel is the reconnect; there is no separate
+verb. A request for the state a session is already in is a no-op that answers
+`202`, so the verb is safe to retry. That is more than convenience: the runtime
+measured turns remote control on with the same command that, when it is already
+on, opens a disconnect dialog — so a driver reads the channel first and refuses
+(`409`) when it cannot, rather than send blind. A dialog the call opened is
+always dismissed before it returns.
+
+It needs the **`remote-control` grant** (§5), its own and denied by default.
+Turning remote control on makes the session drivable from off the machine, which
+is an exposure change and not an input, so neither `send` nor `keys` implies it
+and the refusal names it. A call to a peer additionally needs `relay`, and the
+peer applies its own `remote-control` grant to this service's credential. A peer
+on a build without the route answers with its router's bare `404`; a relaying
+service **must** report that as `unsupported`, never as `not_found`.
+
+Known gap: the runtime's own slash command is still deliverable through `input`
+by any caller holding `send` (§3.3, the session-management commands), and that
+path is not gated by this grant.
+
 `runtime` is an **optional** query parameter on every single-session endpoint
 (`GET`, `input`, `respond`, `discard`, `rename`, `labels`, `keys`, `interrupt`,
 `DELETE`) and on `POST …/sessions` (`create`, in the JSON body as
@@ -1406,8 +1447,11 @@ our judgement of its error code: when true, sending anything resumes the
 session and no human is required.
 
 `state.controlChannel` — when present — is what the RUNTIME says about its own
-remote-control connection: `active`, `connecting`, `reconnecting` or `failed`.
-It is the runtime describing itself, not a claim about whatever is at the far
+remote-control connection: `active`, `connecting`, `reconnecting`, `failed` or
+`off`. `off` (muster #269) means the driver has positive evidence the session has
+no remote control — it was launched without it, or the runtime's own durable
+record shows a disconnect after the last enable — and is never inferred from the
+mere absence of a label. It is the runtime describing itself, not a claim about whatever is at the far
 end, and this service still does not model bridges.
 
 It exists because `failed` is otherwise invisible here. A session whose control
@@ -2025,8 +2069,8 @@ ordering is wrong rather than handing you a cursor that would skip.
   configuration in which authentication is off — not for loopback, not for
   development.
 - Permissions are **per verb, per machine**. `list` and `state` may be granted
-  broadly; `create`, `input`, `interrupt`, `close`, `rename`, `discard`, `keys`
-  and `label` are granted per peer and default to denied. That default is deliberate
+  broadly; `create`, `input`, `interrupt`, `close`, `rename`, `discard`, `keys`,
+  `label` and `remote-control` are granted per peer and default to denied. That default is deliberate
   and applies to a fresh deployment as much as an established one — no grant is
   implied by anything else, including a runtime advertising the capability the
   grant gates (§3, `keys`; muster #68).

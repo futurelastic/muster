@@ -106,7 +106,21 @@ const (
 	// Absent means denied, like every other grant, so no existing principal
 	// gains this by upgrading.
 	GrantLabel Grant = "label"
-	GrantRelay Grant = "relay" // have mutations proxied to peers
+	// GrantRemoteControl turns a RUNNING session's remote control on or off
+	// (POST …/remote-control, muster #269).
+	//
+	// Its own grant rather than folded into send or keys because turning it ON
+	// makes the session drivable from off the machine: an exposure change, not
+	// an input. A principal that may type into a session has not thereby been
+	// trusted to publish it.
+	//
+	// ⚠️ Known bypass, recorded rather than hidden: the runtime's own slash
+	// command is deliverable through `input` for any caller holding `send` (the
+	// terminal-command allow-list in the tmux driver), and that path is not
+	// gated by this grant. This grant governs the verb; it does not yet close
+	// the older workaround. Absent means denied, like every other grant.
+	GrantRemoteControl Grant = "remote-control"
+	GrantRelay         Grant = "relay" // have mutations proxied to peers
 	// GrantHumanRelay marks a principal as a HUMAN relay (muster round-3
 	// #180 review fix; #184). What such a principal sends is a person's own
 	// message, so:
@@ -151,8 +165,8 @@ const (
 func Grants() []Grant {
 	return []Grant{
 		GrantRead, GrantCreate, GrantSend, GrantInterrupt,
-		GrantClose, GrantRename, GrantDiscard, GrantKeys, GrantLabel, GrantRelay,
-		GrantHumanRelay,
+		GrantClose, GrantRename, GrantDiscard, GrantKeys, GrantLabel, GrantRemoteControl,
+		GrantRelay, GrantHumanRelay,
 	}
 }
 
@@ -239,6 +253,8 @@ func grantForVerb(r *http.Request) Grant {
 		return GrantKeys
 	case r.Method == http.MethodPost && strings.HasSuffix(path, "/labels"):
 		return GrantLabel
+	case r.Method == http.MethodPost && strings.HasSuffix(path, "/remote-control"):
+		return GrantRemoteControl
 	case r.Method == http.MethodDelete:
 		return GrantClose
 	}

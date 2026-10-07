@@ -223,7 +223,7 @@ Warning {
 }
 
 ControlChannel {
-  state   : "active" | "connecting" | "reconnecting" | "failed"
+  state   : "active" | "connecting" | "reconnecting" | "failed" | "off"
   reason? : string  // the runtime's own words for why `failed` (muster #69); for humans, never branched on
 }
 
@@ -288,6 +288,14 @@ TurnEnd {
 > field, an ordinary live session. Measured: 37 of 67 sessions came back from a
 > fleet-wide recovery in exactly that state, and the supervisor that had to find
 > them read pane text instead, because nothing here carried it.
+>
+> **`off` is the one state that is not read off the runtime's status label**
+> (muster issue #269). A session without remote control renders no label, so a
+> label can never say "off"; a driver reports `off` only on positive evidence it
+> holds — the session was launched without remote control, or the runtime's own
+> durable record shows the last enable was followed by a disconnect — and never
+> from the mere absence of a label. A driver with neither leaves the field
+> absent, and absent still means "not read".
 >
 > **Absent never means connected** (§5.7). A runtime with no such channel
 > reports nothing, and so does a driver that cannot look; `observesControlChannel`
@@ -1697,6 +1705,7 @@ DriverCapabilities {
   supportsResume  : boolean   // sessions survive a service restart
   deliversToInbox : boolean   // has an inbox delivery path wired for at least some targets
   supportsPin     : { model: boolean, effort: boolean, agent: boolean }
+  remoteControl?  : { toggle: boolean, off: boolean }   // can turn a RUNNING session's remote control on (and off); absent = cannot (muster #269)
   deliveryModules? : DeliveryModuleStatus[]   // optional external delivery modules enabled here (§2.15); absent = none
   deadlineMs      : number    // declared upper bound on any single call
   source          : "observed" | "assumed"

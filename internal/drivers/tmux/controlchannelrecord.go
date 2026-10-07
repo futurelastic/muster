@@ -189,3 +189,129 @@ func (d *Driver) upgradeControlChannelFromRecord(ctx context.Context, st fleet.S
 	}
 	return st
 }
+
+// Reading the runtime's own record for whether remote control is ON or OFF
+// (muster #269) — the state the footer label cannot carry.
+//
+// # Why the label is not enough
+//
+// A session without remote control renders no label, so a label can never say
+// "off". Worse, on the runtime version this was measured against (2.1.293) the
+// label for an ACTIVE channel is drawn in the header banner, not the footer
+// row the reader above looks at, and a banner scrolls away as the transcript
+// grows. The footer reader is therefore blind to a healthy channel there. What
+// the runtime does leave, scroll-independent and written by itself, is a
+// structured entry each time the state changes:
+//
+//   - `system` / `bridge_status`, content "/remote-control is active · …" — the
+//     channel came up (written whether it was enabled at launch or by the
+//     slash command);
+//   - `system` / `local_command` with commandRun.command "remote-control" and
+//     stdout "Remote Control disconnected." — the user chose Disconnect.
+//
+// # The filter is the safety property, again
+//
+// Exactly as latestControlDisconnect above: Type and Subtype (and, for the
+// disconnect, the command name) are checked BEFORE Content is compared with
+// anything. A `user`-role entry carrying captured command output that happens
+// to contain either phrase nests it several levels down and never reaches the
+// comparison. A reader that matched the phrases across entry types would
+// reintroduce the forgeable region the footer rule exists to stay out of.
+//
+// # What is deliberately NOT claimed
+//
+//   - The runtime's own failure notice (system/informational, #69) stops the
+//     walk with no claim. Whether a channel that came up and later broke is
+//     `failed` is the footer's call, not an inference from a record; claiming
+//     `active` over a newer failure notice would be exactly the quiet wrong
+//     answer this field exists to end.
+//   - Entries older than the process's launch are ignored: a resumed
+//     conversation's record holds the previous process's bridge history.
+//   - A tail that does not reach back to the launch (a long conversation) is
+//     "not covered": no entry found is then NOT evidence there is none.
+
+const (
+	controlEnabledPhrase  = "/remote-control is active"
+	controlCommandName    = "remote-control"
+	controlBridgeSubtype  = "bridge_status"
+	controlLocalSubtype   = "local_command"
+	controlInformationalS = "informational"
+)
+
+type controlRecordEntry struct {
+	Type       string `json:"type"`
+	Subtype    string `json:"subtype"`
+	Content    string `json:"content"`
+	Timestamp  string `json:"timestamp"`
+	CommandRun *struct {
+		Command string `json:"command"`
+	} `json:"commandRun"`
+}
+
+// controlRecordRead is what one walk of a record's tail established.
+type controlRecordRead struct {
+	// exists is false when the record file could not be opened at all — a fresh
+	// session the runtime has not written to yet.
+	exists bool
+	// state is active or off when the newest relevant entry since launch said
+	// so; empty otherwise.
+	state fleet.ControlChannelState
+	// blocked is true when the runtime's own failure notice is the newest
+	// relevant entry: the record then makes no claim and neither may anything
+	// that falls back on its silence.
+	blocked bool
+	// covered is true when the walk saw everything since launch, so finding no
+	// entry means there is none.
+	covered bool
+}
+
+// controlChannelFromRecord reads the tail of one runtime record for the newest
+// remote-control entry written at or after since (the process's launch).
+func controlChannelFromRecord(path string, since time.Time) controlRecordRead {
+	lines, torn, ok := recordTail(path)
+	if !ok {
+		return controlRecordRead{}
+	}
+	res := controlRecordRead{exists: true}
+	inspected := 0
+	for i := len(lines) - 1; i >= 0 && inspected < recordTailCandidates; i-- {
+		inspected++
+		var e controlRecordEntry
+		if err := json.Unmarshal([]byte(lines[i]), &e); err != nil {
+			continue // a torn or half-written line is not a reason to stop
+		}
+		// Type first, before anything about the entry's words is looked at.
+		if e.Type != "system" {
+			continue
+		}
+		ts, tsErr := time.Parse(time.RFC3339Nano, e.Timestamp)
+		if tsErr == nil && ts.Before(since) {
+			// Everything from here back belongs to an earlier process: the walk
+			// has covered the whole of this one.
+			res.covered = true
+			return res
+		}
+		switch {
+		case e.Subtype == controlBridgeSubtype && strings.HasPrefix(e.Content, controlEnabledPhrase):
+			if tsErr != nil {
+				return controlRecordRead{exists: true, blocked: true}
+			}
+			res.state, res.covered = fleet.ControlChannelActive, true
+			return res
+		case e.Subtype == controlLocalSubtype && e.CommandRun != nil && e.CommandRun.Command == controlCommandName &&
+			strings.Contains(e.Content, controlDisconnectPhrase):
+			if tsErr != nil {
+				return controlRecordRead{exists: true, blocked: true}
+			}
+			res.state, res.covered = fleet.ControlChannelOff, true
+			return res
+		case e.Subtype == controlInformationalS && strings.Contains(e.Content, controlDisconnectPhrase):
+			// The runtime's own failure notice (#69). No claim — see above.
+			return controlRecordRead{exists: true, blocked: true}
+		}
+	}
+	// Walked to the top of what was read. That is "everything" only when the
+	// read was not cut short on either side.
+	res.covered = !torn && inspected == len(lines)
+	return res
+}

@@ -8,7 +8,7 @@ import (
 func TestControlChannelState_JSONRoundTrip(t *testing.T) {
 	all := []ControlChannelState{
 		ControlChannelActive, ControlChannelConnecting,
-		ControlChannelReconnecting, ControlChannelFailed,
+		ControlChannelReconnecting, ControlChannelFailed, ControlChannelOff,
 	}
 	for _, want := range all {
 		b, err := json.Marshal(want)
@@ -25,8 +25,8 @@ func TestControlChannelState_JSONRoundTrip(t *testing.T) {
 	}
 }
 
-// The set is closed at the decoder. A fifth state decoded silently would fall
-// through every client's four-way branch to its default, which is the quiet
+// The set is closed at the decoder. A state outside the set decoded silently would fall
+// through every client's branch on the known names to its default, which is the quiet
 // wrong answer this type exists to prevent.
 func TestControlChannelState_RejectsAnythingOutsideTheSet(t *testing.T) {
 	for _, raw := range []string{`"suspended"`, `"connected"`, `"Active"`, `""`} {
@@ -144,4 +144,29 @@ func contains(hay, needle string) bool {
 		}
 	}
 	return false
+}
+
+// The verb's confirmation is the channel changing, delivered as a session.state
+// event (muster #269). Every transition the toggle causes — absent to off, off
+// to active, active to off — must be material, or a client that sent the verb
+// would never be told it took.
+func TestEveryToggleTransitionIsAMaterialChange(t *testing.T) {
+	at := func(c *ControlChannel) SessionState {
+		return SessionState{Status: StatusIdle, Confidence: ConfidenceInferred, ControlChannel: c}
+	}
+	off := &ControlChannel{State: ControlChannelOff}
+	active := &ControlChannel{State: ControlChannelActive}
+	for name, pair := range map[string][2]SessionState{
+		"absent → off":    {at(nil), at(off)},
+		"off → active":    {at(off), at(active)},
+		"active → off":    {at(active), at(off)},
+		"failed → active": {at(&ControlChannel{State: ControlChannelFailed}), at(active)},
+	} {
+		if !pair[1].MateriallyDiffers(pair[0]) {
+			t.Errorf("%s did not fire a state event", name)
+		}
+	}
+	if at(off).MateriallyDiffers(at(&ControlChannel{State: ControlChannelOff})) {
+		t.Error("an unchanged off must not fire an event")
+	}
 }

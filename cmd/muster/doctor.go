@@ -568,6 +568,11 @@ func supervisorGrants() []service.Grant {
 		// Counting it would turn every existing full supervisor into a warning
 		// the day this build lands.
 		//
+		// remote-control (muster #269) is left out the same way: publishing a
+		// session to off-machine clients is something a supervisor MAY be
+		// allowed, not a verb it needs to drive sessions, and requiring it would
+		// turn every existing full supervisor into a warning the day this lands.
+		//
 		// human-relay (round-3 #180 review fix) is excluded the same way:
 		// it names a caller's own claim to BE a human-facing relay for
 		// route:"terminal" labelling, not a verb that drives sessions at
@@ -576,7 +581,7 @@ func supervisorGrants() []service.Grant {
 		// grant exists for, and requiring it here would turn every existing
 		// full supervisor into a warning the day this build lands, same as
 		// label/relay would.
-		if g != service.GrantRelay && g != service.GrantLabel && g != service.GrantHumanRelay {
+		if g != service.GrantRelay && g != service.GrantLabel && g != service.GrantRemoteControl && g != service.GrantHumanRelay {
 			out = append(out, g)
 		}
 	}

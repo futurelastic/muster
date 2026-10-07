@@ -25,10 +25,10 @@ import (
 // made the same mistake CredentialGeneration's doc comment warns about — every
 // local source ultimately quotes the process's own announcement about itself.
 //
-// # Why a closed set, and why exactly these four
+// # Why a closed set, and why exactly these five
 //
-// They are the runtime's own, read out of its binary rather than sampled from a
-// screen: the status label it renders is computed from one function with four
+// Four are the runtime's own, read out of its binary rather than sampled from a
+// screen (the fifth, off, is a driver-established fact — see ControlChannelOff): the status label it renders is computed from one function with four
 // outcomes, and it emits one of `/rc active`, `/rc connecting…`,
 // `/rc reconnecting` or `/rc failed`. Nothing else. That is the same standard
 // PromptBypassAcceptance's doc comment sets — read the runtime, do not guess
@@ -52,12 +52,22 @@ const (
 	// otherwise perfectly healthy session, and the only way to find them was
 	// to read pane text.
 	ControlChannelFailed ControlChannelState = "failed"
+	// ControlChannelOff: the runtime has no remote control, and the driver has
+	// positive evidence of it (muster #269) — not merely the absence of a label.
+	//
+	// It is the one value here that is NOT read off the runtime's status label:
+	// a session without remote control renders no label at all, so a label can
+	// never say "off". The driver establishes it from facts it holds: how the
+	// session was launched, and the runtime's own durable record of the last
+	// enable or disconnect. A driver that holds neither leaves the field absent,
+	// and absent still means "not read" — never "off".
+	ControlChannelOff ControlChannelState = "off"
 )
 
 func (c ControlChannelState) valid() bool {
 	switch c {
 	case ControlChannelActive, ControlChannelConnecting,
-		ControlChannelReconnecting, ControlChannelFailed:
+		ControlChannelReconnecting, ControlChannelFailed, ControlChannelOff:
 		return true
 	default:
 		return false

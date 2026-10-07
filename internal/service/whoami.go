@@ -158,7 +158,7 @@ func legacyGrants(cfg Config) []string {
 		out = append(out,
 			string(GrantCreate), string(GrantSend), string(GrantInterrupt),
 			string(GrantClose), string(GrantRename), string(GrantDiscard), string(GrantKeys),
-			string(GrantLabel))
+			string(GrantLabel), string(GrantRemoteControl))
 	}
 	if cfg.AllowPeerRelay {
 		out = append(out, string(GrantRelay))
