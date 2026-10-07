@@ -268,6 +268,26 @@ type LabelRelayer interface {
 	Labels(ctx context.Context, req fleet.Request, ref fleet.SessionRef, patch map[string]*string) (fleet.Session, error)
 }
 
+// RemoteControlSetter is an OPTIONAL capability: a driver whose runtime can
+// turn a RUNNING session's remote control on or off (POST …/remote-control,
+// muster #269). A driver that cannot answers unsupported at the service,
+// declares no DriverCapabilities.RemoteControl, and never emulates the control
+// by typing the runtime's slash command at a caller's behest through `input`.
+//
+// The return is intent only, like interrupt: fleet.Ack{Accepted:true} says the
+// driver took the request; the channel actually changing is confirmed later, as
+// a controlChannel change on the event stream. enabled:true on a channel that is
+// already on is a no-op that still answers accepted — an idempotent verb is safe
+// to retry — and enabled:true on a `failed` channel is the reconnect.
+//
+// An implementation refuses with a retryable fleet.ErrorConflict when it cannot
+// tell what the channel is doing (state absent) or the session is busy, rather
+// than send the toggle blind: on the one runtime measured, the same command that
+// turns remote control on opens a disconnect dialog when it is already on.
+type RemoteControlSetter interface {
+	SetRemoteControl(ctx context.Context, req fleet.Request, ref fleet.SessionRef, enabled bool) (fleet.Ack, error)
+}
+
 // CapturedExit is one session's own process exit, captured by an
 // ExitReporter driver in the same pass that removed the session from its
 // runtime (muster #235). ID is the driver's own session id; the caller

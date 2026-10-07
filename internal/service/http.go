@@ -97,6 +97,7 @@ func NewMux(svc *Service, cfg Config) *http.ServeMux {
 	mux.HandleFunc("POST /v1/machines/{machine}/sessions/{id}/rename", withAuth(cfg, mutating(svc, cfg, handleRename(svc))))
 	mux.HandleFunc("POST /v1/machines/{machine}/sessions/{id}/keys", withAuth(cfg, mutating(svc, cfg, handleKeys(svc))))
 	mux.HandleFunc("POST /v1/machines/{machine}/sessions/{id}/labels", withAuth(cfg, mutating(svc, cfg, handleLabels(svc))))
+	mux.HandleFunc("POST /v1/machines/{machine}/sessions/{id}/remote-control", withAuth(cfg, mutating(svc, cfg, handleRemoteControl(svc))))
 	mux.HandleFunc("DELETE /v1/machines/{machine}/sessions/{id}", withAuth(cfg, mutating(svc, cfg, handleClose(svc))))
 	mux.HandleFunc("GET /v1/events", withAuth(cfg, reading(handleEvents(svc))))
 
@@ -1862,6 +1863,80 @@ func handleLabels(svc *Service) http.HandlerFunc {
 		}
 		svc.publishLabels(machine, *live)
 		writeJSON(w, http.StatusOK, *live)
+	}
+}
+
+// handleRemoteControl turns a running session's remote control on or off
+// (api-http.md §3.3, muster #269).
+//
+// It returns 202, intent only, like interrupt: the confirmation is the session's
+// controlChannel changing, delivered on the event stream. The body is
+// {"enabled": true|false}; a body without it is invalid, because a default here
+// would be a default for "publish this session off the machine".
+//
+// # Declared, not assumed
+//
+// A driver answers this only when it declares DriverCapabilities.RemoteControl.
+// A driver without the optional interface is `unsupported`, and so is
+// enabled:false against a driver that declared it can turn remote control on
+// but not off — refused rather than emulated (§5.6).
+//
+// # Relay
+//
+// mutating() has already required the `relay` grant for a peer target, and the
+// peer applies its own `remote-control` grant to this service's credential. A
+// peer built before the route answers with its router's bare 404; the remote
+// driver reports that as unsupported, never as a missing session.
+func handleRemoteControl(svc *Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		machine := fleet.MachineId(r.PathValue("machine"))
+		id := r.PathValue("id")
+
+		var body struct {
+			Enabled *bool `json:"enabled"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, &fleet.Error{Kind: fleet.ErrorInvalid, Message: "malformed JSON body", Machine: machine})
+			return
+		}
+		if body.Enabled == nil {
+			writeError(w, &fleet.Error{Kind: fleet.ErrorInvalid,
+				Message: `remote-control needs {"enabled": true|false}`, Machine: machine})
+			return
+		}
+
+		req := requestFrom(r)
+		d, resolvedRuntime, via, resErr := svc.resolveSessionDriver(r.Context(), req, machine, id, fleet.RuntimeId(r.URL.Query().Get("runtime")), parseDeadline(r))
+		if resErr != nil {
+			writeError(w, resErr)
+			return
+		}
+		setResolutionHeaders(w, resolvedRuntime, via)
+
+		setter, ok := d.(driver.RemoteControlSetter)
+		if !ok {
+			writeError(w, &fleet.Error{Kind: fleet.ErrorUnsupported,
+				Message: "this runtime cannot turn remote control on or off on a running session", Machine: machine})
+			return
+		}
+		// A local driver's declaration is known here; a peer's is checked by the
+		// peer itself (the call is relayed), so only refuse on what is certain.
+		if rc := d.Capabilities().RemoteControl; via != resolvedPeer && !*body.Enabled && (rc == nil || !rc.Off) {
+			writeError(w, &fleet.Error{Kind: fleet.ErrorUnsupported,
+				Message: "this runtime can turn remote control on but declares no way to turn it off (capabilities.remoteControl.off is false)", Machine: machine})
+			return
+		}
+
+		deadline := effectiveDeadline(d.Capabilities().DeadlineMs, parseDeadline(r))
+		ctx, cancel := context.WithTimeout(r.Context(), deadline)
+		defer cancel()
+
+		ack, err := setter.SetRemoteControl(ctx, req, fleet.SessionRef{Machine: machine, ID: id}, *body.Enabled)
+		if err != nil {
+			writeDriverError(w, machine, deadline, err)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, ack)
 	}
 }
 

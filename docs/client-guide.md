@@ -1475,7 +1475,28 @@ they answer different questions and none of them substitutes for another:
 |---|---|---|
 | a human's terminal, on that session's own machine | `attach` (above) | local argv, or absent if the driver has none |
 | a surface the RUNTIME operates, reachable from elsewhere | `runtimeSurface` | an opaque address on a named `kind`, or `known: false`/`null` (muster #85) |
-| is that runtime surface healthy right now | `state.controlChannel` | `failed`/`reconnecting`/`active`/absent |
+| is that runtime surface healthy right now | `state.controlChannel` | `failed`/`reconnecting`/`active`/`connecting`/`off`/absent |
+
+**Turning a session's remote control on or off after it started** (muster #269)
+is one verb, not a slash command typed through `input`:
+
+1. Read `capabilities.remoteControl` on `GET /v1/runtimes` for that machine and
+   runtime. Absent means there is nothing to offer; `off: false` means it can be
+   turned on but not off.
+2. `POST …/{id}/remote-control` with `{"enabled": true}` (or `false`). `202`
+   means taken, not done. Retry freely: asking for the state a session is
+   already in is a no-op.
+3. Wait for `state.controlChannel` to change — on the event stream, not by
+   polling the composer. `active` after on, `off` after off. Reconnecting a
+   `failed` channel is the same call with `enabled: true`.
+4. A `409` is retryable and changed nothing: the session was busy, had unsent
+   text or an open prompt, or its channel could not be read. Read it again and
+   retry when it is idle.
+
+`off` means the driver holds positive evidence of no remote control; an **absent**
+`controlChannel` still means "not read" and must not be drawn as off. The verb
+needs its own `remote-control` grant — ask for it deliberately: it publishes the
+session off the machine.
 
 `runtimeSurface` is an **identity**, not a health check: once `known: true`,
 it stays true even if `controlChannel` later reads `failed` — the address

@@ -1681,6 +1681,40 @@ func (d *Driver) Labels(ctx context.Context, req fleet.Request, ref fleet.Sessio
 
 var _ driver.LabelRelayer = (*Driver)(nil)
 
+// SetRemoteControl asks the peer to turn a session's remote control on or off
+// (202, intent only; muster #269).
+//
+// The peer applies its own grant and its own capability check, so a refusal for
+// either arrives as the peer's own typed error and is adopted as it is. A peer
+// that predates the route answers with its router's bare 404, which decodeError
+// alone would read as "no such session": it is reported as unsupported instead,
+// because the session may be perfectly alive and the peer simply has no such
+// verb.
+func (d *Driver) SetRemoteControl(ctx context.Context, req fleet.Request, ref fleet.SessionRef, enabled bool) (fleet.Ack, error) {
+	ctx, cancel := d.bounded(ctx)
+	defer cancel()
+
+	path := fmt.Sprintf("/v1/machines/%s/sessions/%s/remote-control",
+		url.PathEscape(string(d.machine)), url.PathEscape(ref.ID))
+	if want := req.Expect.StartedAt; want != nil {
+		path += "?startedAt=" + url.QueryEscape(want.UTC().Format(time.RFC3339Nano))
+	}
+	var out fleet.Ack
+	if err := d.do(ctx, req, http.MethodPost, path, map[string]bool{"enabled": enabled}, &out); err != nil {
+		if routeMissing(err) {
+			return fleet.Ack{}, &fleet.Error{
+				Kind:    fleet.ErrorUnsupported,
+				Message: fmt.Sprintf("peer %s has no remote-control route (older build)", d.machine),
+				Machine: d.machine,
+			}
+		}
+		return fleet.Ack{}, err
+	}
+	return out, nil
+}
+
+var _ driver.RemoteControlSetter = (*Driver)(nil)
+
 // Respond answers a prompt on a session belonging to the peer (§3).
 //
 // Like Send, a refusal comes back as an ordinary 200 carrying an outcome and

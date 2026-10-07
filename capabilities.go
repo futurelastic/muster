@@ -66,6 +66,22 @@ func (c *CapabilitySource) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// RemoteControlSupport is what a driver declares about turning a RUNNING
+// session's remote control on or off (muster #269).
+//
+// It is a pointer on DriverCapabilities, absent for a driver that cannot toggle
+// at all, so a client reads "is there a control to offer" as the field's
+// presence and never has to interpret a pair of falses.
+type RemoteControlSupport struct {
+	// Toggle reports that POST …/remote-control {enabled:true} is honoured:
+	// the driver can turn remote control on, and reconnect a failed channel.
+	Toggle bool `json:"toggle"`
+	// Off reports that {enabled:false} is honoured. A runtime that can turn
+	// remote control on but has no way to turn it off declares false here, and
+	// the verb refuses enabled:false as unsupported rather than emulate it.
+	Off bool `json:"off"`
+}
+
 // DriverCapabilities is what a driver declares about itself (§4.3). Callers
 // must consult this (GET /v1/runtimes, api-http.md §3.1) and degrade rather
 // than assume (§5.6) — a driver never silently emulates a capability it
@@ -151,6 +167,12 @@ type DriverCapabilities struct {
 	DeliversToInbox bool `json:"deliversToInbox"`
 
 	SupportsPin PinSupport `json:"supportsPin"`
+
+	// RemoteControl declares whether a running session's remote control can be
+	// turned on and off through the API (muster #269). Absent means the driver
+	// cannot — and, like every flag in this block, an unreached peer reports it
+	// under source: assumed rather than as that peer's confirmed answer.
+	RemoteControl *RemoteControlSupport `json:"remoteControl,omitempty"`
 
 	// DeliveryModules reports the optional external delivery modules this
 	// machine's driver has enabled and how each is wired (#185; see

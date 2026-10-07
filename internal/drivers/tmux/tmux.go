@@ -433,6 +433,13 @@ type Driver struct {
 	// resumeIntents, for the same reasons. See createrecord.go.
 	createRecords map[string]createRecord
 
+	// controlRecords caches the last read of each session's remote-control
+	// record entries (controlchannelstate.go, muster #269).
+	controlRecords controlRecordCache
+
+	// rcLocks serialises remote-control toggles per session (remotecontrol.go).
+	rcLocks rcLocks
+
 	// environments remembers what each created session's process received
 	// (see environment.go). In memory only, for the reason stated on
 	// Environment.
@@ -952,7 +959,11 @@ func (d *Driver) Capabilities() fleet.DriverCapabilities {
 			Effort: true,
 			Agent:  true,
 		},
-		DeadlineMs: d.deadline.Milliseconds(),
+		// muster #269: a running session's remote control can be turned on and
+		// off through the runtime's own slash command and its disconnect
+		// dialog (remotecontrol.go). Both halves measured live.
+		RemoteControl: &fleet.RemoteControlSupport{Toggle: true, Off: true},
+		DeadlineMs:    d.deadline.Milliseconds(),
 		// #185: the optional external delivery modules enabled here and how
 		// each is wired; absent when none is.
 		DeliveryModules: d.moduleStatuses(),
@@ -1049,6 +1060,9 @@ type paneRow struct {
 	// session this driver never started, one it shares its multiplexer
 	// server with (Create's own comment on that sharing).
 	managed bool
+	// launchRC is what Create recorded about whether it put the remote-control
+	// flag on the command line: "1", "0", or "" when unknown (launchRemoteControlOption).
+	launchRC string
 }
 
 // enumerate performs the whole fleet read in one subprocess: one metadata
@@ -1079,6 +1093,9 @@ func (d *Driver) enumerate(ctx context.Context) ([]paneRow, map[string]paneCaptu
 		// overrides it, and nothing here ever sets a pane- or window-level
 		// override, so this reads the session's value for every pane in it.
 		"#{" + managedSessionOption + "}",
+		// muster #269: whether the launch carried the remote-control flag
+		// (launchRemoteControlOption) — the weakest evidence behind `off`.
+		"#{" + launchRemoteControlOption + "}",
 	}, sep)
 
 	args := []string{"list-panes", "-a", "-f", activeOnly, "-F", format}
@@ -1480,8 +1497,14 @@ func parseRows(out, sep string) ([]paneRow, error) {
 			continue
 		}
 		f := strings.Split(line, sep)
-		if len(f) != 9 {
-			return nil, fmt.Errorf("parseRows: expected 9 fields, got %d in %q", len(f), line)
+		// 9 fields before muster #269 added the launch option; accepted so a
+		// listing from a multiplexer wrapper that predates it still parses.
+		if len(f) != 9 && len(f) != 10 {
+			return nil, fmt.Errorf("parseRows: expected 10 fields, got %d in %q", len(f), line)
+		}
+		launchRC := ""
+		if len(f) == 10 {
+			launchRC = strings.TrimSpace(f[9])
 		}
 		pid, _ := strconv.Atoi(f[3])
 		createdUnix, _ := strconv.ParseInt(f[4], 10, 64)
@@ -1499,7 +1522,8 @@ func parseRows(out, sep string) ([]paneRow, error) {
 			// the empty string, same as any other unset tmux format
 			// variable — never "1" — so an unmanaged session's pane always
 			// parses to false here.
-			managed: f[8] == "1",
+			managed:  f[8] == "1",
+			launchRC: launchRC,
 		})
 	}
 	return rows, nil
@@ -1803,6 +1827,21 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 	// nothing dispatched through Send pays nothing extra here.
 	for i := range sessions {
 		sessions[i].State.Turns = d.turnsFor(sessions[i].ID, string(sessions[i].Cwd), sessions[i].Conversation)
+	}
+
+	// muster #269: where the screen reader found no label, the runtime's own
+	// record and the launch decide between active, off and "not read". Done here
+	// because it needs the resolved conversation, which the row loop above does
+	// not have; the footer's answer, when there is one, passes through untouched.
+	rowByName := make(map[string]paneRow, len(rows))
+	for _, r := range rows {
+		rowByName[r.session] = r
+	}
+	for i := range sessions {
+		if r, ok := rowByName[sessions[i].ID]; ok && !r.dead {
+			sessions[i].State.ControlChannel = d.resolveControlChannel(sessions[i].State.ControlChannel, sessions[i].Conversation, r)
+			d.latchSurfaceFromChannel(&sessions[i], r)
+		}
 	}
 
 	// Ask the runtime's own record about whatever the screen already
@@ -2149,6 +2188,14 @@ func (d *Driver) State(ctx context.Context, req fleet.Request, ref fleet.Session
 		// same reason State does its own lookup rather than reusing a
 		// resolved Conversation.
 		st = d.upgradeControlChannelFromRecord(ctx, st, r.cwd, r.session, r.created, r.paneID, r.pid)
+		// muster #269: where the screen found no label, the record and the launch
+		// decide — see resolveControlChannel. State does its own conversation
+		// lookup for the same reason it does the two upgrades around this line.
+		if st.ControlChannel == nil && !r.dead && d.conversations != nil {
+			conv := d.conversations.lookup(conversationKey{pane: r.paneID, created: r.created}, r.cwd, r.session, r.created,
+				processGeneration{pid: r.pid}, d.liveConversationSource(ctx, r.pid, r.cwd))
+			st.ControlChannel = d.resolveControlChannel(nil, conv, r)
+		}
 		// #111: same split as the two upgrades just above — List resolves
 		// `turns` from its own pre-resolved Conversation, State does its own
 		// lookup.
@@ -4852,6 +4899,21 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 	// behaviour (its dead pane, if any, is never reaped by this driver).
 	if _, err := d.run(ctx, d.bin, "set-option", "-t", name, managedSessionOption, "1"); err != nil {
 		log.Printf("tmux: create %q: could not mark it as managed, its dead pane will never be reaped: %v", name, err)
+	}
+	// muster #269: record whether the remote-control flag really went on the
+	// command line — not what the caller asked for, which a missing name can
+	// silently turn into "no flag" (claudeCodeCommand). `off` is only ever
+	// claimed from this fact, never from the request. Best-effort: without it
+	// the session simply makes no launch-based claim.
+	launchRC := "0"
+	for _, a := range argv {
+		if a == "--remote-control" {
+			launchRC = "1"
+			break
+		}
+	}
+	if _, err := d.run(ctx, d.bin, "set-option", "-t", name, launchRemoteControlOption, launchRC); err != nil {
+		log.Printf("tmux: create %q: could not record its remote-control launch, `off` will not be claimed for it: %v", name, err)
 	}
 	// #185: the process exists now, so the module can be asked to attach —
 	// asynchronously; this create's response never waits on it.

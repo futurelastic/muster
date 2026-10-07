@@ -21,8 +21,8 @@ open.
 
 **Grants.** With a principal table configured, each caller is a named identity
 with its own credential and its own list of grants: `read`, `create`, `send`,
-`interrupt`, `close`, `rename`, `discard`, `keys`, `label`, `relay`. Every grant defaults
-to denied. ⚠️ `keys` is the one that can **escalate** a session (it delivers
+`interrupt`, `close`, `rename`, `discard`, `keys`, `label`, `remote-control`, `relay`.
+Every grant defaults to denied. ⚠️ `keys` is the one that can **escalate** a session (it delivers
 `BTab`, which cycles the permission mode — see `POST …/keys` below), so grant it
 as that, not as "arrow keys". Without a principal table the service runs in
 single-token mode and two booleans stand in: mutations against local sessions,
@@ -90,6 +90,7 @@ every configured peer, exactly one hop — peers never recurse.
 | `POST` | `…/{id}/discard` | Clear unsent composer text without sending it | `discard` | yes |
 | `POST` | `…/{id}/rename` | Change the session's id, and the runtime's own title if it keeps one | `rename` | yes |
 | `POST` | `…/{id}/labels` | Set or delete caller-supplied labels | `label` | yes |
+| `POST` | `…/{id}/remote-control` | Turn a running session's remote control on or off | `remote-control` ⚠️ | yes |
 | `DELETE` | `/v1/machines/{machine}/sessions/{id}` | Destroy the session | `close` | yes |
 
 ⚠️ = the specification requires `read`; the implementation does not check it yet.
@@ -183,6 +184,15 @@ modules this machine enabled — `name`, `status` (`starting`, `available`,
 `unavailable` or `disabled`), a `reason` when it is not available, the module's
 `protocol`, `version`, `platform` and `peerCheck`, and per-lane state counts.
 It is **absent** when none is enabled, which is the ordinary state, not a fault.
+
+`capabilities.remoteControl` (#269) — `{ "toggle": true, "off": true }` — is
+declared only by a runtime that can turn a **running** session's remote control
+on through `POST …/remote-control`; today that is the Claude Code runtime, and the
+key is absent for every other. `off: false` would mean it can turn it on but has
+no way to turn it off, and `enabled:false` is then refused `unsupported`. Read
+this before offering the control. Like every capability it comes with `source`:
+an unreached peer reports it `assumed` and absent, which says nobody has
+answered, not that the peer cannot.
 
 ### `GET /v1/sessions`
 
@@ -881,6 +891,43 @@ bounds apply to the result. Send `?startedAt=` so a recycled id is refused
 `200` with the whole session. Announced as `session.labels` with the complete
 map. Labels follow a rename and are forgotten when the session closes.
 
+### `POST …/{id}/remote-control`
+
+```json
+{ "enabled": true }
+```
+
+Turns a **running** session's remote control on or off. `enabled` is required — a
+missing one is `400`, because a default here would be a default for publishing a
+session off the machine. `202`, `{"accepted": true}`: intent only. The
+confirmation is the session's `state.controlChannel` changing, delivered as a
+`session.state` event.
+
+- **`enabled: true` on a `failed` channel is the reconnect** — there is no
+  separate verb. ⚠️ That path (disconnect, then enable again) joins two steps that
+  were each measured live, but a `failed` channel could not be induced to measure
+  the whole of it.
+- **Already in the requested state is a no-op that answers `202`.** This is not
+  politeness: on the runtime measured, the command that turns remote control on
+  *opens a disconnect dialog* when it is already on, so the driver reads the
+  channel first and never sends it blind.
+- **`409` (retryable) when it cannot act safely:** the channel's state could not
+  be read, the session is not idle, a prompt is open, or the composer holds
+  unsent text. Nothing was changed; read the session and try again. A dialog the
+  call opened is always dismissed before it returns.
+- **`501` `unsupported`** from a runtime that does not declare
+  `capabilities.remoteControl`, and for `enabled:false` where `off` is `false`.
+  A peer built before the route answers the same way, never `404`.
+- **Grant: `remote-control`, its own, denied by default.** Turning it on makes
+  the session drivable from off the machine — an exposure change, not an input —
+  so neither `send` nor `keys` implies it, and the refusal names it. A call to a
+  peer additionally needs `relay` here, and the `remote-control` grant on the
+  peer.
+- ⚠️ **`/input` still carries the older workaround.** The runtime's own slash
+  command (`/rc`, `/remote-control`) is deliverable through `input` for any caller
+  holding `send` (see above), and that path is *not* gated by the `remote-control`
+  grant. The grant governs this verb; it does not close that door.
+
 ### `POST …/{id}/interrupt` and `DELETE …/{id}`
 
 Both express intent and return `202`. Confirmation arrives on the event stream,
@@ -913,6 +960,18 @@ not in the response.
   }
 }
 ```
+
+**`controlChannel`** — what the runtime says about its own remote-control
+channel: `active`, `connecting`, `reconnecting`, `failed`, or `off` (#269). `off`
+means the driver has **positive evidence** there is no remote control — the
+session was launched without it, or the runtime's own record shows a disconnect
+after the last enable — and is never inferred from a missing label. **Absent
+still means "not read"**, never connected and never off: it is what a session
+this service did not start, or one whose record could not be matched, reports.
+A session created with `remoteControl: false` reads `off`. One caveat the claim
+carries: a user's own runtime settings can start remote control without the
+launch flag, in which case the session reads `off` only until the runtime writes
+its enable entry. A change fires `session.state`.
 
 **`status`** — `starting`, `working`, `waiting_input`, `idle`, `quota_blocked`,
 `dead`, `unknown`. A closed set with a strict decoder: an unrecognised value is
