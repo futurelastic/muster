@@ -971,7 +971,12 @@ this service did not start, or one whose record could not be matched, reports.
 A session created with `remoteControl: false` reads `off`. One caveat the claim
 carries: a user's own runtime settings can start remote control without the
 launch flag, in which case the session reads `off` only until the runtime writes
-its enable entry. A change fires `session.state`.
+its enable entry. On a runtime that draws the label of a healthy channel somewhere the footer
+reader does not look, `failed` is also read from the runtime's own record
+(#270): the runtime's disconnection notice, when it is the newest channel entry
+and no recovery has followed within five minutes, with the notice as `reason`.
+Inside those five minutes nothing is reported. `connecting` and `reconnecting`
+have no record entry and are reported only when the footer shows them. A change fires `session.state`.
 
 **`status`** — `starting`, `working`, `waiting_input`, `idle`, `quota_blocked`,
 `dead`, `unknown`. A closed set with a strict decoder: an unrecognised value is

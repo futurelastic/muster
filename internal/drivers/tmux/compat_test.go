@@ -84,6 +84,19 @@ func TestStaticMarkersAreTiedToTheClassifier(t *testing.T) {
 			return acceptanceScreen(compatBypassSpec(), &fleet.SessionPrompt{Options: []string{"No, exit", "Yes, I accept"}}) &&
 				!acceptanceScreen(compatBypassSpec(), &fleet.SessionPrompt{Options: []string{"Yes, I accept", "Yes, I accept"}})
 		},
+		// classifyControlRecordLine (#270): each marker is the wording of an
+		// entry the reader keys on, built as the runtime writes it.
+		"/remote-control is active": func() bool {
+			ev, ok := classifyControlRecordLine(`{"type":"system","subtype":"bridge_status","timestamp":"2026-10-07T20:00:00Z","content":"/remote-control is active · x"}`)
+			return ok && ev.kind == controlRecordActive
+		},
+		"remote control disconnected": func() bool {
+			ev, ok := classifyControlRecordLine(`{"type":"system","subtype":"informational","timestamp":"2026-10-07T20:00:00Z","content":"Remote Control disconnected — x"}`)
+			return ok && ev.kind == controlRecordNotice
+		},
+		"bridge_status": func() bool {
+			return controlBridgeSubtype == "bridge_status"
+		},
 		// permissionModeOf: the three indicator wordings that are literal strings in
 		// the candidate. (The other two are composed at run time and are read off
 		// live sessions by F-MODE instead — see compatStaticMarkers.)
@@ -362,7 +375,7 @@ func TestRunCompatStaticChecks(t *testing.T) {
 // suite. Live checks belong behind FLEET_TMUX_INTEGRATION.
 func TestStaticCheckSetNeedsNoMultiplexer(t *testing.T) {
 	suite := newCompatSuite(&compatHarness{})
-	static := map[string]bool{"F-LIMIT": true, "F-APIERR": true, "H-RC": true}
+	static := map[string]bool{"F-LIMIT": true, "F-APIERR": true, "H-RC": true, "H-RCREC": true}
 	probesOf := map[string][]string{}
 	for _, c := range suite.Checks {
 		probesOf[c.ID] = c.Probes

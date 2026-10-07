@@ -322,3 +322,62 @@ func TestStateAppliesTheSameControlChannelUpgradeAsList(t *testing.T) {
 		t.Errorf("Reason = %q, State did not apply the same record upgrade List does", st.ControlChannel.Reason)
 	}
 }
+
+// ---- #270: a channel the footer cannot show, read from the record ----------
+
+func recordOnlyNoticeDriver(t *testing.T, now time.Time) (*Driver, *fakeMux) {
+	t.Helper()
+	f := twoSessions()
+	f.captures["%1"] = paneWithFooter("") // a runtime that draws no label in the footer
+	root := t.TempDir()
+	writeConversationWithAPIError(t, root, "/work/alpha", "conv-alpha", "alpha💬", sessionStart,
+		map[string]any{
+			"type":      "system",
+			"subtype":   "informational",
+			"sessionId": "conv-alpha",
+			"timestamp": sessionStart.Add(5 * time.Minute).UTC().Format(time.RFC3339Nano),
+			"content":   "Remote Control disconnected — Session creation failed — see debug log",
+		})
+	d := New("testbox", withExec(f.exec),
+		withNonce(func() string { return testNonce }),
+		withClock(func() time.Time { return now }),
+		WithRecordRoot(root))
+	return d, f
+}
+
+// With no footer label, a notice that stood past the settle window reads failed
+// in List AND State, with the runtime's own words as Reason (State's reason
+// upgrade runs before the record decides, so resolve must set it itself).
+func TestRecordOnlyNoticeReadsFailedWithReasonInListAndState(t *testing.T) {
+	ctx := context.Background()
+	d, _ := recordOnlyNoticeDriver(t, sessionStart.Add(5*time.Minute+controlNoticeSettle))
+
+	col, err := d.List(ctx, testCaller, driver.ListFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	alpha := sessionOf(t, col, "alpha💬")
+	if ch := alpha.State.ControlChannel; ch == nil || ch.State != fleet.ControlChannelFailed || !strings.Contains(ch.Reason, "Session creation failed") {
+		t.Fatalf("List ControlChannel = %+v, want failed with the notice as Reason", ch)
+	}
+	st, err := d.State(ctx, testCaller, fleet.SessionRef{Machine: "testbox", ID: "alpha💬"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ch := st.ControlChannel; ch == nil || ch.State != fleet.ControlChannelFailed || !strings.Contains(ch.Reason, "Session creation failed") {
+		t.Fatalf("State ControlChannel = %+v, want failed with the notice as Reason", ch)
+	}
+}
+
+// Inside the window the runtime may be reconnecting by itself: no claim.
+func TestRecordOnlyYoungNoticeMakesNoClaim(t *testing.T) {
+	ctx := context.Background()
+	d, _ := recordOnlyNoticeDriver(t, sessionStart.Add(5*time.Minute+time.Minute))
+	col, err := d.List(ctx, testCaller, driver.ListFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ch := sessionOf(t, col, "alpha💬").State.ControlChannel; ch != nil {
+		t.Fatalf("ControlChannel = %+v, want none inside the settle window", ch)
+	}
+}

@@ -36,8 +36,14 @@ var catalogue = []Spec{
 	{
 		ID:       "H-RC",
 		Gate:     GateWarn,
-		Asserts:  "The candidate still contains the four remote-control footer labels the control-channel reader maps. Static text only: a check never attaches a bridge.",
+		Asserts:  "The candidate still contains the four remote-control footer labels the control-channel reader maps. Static text only: a check never attaches a bridge, and the wording being present does not prove where the runtime draws it.",
 		ReliedOn: []string{"internal/drivers/tmux/controlchannel.go#controlStates"},
+	},
+	{
+		ID:       "H-RCREC",
+		Gate:     GateWarn,
+		Asserts:  "The candidate still contains the wording of the entries the control-channel reader takes from the runtime's own record: the one written when the channel comes up, the one written when it is disconnected, and the record's subtype for the first. Static text only: a check never attaches a bridge, and the wording being present does not prove where the runtime draws a label.",
+		ReliedOn: []string{"internal/drivers/tmux/controlchannelrecord.go#classifyControlRecordLine"},
 	},
 	{
 		ID:       "F-FEEDBACK",

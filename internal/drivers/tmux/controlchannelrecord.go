@@ -220,11 +220,20 @@ func (d *Driver) upgradeControlChannelFromRecord(ctx context.Context, st fleet.S
 //
 // # What is deliberately NOT claimed
 //
-//   - The runtime's own failure notice (system/informational, #69) stops the
-//     walk with no claim. Whether a channel that came up and later broke is
-//     `failed` is the footer's call, not an inference from a record; claiming
-//     `active` over a newer failure notice would be exactly the quiet wrong
-//     answer this field exists to end.
+//   - The runtime's own disconnection notice (system/informational, #69) is not
+//     read as `failed` the moment it is written. The record cannot tell a
+//     channel the runtime is about to bring back from one that is gone: measured
+//     over a large set of records, a notice about an account change was
+//     followed by a fresh enable entry within two minutes every time it
+//     recovered by itself, while a notice about a failed session creation was
+//     followed by one only after hours, when somebody intervened. So the reader
+//     reports the notice and its time, and resolveControlChannel decides after
+//     a settle window (controlNoticeSettle). Before the window ends it makes no
+//     claim, and never `reconnecting`, which no record entry carries.
+//   - `connecting` and `reconnecting` have no record entry at all (none in any
+//     record measured), and the banner they would be drawn in scrolls away and
+//     is not chrome an agent cannot write once it has. They are read from the
+//     footer when the runtime draws them there and are otherwise absent.
 //   - Entries older than the process's launch are ignored: a resumed
 //     conversation's record holds the previous process's bridge history.
 //   - A tail that does not reach back to the launch (a long conversation) is
@@ -248,6 +257,59 @@ type controlRecordEntry struct {
 	} `json:"commandRun"`
 }
 
+// controlRecordKind is what one record line says about the control channel.
+type controlRecordKind int
+
+const (
+	// controlRecordNone is a system entry that says nothing about the channel.
+	controlRecordNone controlRecordKind = iota
+	// controlRecordActive is the runtime's "channel came up" entry.
+	controlRecordActive
+	// controlRecordOff is the user's own Disconnect.
+	controlRecordOff
+	// controlRecordNotice is the runtime's own disconnection notice (#69).
+	controlRecordNotice
+)
+
+// controlRecordEvent is one classified record line.
+type controlRecordEvent struct {
+	kind controlRecordKind
+	// at is the entry's own timestamp; atOK is false when it did not parse.
+	at   time.Time
+	atOK bool
+	// text is the entry's content, set for a notice only.
+	text string
+}
+
+// classifyControlRecordLine classifies one JSONL line. system is false for a
+// line that is not a decodable `system` entry, which every caller skips. It is
+// a pure function of the line so a per-session fold (#271) can reuse it.
+//
+// The order is the safety property: Type, then Subtype (and the command name
+// for a local command), and only then Content.
+func classifyControlRecordLine(line string) (ev controlRecordEvent, system bool) {
+	var e controlRecordEntry
+	if err := json.Unmarshal([]byte(line), &e); err != nil {
+		return controlRecordEvent{}, false // torn or half-written
+	}
+	if e.Type != "system" {
+		return controlRecordEvent{}, false
+	}
+	ts, err := time.Parse(time.RFC3339Nano, e.Timestamp)
+	ev = controlRecordEvent{at: ts, atOK: err == nil}
+	switch {
+	case e.Subtype == controlBridgeSubtype && strings.HasPrefix(e.Content, controlEnabledPhrase):
+		ev.kind = controlRecordActive
+	case e.Subtype == controlLocalSubtype && e.CommandRun != nil && e.CommandRun.Command == controlCommandName &&
+		strings.Contains(e.Content, controlDisconnectPhrase):
+		ev.kind = controlRecordOff
+	case e.Subtype == controlInformationalS && strings.Contains(e.Content, controlDisconnectPhrase):
+		ev.kind = controlRecordNotice
+		ev.text = e.Content
+	}
+	return ev, true
+}
+
 // controlRecordRead is what one walk of a record's tail established.
 type controlRecordRead struct {
 	// exists is false when the record file could not be opened at all — a fresh
@@ -256,9 +318,14 @@ type controlRecordRead struct {
 	// state is active or off when the newest relevant entry since launch said
 	// so; empty otherwise.
 	state fleet.ControlChannelState
-	// blocked is true when the runtime's own failure notice is the newest
-	// relevant entry: the record then makes no claim and neither may anything
-	// that falls back on its silence.
+	// notice is set when the runtime's own disconnection notice is the newest
+	// relevant entry since launch. Whether it means `failed` depends on how
+	// long ago it was written, which a cached read cannot know — see
+	// resolveControlChannel.
+	notice *controlDisconnectFact
+	// blocked is true when the record is readable but may not be claimed from
+	// (an entry whose time cannot be read): neither may anything that falls
+	// back on its silence.
 	blocked bool
 	// covered is true when the walk saw everything since launch, so finding no
 	// entry means there is none.
@@ -276,38 +343,32 @@ func controlChannelFromRecord(path string, since time.Time) controlRecordRead {
 	inspected := 0
 	for i := len(lines) - 1; i >= 0 && inspected < recordTailCandidates; i-- {
 		inspected++
-		var e controlRecordEntry
-		if err := json.Unmarshal([]byte(lines[i]), &e); err != nil {
-			continue // a torn or half-written line is not a reason to stop
-		}
-		// Type first, before anything about the entry's words is looked at.
-		if e.Type != "system" {
+		ev, system := classifyControlRecordLine(lines[i])
+		if !system {
 			continue
 		}
-		ts, tsErr := time.Parse(time.RFC3339Nano, e.Timestamp)
-		if tsErr == nil && ts.Before(since) {
+		if ev.atOK && ev.at.Before(since) {
 			// Everything from here back belongs to an earlier process: the walk
 			// has covered the whole of this one.
 			res.covered = true
 			return res
 		}
-		switch {
-		case e.Subtype == controlBridgeSubtype && strings.HasPrefix(e.Content, controlEnabledPhrase):
-			if tsErr != nil {
+		switch ev.kind {
+		case controlRecordActive, controlRecordOff:
+			if !ev.atOK {
 				return controlRecordRead{exists: true, blocked: true}
 			}
 			res.state, res.covered = fleet.ControlChannelActive, true
+			if ev.kind == controlRecordOff {
+				res.state = fleet.ControlChannelOff
+			}
 			return res
-		case e.Subtype == controlLocalSubtype && e.CommandRun != nil && e.CommandRun.Command == controlCommandName &&
-			strings.Contains(e.Content, controlDisconnectPhrase):
-			if tsErr != nil {
+		case controlRecordNotice:
+			if !ev.atOK {
 				return controlRecordRead{exists: true, blocked: true}
 			}
-			res.state, res.covered = fleet.ControlChannelOff, true
+			res.notice, res.covered = &controlDisconnectFact{text: ev.text, at: ev.at}, true
 			return res
-		case e.Subtype == controlInformationalS && strings.Contains(e.Content, controlDisconnectPhrase):
-			// The runtime's own failure notice (#69). No claim — see above.
-			return controlRecordRead{exists: true, blocked: true}
 		}
 	}
 	// Walked to the top of what was read. That is "everything" only when the

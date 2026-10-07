@@ -46,7 +46,10 @@ const (
 	// retrying by itself. A supervisor that acts on this rather than waiting
 	// will interrupt a recovery already under way.
 	ControlChannelReconnecting ControlChannelState = "reconnecting"
-	// ControlChannelFailed: the runtime has given up. This is the state that
+	// ControlChannelFailed: the runtime has given up. A driver may also
+	// establish it from the runtime's own record (muster #270), when the
+	// disconnection notice stood unanswered for a settle window. This is the
+	// state that
 	// motivated the whole field — 37 of 67 sessions came back from a
 	// fleet-wide recovery in exactly it, every one of them reporting an
 	// otherwise perfectly healthy session, and the only way to find them was

@@ -234,6 +234,10 @@ var compatStaticMarkers = map[string][]string{
 	"F-APIERR": {"api error", "try again ", "temporary"},
 	// controlStateIn: the label `/rc` followed by one of four state words.
 	"H-RC": {"/rc active", "/rc failed", "/rc reconnecting", "/rc connecting"},
+	// classifyControlRecordLine (#270): the wording of the record entries the
+	// control-channel reader keys on. Each was measured present in the runtime
+	// binary the reader was built against.
+	"H-RCREC": {"/remote-control is active", "remote control disconnected", "bridge_status"},
 	// permissionModeLabels: the wording of the three indicator rows that exist
 	// as literal strings in the candidate. The other two — the default mode's
 	// `manual mode on` and `bypass permissions on` — are composed at runtime
@@ -351,7 +355,7 @@ func (h *compatHarness) addStatic(s *compat.Suite) {
 			return nil
 		},
 	})
-	for _, id := range []string{"F-LIMIT", "F-APIERR", "H-RC", "F-FEEDBACK"} {
+	for _, id := range []string{"F-LIMIT", "F-APIERR", "H-RC", "H-RCREC", "F-FEEDBACK"} {
 		id := id
 		s.Checks = append(s.Checks, compat.Check{
 			ID: id, Probes: []string{probe},

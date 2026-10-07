@@ -1887,9 +1887,9 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 		// still have a failed channel, so this is its own check rather
 		// than another case of the switch above, which a session matching
 		// both would only ever enter once.
-		if ch := sessions[i].State.ControlChannel; ch != nil && ch.State == fleet.ControlChannelFailed {
-			// Only a session the footer already flagged Failed pays for
-			// this (#69, the same "quiet session's record is never
+		if ch := sessions[i].State.ControlChannel; ch != nil && ch.State == fleet.ControlChannelFailed && ch.Reason == "" {
+			// Only a session already flagged Failed pays for this, and one
+			// resolved from the record (#270) already carries its Reason (#69, the same "quiet session's record is never
 			// opened" discipline the switch above already holds). Reason
 			// stays empty — never a guess — whenever the record cannot
 			// explain why: no store, no matched conversation, or no
