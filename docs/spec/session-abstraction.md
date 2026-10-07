@@ -370,6 +370,18 @@ TurnEnd {
 > expected to grow as new notices are measured, the same way `waitingOn`'s set
 > is not claimed to be exhaustive by having only three members.
 
+> **`failed` may be established from the record as well as the footer (muster
+> issue #270).** A runtime may draw the label of a healthy channel in a place a
+> driver cannot read safely, and the label of a failed one is then invisible.
+> The runtime's own disconnection notice is a durable, structured entry an agent
+> cannot write, so a driver may read it, but not as `failed` at once: measured
+> over a large set of records, a notice about a recoverable cause was followed
+> by a fresh enable entry within two minutes every time, while a terminal one
+> was not followed by one for hours. A driver reports `failed` only once the
+> notice has stood unanswered for a settle window, and nothing before that. The
+> record carries no entry for `connecting` or `reconnecting`, so those are
+> reported only when the screen shows them.
+
 > **`ControlChannel.reason` is sourced from the runtime's own durable record,
 > never from a screen (muster issue #69).** `state` alone cannot say
 > WHY a channel is `failed` — some failures are the runtime retrying on its

@@ -2,6 +2,7 @@ schema 1
 F-LIMIT
 F-APIERR
 H-RC
+H-RCREC
 F-MODE
 C1
 F-TRUST

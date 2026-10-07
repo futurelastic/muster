@@ -16,10 +16,13 @@ import (
 // # The order, and why it is this order
 //
 //  1. The footer label wins whenever it is there. It is the runtime's own
-//     chrome and the only source that distinguishes connecting, reconnecting
-//     and failed.
+//     chrome and the only source that distinguishes connecting and
+//     reconnecting.
 //  2. Otherwise the newest remote-control entry in the runtime's own record
-//     since this process launched decides between active and off.
+//     since this process launched decides between active and off, or, when
+//     it is the runtime's own disconnection notice, reads `failed` once the
+//     settle window has passed without a recovery (#270). Inside the window
+//     it makes no claim.
 //  3. Otherwise `off` is claimed from the LAUNCH only when every condition that
 //     would make the absence of an entry mean something holds: this driver
 //     started the session without the remote-control flag, its conversation is
@@ -32,6 +35,16 @@ import (
 // runtime writes the enable entry and (2) takes over. Until it does, a session
 // reads `off`; that window is a documented property of the claim, not a hidden
 // one.
+
+// controlNoticeSettle is how long a disconnection notice may stand as the
+// newest channel entry before it reads as `failed`. Measured over a large set
+// of runtime records (#270): a channel the runtime brought back by itself wrote
+// a fresh enable entry within 116 seconds in every one of 77 cases; the
+// longer gaps were somebody restoring it by hand. Five minutes sits well above
+// the first and well below the second. The rule is deliberately about time and
+// not about the notice's wording, which is the classification controlchannel.go
+// declined to infer (#65) and which new wording would silently defeat.
+const controlNoticeSettle = 5 * time.Minute
 
 // launchRemoteControlOption is the tmux user option Create sets on every
 // session it starts, recording whether the remote-control flag was actually
@@ -53,6 +66,14 @@ func (d *Driver) resolveControlChannel(footer *fleet.ControlChannel, conv *fleet
 	switch {
 	case read.state != "":
 		return &fleet.ControlChannel{State: read.state}
+	case read.notice != nil:
+		// The verdict depends on the clock, so it is made here and never stored
+		// in the cached read. Inside the window the answer is nothing, not `off`
+		// from the launch and not `reconnecting`, which no record entry carries.
+		if d.now().Sub(read.notice.at) >= controlNoticeSettle {
+			return &fleet.ControlChannel{State: fleet.ControlChannelFailed, Reason: read.notice.reasonText()}
+		}
+		return nil
 	case read.blocked:
 		return nil
 	case row.managed && row.launchRC == "0" && (!read.exists || read.covered):

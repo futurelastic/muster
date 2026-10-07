@@ -1451,7 +1451,12 @@ remote-control connection: `active`, `connecting`, `reconnecting`, `failed` or
 `off`. `off` (muster #269) means the driver has positive evidence the session has
 no remote control — it was launched without it, or the runtime's own durable
 record shows a disconnect after the last enable — and is never inferred from the
-mere absence of a label. It is the runtime describing itself, not a claim about whatever is at the far
+mere absence of a label. `failed` may also be read from the runtime's own
+durable record (muster #270): its disconnection notice, when that is the newest
+channel entry and no enable entry followed within five minutes, the notice
+being the `reason`. Inside those five minutes nothing is reported, and
+`connecting` and `reconnecting` are reported only when the footer shows them,
+since no record entry carries either. It is the runtime describing itself, not a claim about whatever is at the far
 end, and this service still does not model bridges.
 
 It exists because `failed` is otherwise invisible here. A session whose control

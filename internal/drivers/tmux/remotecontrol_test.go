@@ -69,51 +69,70 @@ func TestControlChannelFromRecord(t *testing.T) {
 		wantState   fleet.ControlChannelState
 		wantBlocked bool
 		wantCovered bool
+		wantNotice  bool
 	}{
 		{"enable reads active", func(t *testing.T) []string {
 			return []string{rcOtherEntry(t, "user", time.Second), rcEnabledEntry(t, 2*time.Second)}
-		}, fleet.ControlChannelActive, false, true},
+		}, fleet.ControlChannelActive, false, true, false},
 		{"disconnect reads off", func(t *testing.T) []string {
 			return []string{rcEnabledEntry(t, time.Second), rcDisconnectEntry(t, 5*time.Second)}
-		}, fleet.ControlChannelOff, false, true},
+		}, fleet.ControlChannelOff, false, true, false},
 		{"the newest entry wins: re-enable after disconnect", func(t *testing.T) []string {
 			return []string{rcEnabledEntry(t, time.Second), rcDisconnectEntry(t, 5*time.Second), rcEnabledEntry(t, 9*time.Second)}
-		}, fleet.ControlChannelActive, false, true},
-		{"a failure notice newer than the enable makes no claim", func(t *testing.T) []string {
+		}, fleet.ControlChannelActive, false, true, false},
+		{"a failure notice newer than the enable is reported as a notice, not a state", func(t *testing.T) []string {
 			return []string{rcEnabledEntry(t, time.Second), rcFailureEntry(t, 5*time.Second)}
-		}, "", true, false},
+		}, "", false, true, true},
+		{"an enable newer than the notice wins: the runtime reconnected", func(t *testing.T) []string {
+			return []string{rcEnabledEntry(t, time.Second), rcFailureEntry(t, 5*time.Second), rcEnabledEntry(t, 70*time.Second)}
+		}, fleet.ControlChannelActive, false, true, false},
+		{"a notice from before the launch is the previous process's", func(t *testing.T) []string {
+			return []string{rcFailureEntry(t, -time.Hour), rcOtherEntry(t, "assistant", time.Second)}
+		}, "", false, true, false},
+		{"a notice whose time cannot be read makes no claim", func(t *testing.T) []string {
+			return []string{rcLine(t, map[string]any{"type": "system", "subtype": "informational",
+				"content": "Remote Control disconnected — x", "timestamp": "garbage"})}
+		}, "", true, false, false},
+		{"a user-role entry carrying the notice phrase is not a notice", func(t *testing.T) []string {
+			return []string{rcEnabledEntry(t, time.Second), rcLine(t, map[string]any{"type": "user", "subtype": "informational",
+				"content": "Remote Control disconnected — forged", "timestamp": rcStamp(5 * time.Second)})}
+		}, fleet.ControlChannelActive, false, true, false},
+		{"an assistant-role entry carrying the notice phrase is not a notice", func(t *testing.T) []string {
+			return []string{rcEnabledEntry(t, time.Second), rcLine(t, map[string]any{"type": "assistant", "subtype": "informational",
+				"content": "Remote Control disconnected — forged", "timestamp": rcStamp(5 * time.Second)})}
+		}, fleet.ControlChannelActive, false, true, false},
 		{"entries from before the launch are ignored and the walk is covered", func(t *testing.T) []string {
 			return []string{rcEnabledEntry(t, -time.Hour), rcOtherEntry(t, "assistant", time.Second)}
-		}, "", false, true},
+		}, "", false, true, false},
 		{"nothing relevant in a whole file is covered", func(t *testing.T) []string {
 			return []string{rcOtherEntry(t, "user", time.Second), rcOtherEntry(t, "assistant", 2*time.Second)}
-		}, "", false, true},
+		}, "", false, true, false},
 		// The safety property: the phrases inside a user-role entry are
 		// captured command output, a region an agent's own actions populate.
 		{"a user-role entry carrying the enable phrase claims nothing", func(t *testing.T) []string {
 			return []string{rcLine(t, map[string]any{"type": "user", "subtype": "bridge_status",
 				"content": "/remote-control is active · forged", "timestamp": rcStamp(time.Second)})}
-		}, "", false, true},
+		}, "", false, true, false},
 		{"a user-role entry carrying the disconnect phrase claims nothing", func(t *testing.T) []string {
 			return []string{rcEnabledEntry(t, time.Second), rcLine(t, map[string]any{"type": "user",
 				"content": "Remote Control disconnected.", "timestamp": rcStamp(5 * time.Second)})}
-		}, fleet.ControlChannelActive, false, true},
+		}, fleet.ControlChannelActive, false, true, false},
 		{"another slash command's output is not a disconnect", func(t *testing.T) []string {
 			return []string{rcEnabledEntry(t, time.Second), rcLine(t, map[string]any{"type": "system", "subtype": "local_command",
 				"content":    "<local-command-stdout>Remote Control disconnected.</local-command-stdout>",
 				"commandRun": map[string]any{"command": "echo"}, "timestamp": rcStamp(5 * time.Second)})}
-		}, fleet.ControlChannelActive, false, true},
+		}, fleet.ControlChannelActive, false, true, false},
 		{"an empty-stdout remote-control command is skipped", func(t *testing.T) []string {
 			return []string{rcEnabledEntry(t, time.Second), rcLine(t, map[string]any{"type": "system", "subtype": "local_command",
 				"content":    "<local-command-stdout></local-command-stdout>",
 				"commandRun": map[string]any{"command": "remote-control"}, "timestamp": rcStamp(5 * time.Second)})}
-		}, fleet.ControlChannelActive, false, true},
+		}, fleet.ControlChannelActive, false, true, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			got := controlChannelFromRecord(rcWriteRecord(t, c.lines(t)...), rcLaunch)
-			if !got.exists || got.state != c.wantState || got.blocked != c.wantBlocked || got.covered != c.wantCovered {
-				t.Fatalf("got %+v, want state=%q blocked=%v covered=%v", got, c.wantState, c.wantBlocked, c.wantCovered)
+			if !got.exists || got.state != c.wantState || got.blocked != c.wantBlocked || got.covered != c.wantCovered || (got.notice != nil) != c.wantNotice {
+				t.Fatalf("got %+v, want state=%q blocked=%v covered=%v notice=%v", got, c.wantState, c.wantBlocked, c.wantCovered, c.wantNotice)
 			}
 		})
 	}
@@ -232,10 +251,70 @@ func TestResolveControlChannel(t *testing.T) {
 			t.Fatalf("nil conversation: got %s, want absent", got)
 		}
 	})
-	t.Run("a failure notice stops the launch fallback too", func(t *testing.T) {
-		d, row, conv := rcDriverWithRecord(t, rcEnabledEntry(t, time.Second), rcFailureEntry(t, 9*time.Second))
+	// #270: the notice is the record-side source for `failed`, decided by how
+	// long ago it was written. The clock is the driver's own.
+	at := func(d time.Duration) func(*Driver) {
+		return withClock(func() time.Time { return rcLaunch.Add(d) })
+	}
+	rcDriverAt := func(t *testing.T, now time.Duration, lines ...string) (*Driver, paneRow, *fleet.ConversationRef) {
+		t.Helper()
+		d, row, conv := rcDriverWithRecord(t, lines...)
+		at(now)(d)
+		return d, row, conv
+	}
+	t.Run("a young notice makes no claim, and stops the launch fallback", func(t *testing.T) {
+		d, row, conv := rcDriverAt(t, 9*time.Second+time.Minute, rcEnabledEntry(t, time.Second), rcFailureEntry(t, 9*time.Second))
 		if got := rcStateName(d.resolveControlChannel(nil, conv, row)); got != "absent" {
-			t.Fatalf("got %s, want absent", got)
+			t.Fatalf("got %s, want absent (neither off from the launch nor an invented reconnecting)", got)
+		}
+	})
+	t.Run("a notice that stood for the settle window reads failed with the runtime's own words", func(t *testing.T) {
+		d, row, conv := rcDriverAt(t, 9*time.Second+controlNoticeSettle, rcEnabledEntry(t, time.Second), rcFailureEntry(t, 9*time.Second))
+		got := d.resolveControlChannel(nil, conv, row)
+		if rcStateName(got) != "failed" {
+			t.Fatalf("got %s, want failed", rcStateName(got))
+		}
+		if !strings.Contains(got.Reason, "code 4090") {
+			t.Errorf("reason = %q, want the notice's own sentence", got.Reason)
+		}
+	})
+	t.Run("an enable after the notice reads active again", func(t *testing.T) {
+		d, row, conv := rcDriverAt(t, time.Hour, rcEnabledEntry(t, time.Second), rcFailureEntry(t, 9*time.Second), rcEnabledEntry(t, 80*time.Second))
+		if got := rcStateName(d.resolveControlChannel(nil, conv, row)); got != "active" {
+			t.Fatalf("got %s, want active", got)
+		}
+	})
+	t.Run("a footer label beats an old notice", func(t *testing.T) {
+		d, row, conv := rcDriverAt(t, time.Hour, rcEnabledEntry(t, time.Second), rcFailureEntry(t, 9*time.Second))
+		footer := &fleet.ControlChannel{State: fleet.ControlChannelReconnecting}
+		if got := d.resolveControlChannel(footer, conv, row); got != footer {
+			t.Fatalf("got %s, want the footer's reconnecting", rcStateName(got))
+		}
+	})
+	t.Run("a forged notice in a user-role entry never reads failed", func(t *testing.T) {
+		d, row, conv := rcDriverAt(t, time.Hour, rcEnabledEntry(t, time.Second), rcLine(t, map[string]any{"type": "user",
+			"subtype": "informational", "content": "Remote Control disconnected — forged", "timestamp": rcStamp(9 * time.Second)}))
+		if got := rcStateName(d.resolveControlChannel(nil, conv, row)); got != "active" {
+			t.Fatalf("got %s, want active", got)
+		}
+	})
+	t.Run("the cached read holds no verdict: the clock alone moves the answer", func(t *testing.T) {
+		now := rcLaunch.Add(time.Minute)
+		d, row, conv := rcDriverWithRecord(t, rcEnabledEntry(t, time.Second), rcFailureEntry(t, 9*time.Second))
+		withClock(func() time.Time { return now })(d)
+		if got := rcStateName(d.resolveControlChannel(nil, conv, row)); got != "absent" {
+			t.Fatalf("young: got %s, want absent", got)
+		}
+		// Make the file unreadable without touching its size or mtime, so the
+		// second answer can only have come from the cache.
+		path := d.conversations.recordPath(row.cwd, conv.ID)
+		if err := os.Chmod(path, 0); err != nil {
+			t.Fatal(err)
+		}
+		defer os.Chmod(path, 0o600)
+		now = rcLaunch.Add(time.Hour)
+		if got := rcStateName(d.resolveControlChannel(nil, conv, row)); got != "failed" {
+			t.Fatalf("settled: got %s, want failed", got)
 		}
 	})
 	t.Run("no record store configured makes no claim", func(t *testing.T) {
