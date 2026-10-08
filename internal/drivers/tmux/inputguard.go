@@ -143,6 +143,12 @@ func refuseAsRuntimeSyntax(text string, humanRelay bool) (reason string, refused
 // its remote-control link — and a consumer that is not a human relay already
 // sends them. Every other command is refused unless the caller relays a
 // human (driver.SendOptions.HumanRelay).
+//
+// Since #272 the two remote-control commands are narrower than this table
+// says when the driver's gate is on: refuseRemoteControlCommand then requires
+// the remote-control or human-relay grant on top of send. This table still
+// answers "is it a session command" (the #111 delivery-mark site below), which
+// is a question about the command, not about who sent it.
 var sessionSlashCommands = map[string]bool{
 	"/rename":         true,
 	"/rc":             true,
@@ -167,6 +173,56 @@ func isSessionCommand(text string) bool {
 		name = name[:i]
 	}
 	return sessionSlashCommands[name]
+}
+
+// remoteControlCommands are the runtime's own commands that turn the
+// remote-control link on or off (#272). A subset of sessionSlashCommands: they
+// are deliverable by any caller holding the send grant, which is the hole the
+// remote-control grant (#269) would otherwise have beside it.
+var remoteControlCommands = map[string]bool{
+	"/rc":             true,
+	"/remote-control": true,
+}
+
+// leadingCommand returns the slash command text begins with, after the same
+// leading-invisible trim the runtime applies, or "" when it does not begin
+// with one. text must already be sanitised (see refuseAsRuntimeSyntax).
+func leadingCommand(text string) string {
+	trimmed := strings.TrimLeftFunc(text, runtimeTrimCutset)
+	if !strings.HasPrefix(trimmed, "/") {
+		return ""
+	}
+	name, _, _ := strings.Cut(trimmed, " ")
+	if i := strings.IndexAny(name, "\n\t"); i >= 0 {
+		name = name[:i]
+	}
+	return name
+}
+
+// refuseRemoteControlCommand is #272: when the gate is on, the runtime's
+// remote-control commands are delivered only for a caller who holds the
+// remote-control grant or relays a human (humanRelay — what a person sending
+// the command at a keyboard is). Every other caller holding only `send` is
+// refused, with a reason that names both grants so an operator knows what to
+// add. With the gate off it never refuses: that is the behaviour before #272,
+// kept for one release so a caller still typing the command through `input`
+// has time to move to POST …/remote-control.
+//
+// text is the same already-sanitised text refuseAsRuntimeSyntax judges, for
+// the same reason: a control byte the sanitiser drops must not be able to hide
+// a leading "/rc" from this check.
+func refuseRemoteControlCommand(text string, gate, humanRelay, remoteControl bool) (reason string, refused bool) {
+	if !gate || humanRelay || remoteControl {
+		return "", false
+	}
+	name := leadingCommand(text)
+	if !remoteControlCommands[name] {
+		return "", false
+	}
+	return "the " + name + " command turns the session's remote control on or off, which makes it " +
+		"drivable from off the machine — an exposure change, not a message. This caller holds neither " +
+		"the remote-control grant nor the human-relay grant, so it is refused rather than delivered " +
+		"(#272). Use POST …/remote-control with the remote-control grant", true
 }
 
 // refuseSlashCommand is #180 L6: a message beginning with "/" is read by

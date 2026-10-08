@@ -1251,9 +1251,19 @@ peer applies its own `remote-control` grant to this service's credential. A peer
 on a build without the route answers with its router's bare `404`; a relaying
 service **must** report that as `unsupported`, never as `not_found`.
 
-Known gap: the runtime's own slash command is still deliverable through `input`
-by any caller holding `send` (§3.3, the session-management commands), and that
-path is not gated by this grant.
+The runtime's own slash command (`/rc`, `/remote-control`) is the same act typed
+instead of requested, and `input` delivers it for any caller holding `send`
+(§3.3, the session-management commands). A machine closes that door with the
+`gateRemoteControlInput` setting (muster #272): with it on, `input` delivers
+those two commands only to a caller holding `remote-control` or `human-relay`,
+and the refusal names both grants. The setting is **off by default for one
+release** — the earlier behaviour — so existing callers have a release to move
+to this verb, after which the default flips; until a machine sets it, the grant
+governs this verb and not the older door. The verb's own command is not subject
+to the setting. A relayed `input` carries the fact that the original caller held
+`remote-control` as an assertion the owning machine honours only from a
+configured peer that itself holds `remote-control`; the peer's own grant never
+stands in for the caller's.
 
 `runtime` is an **optional** query parameter on every single-session endpoint
 (`GET`, `input`, `respond`, `discard`, `rename`, `labels`, `keys`, `interrupt`,
@@ -2088,7 +2098,9 @@ ordering is wrong rather than handing you a cursor that would skip.
   #180, #184). A principal holding it is a human-facing relay: what it sends is a
   person's own message, so `route: auto` carries it through the session's live
   lane or else the terminal, unlabelled, arriving as the user's own turn, and
-  it may send a leading `/`.
+  it may send a leading `/` — including `/rc` and `/remote-control`, which with
+  `gateRemoteControlInput` on (§3.3 `remote-control`, muster #272) are
+  otherwise delivered only to a `remote-control` holder.
   Nothing else confers this — no header, no `from`, no `relayOfHuman` — and it
   crosses a peer relay only as an assertion the owning machine honours from one
   of its configured peers (or from anyone, on a machine with no principal table:

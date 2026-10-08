@@ -586,6 +586,16 @@ different message and is not held.
   may send, and any command from a caller holding the `human-relay` grant.
   Like the `!` refusal, it is judged after leading invisible characters are
   skipped.
+- **`/rc` and `/remote-control` need a grant of their own when the machine
+  gates them (#272).** With `gateRemoteControlInput: true` in the config file,
+  `input` delivers those two only to a caller holding `remote-control` (the grant
+  of `POST …/remote-control`) or `human-relay`; a caller holding only `send` is
+  refused, and the `reason` names both grants. **The setting is off by default
+  for one release** — today's behaviour, where `send` alone is enough — so a
+  client still typing the command through `input` has a release to move to the
+  verb; the release after flips the default. A client shared by people and
+  automation should call the verb with a `remote-control` principal rather than
+  be given `human-relay`.
 
 **`submitted` is not one of the outcomes `input` can return today.** Every driver
 in this fleet reports `confirmsDelivery: false` on `/v1/runtimes` — none can
@@ -923,10 +933,17 @@ confirmation is the session's `state.controlChannel` changing, delivered as a
   so neither `send` nor `keys` implies it, and the refusal names it. A call to a
   peer additionally needs `relay` here, and the `remote-control` grant on the
   peer.
-- ⚠️ **`/input` still carries the older workaround.** The runtime's own slash
-  command (`/rc`, `/remote-control`) is deliverable through `input` for any caller
-  holding `send` (see above), and that path is *not* gated by the `remote-control`
-  grant. The grant governs this verb; it does not close that door.
+- **`/input` carried the older workaround, and a setting now closes it (#272).**
+  The runtime's own slash command (`/rc`, `/remote-control`) is deliverable through
+  `input` for any caller holding `send` unless the machine sets
+  `gateRemoteControlInput: true` (config file; see `POST …/input`): then `input`
+  delivers it only for a caller holding `remote-control` or `human-relay`. ⚠️ The
+  setting is **off by default for one release** and the grant is advisory on a
+  machine that has not turned it on; the release after flips the default. The
+  verb's own command is unaffected by the setting — it is the grant-checked path.
+  Across a peer the fact travels as an assertion from a configured peer that
+  itself holds `remote-control`, so a caller who may only `send` through a peer
+  cannot ride the peer's grant.
 
 ### `POST …/{id}/interrupt` and `DELETE …/{id}`
 

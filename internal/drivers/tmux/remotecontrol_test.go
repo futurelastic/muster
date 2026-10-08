@@ -399,6 +399,7 @@ type rcModel struct {
 	prompt     *fleet.SessionPrompt
 	options    []string
 	sends      []string
+	sendOpts   []driver.SendOptions
 	responds   []fleet.Response
 	sendRefuse bool
 	noDialog   bool // the runtime ignores /remote-control (no dialog, no change)
@@ -426,6 +427,7 @@ func (m *rcModel) Send(ctx context.Context, req fleet.Request, ref fleet.Session
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.sends = append(m.sends, text)
+	m.sendOpts = append(m.sendOpts, opts)
 	if m.sendRefuse {
 		return fleet.DeliveryReceipt{Outcome: fleet.OutcomeRefused, Reason: "composer holds unsent text"}, nil
 	}
@@ -485,6 +487,18 @@ func TestToggle_EnableWhenOffSendsTheCommandOnce(t *testing.T) {
 	}
 	if len(m.sends) != 1 || m.sends[0] != "/remote-control" || len(m.responds) != 0 {
 		t.Fatalf("sends %v responds %v", m.sends, m.responds)
+	}
+}
+
+// #272: the verb is the grant-checked path, so its own command carries the
+// remote-control fact — otherwise the input gate would refuse the verb itself.
+func TestToggle_TheVerbsOwnCommandCarriesTheRemoteControlFact(t *testing.T) {
+	m := newRCModel(fleet.ControlChannelOff)
+	if _, err := m.set(t, true); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.sendOpts) != 1 || !m.sendOpts[0].RemoteControl {
+		t.Fatalf("send options %+v, want RemoteControl set", m.sendOpts)
 	}
 }
 

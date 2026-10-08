@@ -343,6 +343,12 @@ type Driver struct {
 	store   *state.Store
 	idemErr error
 
+	// gateRemoteControlInput is #272's setting: when true, `input` delivers
+	// /rc and /remote-control only for a caller holding the remote-control or
+	// human-relay grant. Off by default for one release (the behaviour before
+	// #272), then the default flips — see WithRemoteControlInputGate.
+	gateRemoteControlInput bool
+
 	mu sync.Mutex
 	// observed is this driver's most recent sighting of each session id,
 	// keyed by id. It is what Close corroborates against (§5.4) and what
@@ -1015,6 +1021,20 @@ func WithCounterSource(src func() map[string]int64) Option {
 			d.counterSources = append(d.counterSources, src)
 		}
 	}
+}
+
+// WithRemoteControlInputGate turns #272's gate on or off: with it on, `input`
+// refuses the runtime's /rc and /remote-control commands unless the caller
+// holds the remote-control grant (or relays a human, the human-relay grant),
+// so the grant means what it says. Off keeps the behaviour from before #272,
+// where anyone holding send could turn remote control on by typing the command.
+//
+// Off is the default for ONE release, so a client still typing the command
+// through `input` has a release to move to POST …/remote-control; the release
+// after flips the default. The driver does not choose: the composition root
+// passes what the operator set.
+func WithRemoteControlInputGate(on bool) Option {
+	return func(d *Driver) { d.gateRemoteControlInput = on }
 }
 
 // bounded applies this driver's declared deadline, or the caller's if the
@@ -2322,6 +2342,12 @@ func (d *Driver) send(ctx context.Context, req fleet.Request, ref fleet.SessionR
 	// never touched for text that was always going to be refused. See
 	// inputguard.go for the pattern list and why it belongs to this driver.
 	if reason, refused := refuseAsRuntimeSyntax(text, opts.HumanRelay); refused {
+		return d.observeEarly(delivery.Refused, fleet.DeliveryReceipt{Outcome: fleet.OutcomeRefused, Reason: reason}), nil
+	}
+	// #272: the remote-control commands are an exposure change, so with the
+	// gate on they need the remote-control (or human-relay) grant on top of
+	// send. Same bytes, same place, same reason as the guard above.
+	if reason, refused := refuseRemoteControlCommand(text, d.gateRemoteControlInput, opts.HumanRelay, opts.RemoteControl); refused {
 		return d.observeEarly(delivery.Refused, fleet.DeliveryReceipt{Outcome: fleet.OutcomeRefused, Reason: reason}), nil
 	}
 

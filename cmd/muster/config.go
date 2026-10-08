@@ -114,6 +114,21 @@ type fileConfig struct {
 	// needs the same restart those settings do.
 	MaxInputBytes int `json:"maxInputBytes,omitempty"`
 
+	// GateRemoteControlInput makes `input` deliver the runtime's /rc and
+	// /remote-control commands only to a caller holding the remote-control or
+	// human-relay grant (muster #272). Absent or false keeps the behaviour from
+	// before #272, where a caller holding only send could turn a session's
+	// remote control on by typing the command — the one door the
+	// remote-control grant did not close.
+	//
+	// False is the default for ONE release, so a client still typing the
+	// command through `input` has a release to move to POST …/remote-control;
+	// the release notes name this setting, and the release after flips the
+	// default. Config-file-only and per machine, like the settings above: the
+	// gate is applied by the machine that owns the session. Changing it needs a
+	// restart.
+	GateRemoteControlInput bool `json:"gateRemoteControlInput,omitempty"`
+
 	// ClosedRetentionDays is how long this machine keeps its record of each
 	// session that ended (muster #179, GET /v1/sessions/closed). Absent
 	// or zero means the shipped default (service.DefaultClosedRetention, 14

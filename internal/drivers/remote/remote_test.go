@@ -40,6 +40,8 @@ type capture struct {
 	body   string
 	// humanRelay is the #180 L3 assertion header.
 	humanRelay string
+	// remoteCtl is the #272 assertion header.
+	remoteCtl string
 }
 
 func peerServing(t *testing.T, status int, payload any, rec *capture) *httptest.Server {
@@ -69,6 +71,7 @@ func peerServing(t *testing.T, status int, payload any, rec *capture) *httptest.
 				query:      r.URL.RawQuery,
 				auth:       r.Header.Get("Authorization"),
 				humanRelay: r.Header.Get("Fleet-Human-Relay"),
+				remoteCtl:  r.Header.Get("Fleet-Remote-Control"),
 				idem:       r.Header.Get("Idempotency-Key"),
 				dline:      r.Header.Get("Fleet-Deadline-Ms"),
 				body:       string(raw),
@@ -1190,5 +1193,28 @@ func TestSendCarriesTheHumanRelayAssertion(t *testing.T) {
 	}
 	if rec.humanRelay != "" {
 		t.Fatalf("Fleet-Human-Relay = %q on a send that asserted nothing", rec.humanRelay)
+	}
+}
+
+// TestSendCarriesTheRemoteControlAssertion (#272): the finding that the caller
+// holds the remote-control grant reaches the owning machine as an assertion
+// header — and only when it was established.
+func TestSendCarriesTheRemoteControlAssertion(t *testing.T) {
+	var rec capture
+	srv := peerServing(t, 200, fleet.DeliveryReceipt{Outcome: fleet.OutcomeQueued}, &rec)
+	d := New("peerbox", srv.URL)
+	if _, err := d.Send(context.Background(), caller, fleet.SessionRef{ID: "s1"}, "/rc",
+		driver.SendOptions{Submit: true, RemoteControl: true}); err != nil {
+		t.Fatal(err)
+	}
+	if rec.remoteCtl != "1" {
+		t.Fatalf("Fleet-Remote-Control = %q, want 1", rec.remoteCtl)
+	}
+	if _, err := d.Send(context.Background(), caller, fleet.SessionRef{ID: "s1"}, "/rc",
+		driver.SendOptions{Submit: true}); err != nil {
+		t.Fatal(err)
+	}
+	if rec.remoteCtl != "" {
+		t.Fatalf("Fleet-Remote-Control = %q on a send that asserted nothing", rec.remoteCtl)
 	}
 }

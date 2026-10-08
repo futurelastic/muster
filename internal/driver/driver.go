@@ -123,6 +123,18 @@ type SendOptions struct {
 	// refuses one from anyone else.
 	HumanRelay bool
 
+	// RemoteControl says the service established that this call is made with
+	// authority over the session's remote control: the caller holds the
+	// remote-control grant, or a peer this service trusts to relay asserted
+	// it (#272). Set by the service, never by a caller's body.
+	//
+	// It matters to a driver only for the runtime's own remote-control slash
+	// command, which would otherwise turn the link on through `input` for
+	// anyone who may merely send. A driver that gates that command lets a call
+	// carrying this (or HumanRelay) through and refuses one carrying neither.
+	// A driver that never gates it ignores the field.
+	RemoteControl bool
+
 	// From (muster #158) is who the message says it comes from. Nil
 	// means unlabelled, exactly as before #158. By the time a driver sees
 	// it, Machine has already been stamped by the service (see

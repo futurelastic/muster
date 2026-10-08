@@ -114,11 +114,14 @@ const (
 	// an input. A principal that may type into a session has not thereby been
 	// trusted to publish it.
 	//
-	// ⚠️ Known bypass, recorded rather than hidden: the runtime's own slash
-	// command is deliverable through `input` for any caller holding `send` (the
-	// terminal-command allow-list in the tmux driver), and that path is not
-	// gated by this grant. This grant governs the verb; it does not yet close
-	// the older workaround. Absent means denied, like every other grant.
+	// The runtime's own slash command (/rc, /remote-control) is the same act
+	// typed instead of requested. Since #272 a machine can close that door with
+	// the gateRemoteControlInput setting: `input` then delivers the command only
+	// to a caller holding this grant or GrantHumanRelay (a person's own message).
+	// ⚠️ The setting is off by default for ONE release, so a caller holding only
+	// `send` can still do it on a machine that has not turned it on; the
+	// following release flips the default. Absent means denied, like every other
+	// grant.
 	GrantRemoteControl Grant = "remote-control"
 	GrantRelay         Grant = "relay" // have mutations proxied to peers
 	// GrantHumanRelay marks a principal as a HUMAN relay (muster round-3
@@ -321,6 +324,36 @@ func (svc *Service) humanRelay(r *http.Request) bool {
 		return true
 	}
 	return r.Header.Get(onBehalfOfHeader) != "" && r.Header.Get(humanRelayHeader) == "1" && svc.relayTrusted(r)
+}
+
+// remoteControlHeader carries, across a peer relay, the entering machine's
+// finding that the original caller held the remote-control grant there (#272).
+// Same shape and the same trust as humanRelayHeader.
+const remoteControlHeader = "Fleet-Remote-Control"
+
+// remoteControl reports whether this /input call is made with authority over
+// the session's remote control (#272): the caller holds GrantRemoteControl
+// here, or a trusted relay asserted that the original caller held it where the
+// request entered the fleet.
+//
+// A relayed call is judged by the assertion alone, and only when the relaying
+// peer itself holds the grant on this machine — the same per-peer grant the
+// remote-control verb needs. The peer's own grant is NOT enough on its own:
+// that would let any caller who may send through that peer turn remote control
+// on with the peer's credential, which is the door this exists to close.
+//
+// With no principal table there is no per-caller identity: whoever holds the
+// shared token is trusted with every verb the host permits, the remote-control
+// verb included, so the fact holds for them.
+func (svc *Service) remoteControl(r *http.Request) bool {
+	p, ok := principalOf(r)
+	if !ok {
+		return true
+	}
+	if r.Header.Get(onBehalfOfHeader) != "" && svc.relayTrusted(r) {
+		return r.Header.Get(remoteControlHeader) == "1" && p.Allows(GrantRemoteControl)
+	}
+	return p.Allows(GrantRemoteControl)
 }
 
 // callerFor builds the Request a resolved principal makes.
