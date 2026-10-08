@@ -361,6 +361,13 @@ func main() {
 		// here fails only under remote invocation, which is precisely how
 		// this service gets deployed.
 		opts := []tmux.Option{tmux.WithState(store)}
+		// #272: opt in to requiring the remote-control (or human-relay) grant
+		// for /rc and /remote-control typed through `input`. Off by default for
+		// one release; see fileConfig.GateRemoteControlInput.
+		if cfgFile != nil && cfgFile.GateRemoteControlInput {
+			opts = append(opts, tmux.WithRemoteControlInputGate(true))
+			log.Printf("muster: input gate on — /rc and /remote-control need the remote-control or human-relay grant (#272)")
+		}
 		if bin := os.Getenv("FLEET_TMUX_BIN"); bin != "" {
 			opts = append(opts, tmux.WithBinary(bin))
 		}

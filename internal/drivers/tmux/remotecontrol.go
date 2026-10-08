@@ -169,8 +169,13 @@ func (t rcToggler) set(ctx context.Context, req fleet.Request, ref fleet.Session
 
 // rcSend delivers the runtime's command and turns a refusal into the retryable
 // conflict it is.
+//
+// RemoteControl is set because this IS the grant-checked verb (#269): the
+// service has already required the remote-control grant before the driver is
+// reached, and without this the #272 input gate would refuse the verb's own
+// command.
 func (t rcToggler) rcSend(ctx context.Context, req fleet.Request, ref fleet.SessionRef) error {
-	receipt, err := t.p.Send(ctx, req, ref, "/remote-control", driver.SendOptions{Submit: true, Route: fleet.RouteTerminal})
+	receipt, err := t.p.Send(ctx, req, ref, "/remote-control", driver.SendOptions{Submit: true, Route: fleet.RouteTerminal, RemoteControl: true})
 	if err != nil {
 		return err
 	}

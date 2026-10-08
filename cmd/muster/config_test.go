@@ -120,6 +120,28 @@ func TestLoadConfigWithoutMaxInputBytesLeavesItZero(t *testing.T) {
 	}
 }
 
+// muster #272: gateRemoteControlInput is a plain optional boolean; absent
+// means the behaviour from before #272 (the gate is off for one release).
+func TestLoadConfigReadsGateRemoteControlInput(t *testing.T) {
+	for body, want := range map[string]bool{
+		`{"principals": [{"name": "op", "token": "tok"}], "gateRemoteControlInput": true}`:  true,
+		`{"principals": [{"name": "op", "token": "tok"}], "gateRemoteControlInput": false}`: false,
+		`{"principals": [{"name": "op", "token": "tok"}]}`:                                  false,
+	} {
+		path := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := loadConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.GateRemoteControlInput != want {
+			t.Errorf("%s: GateRemoteControlInput = %v, want %v", body, cfg.GateRemoteControlInput, want)
+		}
+	}
+}
+
 // muster issue #94: sessionEnv is a plain, optional field on the same
 // file trustRoots and defaultRuntime already live on, and round-trips the
 // same way — including appliesTo, which is itself optional within an entry.

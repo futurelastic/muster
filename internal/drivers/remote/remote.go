@@ -1502,6 +1502,15 @@ func (d *Driver) Send(ctx context.Context, req fleet.Request, ref fleet.SessionR
 	if opts.HumanRelay {
 		headers = map[string]string{"Fleet-Human-Relay": "1"}
 	}
+	// #272: likewise the finding that the caller holds the remote-control
+	// grant here, so the owning machine can apply its gate to the original
+	// caller and not to this machine's credential.
+	if opts.RemoteControl {
+		if headers == nil {
+			headers = map[string]string{}
+		}
+		headers["Fleet-Remote-Control"] = "1"
+	}
 	if err := d.doWithHeaders(ctx, req, http.MethodPost, path, headers, body, &out); err != nil {
 		return fleet.DeliveryReceipt{}, err
 	}
