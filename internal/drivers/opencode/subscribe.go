@@ -125,8 +125,8 @@ func (d *Driver) Subscribe(ctx context.Context, req fleet.Request, filter driver
 		if !filter.Matches(id, string(info.cwd)) {
 			continue
 		}
-		if d.shared == nil && info.srv.proc.exited() {
-			continue // a dead session has no bus to listen to
+		if info.srv == nil || (d.shared == nil && info.srv.proc.exited()) {
+			continue // a dead or unlaunched session has no bus to listen to
 		}
 		servers[info.srv] = struct{}{}
 	}

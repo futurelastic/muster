@@ -139,6 +139,9 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 	ctx, cancel := d.bounded(ctx)
 	defer cancel()
 
+	// Names only, taken before anything can touch the map (muster #282).
+	callerEnvNames := envNames(spec.Env)
+
 	srv := d.shared
 	if srv == nil {
 		started, err := d.startSessionServer(ctx, spec)
@@ -177,6 +180,26 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 		cwd = spec.Cwd
 	}
 	created := knownSession{srv: srv, cwd: cwd, name: sess.Title, agent: sess.Agent, startedAt: startedAt}
+	if d.store != nil && d.shared == nil {
+		// Before the session is announced or handed an id: a session the caller
+		// can see but a restart cannot find would make SupportsResume a lie.
+		rec := &sessionRecord{
+			ID: sess.ID, Cwd: string(cwd), Name: sess.Title, Agent: sess.Agent,
+			SpecAgent: string(spec.Agent), SpecMarker: spec.Marker,
+			StartedAtMs: sess.Time.Created, Dir: srv.dir, EnvNames: callerEnvNames,
+			Sandbox: spec.Sandbox,
+		}
+		if srv.sandbox != nil && srv.sandbox.PackageCache != nil {
+			rec.CacheCopy = srv.sandbox.PackageCache.Copy
+		}
+		d.stampProcess(rec, srv)
+		if err := d.store.write(rec); err != nil {
+			d.discardServer(srv)
+			return fleet.Session{}, err
+		}
+		srv.persisted.Store(true)
+		created.dir = srv.dir
+	}
 	d.markSeen(sess.ID, created)
 	// Before the opening prompt: a subscription connects to this session's bus
 	// now, so the prompt's first change is on the stream (muster #284).
@@ -204,6 +227,14 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 // scoped directory, and execs the server. The directory is removed again if
 // the server does not come up.
 func (d *Driver) startSessionServer(ctx context.Context, spec fleet.SessionSpec) (*server, error) {
+	return d.startServerIn(ctx, spec, "", "")
+}
+
+// startServerIn is startSessionServer for a session that may already have its
+// directory (muster #282): a relaunch passes the directory the previous process
+// used, so the runtime finds its database there, and never removes it on failure
+// — a session that could not be relaunched keeps what it had for the next try.
+func (d *Driver) startServerIn(ctx context.Context, spec fleet.SessionSpec, existingDir, priorCopy string) (*server, error) {
 	extra, err := d.sessionEnvFor(spec)
 	if err != nil {
 		return nil, err
@@ -217,16 +248,25 @@ func (d *Driver) startSessionServer(ctx context.Context, spec fleet.SessionSpec)
 	if closed {
 		return nil, &fleet.Error{Kind: fleet.ErrorUnreachable, Message: "create: this driver has been shut down", Machine: d.machine}
 	}
-	dir, err := sessionDirs(d.sessionRoot)
-	if err != nil {
-		return nil, err
+	dir := existingDir
+	fresh := existingDir == ""
+	if fresh {
+		dir, err = sessionDirs(d.sessionRoot)
+		if err != nil {
+			return nil, err
+		}
+	}
+	cleanup := func() {
+		if fresh {
+			_ = os.RemoveAll(dir)
+		}
 	}
 	// muster #281: the sandbox request is resolved and validated here, before a
 	// process exists, so a refusal costs nothing but the directory removed below.
 	var plan *sandboxPlan
 	var profile string
 	if spec.Sandbox != nil {
-		plan, err = d.planSandbox(spec, dir)
+		plan, err = d.planSandboxFor(spec, dir, priorCopy)
 		if err == nil {
 			profile, err = plan.profile()
 			if err != nil {
@@ -234,7 +274,7 @@ func (d *Driver) startSessionServer(ctx context.Context, spec fleet.SessionSpec)
 			}
 		}
 		if err != nil {
-			_ = os.RemoveAll(dir)
+			cleanup()
 			return nil, err
 		}
 		if plan.cache != nil {
@@ -243,15 +283,23 @@ func (d *Driver) startSessionServer(ctx context.Context, spec fleet.SessionSpec)
 	}
 	srv, err := startServer(ctx, d.bin, string(spec.Cwd), d.username, d.buildEnv(dir, extra), profile)
 	if err != nil {
-		_ = os.RemoveAll(dir)
+		cleanup()
 		return nil, err
 	}
 	if plan != nil {
 		srv.sandbox = plan.state()
 	}
 	srv.dir = dir
+	if !fresh {
+		// A directory that already held a session is not this call's to remove,
+		// whatever happens to the process now.
+		srv.persisted.Store(true)
+	}
 	if !d.trackServer(srv) {
-		srv.teardown()
+		srv.pauseForShutdown()
+		if fresh {
+			_ = os.RemoveAll(dir)
+		}
 		return nil, &fleet.Error{Kind: fleet.ErrorUnreachable, Message: "create: this driver has been shut down", Machine: d.machine}
 	}
 	return srv, nil
@@ -361,6 +409,9 @@ func (d *Driver) Send(ctx context.Context, req fleet.Request, ref fleet.SessionR
 	if !ok {
 		return fleet.DeliveryReceipt{}, fmt.Errorf("%w: %q", fleet.ErrNoSuchSession, ref.ID)
 	}
+	if err := d.requireLive(known); err != nil {
+		return fleet.DeliveryReceipt{}, err
+	}
 	ctx, cancel := d.bounded(ctx)
 	defer cancel()
 
@@ -370,6 +421,8 @@ func (d *Driver) Send(ctx context.Context, req fleet.Request, ref fleet.SessionR
 		}
 		return fleet.DeliveryReceipt{}, err
 	}
+	// A new turn supersedes the one a restart interrupted (muster #282).
+	d.clearInterrupted(ref.ID)
 	// HTTP 204 from prompt_async means the runtime accepted the message
 	// and will process it; it is not synchronous confirmation that the
 	// agent has started reading it (that only shows up on the status
@@ -407,6 +460,10 @@ func (d *Driver) readState(ctx context.Context, ref fleet.SessionRef) (fleet.Ses
 	if !ok {
 		return fleet.SessionState{}, fmt.Errorf("%w: %q", fleet.ErrNoSuchSession, ref.ID)
 	}
+	if known.srv == nil {
+		// Listed, not running (muster #282): the reason is the whole answer.
+		return fleet.UnknownState(fleet.ConfidenceObserved, known.unknown), nil
+	}
 	srv := known.srv
 	// muster #280: in isolated mode the session IS its process. One that has
 	// exited is a session that no longer exists — read from the process itself,
@@ -439,10 +496,10 @@ func (d *Driver) readState(ctx context.Context, ref fleet.SessionRef) (fleet.Ses
 	err := d.do(ctx, srv, "GET", "/session/"+url.PathEscape(ref.ID), nil, &sess)
 	switch {
 	case err == nil:
-		d.markSeen(sess.ID, knownSession{
-			srv: srv, cwd: fleet.AbsolutePath(sess.Directory), name: sess.Title, agent: sess.Agent,
-			startedAt: time.UnixMilli(sess.Time.Created),
-		})
+		refreshed := known
+		refreshed.cwd, refreshed.name, refreshed.agent = fleet.AbsolutePath(sess.Directory), sess.Title, sess.Agent
+		refreshed.startedAt = time.UnixMilli(sess.Time.Created)
+		d.markSeen(sess.ID, refreshed)
 		st := classify(false, wireStatus{})
 		// #77: absent from the status map is idle ONLY when the last thing
 		// that happened was not a turn the provider refused. classify has
@@ -450,6 +507,9 @@ func (d *Driver) readState(ctx context.Context, ref fleet.SessionRef) (fleet.Ses
 		// — so it is checked here, once, on the one path that reaches a
 		// confirmed-idle verdict.
 		st.LastTurn = d.lastTurnFailure(ctx, srv, ref.ID)
+		if st.LastTurn == nil {
+			st.LastTurn = known.interrupted // muster #282
+		}
 		return st, nil
 	case isNotFound(err):
 		return fleet.InferredState(fleet.StatusDead,
@@ -475,6 +535,9 @@ func (d *Driver) Interrupt(ctx context.Context, req fleet.Request, ref fleet.Ses
 	known, ok := d.wasSeen(ref.ID)
 	if !ok {
 		return fleet.Ack{}, fmt.Errorf("%w: %q", fleet.ErrNoSuchSession, ref.ID)
+	}
+	if err := d.requireLive(known); err != nil {
+		return fleet.Ack{}, err
 	}
 	ctx, cancel := d.bounded(ctx)
 	defer cancel()
@@ -507,6 +570,9 @@ func (d *Driver) Close(ctx context.Context, req fleet.Request, ref fleet.Session
 	prior, seen := d.wasSeen(ref.ID)
 	if !seen {
 		return fleet.Ack{}, fmt.Errorf("%w: %q", fleet.ErrNoSuchSession, ref.ID)
+	}
+	if prior.srv == nil {
+		return d.closeUnlaunched(req, ref, prior)
 	}
 	priorStart := prior.startedAt
 	srv := prior.srv
@@ -641,6 +707,9 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 	}
 	reads := make(map[*server]*statusRead)
 	for _, info := range known {
+		if info.srv == nil {
+			continue // listed, not running (muster #282): nothing to read
+		}
 		if _, ok := reads[info.srv]; !ok {
 			reads[info.srv] = &statusRead{}
 		}
@@ -664,6 +733,8 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 		r := reads[info.srv]
 		var st fleet.SessionState
 		switch {
+		case info.srv == nil:
+			st = fleet.UnknownState(fleet.ConfidenceObserved, info.unknown)
 		case d.shared == nil && info.srv.proc.exited():
 			st = fleet.InferredState(fleet.StatusDead, "the session's runtime process has exited", nil)
 		case r.err != nil:
@@ -679,6 +750,9 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 		default:
 			ws, present := r.statuses[id]
 			st = classify(present, ws)
+			if !present && info.interrupted != nil {
+				st.LastTurn = info.interrupted // muster #282
+			}
 		}
 
 		if info.srv != nil {

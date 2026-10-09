@@ -21,7 +21,7 @@ func TestCapabilities_DeclaresObservedStateAndItsRealLimits(t *testing.T) {
 		t.Error("ConfirmsDelivery = true; prompt_async's 204 is acceptance, not confirmation")
 	}
 	if caps.SupportsResume {
-		t.Error("SupportsResume = true; this driver's session memory does not survive a restart (see package doc)")
+		t.Error("SupportsResume = true with no state directory; nothing is remembered across a restart (see package doc)")
 	}
 	if !caps.SupportsPin.Model {
 		t.Error("SupportsPin.Model = false; Create genuinely honours a provider/model hint")

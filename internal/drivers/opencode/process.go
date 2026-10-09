@@ -111,6 +111,11 @@ type server struct {
 	// right after it do not both report. Isolated mode only: in shared mode a
 	// session's end does not end the connection.
 	gone atomic.Bool
+	// persisted is set once the session on this server has a record on disk
+	// (muster #282). A server that is merely STOPPED with the service keeps its
+	// directory — the session's database is what a restart finds again — while a
+	// server whose session was closed, or never came to exist, removes it.
+	persisted atomic.Bool
 
 	once       sync.Once
 	onTeardown func(*server)
@@ -118,13 +123,20 @@ type server struct {
 
 // teardown stops the server's process group and removes its session-scoped
 // directory. Safe to call any number of times, from any goroutine.
-func (s *server) teardown() {
+func (s *server) teardown() { s.stop(false) }
+
+// pauseForShutdown stops the server the way the service stopping does: the
+// process group goes, but a persisted session keeps its directory, because the
+// session has not been closed and the next start will look for it there.
+func (s *server) pauseForShutdown() { s.stop(true) }
+
+func (s *server) stop(keepPersisted bool) {
 	if s == nil {
 		return
 	}
 	s.once.Do(func() {
 		s.proc.stop()
-		if s.dir != "" {
+		if s.dir != "" && !(keepPersisted && s.persisted.Load()) {
 			_ = os.RemoveAll(s.dir)
 		}
 		if s.onTeardown != nil {

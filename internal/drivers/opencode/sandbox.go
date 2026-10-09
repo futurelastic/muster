@@ -216,6 +216,13 @@ func installRoots(bin, home string) []string {
 // other than sessionDir exists, so a refusal has no side effect to undo beyond
 // sessionDir, which the caller removes.
 func (d *Driver) planSandbox(spec fleet.SessionSpec, sessionDir string) (*sandboxPlan, error) {
+	return d.planSandboxFor(spec, sessionDir, "")
+}
+
+// planSandboxFor is planSandbox for a session that may already have a private
+// package cache in its directory (muster #282): priorCopy, when set, is how that
+// cache was made, and it is reused rather than copied over itself.
+func (d *Driver) planSandboxFor(spec fleet.SessionSpec, sessionDir, priorCopy string) (*sandboxPlan, error) {
 	sb := spec.Sandbox
 	invalid := func(msg string, args ...any) error {
 		return &fleet.Error{Kind: fleet.ErrorInvalid, Message: "create: " + fmt.Sprintf(msg, args...), Machine: d.machine}
@@ -290,9 +297,15 @@ func (d *Driver) planSandbox(spec fleet.SessionSpec, sessionDir string) (*sandbo
 			write = append(write, src)
 		case fleet.PackageCachePrivate:
 			dst := filepath.Join(resolvePath(sessionDir), "pkgcache")
-			how, err := copyTree(src, dst)
-			if err != nil {
-				return nil, &fleet.Error{Kind: fleet.ErrorUnreachable, Message: fmt.Sprintf("create: copying the package cache for this session: %v", err), Machine: d.machine}
+			how := priorCopy
+			if how == "" {
+				var err error
+				how, err = copyTree(src, dst)
+				if err != nil {
+					return nil, &fleet.Error{Kind: fleet.ErrorUnreachable, Message: fmt.Sprintf("create: copying the package cache for this session: %v", err), Machine: d.machine}
+				}
+			} else if info, err := os.Stat(dst); err != nil || !info.IsDir() {
+				return nil, invalid("the session's private package cache is gone from %q", dst)
 			}
 			st.Path, st.Copy = fleet.AbsolutePath(dst), how
 			// dst is inside the session directory already granted writable.

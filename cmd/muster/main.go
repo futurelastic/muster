@@ -60,7 +60,10 @@
 //	                       (§10) and the event sequence (§7.3). Absent means
 //	                       in-memory only, which is honest for a throwaway
 //	                       instance and is the defect D5 described for a real
-//	                       one. Created if missing, mode 0700.
+//	                       one. Created if missing, mode 0700. The opencode
+//	                       runtime keeps its session records and each session's
+//	                       database here too, so its sessions are found again
+//	                       after a restart (muster #282).
 //	FLEET_CONFIG           path to a JSON file carrying the principal table,
 //	                       per-peer credentials (§6), this machine's
 //	                       defaultRuntime (§60: the bare-id tiebreak once a
@@ -606,6 +609,9 @@ func main() {
 		d, err := opencode.New(context.Background(), self,
 			opencode.WithBinary(bin),
 			opencode.WithSessionEnv(sessionEnvEntries),
+			// muster #282: with a state directory, opencode sessions survive a
+			// restart of this service; without one they are forgotten, as before.
+			opencode.WithStateDir(os.Getenv("FLEET_STATE_DIR")),
 			opencode.WithRuntimePath(splitList(os.Getenv("FLEET_OPENCODE_PATH"))),
 			opencode.WithSandboxReadPaths(splitList(os.Getenv("FLEET_OPENCODE_SANDBOX_READ"))))
 		if err != nil {

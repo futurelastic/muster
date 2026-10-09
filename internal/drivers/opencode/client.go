@@ -82,6 +82,10 @@ type wireMessageInfo struct {
 	Role string `json:"role"`
 	Time struct {
 		Created int64 `json:"created"`
+		// Completed is set once the runtime finished the message. An assistant
+		// message without it, in a session no turn is running in, is a turn that
+		// was cut off (muster #282).
+		Completed int64 `json:"completed"`
 	} `json:"time"`
 	Error *wireAssistantError `json:"error"`
 }
