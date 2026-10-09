@@ -777,6 +777,10 @@ func sameTurnEnd(a, b *TurnEnd) bool {
 // to end. The recovery direction matters just as much: a supervisor never told
 // the channel came back goes on believing the session is unreachable.
 //
+// BridgeID is compared as well (#276): the identifier is written once, with the
+// channel coming up, so a change in it is a different channel — a caller that
+// builds a viewer link from it must hear that the link it holds is stale.
+//
 // Reason is compared too, the same call sameTurnEnd already makes for its own
 // Reason: it is written once, from a record entry the runtime appends when the
 // channel fails (#69), not repainted continuously the way Evidence is — so
@@ -785,6 +789,9 @@ func sameTurnEnd(a, b *TurnEnd) bool {
 func sameControlChannel(a, b *ControlChannel) bool {
 	if a == nil || b == nil {
 		return a == b
+	}
+	if (a.BridgeID == nil) != (b.BridgeID == nil) || (a.BridgeID != nil && *a.BridgeID != *b.BridgeID) {
+		return false
 	}
 	return a.State == b.State && a.Reason == b.Reason
 }
@@ -813,4 +820,28 @@ func sameStamp(a, b *Timestamp) bool {
 		return a == b
 	}
 	return a.Equal(*b)
+}
+
+// ComposerRead is what an on-demand read of a session's composer returns
+// (muster #276): the unsent text itself, and the digest `discard` accepts for it.
+//
+// It exists because SessionState.ComposerDigest says WHETHER text is sitting
+// unsent and lets a caller destroy it safely, but not WHAT it is, and a
+// supervisor that must report stranded operator text verbatim so a person can
+// decide whether to resubmit it had no way to say more than "unsent, text
+// unavailable".
+//
+// The text is deliberately served by its own route and never carried on a
+// listing, a single-session read or the event stream: it can hold anything an
+// operator typed, and those surfaces reach every principal that holds `read`
+// without asking for it. Reading it is gated by `read` all the same (ruled
+// 2026-10-09): every principal holding `read` can read what was left typed.
+//
+// Text and ComposerDigest are both empty when the composer holds nothing; the
+// read then succeeds, since an empty composer is a real answer and not a fault.
+// The digest is the SAME value State publishes, so a caller can pass it straight
+// to `discard` as the expected digest.
+type ComposerRead struct {
+	Text           string `json:"text"`
+	ComposerDigest string `json:"composerDigest"`
 }

@@ -225,6 +225,7 @@ Warning {
 ControlChannel {
   state   : "active" | "connecting" | "reconnecting" | "failed" | "off"
   reason? : string  // the runtime's own words for why `failed` (muster #69); for humans, never branched on
+  bridgeId : string | null  // the id the runtime's bridge published when the channel came up (muster #276); an opaque token, null when off, failed, not read or the runtime wrote none
 }
 
 PermissionMode =

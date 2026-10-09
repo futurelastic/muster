@@ -2211,10 +2211,10 @@ func (d *Driver) State(ctx context.Context, req fleet.Request, ref fleet.Session
 		// muster #269: where the screen found no label, the record and the launch
 		// decide — see resolveControlChannel. State does its own conversation
 		// lookup for the same reason it does the two upgrades around this line.
-		if st.ControlChannel == nil && !r.dead && d.conversations != nil {
+		if !r.dead && d.conversations != nil {
 			conv := d.conversations.lookup(conversationKey{pane: r.paneID, created: r.created}, r.cwd, r.session, r.created,
 				processGeneration{pid: r.pid}, d.liveConversationSource(ctx, r.pid, r.cwd))
-			st.ControlChannel = d.resolveControlChannel(nil, conv, r)
+			st.ControlChannel = d.resolveControlChannel(st.ControlChannel, conv, r)
 		}
 		// #111: same split as the two upgrades just above — List resolves
 		// `turns` from its own pre-resolved Conversation, State does its own
@@ -3712,6 +3712,69 @@ func (d *Driver) Discard(ctx context.Context, req fleet.Request, ref fleet.Sessi
 	}
 	return fleet.Ack{}, d.withRestartNote(ref.ID, discardIncomplete(pending, left))
 }
+
+// Composer reports what text is sitting unsent in a session's composer, with the
+// digest Discard accepts for exactly that text (muster #276).
+//
+// It reads the same screen Discard reads, through the same composerText, and
+// digests it with the same composerTextDigest State publishes as
+// ComposerDigest — so a read followed by a discard agree by construction, and a
+// composer that changes between the two is refused by Discard's own digest check
+// rather than silently destroyed.
+//
+// It takes no composer lock: it presses nothing, so it cannot race a
+// delivery into corrupting anything, and a read that lands mid-delivery returns
+// the composer as it stood, which is all a snapshot ever promised.
+//
+// A composer this driver cannot read as a whole is a refusal and never an empty
+// answer. "Nothing is there" would be a claim about text the driver has not seen
+// (§5.7), and for a supervisor reporting stranded text a false empty is worse
+// than an error.
+func (d *Driver) Composer(ctx context.Context, req fleet.Request, ref fleet.SessionRef) (fleet.ComposerRead, error) {
+	ctx, cancel := d.bounded(ctx)
+	defer cancel()
+
+	rows, captures, err := d.enumerate(ctx)
+	if err != nil {
+		return fleet.ComposerRead{}, err
+	}
+	var live *paneRow
+	for i := range rows {
+		if rows[i].session == ref.ID {
+			live = &rows[i]
+			break
+		}
+	}
+	if live == nil {
+		return fleet.ComposerRead{}, d.noSuchSession(ctx, rows, ref.ID)
+	}
+	if want := req.Expect.StartedAt; want != nil && !live.created.Equal(*want) {
+		return fleet.ComposerRead{}, fmt.Errorf(
+			"%w: id %q now holds a session started at %s; the caller meant the one started at %s",
+			ErrAmbiguousTarget, ref.ID, live.created.Format(time.RFC3339), want.Format(time.RFC3339))
+	}
+
+	sc := captures[live.paneID].screen()
+	pending, scan := composerText(sc)
+	if scan != composerFound {
+		if reason, ok := feedbackCardRefusal(sc); ok {
+			return fleet.ComposerRead{}, fmt.Errorf("%w: composer: %s", ErrAmbiguousTarget, reason)
+		}
+		if reason, ok := feedbackPanelRefusal(sc); ok {
+			return fleet.ComposerRead{}, fmt.Errorf("%w: composer: %s", ErrAmbiguousTarget, reason)
+		}
+		return fleet.ComposerRead{}, fmt.Errorf(
+			"%w: composer: this session's composer cannot be read as a whole right now (it is clipped by the "+
+				"window or covered by something else), so whether text is sitting in it is not known",
+			ErrAmbiguousTarget)
+	}
+	if pending == "" {
+		return fleet.ComposerRead{}, nil
+	}
+	return fleet.ComposerRead{Text: pending, ComposerDigest: composerTextDigest(pending)}, nil
+}
+
+var _ driver.ComposerReader = (*Driver)(nil)
 
 // clearComposer walks a composer's unsent text backward with repeated C-u
 // presses until it empties or the pass proves futile — the mechanism both

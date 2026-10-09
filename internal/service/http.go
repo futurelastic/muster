@@ -90,6 +90,7 @@ func NewMux(svc *Service, cfg Config) *http.ServeMux {
 	mux.HandleFunc("GET /v1/machines/{machine}/sessions/{id}", withAuth(cfg, reading(handleGetSession(svc))))
 	mux.HandleFunc("GET /v1/machines/{machine}/sessions/{id}/environment", withAuth(cfg, reading(handleSessionEnvironment(svc))))
 	mux.HandleFunc("GET /v1/machines/{machine}/sessions/{id}/turns", withAuth(cfg, revealing(handleTurns(svc))))
+	mux.HandleFunc("GET /v1/machines/{machine}/sessions/{id}/composer", withAuth(cfg, reading(handleComposer(svc))))
 	mux.HandleFunc("POST /v1/machines/{machine}/sessions/{id}/input", withAuth(cfg, mutating(svc, cfg, handleSendInput(svc))))
 	mux.HandleFunc("POST /v1/machines/{machine}/sessions/{id}/respond", withAuth(cfg, mutating(svc, cfg, handleRespond(svc))))
 	mux.HandleFunc("POST /v1/machines/{machine}/sessions/{id}/interrupt", withAuth(cfg, mutating(svc, cfg, handleInterrupt(svc))))

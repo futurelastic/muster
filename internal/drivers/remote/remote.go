@@ -1724,6 +1724,38 @@ func (d *Driver) SetRemoteControl(ctx context.Context, req fleet.Request, ref fl
 
 var _ driver.RemoteControlSetter = (*Driver)(nil)
 
+// Composer asks the peer what is sitting unsent in a session's composer
+// (GET …/composer, muster #276).
+//
+// The peer applies its own grant to the asserted caller. A peer that predates the
+// route answers with its router's bare 404, which decodeError alone would read as
+// "no such session"; it is reported as unsupported instead, because the session
+// may be perfectly alive and the peer simply has no such read.
+func (d *Driver) Composer(ctx context.Context, req fleet.Request, ref fleet.SessionRef) (fleet.ComposerRead, error) {
+	ctx, cancel := d.bounded(ctx)
+	defer cancel()
+
+	path := fmt.Sprintf("/v1/machines/%s/sessions/%s/composer",
+		url.PathEscape(string(d.machine)), url.PathEscape(ref.ID))
+	if want := req.Expect.StartedAt; want != nil {
+		path += "?startedAt=" + url.QueryEscape(want.UTC().Format(time.RFC3339Nano))
+	}
+	var out fleet.ComposerRead
+	if err := d.do(ctx, req, http.MethodGet, path, nil, &out); err != nil {
+		if routeMissing(err) {
+			return fleet.ComposerRead{}, &fleet.Error{
+				Kind:    fleet.ErrorUnsupported,
+				Message: fmt.Sprintf("peer %s has no composer route (older build)", d.machine),
+				Machine: d.machine,
+			}
+		}
+		return fleet.ComposerRead{}, err
+	}
+	return out, nil
+}
+
+var _ driver.ComposerReader = (*Driver)(nil)
+
 // Respond answers a prompt on a session belonging to the peer (§3).
 //
 // Like Send, a refusal comes back as an ordinary 200 carrying an outcome and
