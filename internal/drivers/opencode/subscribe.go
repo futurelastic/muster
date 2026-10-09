@@ -44,16 +44,41 @@ import (
 //	session.error     the runtime's own failure account       -> the LastTurn of the
 //	                                                             idle state it ends in
 //	session.deleted   gone on the runtime                     -> session.closed
+//	permission.*      an ask raised, answered or withdrawn    -> session.state (see below)
 //	Close, process exit                                       -> session.closed
 //
 // Everything else the bus publishes — message and part updates, file and LSP
 // events, session.updated (a title change; rename is unsupported here),
-// permission and question prompts (Respond is unsupported here), heartbeats — is
-// DROPPED. So a session parked on a permission ask emits no event of its own:
-// State and List read it as `waiting_input` (muster #283), but the stream still
-// shows the `working` it last said until something else changes. None of it is invented into an existing kind. Events about a session
-// this driver did not create (a child session the runtime started for itself)
-// are dropped too: they are not in this driver's session universe.
+// question prompts (Respond is unsupported here), heartbeats — is DROPPED, and
+// none of it is invented into an existing kind. Events about a session this
+// driver did not create (a child session the runtime started for itself) are
+// dropped too: they are not in this driver's session universe.
+//
+// # A permission ask is a hint to look, not a payload to decode (muster #289)
+//
+// A session parked on a tool-permission ask is `waiting_input` to State and List
+// (muster #283). The stream says the same, through the same reader: any event
+// whose type is in permissionEvents makes this driver re-read the session's
+// state (readState, the very function State calls) and report what it finds.
+// So the stream and a poll agree by construction, and nothing here depends on
+// the shape of an ask, which differs between runtime releases.
+//
+// The event names are the part that differs. The releases this driver has been
+// written against raise `permission.updated` (older) or `permission.asked`
+// (newer) when an ask appears, and `permission.replied` when it is answered or
+// withdrawn; all three are treated alike, since every one means "the list of
+// asks changed". Reading the list rather than the event is also what makes an
+// unfamiliar spelling harmless: it costs one read, never a wrong state.
+//
+// Cost: one state read per permission event, none otherwise. An idle session,
+// and a busy one nobody asks anything of, generate no permission read at all.
+//
+// A runtime that raises NO event for an ask cannot be heard here, and this
+// driver does not poll to cover for it: such a session keeps its last reported
+// state on the stream while State, asked directly, still says `waiting_input`.
+// That is the gap issue #289 allowed for; it was not found on any release
+// available when this was written, and a poll would charge every healthy
+// session to cover a runtime nobody has seen.
 //
 // A state is emitted only when it CHANGES. The runtime reports a turn's end
 // twice (session.status idle, then session.idle); the second is not news.
@@ -92,8 +117,10 @@ const (
 
 // busMaxEventBytes bounds one event's data. An event past it (a large tool
 // output in a message part) is skipped, never decoded: nothing this driver maps
-// is anywhere near that large. A variable only so a test can lower it.
-var busMaxEventBytes = 8 << 20
+// is anywhere near that large. A constant: the framing functions take the bound
+// as a parameter, so a test lowers it for one call without writing shared state
+// a leftover reader goroutine could be reading (muster #290).
+const busMaxEventBytes = 8 << 20
 
 // Subscribe opens a stream of this driver's session events (§3, §5.5). The
 // filter decides which servers it connects to and which sessions' events pass.
@@ -344,7 +371,7 @@ type busProps struct {
 // was a gap.
 func (s *subscription) read(srv *server, body io.ReadCloser) {
 	defer body.Close()
-	err := readSSE(body, func(data []byte) {
+	err := readSSE(body, busMaxEventBytes, func(data []byte) {
 		var ev busEvent
 		if json.Unmarshal(data, &ev) != nil || ev.Type == "" {
 			return
@@ -359,14 +386,14 @@ func (s *subscription) read(srv *server, body io.ReadCloser) {
 
 // readSSE parses a server-sent-events body, calling emit once per event with its
 // data. Fields other than data are ignored. An event whose data exceeds
-// busMaxEventBytes is skipped. It returns when the body ends or errors; a clean
+// limit bytes is skipped. It returns when the body ends or errors; a clean
 // end is io.EOF.
-func readSSE(r io.Reader, emit func(data []byte)) error {
+func readSSE(r io.Reader, limit int, emit func(data []byte)) error {
 	br := bufio.NewReaderSize(r, 64<<10)
 	var data []byte
 	over := false
 	for {
-		line, err := readBoundedLine(br)
+		line, err := readBoundedLine(br, limit)
 		if err != nil {
 			return err
 		}
@@ -385,7 +412,7 @@ func readSSE(r io.Reader, emit func(data []byte)) error {
 			continue
 		}
 		value = strings.TrimPrefix(value, " ")
-		if over || len(data)+len(value)+1 > busMaxEventBytes {
+		if over || len(data)+len(value)+1 > limit {
 			over = true
 			continue
 		}
@@ -397,13 +424,13 @@ func readSSE(r io.Reader, emit func(data []byte)) error {
 }
 
 // readBoundedLine reads one line without its terminator. A line longer than
-// busMaxEventBytes is consumed in full but returned truncated, so one huge event
+// limit bytes is consumed in full but returned truncated, so one huge event
 // cannot grow memory without bound.
-func readBoundedLine(br *bufio.Reader) ([]byte, error) {
+func readBoundedLine(br *bufio.Reader, limit int) ([]byte, error) {
 	var line []byte
 	for {
 		chunk, err := br.ReadSlice('\n')
-		if len(line) < busMaxEventBytes {
+		if len(line) < limit {
 			line = append(line, chunk...)
 		}
 		switch {
@@ -460,6 +487,8 @@ func (s *subscription) handle(srv *server, ev busEvent) {
 		s.idle(ref, srv)
 	case "session.error":
 		s.failure(ref, srv, p.Error)
+	case "permission.asked", "permission.updated", "permission.replied":
+		s.permissionChanged(ref, srv)
 	case "session.deleted":
 		// The runtime's own word that the session is gone, the same authority
 		// Close's 404 path acts on (#78).
@@ -474,6 +503,60 @@ func (s *subscription) handle(srv *server, ev busEvent) {
 			Payload: fleet.SessionStatePayload{Ref: ref, State: fleet.InferredState(fleet.StatusDead,
 				"the runtime reported the session deleted", nil)},
 		})
+	}
+}
+
+// permissionChanged answers a permission event for one session: it re-reads the
+// session's state and reports it, keyed so that a repeat is not news. A session
+// blocked on an ask is keyed by the ask itself (a second, different ask is a new
+// fact; the same one re-announced is not). One that is no longer blocked reports
+// whatever it is now: working again, or idle if its turn ended meanwhile.
+func (s *subscription) permissionChanged(ref fleet.SessionRef, srv *server) {
+	ctx, cancel := context.WithTimeout(s.ctx, busReadTimeout)
+	defer cancel()
+	st, err := s.d.readState(ctx, ref)
+	if err != nil {
+		if s.ctx.Err() != nil {
+			return
+		}
+		// Not "nothing changed" (§5.7): the stream cannot say what became of the
+		// ask, so it ends as a gap and the service subscribes again from a fresh
+		// baseline rather than leave a consumer on a state that may be stale.
+		s.fail(&fleet.Error{
+			Kind:      fleet.ErrorUnreachable,
+			Message:   fmt.Sprintf("the runtime raised a permission event and its session state could not be read afterwards (%v); changes after this point were not seen", err),
+			Machine:   s.d.machine,
+			Retryable: true,
+		})
+		return
+	}
+	switch st.Status {
+	case fleet.StatusWaitingInput:
+		key := "ask"
+		if st.Prompt != nil {
+			key += ":" + st.Prompt.Nonce
+		}
+		// The figures State attaches to any live, non-idle session.
+		uctx, ucancel := context.WithTimeout(s.ctx, busReadTimeout)
+		st.Usage = s.d.usageOf(uctx, srv, ref.ID, false)
+		ucancel()
+		s.state(ref, srv, key, st)
+	case fleet.StatusWorking:
+		s.state(ref, srv, "busy", st)
+	case fleet.StatusIdle:
+		// Only the end of something this stream already reported. A permission
+		// event for a session the stream has said nothing about, found idle, is
+		// not a change to announce: there is no earlier state for it to follow.
+		s.mu.Lock()
+		t := s.track[ref.ID]
+		seen := t != nil && t.last != ""
+		s.mu.Unlock()
+		if seen {
+			s.idle(ref, srv)
+		}
+	default:
+		// dead or unknown: a permission event is not the authority for either,
+		// and the events that are (session.deleted, the process ending) say so.
 	}
 }
 
