@@ -43,6 +43,13 @@
 //	                       interpreter, a build tool) must be on a system
 //	                       directory or listed here; a directory under the
 //	                       service user's home is refused.
+//	FLEET_OPENCODE_SANDBOX_READ  comma-separated absolute directories every
+//	                       SANDBOXED opencode session may read, in addition to
+//	                       the default profile (muster issue #281): an
+//	                       interpreter or package cache that lives under the
+//	                       service user's home and so is closed by default.
+//	                       Operator configuration only; a create cannot add to
+//	                       the allow-lists the profile is built on.
 //	FLEET_PEERS            comma-separated name=url list, e.g.
 //	                       "other=https://other.example:PORT". Peers are
 //	                       statically configured; there is no discovery
@@ -599,7 +606,8 @@ func main() {
 		d, err := opencode.New(context.Background(), self,
 			opencode.WithBinary(bin),
 			opencode.WithSessionEnv(sessionEnvEntries),
-			opencode.WithRuntimePath(splitList(os.Getenv("FLEET_OPENCODE_PATH"))))
+			opencode.WithRuntimePath(splitList(os.Getenv("FLEET_OPENCODE_PATH"))),
+			opencode.WithSandboxReadPaths(splitList(os.Getenv("FLEET_OPENCODE_SANDBOX_READ"))))
 		if err != nil {
 			log.Printf("muster: opencode runtime not started, continuing without it: %v", err)
 		} else if err := svc.RegisterLocalDriver(opencode.DefaultRuntime, d); err != nil {

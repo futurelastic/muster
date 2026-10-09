@@ -108,6 +108,22 @@ func runFakeOpencode(args []string) {
 			writeJSON(w, []wireMessage{})
 		case path == "/__test/env":
 			writeJSON(w, map[string]any{"env": os.Environ(), "cwd": cwd, "pid": os.Getpid()})
+		case path == "/__test/sh" && r.Method == http.MethodPost:
+			// A tool the session runs: a shell started BY the runtime's process,
+			// as the agent's own commands are, so it inherits whatever profile the
+			// runtime was started under (muster #281).
+			var body struct {
+				Cmd string `json:"cmd"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			out, err := exec.Command("/bin/sh", "-c", body.Cmd).CombinedOutput()
+			rc := 0
+			if ee, ok := err.(*exec.ExitError); ok {
+				rc = ee.ExitCode()
+			} else if err != nil {
+				rc = -1
+			}
+			writeJSON(w, map[string]any{"out": string(out), "rc": rc})
 		case path == "/__test/spawn" && r.Method == http.MethodPost:
 			// A long-lived grandchild, as a tool the session ran would be. It is
 			// found through the BUILT PATH, so the test also proves the base PATH

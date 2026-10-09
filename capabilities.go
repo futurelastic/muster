@@ -152,6 +152,14 @@ type DriverCapabilities struct {
 	// create as unsupported; a caller can also read this flag first. Like every
 	// flag here it inherits `source: assumed` from an unreached peer.
 	IsolatesEnvironment bool `json:"isolatesEnvironment"`
+	// Sandbox declares that the driver can wrap a session in an operating-system
+	// sandbox (muster #281): SessionSpec.Sandbox is honoured, and every session
+	// created with it reports the profile in force (SessionState.Sandbox). Absent
+	// means it cannot, and a create asking for one is refused as unsupported —
+	// a platform that cannot deny every class in SandboxSupport.Denies leaves it
+	// absent rather than offering a weaker profile under the same name. Like
+	// every flag here it inherits `source: assumed` from an unreached peer.
+	Sandbox *SandboxSupport `json:"sandbox,omitempty"`
 	// ConfirmsDelivery reports whether the driver can distinguish
 	// "submitted" from "queued".
 	ConfirmsDelivery bool `json:"confirmsDelivery"`

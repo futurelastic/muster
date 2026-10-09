@@ -85,6 +85,7 @@ SessionSpec {
   contextRef?: AbsolutePath       // see §5.3 — never inline, never argv
   env?       : map<string,string> // out of band only, never argv (§5.3)
   isolateEnvironment?: boolean    // the session's process carries ONLY a built environment, never the service's own; a driver that cannot refuses `unsupported` (§4.3)
+  sandbox?   : SandboxSpec        // an OS sandbox around the session's process: files, unix sockets and system services denied outside what is granted; a driver that cannot enforce it refuses `unsupported` (§4.3)
   resume?    : string             // a prior conversation this session continues
   conversationId?: string         // a caller-chosen UUID this session starts a NEW conversation under; mutually exclusive with resume
   permissionMode?: string         // a non-default permission posture; "bypass" is the only value
@@ -140,6 +141,91 @@ environment into a caller that asked for less (§5.6); a relay to a peer that pr
 refused the same way (api-http.md §3.3). It is a plain boolean: there is no honest request for the
 opposite, and a driver that always isolates simply honours it. What it does and does not promise is
 in §4.3.
+
+**`sandbox` is a requirement, and it is refused rather than degraded** (muster #281). Environment
+isolation decides what a session is *handed*; it does not decide what the session can *reach*. A
+process started with a clean environment still reads the service user's home directory (git and
+forge CLI configuration, SSH keys, other projects), connects to that user's multiplexer and agent
+sockets, and talks to the desktop's system services. `sandbox` asks the driver to wrap the session's
+process — and so every tool the session starts — in the host's own sandbox facility. Its absence is
+no sandbox; its presence, even as `{}`, is the default profile.
+
+```
+SandboxSpec {
+  readPaths?    : AbsolutePath[]   // readable in addition to the defaults
+  writePaths?   : AbsolutePath[]   // readable and writable in addition to the defaults; never a shared temporary directory
+  network?      : "open" | "closed"  // default open; closed = loopback only
+  packageCache? : { path: AbsolutePath, mode?: "shared" | "private" }   // default private
+}
+```
+
+The defaults are deliberately narrow. Readable: the session's working directory and its own private
+directory, the runtime's own install, and the system's program directories. Writable: the working
+directory and the session's private directory (which holds its `TMPDIR`), and a few device files.
+Everything else is denied, and the caller can only *add* paths — the allow-lists that keep the
+runtime working are carried in the driver and no create can widen them. A path must be absolute and
+clean; a grant that is, or contains, the service user's home directory is refused `invalid`
+(it would put back exactly what the profile removes), as is a writable grant on a shared temporary
+directory. The shape of a malformed request is a `400` on any machine.
+
+**What "denied" means is three classes, together** — because each is a way out of the other two,
+and a platform that cannot deny all three does not offer the capability (§4.3) rather than a weaker
+profile under the same name:
+
+- *Files.* Reads and writes are denied outside the granted paths. Metadata (does it exist, how big)
+  stays readable so a program can walk to a directory it was granted.
+- *Unix-domain sockets.* A path-based file deny does not cover a **connect**. Measured: inside a
+  profile that denied the home directory, the multiplexer's server socket was still connectable —
+  and a command started through it runs *outside* the profile, with the user's full home — and so
+  was the SSH agent's socket. Connects are denied outright, with one exception: the system name
+  resolver, while the network is open. A file grant on a directory does not make a socket inside it
+  connectable.
+- *System services.* With the first two closed, the clipboard was still readable, `open` still
+  launched applications outside the profile, and scripting events still drove other applications.
+  Service lookups are denied except a short allow-list a process needs to resolve users and names
+  and write a log line.
+
+**The temporary directory is the session's own.** Each session has a private `TMPDIR` inside its own
+directory (§4.3, `isolatesEnvironment`); writes to the shared system temporary directories are
+denied, because concurrent sessions would otherwise share a writable directory — a cross-session
+side channel.
+
+**The profile replaces a harness's own sandbox; it never nests inside it.** A macOS profile cannot be
+applied from inside another (`Operation not permitted`), so a harness that ships its own sandbox
+fails closed under this one and refuses every shell command. A driver whose runtime has one must
+tell it to stand down. (The opencode driver's runtime has none.)
+
+**Network posture is open or closed, nothing finer.** The platform sandbox cannot filter by
+hostname, and the model API a session talks to needs the network. `closed` leaves loopback only (the
+runtime's own server lives there), so a closed session works only against a model that is reachable
+over loopback. The capability lists the postures a driver can enforce and implies no host filtering.
+
+**A package cache is part of the profile's shape**, because a dependency install is impractical
+without one and the home directory is closed. `private` (default) gives the session its own copy of
+the named directory, made when the session starts — copy-on-write where the filesystem has it, a
+plain copy otherwise — so no write path is shared between concurrent sessions and what the session
+installs never reaches the original. `shared` grants the named directory itself, writable.
+Either way the session finds the directory it should use in `MUSTER_PACKAGE_CACHE`, and
+`state.sandbox.packageCache` says which mode and which kind of copy was used.
+
+**What a `201` does not mean, and what the caller must do.**
+
+- *The working directory is untrusted once a sandboxed session has run in it.* The session controls
+  any repository configuration inside it (filter drivers, external diff programs, file-system
+  monitors, hooks). A git command run **outside** the profile on that directory afterwards — by this
+  service or by its caller — executes code the session chose: a sandbox escape. This service never
+  runs git on a session's working directory. A caller extracting the result (a diff, artifacts) must
+  do it inside the same profile, or with every exec-capable setting overridden.
+- *Setting up the working directory is the caller's job, and it comes first.* A test loop that diffs
+  against the repository's trunk needs the trunk reference to exist before the session starts (a
+  clone fetched at one commit has none, and diff-based gates refuse to run); it cannot be fetched
+  from inside the profile once the credentials are out of reach. Seed the reference, pointing at the
+  start commit, before creating the session.
+- *Tests that start their own multiplexer fixtures* fail inside the profile unless pointed at a
+  private socket under the session's own directory — their connect to the default socket is
+  exactly what the profile denies.
+- *The model-provider key is still in the session's environment*, and the profile does not hide it
+  from the session's own tools (§4.3, `isolatesEnvironment`).
 
 **`labels` are caller facts, not hints and not configuration** (muster #153). A caller
 attaches what IT knows about a session — the unit of work it serves, the working tree it uses, what
@@ -225,6 +311,7 @@ SessionState {
   credentialGeneration?: Timestamp // this machine's local credential generation at read time (#12)
   controlChannel?: ControlChannel  // what the RUNTIME says about its own remote-control channel (#48)
   permissionMode?: PermissionMode  // the permission mode the runtime shows the session to be in, when the driver can read it (#194); absent = nothing was read
+  sandbox?       : SandboxState    // the profile the session runs under (#281): mechanism, denied classes, network, granted paths (defaults included), package cache; absent = not sandboxed
   warnings?      : Warning[]       // footer notices the driver read below the composer (#230); absent = none found, not merely unobserved
 }
 
@@ -1726,6 +1813,7 @@ DriverCapabilities {
   observesPermissionMode: boolean // can report `permissionMode` (§2.3); absent state is answerable only against this
   reportsRuntimeSurface: boolean // can say anything about `runtimeSurface` (§2.13); absent state is answerable only against this
   isolatesEnvironment: boolean // starts a session's process with a BUILT environment, nothing inherited from the service (§2.1 `isolateEnvironment`, muster #280)
+  sandbox?        : SandboxSupport  // can wrap a session in an OS sandbox (§2.1 `sandbox`, muster #281): { mechanism, denies[], network[], packageCache[] }; absent = cannot, and a create asking for one is refused `unsupported`
   confirmsDelivery: boolean   // can distinguish submitted from queued
   supportsResume  : boolean   // sessions survive a service restart
   deliversToInbox : boolean   // has an inbox delivery path wired for at least some targets
@@ -1765,6 +1853,22 @@ capability that silently read `false` on an unreachable peer, with nothing
 to mark the value as unconfirmed, is precisely the defect `source` exists to
 prevent (see below), and adding a flag is not a license to re-introduce it
 by accident.
+
+**`sandbox` answers "can a session here be confined by an operating-system profile"** (muster #281).
+Present means the driver enforces **every** class in `denies` — `files`, `unixSockets`,
+`systemServices` — with the mechanism it names, and honours the `network` postures and
+`packageCache` modes it lists. Absent means it cannot, and a create carrying `sandbox` is refused
+`unsupported`, naming what is missing, before anything is started (§5.6). It is absent, not
+half-offered, where the platform cannot deny all three classes. For the opencode driver it is
+present on macOS only, enforced with the system's `sandbox-exec` and a profile the driver generates;
+on any other platform, in the test-only shared mode (one server cannot confine one of its sessions),
+or when the service itself already runs inside a sandbox (a profile cannot be nested), it is absent
+and the reason is in the refusal. The tmux driver never declares it: its sessions live in the user's
+own multiplexer, whose server socket is exactly what a sandbox must keep a session from. A session
+created with `sandbox` reports the profile in force in `state.sandbox` on every read and in every
+listing — the paths and posture actually granted, defaults included — so a reader confirms the
+profile rather than assumes it from the request. Like every flag here it inherits `source: assumed`
+from an unreached peer.
 
 **`isolatesEnvironment` answers "can a session here be started with ONLY the environment its
 create asked for"** (muster #280). `true` means the driver starts each session in a process of its

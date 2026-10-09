@@ -41,8 +41,9 @@
 // model-provider key a session needs is in its environment, and opencode
 // exposes that environment to its tool shell: isolation scopes every OTHER
 // credential and cannot protect the model key itself, so give each lane its
-// own spend-capped key. The filesystem is not confined: a session can read what
-// the service user can (the sandbox, #281, is where that belongs). And the
+// own spend-capped key. The filesystem is not confined unless the create asks
+// for a sandbox (sandbox.go, #281): without one a session can read what the
+// service user can. And the
 // working directory's AGENTS.md and CLAUDE.md reach the runtime (up to 64 KB;
 // @path imports are not followed by one of the harnesses measured).
 //
@@ -167,6 +168,15 @@ type Driver struct {
 	sessionRoot string
 	runtimePath []string
 
+	// sandbox is what this driver can enforce on this host (nil: nothing) and
+	// sandboxWhy says why not, in words a refused create can quote (muster
+	// #281). sandboxRead is the operator's extra readable directories — an
+	// interpreter or package cache that lives under the service user's home —
+	// carried here because the allow-lists never come from a create.
+	sandbox     *fleet.SandboxSupport
+	sandboxWhy  string
+	sandboxRead []string
+
 	// baseURL and password are the shared-mode seam's inputs (WithBaseURL,
 	// WithCredential); New folds them into shared.
 	baseURL  string
@@ -235,6 +245,13 @@ func WithSessionRoot(dir string) Option { return func(d *Driver) { d.sessionRoot
 // system directories. Each must be absolute and not under the service user's
 // home (checked at New).
 func WithRuntimePath(dirs []string) Option { return func(d *Driver) { d.runtimePath = dirs } }
+
+// WithSandboxReadPaths adds directories every sandboxed session may read, ahead
+// of what a create asks for: the interpreter or shared package cache a runtime
+// needs that lives somewhere the default profile does not reach (muster #281).
+// This is the only place such a grant can come from — a create can add paths of
+// its own but can never widen the allow-lists the profile is built on.
+func WithSandboxReadPaths(dirs []string) Option { return func(d *Driver) { d.sandboxRead = dirs } }
 
 // WithDeadline sets DriverCapabilities.DeadlineMs (§4.4). Non-positive
 // values are ignored, so a zero-value Option never produces an
@@ -312,6 +329,7 @@ func New(ctx context.Context, machine fleet.MachineId, opts ...Option) (*Driver,
 		// fake) and told us where it is. Nothing to spawn or probe, and
 		// nothing to isolate: one server serves every session.
 		d.shared = &server{baseURL: d.baseURL, username: d.username, password: d.password}
+		d.sandbox, d.sandboxWhy = sandboxSupport(true)
 		return d, nil
 	}
 
@@ -333,6 +351,7 @@ func New(ctx context.Context, machine fleet.MachineId, opts ...Option) (*Driver,
 	if d.sessionRoot == "" {
 		d.sessionRoot = os.TempDir()
 	}
+	d.sandbox, d.sandboxWhy = sandboxSupport(false)
 	return d, nil
 }
 
@@ -406,7 +425,11 @@ func (d *Driver) Capabilities() fleet.DriverCapabilities {
 		// with a built environment (env.go). Shared mode — the test seam —
 		// has one server for everyone and cannot.
 		IsolatesEnvironment: d.shared == nil,
-		DeadlineMs:          d.deadline.Milliseconds(),
+		// Sandbox: nil where this host cannot deny files, unix sockets and
+		// system services together (sandbox.go) — a capability absent, never a
+		// weaker profile under the same name.
+		Sandbox:    d.sandbox,
+		DeadlineMs: d.deadline.Milliseconds(),
 		// A local driver is describing itself — no network between the
 		// claim and its subject (same reasoning as the tmux driver's
 		// Capabilities).
