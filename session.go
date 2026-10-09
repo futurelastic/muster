@@ -153,6 +153,16 @@ type SessionSpec struct {
 	// environment — and it does not confine the filesystem (see §4.3).
 	IsolateEnvironment bool `json:"isolateEnvironment,omitempty"`
 
+	// Sandbox asks for an operating-system sandbox around the session's process
+	// and everything it starts (muster #281): file access, unix-socket connects
+	// and system-service lookups denied outside what is granted. See SandboxSpec.
+	//
+	// Like IsolateEnvironment it is a requirement, not a preference. A driver or
+	// platform that cannot enforce the profile (DriverCapabilities.Sandbox is
+	// absent) REFUSES the create as unsupported, naming what is missing; it never
+	// starts the session with a weaker profile. Nil is no sandbox.
+	Sandbox *SandboxSpec `json:"sandbox,omitempty"`
+
 	// Resume names a prior conversation this session continues.
 	//
 	// Distinct from DriverCapabilities.SupportsResume, which answers a different

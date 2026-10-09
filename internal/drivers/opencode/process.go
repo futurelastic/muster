@@ -15,6 +15,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	fleet "github.com/futurelastic/muster"
 )
 
 // Availability is what a Probe-style check reports about the local
@@ -93,6 +95,9 @@ type server struct {
 	// NEVER logged.
 	password string
 	proc     *process
+	// sandbox is the profile this server's process runs under, nil when it is
+	// not sandboxed (muster #281). Reported on every state read.
+	sandbox *fleet.SandboxState
 	// dir is the session-scoped directory (HOME, TMPDIR, XDG_*), removed with
 	// the server. Empty in shared mode.
 	dir string
@@ -157,14 +162,24 @@ func generateCredential() (string, error) {
 // env is the BUILT environment (env.go): the child gets exactly that plus its
 // own server credential, and nothing is inherited from this process. A nil env
 // is therefore an empty environment, not "inherit".
-func buildServeCmd(bin, workdir string, port int, username, password string, env []string) *exec.Cmd {
-	cmd := exec.Command(bin, "serve",
+func buildServeCmd(bin, workdir string, port int, username, password string, env []string, profile string) *exec.Cmd {
+	serve := []string{"serve",
 		"--port", strconv.Itoa(port),
 		"--hostname", "127.0.0.1",
 		// Deliberately no --mdns: it defaults the bind to 0.0.0.0
 		// (measured on #55), which nothing here wants — this server is
 		// reached only by this driver, over loopback.
-	)
+	}
+	var cmd *exec.Cmd
+	if profile != "" {
+		// muster #281: the runtime runs INSIDE the profile, so every tool it
+		// starts inherits it. The profile text holds paths and service names
+		// only — nothing secret — so it travels as an argument; the credential
+		// still travels through the environment alone.
+		cmd = exec.Command(sandboxExecPath, append([]string{"-p", profile, bin}, serve...)...)
+	} else {
+		cmd = exec.Command(bin, serve...)
+	}
 	if workdir != "" {
 		cmd.Dir = workdir
 	}
@@ -203,7 +218,7 @@ const startAttempts = 3
 // is closed by checking, not by hoping: readiness counts only a 200 (a 401
 // would mean a DIFFERENT server holds the port, with a different credential)
 // and a child that exits before answering is retried on a fresh port.
-func startServer(ctx context.Context, bin, workdir, username string, env []string) (*server, error) {
+func startServer(ctx context.Context, bin, workdir, username string, env []string, profile string) (*server, error) {
 	var lastErr error
 	for attempt := 0; attempt < startAttempts; attempt++ {
 		port, err := freePort()
@@ -214,7 +229,7 @@ func startServer(ctx context.Context, bin, workdir, username string, env []strin
 		if err != nil {
 			return nil, err
 		}
-		cmd := buildServeCmd(bin, workdir, port, username, cred, env)
+		cmd := buildServeCmd(bin, workdir, port, username, cred, env, profile)
 		if err := cmd.Start(); err != nil {
 			return nil, fmt.Errorf("opencode: starting server: %w", err)
 		}

@@ -475,6 +475,13 @@ type SessionState struct {
 	// is evidence about which mode the session is in.
 	PermissionMode PermissionModeState `json:"permissionMode,omitempty"`
 
+	// Sandbox is the sandbox profile the session runs under (muster #281), so a
+	// reader confirms rather than assumes. Nil means the session is not
+	// sandboxed — a positive statement for a driver that declares
+	// DriverCapabilities.Sandbox, and simply "not applicable" for one that does
+	// not.
+	Sandbox *SandboxState `json:"sandbox,omitempty"`
+
 	// Warnings lists footer notices this driver read below the composer's
 	// closing rule (muster#230) — chrome the runtime redraws, the same
 	// region ControlChannel and PermissionMode are read from, and for the

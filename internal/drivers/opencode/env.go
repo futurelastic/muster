@@ -60,6 +60,8 @@ var ownedEnvNames = map[string]bool{
 	"XDG_CACHE_HOME":           true,
 	"OPENCODE_SERVER_USERNAME": true,
 	"OPENCODE_SERVER_PASSWORD": true,
+	// muster #281: where a sandboxed session's package cache is.
+	packageCacheEnv: true,
 }
 
 // checkOwnedEnv refuses an env map naming a variable this driver owns.

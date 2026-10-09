@@ -369,7 +369,7 @@ carries `Cache-Control: no-store`.
 {
   "runtime": "", "cwd": "/abs/path", "agent": "", "model": "", "effort": "",
   "name": "", "prompt": "", "contextRef": "/abs/path", "marker": "",
-  "remoteControl": true, "trustCwd": false, "env": {}, "isolateEnvironment": false,
+  "remoteControl": true, "trustCwd": false, "env": {}, "isolateEnvironment": false, "sandbox": null,
   "resume": "", "conversationId": "", "permissionMode": "", "consents": [],
   "mcpConfig": [], "settings": {}, "labels": {}
 }
@@ -471,6 +471,19 @@ nothing inherited from the service. A runtime that cannot do that
 is started. Needs only `create`. It cannot hide the model-provider key the session needs
 from the session's own tool shell: give each lane its own spend-capped key. See
 session-abstraction.md §4.3 for the exact base environment and what isolation does not cover.
+
+**`sandbox`** (#281) wraps the session's process, and so every tool it starts, in an
+operating-system sandbox: reads and writes denied outside the working directory and the
+session's own private directory, unix-socket connects denied (a path rule does not stop a
+connect, and the multiplexer and ssh-agent sockets are both reachable that way), and system
+services such as the clipboard and `open` denied. Add `readPaths`, `writePaths`, a
+`network` of `open` (default) or `closed` (loopback only), or a `packageCache`
+(`private` copy per session, or `shared`; the session finds it in `MUSTER_PACKAGE_CACHE`).
+A runtime that cannot enforce all of it has no `sandbox` entry in `GET /v1/runtimes` and answers
+`unsupported`; it never starts the session with less. `state.sandbox` reports the profile
+actually in force. Needs only `create`. Two things are yours: seed the repository's trunk
+reference before the session starts, and treat the working directory as untrusted afterwards — run
+git on it only inside the same profile. See session-abstraction.md §2.1.
 
 **`conversationId`** (#224) is a caller-chosen UUID that asks the runtime to
 start a NEW conversation under it, instead of the driver deriving one after

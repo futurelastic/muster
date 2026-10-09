@@ -101,6 +101,7 @@ GET /v1/health
         "labels": { "maxKeys": 16, "maxKeyBytes": 128, "maxValueBytes": 128 },
         "supportsConversationId": true,
         "supportsIsolateEnvironment": true,
+        "supportsSandbox": true,
         "supportsLaunchSettings": true,
         "launchSettingsOutsideBypass": ["crossSessionInbound"],
         "drivers": [...] }
@@ -126,6 +127,10 @@ GET /v1/runtimes
                                        "supportsResume": false,
                                        "deliversToInbox": false,
                                        "isolatesEnvironment": false,
+                                       "sandbox": { "mechanism": "macos-sandbox-exec",
+                                                    "denies": ["files", "unixSockets", "systemServices"],
+                                                    "network": ["open", "closed"],
+                                                    "packageCache": ["shared", "private"] },  ← absent where cannot
                                        "supportsPin": { "model": true,
                                                         "effort": false,
                                                         "agent": true },
@@ -449,6 +454,8 @@ Idempotency-Key: <caller-supplied, required>
   "effort": "...", "name": "...", "marker": "...", "remoteControl": true,
   "prompt": "...", "contextRef": "/abs/path", "trustCwd": false,
   "env": {"NAME": "value"}, "isolateEnvironment": true,
+  "sandbox": {"readPaths": ["/abs"], "writePaths": ["/abs"], "network": "open",
+              "packageCache": {"path": "/abs/cache", "mode": "private"}},
   "resume": "<conversation id>", "conversationId": "<caller-chosen uuid>",
   "permissionMode": "bypass", "consents": ["folder-trust"],
   "mcpConfig": ["/abs/servers.json"],
@@ -542,6 +549,18 @@ sees it. The flag needs only `create`: it narrows what the session gets and gran
 about what a `201` then means — the session holds *only* the variables the create (and this
 machine's `sessionEnv`) named, **including the model-provider key it needs, which isolation cannot
 hide from the session's own tool shell**; give each lane its own spend-capped key.
+
+**`sandbox` is a requirement, and a driver that cannot enforce it answers `unsupported`** (muster
+#281; session-abstraction.md §2.1 and §4.3). A runtime that can confine a session reports a
+`sandbox` object in `/v1/runtimes`; against any other the create is refused before anything is
+started, naming what is missing, and a relay to a peer whose `/v1/health` lacks `supportsSandbox` is
+refused on this side — an older peer would drop the field and answer `201` for a session with
+nothing confined. A malformed `sandbox` (a relative or unclean path, a writable shared temporary
+directory, an unknown posture) is `400` on any machine; a grant that is or contains the service
+user's home directory is `400` where the session runs. It needs only `create`: it narrows what the
+session reaches and grants nothing. A `201` then means the session runs under the profile that
+`state.sandbox` reports on every read; it does **not** make the working directory trustworthy
+afterwards (§2.1: run any git against it inside the same profile).
 
 **A 201 for a create that asked to pin `agent`/`model`/`effort` is not proof
 the pin was applied** — a value this driver cannot pass through safely is

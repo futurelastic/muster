@@ -98,6 +98,15 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 		refused["env"] = len(spec.Env) > 0
 		refused["isolateEnvironment"] = spec.IsolateEnvironment
 	}
+	if spec.Sandbox != nil && d.sandbox == nil {
+		// muster #281: refuse, never degrade. The reason is the capability's own,
+		// so a caller reading it learns what is missing rather than that "it failed".
+		return fleet.Session{}, &fleet.Error{
+			Kind:    fleet.ErrorUnsupported,
+			Message: "create: this driver cannot enforce a sandbox: " + d.sandboxWhy + " (refusing rather than start the session unconfined)",
+			Machine: d.machine,
+		}
+	}
 	for name, set := range refused {
 		if set {
 			return fleet.Session{}, &fleet.Error{
@@ -186,6 +195,9 @@ func (d *Driver) startSessionServer(ctx context.Context, spec fleet.SessionSpec)
 	if err != nil {
 		return nil, err
 	}
+	if extra == nil {
+		extra = map[string]string{}
+	}
 	d.mu.RLock()
 	closed := d.closed
 	d.mu.RUnlock()
@@ -196,10 +208,33 @@ func (d *Driver) startSessionServer(ctx context.Context, spec fleet.SessionSpec)
 	if err != nil {
 		return nil, err
 	}
-	srv, err := startServer(ctx, d.bin, string(spec.Cwd), d.username, d.buildEnv(dir, extra))
+	// muster #281: the sandbox request is resolved and validated here, before a
+	// process exists, so a refusal costs nothing but the directory removed below.
+	var plan *sandboxPlan
+	var profile string
+	if spec.Sandbox != nil {
+		plan, err = d.planSandbox(spec, dir)
+		if err == nil {
+			profile, err = plan.profile()
+			if err != nil {
+				err = &fleet.Error{Kind: fleet.ErrorInvalid, Message: "create: " + err.Error(), Machine: d.machine}
+			}
+		}
+		if err != nil {
+			_ = os.RemoveAll(dir)
+			return nil, err
+		}
+		if plan.cache != nil {
+			extra[packageCacheEnv] = string(plan.cache.Path)
+		}
+	}
+	srv, err := startServer(ctx, d.bin, string(spec.Cwd), d.username, d.buildEnv(dir, extra), profile)
 	if err != nil {
 		_ = os.RemoveAll(dir)
 		return nil, err
+	}
+	if plan != nil {
+		srv.sandbox = plan.state()
 	}
 	srv.dir = dir
 	if !d.trackServer(srv) {
@@ -342,6 +377,19 @@ func (d *Driver) Send(ctx context.Context, req fleet.Request, ref fleet.SessionR
 // this driver does not attempt to resolve any further than the runtime
 // itself can).
 func (d *Driver) State(ctx context.Context, req fleet.Request, ref fleet.SessionRef) (fleet.SessionState, error) {
+	st, err := d.readState(ctx, ref)
+	if err != nil {
+		return st, err
+	}
+	// muster #281: the profile is a fact of the session's process, not of this
+	// read, so it is stamped on whatever the read concluded — including dead.
+	if known, ok := d.wasSeen(ref.ID); ok && known.srv != nil {
+		st.Sandbox = known.srv.sandbox
+	}
+	return st, nil
+}
+
+func (d *Driver) readState(ctx context.Context, ref fleet.SessionRef) (fleet.SessionState, error) {
 	known, ok := d.wasSeen(ref.ID)
 	if !ok {
 		return fleet.SessionState{}, fmt.Errorf("%w: %q", fleet.ErrNoSuchSession, ref.ID)
@@ -617,6 +665,9 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 			st = classify(present, ws)
 		}
 
+		if info.srv != nil {
+			st.Sandbox = info.srv.sandbox // muster #281
+		}
 		startedAt := info.startedAt
 		sess := fleet.Session{
 			SessionRef: fleet.SessionRef{Machine: d.machine, ID: id, Name: info.name},

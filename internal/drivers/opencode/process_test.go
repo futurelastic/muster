@@ -103,7 +103,7 @@ func TestStartProcess_CredentialNeverReachesArgv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := buildServeCmd(bin, "", port, "muster", cred, nil)
+	cmd := buildServeCmd(bin, "", port, "muster", cred, nil, "")
 
 	for _, a := range cmd.Args {
 		if strings.Contains(a, cred) {

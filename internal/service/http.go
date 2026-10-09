@@ -490,6 +490,12 @@ func handleHealth(svc *Service) http.HandlerFunc {
 			// isolated environment is refused against an older build rather than
 			// forwarded and silently started with the service's own environment.
 			"supportsIsolateEnvironment": true,
+			// Whether the create endpoint understands `sandbox` (muster #281):
+			// a relaying peer asks before forwarding, because a build that predates
+			// the field would drop it, answer 201 and start the session unconfined.
+			// Whether THIS machine can enforce one is a different fact, and is the
+			// driver's capability.
+			"supportsSandbox": true,
 			// Whether the create endpoint understands `settings` (muster
 			// #247) — the same wire-protocol fact, for the same reason: a relaying
 			// peer asks before forwarding, so a create carrying launch settings
@@ -884,6 +890,11 @@ type createSessionBody struct {
 	// needs no grant beyond create. See fleet.SessionSpec.IsolateEnvironment.
 	IsolateEnvironment bool `json:"isolateEnvironment"`
 
+	// Sandbox asks for an operating-system sandbox around the session (muster
+	// #281). Like IsolateEnvironment it only NARROWS what the session reaches,
+	// so it needs no grant beyond create. See fleet.SandboxSpec.
+	Sandbox *fleet.SandboxSpec `json:"sandbox"`
+
 	// ConversationId asks the runtime to start a NEW conversation under a
 	// caller-chosen UUID (muster #224) — mutually exclusive with Resume,
 	// which continues one. See fleet.SessionSpec.ConversationId.
@@ -1086,6 +1097,15 @@ func handleCreateSession(svc *Service) http.HandlerFunc {
 			}
 		}
 
+		// muster #281: a malformed sandbox is a 400 on any machine; whether a
+		// driver can enforce a well-formed one is the driver's answer.
+		if body.Sandbox != nil {
+			if err := body.Sandbox.Validate(); err != nil {
+				writeError(w, &fleet.Error{Kind: fleet.ErrorInvalid, Message: err.Error() + " (#281)", Machine: machine})
+				return
+			}
+		}
+
 		// create has no id yet to resolve existence-first against — that is
 		// exactly the "genuine miss" shape resolveSessionDriver falls to the
 		// configured default for when body.Runtime names none (§60).
@@ -1146,6 +1166,7 @@ func handleCreateSession(svc *Service) http.HandlerFunc {
 			Marker: body.Marker, RemoteControl: body.RemoteControl,
 			TrustCwd: body.TrustCwd, Env: body.Env, Resume: body.Resume,
 			ConversationId: body.ConversationId, IsolateEnvironment: body.IsolateEnvironment,
+			Sandbox:        body.Sandbox,
 			PermissionMode: body.PermissionMode, Consents: body.Consents,
 			McpConfig: body.McpConfig, Labels: body.Labels,
 			Settings: body.Settings,

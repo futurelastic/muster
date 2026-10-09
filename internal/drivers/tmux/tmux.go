@@ -4688,6 +4688,17 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 			Machine: d.machine,
 		}
 	}
+	// muster #281: this driver starts sessions through the user's multiplexer,
+	// whose server socket is the very thing a sandbox must keep a session away
+	// from, so it cannot confine one. Refused before any side effect.
+	if spec.Sandbox != nil {
+		return fleet.Session{}, &fleet.Error{
+			Kind: fleet.ErrorUnsupported,
+			Message: "create: this driver cannot enforce a sandbox (its sessions run in the user's own multiplexer, " +
+				"outside any profile this service could apply); refusing rather than start the session unconfined",
+			Machine: d.machine,
+		}
+	}
 	// A completed key returns what it produced; a pending one means this
 	// driver was interrupted mid-create and must find out what happened
 	// before doing anything (§10, see idempotency.go).
