@@ -472,6 +472,11 @@ func (d *Driver) State(ctx context.Context, req fleet.Request, ref fleet.Session
 	if known, ok := d.wasSeen(ref.ID); ok && known.srv != nil {
 		st.Sandbox = known.srv.sandbox
 		st.PermissionMode = known.srv.permission // muster #283
+		// muster #285: only where the session has a live server to ask. A read
+		// that failed or found the session gone has no figures worth adding.
+		if st.Status != fleet.StatusDead && st.Status != fleet.StatusUnknown {
+			st.Usage = d.usageOf(ctx, known.srv, ref.ID, st.Status == fleet.StatusIdle)
+		}
 	}
 	return st, nil
 }
@@ -786,6 +791,9 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 		if info.srv != nil {
 			st.Sandbox = info.srv.sandbox           // muster #281
 			st.PermissionMode = info.srv.permission // muster #283
+			// muster #285: what a State read or a turn's end last learned, with no
+			// request made here; AsOf says how old it is.
+			st.Usage = d.usageSnapshot(id, st.Status == fleet.StatusIdle)
 		}
 		startedAt := info.startedAt
 		sess := fleet.Session{

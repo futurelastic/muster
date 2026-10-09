@@ -313,6 +313,29 @@ SessionState {
   permissionMode?: PermissionMode  // the permission mode the runtime shows the session to be in, when the driver can read it (#194); absent = nothing was read
   sandbox?       : SandboxState    // the profile the session runs under (#281): mechanism, denied classes, network, granted paths (defaults included), package cache; absent = not sandboxed
   warnings?      : Warning[]       // footer notices the driver read below the composer (#230); absent = none found, not merely unobserved
+  usage?         : Usage           // what the session has spent, as its RUNTIME reports it (#285): summed over every request; absent = not yet known, never zero
+}
+
+Usage {
+  input      : integer      // tokens read that were not served from a cache
+  output     : integer      // tokens written, as the runtime counts them
+  cacheRead  : integer      // tokens served from the runtime's prompt cache
+  cacheWrite : integer      // tokens written into the runtime's prompt cache
+  reasoning? : integer      // reasoning tokens the runtime reports APART from `output`, additional to it; absent = it does not split them out
+  cost?      : number       // what the runtime itself reports the requests cost; absent = it reports none — never priced here
+  source     : "observed" | "inferred"   // from a structured API / inferred from a record the runtime writes
+  asOf       : Timestamp    // the runtime's own newest entry counted in these figures, not the time of the read
+  lastTurn?  : TurnUsage    // the same figures for the most recent COMPLETED turn
+}
+
+TurnUsage {
+  at         : Timestamp    // when the runtime recorded the turn as finished
+  input      : integer
+  output     : integer
+  cacheRead  : integer
+  cacheWrite : integer
+  reasoning? : integer
+  cost?      : number
 }
 
 Warning {
@@ -441,6 +464,47 @@ TurnEnd {
 > `plan mode on` must not read as being in plan mode, or a client that stops
 > cycling at `plan` stops on a lie. A change fires `session.state` (§4) like any
 > other material change. It never changes `status`.
+
+> **`usage` is what the session has spent, as its runtime reports it (muster issue
+> #285).** A consumer that wants activity and cost for every session, whatever its
+> engine, should not have to read each runtime's private records itself. The
+> figures are the runtime's own account of itself (§5.8) — counts and a cost it
+> chose to report — and never content the session produced.
+>
+> **It is the SUM over every request, never the last one.** A runtime reports
+> usage per request and a turn is many requests (one per tool round); the last
+> understates a run by an order of magnitude (measured 2–20×; one run logged 63
+> thousand against 1.19 million true). `cost` is per request as well and is summed
+> the same way. A runtime that writes one message as several record entries
+> repeats the usage on each, and a driver counts a message once.
+>
+> **Absent means not yet known, never zero** (§5.7), field by field. A driver
+> declaring `reportsUsage` (§4.3) that has read nothing yet leaves the block off —
+> a record not found, no entry yet carrying usage, a large record still being
+> read in the background. Zero is a finding: the runtime reported, and nothing was
+> spent. `reasoning` and `cost` are absent when the runtime does not report that
+> figure and present — zero included — when it does. **`cost` is never computed
+> from a price table**: a driver that would have to guess leaves it off, and a
+> runtime that reports tokens only (the tmux driver's record carries no cost)
+> yields tokens only. `reasoning` is a runtime's separately reported count and is
+> *additional* to `output`; a runtime that counts reasoning inside its output
+> figure leaves `reasoning` absent rather than double-counting.
+>
+> **`source` and `asOf`.** `observed` is read from a structured API, `inferred`
+> from a record the runtime writes to disk — the same distinction `confidence`
+> makes. `asOf` is the runtime's own timestamp on the newest entry counted, so a
+> consumer seeing figures that stopped moving can tell a session that stopped
+> spending from a reader that stopped reading.
+>
+> **Per-turn figures ride on the state, not on a separate event.** No turn-end
+> event exists; a turn ending is a `session.state` carrying `usage.lastTurn`
+> beside the cumulative figures. A consumer summing off the feed needs no poll and
+> no new event kind, and a poller reads the same field. A turn is the span between
+> two of the runtime's own turn-boundary markers (the tmux driver) or the
+> assistant messages after one user message (the opencode driver); a turn in
+> progress is in the cumulative figures and is not yet `lastTurn`. A change in any
+> figure fires `session.state` (§4 of api-http.md): once per completed request,
+> never per repaint. It never changes `status`.
 
 > **`warnings` lists footer notices the driver read below the composer's closing
 > rule (muster issue #230), the same region `controlChannel` and
@@ -1811,6 +1875,7 @@ DriverCapabilities {
   deliversRawKeys : boolean   // can deliver a raw key event to a screen (§3 `keys`) and populate `screenDigest` (§2.3)
   observesControlChannel: boolean // can report `controlChannel` (§2.3); absent state is answerable only against this
   observesPermissionMode: boolean // can report `permissionMode` (§2.3); absent state is answerable only against this. A driver may report it from a posture it configured itself (the local opencode driver reports `bypass`, muster #283) and leave it absent for a session it set nothing on; and a driver may honour `permissionMode: "bypass"` only together with an enforced `sandbox` (§2.1), refusing `unsupported` otherwise
+  reportsUsage    : boolean   // can read `usage` (§2.3, muster #285) from its runtime; absent usage is answerable only against this: true = "not yet known", false = never
   reportsRuntimeSurface: boolean // can say anything about `runtimeSurface` (§2.13); absent state is answerable only against this
   isolatesEnvironment: boolean // starts a session's process with a BUILT environment, nothing inherited from the service (§2.1 `isolateEnvironment`, muster #280)
   sandbox?        : SandboxSupport  // can wrap a session in an OS sandbox (§2.1 `sandbox`, muster #281): { mechanism, denies[], network[], packageCache[] }; absent = cannot, and a create asking for one is refused `unsupported`

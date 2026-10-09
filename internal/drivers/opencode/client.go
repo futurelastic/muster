@@ -79,6 +79,7 @@ type wireAssistantError struct {
 // driver to: this answers "did the last turn fail and why", never "what
 // was said".
 type wireMessageInfo struct {
+	ID   string `json:"id"`
 	Role string `json:"role"`
 	Time struct {
 		Created int64 `json:"created"`
@@ -88,12 +89,47 @@ type wireMessageInfo struct {
 		Completed int64 `json:"completed"`
 	} `json:"time"`
 	Error *wireAssistantError `json:"error"`
+
+	// Cost and Tokens are the runtime's own account of what the message spent
+	// (muster #285). Pointers: absent on the wire is "the runtime said nothing",
+	// which usage.go keeps apart from a reported zero. For a message that took
+	// several steps these are the message's final figures, which a reader must
+	// not prefer over the per-step records (see wirePart).
+	Cost   *float64    `json:"cost"`
+	Tokens *wireTokens `json:"tokens"`
+}
+
+// wireTokens is the token breakdown opencode attaches to an assistant message
+// and to each step-finish part (muster #285). Reasoning is reported apart
+// from Output, not inside it.
+type wireTokens struct {
+	Input     int64  `json:"input"`
+	Output    int64  `json:"output"`
+	Reasoning *int64 `json:"reasoning"`
+	Cache     struct {
+		Read  int64 `json:"read"`
+		Write int64 `json:"write"`
+	} `json:"cache"`
+}
+
+// wirePart is the only part of a message's "parts" this driver decodes: a
+// step-finish record's token and cost figures (muster #285). Per step, which is
+// the grain the runtime reports at and the one a sum has to be taken over — the
+// message's own figures hold the last step's tokens, and summing those
+// understates a long turn by an order of magnitude. Every other part (text,
+// tool calls, files — the conversation's content) is skipped by decoding only
+// Type; the discipline wireMessageInfo states for content holds here too.
+type wirePart struct {
+	Type   string      `json:"type"`
+	Cost   *float64    `json:"cost"`
+	Tokens *wireTokens `json:"tokens"`
 }
 
 // wireMessage is one entry of GET /session/{id}/message's response array —
 // the {info, parts} envelope the real server's OpenAPI schema documents.
 type wireMessage struct {
-	Info wireMessageInfo `json:"info"`
+	Info  wireMessageInfo `json:"info"`
+	Parts []wirePart      `json:"parts,omitempty"`
 }
 
 // do performs one request against one of this driver's own opencode servers

@@ -1624,6 +1624,20 @@ are measured; it is not claimed exhaustive by having one member today. A
 change fires `session.state` on the event stream (§4) like any other material
 change. It never changes `status`.
 
+`state.usage` — when present — is what the session has spent, as its runtime
+reports it (muster #285): `{"input":311,"output":42,"cacheRead":3013,"cacheWrite":60,
+"cost":0.76,"source":"observed","asOf":"…","lastTurn":{"at":"…","input":311,…}}`.
+The cumulative figures are the **sum over every request**, not the last; `lastTurn`
+is the same figures for the most recent completed turn and is the turn-end figure
+a subscriber receives — a turn ending is a `session.state` carrying it, there is no
+separate event. `reasoning` (a runtime's separately reported tokens, additional to
+`output`) and `cost` (what the runtime itself reported) are present only when the
+runtime reports them; nothing is priced by this service. **Absent means not yet
+known, never zero**: `reportsUsage` in `/v1/runtimes` says whether it can ever
+arrive (an unreached peer reports it `assumed`). A peer built before the field
+sends no key, and a relay passes the block through untouched. A change in any
+figure fires `session.state` (§4); it never changes `status`.
+
 `state.prompt.kind` — when present — names what is being asked
 (`resume-chooser`, `folder-trust`, `external-imports`, `settings-trust`,
 `tool-permission`, `feedback-review`). `bypass-permissions` is deliberately absent from what CLASSIFICATION can produce:
@@ -1999,7 +2013,7 @@ from silence is the failure mode this whole specification is organised against.
 **`session.state` fires on any material change**, which is every structured
 field a caller branches on: `status`, `confidence`, `waitingOn`,
 `composerDigest`, `strandedDelivery`, the prompt (its options, highlight and **nonce**), `quota`,
-`lastTurn`, `turns`, `credentialGeneration`. It began firing on `status` alone, and
+`lastTurn`, `turns`, `usage` (muster #285; once per completed request, and its `asOf` alone is not a change), `credentialGeneration`. It began firing on `status` alone, and
 everything else then moved underneath a silent feed — including the nonce,
 whose entire job is to make an answer submitted against a replaced question
 refusable. A feed that under-reports does not merely go stale; it manufactures

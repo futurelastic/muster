@@ -569,6 +569,17 @@ type SessionState struct {
 	// completes the SAME delivery, not a new one).
 	Turns *int `json:"turns,omitempty"`
 
+	// Usage is what this session has spent, as its runtime reports it (muster
+	// #285): the SUM over every request, with the same figures for the most
+	// recent completed turn on Usage.LastTurn. Absent means not yet known —
+	// never zero (see Usage) — and, on a driver that does not declare
+	// DriverCapabilities.ReportsUsage, never will be.
+	//
+	// It lives on the state so a turn ending reaches a subscriber as a
+	// session.state event carrying the figures, and a poller reads the same
+	// thing: there is no separate turn-end event to miss (api-http.md §4).
+	Usage *Usage `json:"usage,omitempty"`
+
 	// CredentialGeneration is the local credential store's own modification
 	// time, as read at the moment this state was produced (#12).
 	//
@@ -668,6 +679,10 @@ func UnknownState(confidence Confidence, evidence string) SessionState {
 // when a status was first observed is not a change in what the session is
 // doing. It travels with every event that does fire.
 //
+// Usage (#285) is material by that rule: a consumer summing spend off the feed
+// branches on it, and a request completing moves nothing else here. It changes
+// once per completed request, never per repaint, so it cannot storm.
+//
 // PermissionMode (#194) is material by that rule: a client cycling toward a
 // named mode branches on it, and a mode change moves nothing else here — same
 // status, same composer, same prompt — so a feed that did not fire on it would
@@ -708,6 +723,9 @@ func (s SessionState) MateriallyDiffers(other SessionState) bool {
 		return true
 	}
 	if !sameTurns(s.Turns, other.Turns) {
+		return true
+	}
+	if !sameUsage(s.Usage, other.Usage) {
 		return true
 	}
 	if !sameWarnings(s.Warnings, other.Warnings) {

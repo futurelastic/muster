@@ -523,6 +523,11 @@ func (s *subscription) idle(ref fleet.SessionRef, srv *server) {
 		st.LastTurn = s.d.lastTurnFailure(ctx, srv, ref.ID)
 		cancel()
 	}
+	// muster #285: the turn that just ended, with what it spent — this is the
+	// turn-end event, and its figures are the same ones State reads.
+	ctx, cancel := context.WithTimeout(s.ctx, busReadTimeout)
+	st.Usage = s.d.usageOf(ctx, srv, ref.ID, true)
+	cancel()
 	s.state(ref, srv, "idle", st)
 }
 

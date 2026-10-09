@@ -227,6 +227,11 @@ type Driver struct {
 	// isolated mode, where every session carries its own *server.
 	shared *server
 
+	// usageMemos remembers each session's message-record usage between reads
+	// (muster #285); usageMu guards the map, each memo its own contents.
+	usageMu    sync.Mutex
+	usageMemos map[string]*usageMemo
+
 	// subs are the open event streams (subscribe.go); subMu guards the set.
 	subMu sync.Mutex
 	subs  map[*subscription]struct{}
@@ -530,7 +535,10 @@ func (d *Driver) Capabilities() fleet.DriverCapabilities {
 		// configuration itself and reports it back; shared mode has no posture
 		// of its own to report.
 		ObservesPermissionMode: d.shared == nil,
-		DeadlineMs:             d.deadline.Milliseconds(),
+		// muster #285: tokens and cost are read from the runtime's own message
+		// record, summed over every step.
+		ReportsUsage: true,
+		DeadlineMs:   d.deadline.Milliseconds(),
 		// A local driver is describing itself — no network between the
 		// claim and its subject (same reasoning as the tmux driver's
 		// Capabilities).
@@ -614,6 +622,7 @@ func (d *Driver) forgetSeen(id string) {
 	d.mu.Lock()
 	delete(d.seen, id)
 	d.mu.Unlock()
+	d.forgetUsage(id)
 	if d.store != nil {
 		// Only ever called once the runtime confirmed the session is gone, which is
 		// also when it stops being worth finding again (muster #282).

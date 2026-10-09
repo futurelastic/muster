@@ -131,6 +131,16 @@ type DriverCapabilities struct {
 	// so a temporarily unreachable machine can never report a bare false and
 	// become permanently incapable in a caller's cache (§4.3, D3).
 	ObservesPermissionMode bool `json:"observesPermissionMode"`
+	// ReportsUsage reports whether the driver can read a session's token usage
+	// from its runtime (SessionState.Usage, muster #285).
+	//
+	// It exists so an absent Usage is answerable: on a driver declaring this it
+	// means "not yet known", on one that does not it means "this will never
+	// arrive" — and neither is ever zero. Like every flag here it inherits
+	// `source: assumed` from an unreached peer, so a temporarily unreachable
+	// machine can never report a bare false and become permanently incapable in
+	// a caller's cache (§4.3, D3).
+	ReportsUsage bool `json:"reportsUsage"`
 	// ReportsRuntimeSurface reports whether this driver can say anything
 	// about a session's runtime-operated surface (Session.RuntimeSurface,
 	// muster #85).
