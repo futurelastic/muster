@@ -152,7 +152,9 @@ func TestSubscribe_WhatHasNoHonestMappingIsDroppedNotInvented(t *testing.T) {
 	f.emit("message.updated", map[string]any{"info": map[string]any{"id": ref.ID, "sessionID": ref.ID}})
 	f.emit("message.part.updated", map[string]any{"part": map[string]any{"sessionID": ref.ID}})
 	f.emit("session.updated", map[string]any{"info": map[string]any{"id": ref.ID, "title": "renamed by the runtime"}})
-	f.emit("permission.updated", map[string]any{"sessionID": ref.ID})
+	// A question prompt is not a permission ask: Respond is unsupported, and
+	// nothing here claims to see it (muster #289 maps permission.* only).
+	f.emit("question.asked", map[string]any{"sessionID": ref.ID})
 	f.emit("file.edited", map[string]any{"file": "/x"})
 	f.emit("server.heartbeat", map[string]any{})
 	// A session this driver did not create: a child the runtime started for itself.
@@ -164,6 +166,140 @@ func TestSubscribe_WhatHasNoHonestMappingIsDroppedNotInvented(t *testing.T) {
 	f.emit("session.status", status(ref.ID, "busy"))
 	if got := statePayload(t, next(t, s)).State.Status; got != fleet.StatusWorking {
 		t.Errorf("after the dropped ones, busy -> %s, want working", got)
+	}
+}
+
+// setAsks scripts the asks GET /permission lists.
+func (f *fakeServer) setAsks(asks ...wirePermissionAsk) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.permissions = asks
+}
+
+func (f *fakeServer) permissionReads() int {
+	n := 0
+	for _, r := range f.requestsSnapshot() {
+		if r.path == "/permission" {
+			n++
+		}
+	}
+	return n
+}
+
+// muster #289: a session parked on a permission ask reads as waiting_input on
+// the stream, as it does to State, whichever spelling the runtime raises.
+func TestSubscribe_AParkedPermissionAskIsOneWaitingInputState(t *testing.T) {
+	for _, event := range []string{"permission.asked", "permission.updated"} {
+		t.Run(event, func(t *testing.T) {
+			f := newFakeServer(t)
+			d := newTestDriver(t, f)
+			ref := createOne(t, d, "/work/x", "k1")
+			s := subscribe(t, d, driver.SubscribeFilter{})
+			waitFor(t, "the bus connection", func() bool { return f.busConns() == 1 })
+
+			f.setBusy(ref.ID)
+			f.emit("session.status", status(ref.ID, "busy"))
+			if got := statePayload(t, next(t, s)).State.Status; got != fleet.StatusWorking {
+				t.Fatalf("first = %s, want working", got)
+			}
+
+			f.setAsks(wirePermissionAsk{ID: "per_1", SessionID: ref.ID, Permission: "bash", Patterns: []string{"rm -rf build"}})
+			f.emit(event, map[string]any{"sessionID": ref.ID})
+			p := statePayload(t, next(t, s))
+			st := p.State
+			if p.Ref.ID != ref.ID || st.Status != fleet.StatusWaitingInput || st.WaitingOn != fleet.WaitingPrompt ||
+				st.Prompt == nil || st.Prompt.Kind != fleet.PromptToolPermission || len(st.Prompt.Options) != 0 {
+				t.Fatalf("state = %+v, want waiting_input with a tool-permission prompt and no options", st)
+			}
+			// What State says about the same session, the same moment.
+			if want := stateOf(t, d, ref.ID); want.Status != st.Status || want.Prompt.Question != st.Prompt.Question {
+				t.Errorf("the stream says %+v, State says %+v", st, want)
+			}
+
+			// The same ask announced again is not news.
+			f.emit(event, map[string]any{"sessionID": ref.ID})
+			silent(t, s, "the same ask raised twice")
+		})
+	}
+}
+
+func TestSubscribe_AnAnsweredAskReportsTheSessionsNextState(t *testing.T) {
+	f := newFakeServer(t)
+	d := newTestDriver(t, f)
+	ref := createOne(t, d, "/work/x", "k1")
+	s := subscribe(t, d, driver.SubscribeFilter{})
+	waitFor(t, "the bus connection", func() bool { return f.busConns() == 1 })
+
+	f.setBusy(ref.ID)
+	f.setAsks(wirePermissionAsk{ID: "per_1", SessionID: ref.ID, Permission: "edit"})
+	f.emit("permission.asked", map[string]any{"sessionID": ref.ID})
+	if got := statePayload(t, next(t, s)).State.Status; got != fleet.StatusWaitingInput {
+		t.Fatalf("ask -> %s, want waiting_input", got)
+	}
+
+	// Answered: the turn carries on.
+	f.setAsks()
+	f.emit("permission.replied", map[string]any{"sessionID": ref.ID})
+	if got := statePayload(t, next(t, s)).State.Status; got != fleet.StatusWorking {
+		t.Fatalf("answered -> %s, want working", got)
+	}
+
+	// Asked again, then withdrawn because the turn ended (aborted).
+	f.setAsks(wirePermissionAsk{ID: "per_2", SessionID: ref.ID, Permission: "bash"})
+	f.emit("permission.asked", map[string]any{"sessionID": ref.ID})
+	if p := statePayload(t, next(t, s)).State; p.Status != fleet.StatusWaitingInput || p.Prompt.Nonce != "per_2" {
+		t.Fatalf("second ask -> %+v, want waiting_input on per_2", p)
+	}
+	f.setAsks()
+	f.clearStatus(ref.ID)
+	f.emit("permission.replied", map[string]any{"sessionID": ref.ID})
+	if got := statePayload(t, next(t, s)).State.Status; got != fleet.StatusIdle {
+		t.Fatalf("withdrawn with the turn over -> %s, want idle", got)
+	}
+}
+
+// An ask for another session is not this one's, and a quiet session costs nothing.
+func TestSubscribe_OnlyPermissionEventsCostAPermissionRead(t *testing.T) {
+	f := newFakeServer(t)
+	d := newTestDriver(t, f)
+	ref := createOne(t, d, "/work/x", "k1")
+	s := subscribe(t, d, driver.SubscribeFilter{})
+	waitFor(t, "the bus connection", func() bool { return f.busConns() == 1 })
+
+	f.setBusy(ref.ID)
+	f.emit("session.status", status(ref.ID, "busy"))
+	next(t, s)
+	f.emit("message.part.updated", map[string]any{"part": map[string]any{"sessionID": ref.ID}})
+	f.emit("server.heartbeat", map[string]any{})
+	f.clearStatus(ref.ID)
+	f.emit("session.status", status(ref.ID, "idle"))
+	next(t, s)
+	silent(t, s, "a quiet session")
+	if n := f.permissionReads(); n != 0 {
+		t.Errorf("%d permission reads with no permission event, want 0", n)
+	}
+
+	// A permission event for a session found idle, never reported otherwise, is
+	// no change to announce.
+	f.emit("permission.replied", map[string]any{"sessionID": ref.ID})
+	silent(t, s, "a reply for a session already reported idle")
+}
+
+func TestSubscribe_AnUnreadableStateAfterAPermissionEventEndsTheStreamAsAGap(t *testing.T) {
+	f := newFakeServer(t)
+	d := newTestDriver(t, f)
+	ref := createOne(t, d, "/work/x", "k1")
+	s := subscribe(t, d, driver.SubscribeFilter{})
+	waitFor(t, "the bus connection", func() bool { return f.busConns() == 1 })
+
+	f.mu.Lock()
+	f.statusDown = true
+	f.mu.Unlock()
+	f.emit("permission.asked", map[string]any{"sessionID": ref.ID})
+	ctx, cancel := context.WithTimeout(context.Background(), wait)
+	defer cancel()
+	if _, err := s.Next(ctx); err == nil || errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Next = %v, want the stream to end with an error (a gap), not silence", err)
 	}
 }
 
@@ -443,10 +579,6 @@ func TestSubscribe_ThroughTheService_EventsCarryCursorAndEpoch_AndABusDropIsAGap
 // --- the framing --------------------------------------------------------------
 
 func TestReadSSE_FramesEventsAndSkipsWhatItShould(t *testing.T) {
-	old := busMaxEventBytes
-	busMaxEventBytes = 64
-	defer func() { busMaxEventBytes = old }()
-
 	body := strings.Join([]string{
 		": a comment",
 		"event: ignored-field",
@@ -466,7 +598,7 @@ func TestReadSSE_FramesEventsAndSkipsWhatItShould(t *testing.T) {
 		"",
 	}, "\n")
 	var got []string
-	err := readSSE(strings.NewReader(body), func(data []byte) { got = append(got, string(data)) })
+	err := readSSE(strings.NewReader(body), 64, func(data []byte) { got = append(got, string(data)) })
 	if !errors.Is(err, io.EOF) {
 		t.Fatalf("err = %v, want a clean end", err)
 	}
@@ -477,12 +609,9 @@ func TestReadSSE_FramesEventsAndSkipsWhatItShould(t *testing.T) {
 }
 
 func TestReadSSE_ALineLongerThanTheReaderBufferIsOneLine(t *testing.T) {
-	old := busMaxEventBytes
-	busMaxEventBytes = 1 << 20
-	defer func() { busMaxEventBytes = old }()
 	long := strings.Repeat("y", 200<<10)
 	var got [][]byte
-	_ = readSSE(bytes.NewReader([]byte("data: "+long+"\n\n")), func(d []byte) { got = append(got, append([]byte(nil), d...)) })
+	_ = readSSE(bytes.NewReader([]byte("data: "+long+"\n\n")), 1<<20, func(d []byte) { got = append(got, append([]byte(nil), d...)) })
 	if len(got) != 1 || string(got[0]) != long {
 		t.Errorf("got %d events (first %d bytes), want the one long event intact", len(got), func() int {
 			if len(got) == 0 {
