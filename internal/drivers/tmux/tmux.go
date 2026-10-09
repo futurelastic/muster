@@ -592,6 +592,19 @@ type observation struct {
 	// the provenance is not lost the moment the value is cached in memory.
 	sinceRestored bool
 
+	// gapSince is non-zero while the LATEST read of this pane was a driver
+	// malfunction (a capture that returned nothing), and is when the first of
+	// the consecutive failed reads happened (#278).
+	//
+	// Such a read observed nothing, so it must not overwrite the last real
+	// observation: status, statusSince, digest and at above keep describing
+	// the last time this driver actually looked. Before this field the failed
+	// read stored `unknown`, and the next good read found `idle` against a
+	// prior `unknown` and restarted `since` at now. One cancelled capture
+	// therefore made every idle session in the chunk read as active a minute
+	// ago.
+	gapSince time.Time
+
 	// digest fingerprints the screen this observation classified, so the
 	// next one can tell "unchanged" from "changed" without keeping the pane
 	// text. See classify.go's resolveAmbiguity: an unchanged screen is what
@@ -1708,7 +1721,7 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 		c, captured := captures[r.paneID]
 		young := now.Sub(r.created) < startingWindow
 		raw, digest := classifyCaptureRemembering(c, captured, !r.dead, young, d.memoryLocked(r.session), now)
-		st, carried := d.stampSinceLocked(r.session, raw, now)
+		st, carried := d.stampSinceLocked(r.session, raw, now, captured)
 		st.CredentialGeneration = gen
 		// Published so a caller can quote it back on a raw key (keys.go). It
 		// is already computed for the classifier's own use; empty when the
@@ -1723,12 +1736,12 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 		if nd, ok := driftBySession[r.session]; ok {
 			st.Evidence += "; " + driftSentence(nd.want, r.session)
 		}
-		d.observed[r.session] = observation{
+		d.recordObservationLocked(r.session, observation{
 			created: r.created, cwd: r.cwd, at: now,
 			status: st.Status, statusSince: *st.Since, digest: digest,
 			digestSince:   d.digestSinceLocked(r.session, digest, now),
 			sinceRestored: carried,
-		}
+		}, captured, *st.Since)
 		started := r.created
 		s := fleet.Session{
 			SessionRef: fleet.SessionRef{Machine: d.machine, ID: r.session, Name: r.session},
@@ -2185,18 +2198,18 @@ func (d *Driver) State(ctx context.Context, req fleet.Request, ref fleet.Session
 		d.mu.Lock()
 		raw, digest := classifyCaptureRemembering(c, captured, !r.dead,
 			now.Sub(r.created) < startingWindow, d.memoryLocked(r.session), now)
-		st, carried := d.stampSinceLocked(r.session, raw, now)
+		st, carried := d.stampSinceLocked(r.session, raw, now, captured)
 		st.CredentialGeneration = d.credentialGeneration() // #12, same as List's per-session stamp
 		st.ScreenDigest = digest                           // see List's stamp of the same field
 		if st.WaitingOn == fleet.WaitingUnsentInput {      // #240, same as List
 			st.StrandedDelivery = d.ownDeliveryLocked(r.session, r.cwd, c, captured)
 		}
-		d.observed[r.session] = observation{
+		d.recordObservationLocked(r.session, observation{
 			created: r.created, cwd: r.cwd, at: now,
 			status: st.Status, statusSince: *st.Since, digest: digest,
 			digestSince:   d.digestSinceLocked(r.session, digest, now),
 			sinceRestored: carried,
-		}
+		}, captured, *st.Since)
 		d.mu.Unlock()
 		// Same record upgrade List applies to LastTurn (#56) — State has no
 		// pre-resolved Conversation to reuse (it returns a bare
@@ -7280,9 +7293,22 @@ func (d *Driver) withRestartNoteReason(id, reason string) string {
 // instance — the caller must store that on the observation, or the provenance
 // is lost the moment the value is cached and every later read presents a
 // second-hand age as one this instance measured.
-func (d *Driver) stampSinceLocked(id string, st fleet.SessionState, now time.Time) (fleet.SessionState, bool) {
+//
+// captured is false when the read observed nothing (a driver malfunction, not
+// a status). Such a read is stamped from the start of the gap, and never
+// touches the last real observation — see recordObservationLocked (#278).
+func (d *Driver) stampSinceLocked(id string, st fleet.SessionState, now time.Time, captured bool) (fleet.SessionState, bool) {
 	since := now
 	restored := false
+	if prior, ok := d.observed[id]; !captured && ok && !prior.statusSince.IsZero() {
+		// The unknown status began when the reads started failing, not now:
+		// a gap that lasts ten polls is one stretch of unknown.
+		if !prior.gapSince.IsZero() {
+			since = prior.gapSince
+		}
+		st.Since = &since
+		return st, false
+	}
 	if prior, ok := d.observed[id]; ok && prior.status == st.Status && !prior.statusSince.IsZero() {
 		since = prior.statusSince
 		restored = prior.sinceRestored
@@ -7308,6 +7334,32 @@ func (d *Driver) stampSinceLocked(id string, st fleet.SessionState, now time.Tim
 		st.Evidence += " (age carried from before this service restarted)"
 	}
 	return st, restored
+}
+
+// recordObservationLocked stores what a read saw of a pane. Caller holds d.mu.
+//
+// A read that captured nothing (captured == false) is a driver malfunction, and
+// its own classification says so: not an observation about the session. If an
+// earlier real observation exists it is KEPT as it is, with only gapSince
+// marked, so that when the next good read finds the same status the `since`
+// carries across the gap instead of restarting at now (#278).
+//
+// This covers every cause alike: a chunk-wide failure and a partial one (some
+// captures in an invocation missing) both arrive here as captured == false for
+// the panes that came back empty, and the sessions that did capture in the same
+// invocation are untouched by it.
+//
+// With no earlier observation there is nothing to protect, and the unknown read
+// is stored as a first sighting, as it always was.
+func (d *Driver) recordObservationLocked(id string, o observation, captured bool, since time.Time) {
+	if !captured {
+		if prior, ok := d.observed[id]; ok && !prior.statusSince.IsZero() {
+			prior.gapSince = since
+			d.observed[id] = prior
+			return
+		}
+	}
+	d.observed[id] = o
 }
 
 // persistedRecord reads one session's durable record. Caller holds d.mu.

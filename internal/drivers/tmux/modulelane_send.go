@@ -81,7 +81,9 @@ func (d *Driver) idleBeforeSend(id string) (bool, time.Time) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	o, ok := d.observed[id]
-	if !ok || !idleStatus(o.status) {
+	// A pane whose latest read observed nothing (gapSince) is not known idle:
+	// its kept status is the last real one, which may be stale (#278).
+	if !ok || !idleStatus(o.status) || !o.gapSince.IsZero() {
 		return false, time.Time{}
 	}
 	return true, o.statusSince
