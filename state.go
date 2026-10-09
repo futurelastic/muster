@@ -260,9 +260,11 @@ type QuotaBlock struct {
 // must ACT on this needs a field, or it ends up pattern-matching sentences this
 // project keeps rewriting.
 type TurnEnd struct {
-	// Outcome is "failed" when the screen shows the turn ending in an error.
-	// Absent otherwise: "it worked" is the unremarkable case, and recording it
-	// would make every session carry a field nobody reads.
+	// Outcome is "failed" when the screen shows the turn ending in an error, or
+	// "interrupted" when the turn was cut short by the service restarting
+	// (muster #282): the history shows a turn that began and never finished, and
+	// nothing is running now. Absent otherwise: "it worked" is the unremarkable
+	// case, and recording it would make every session carry a field nobody reads.
 	Outcome string `json:"outcome"`
 
 	// Reason is the runtime's own words, trimmed. For humans and logs; do not

@@ -74,13 +74,36 @@
 // for an unrelated reason. List answers entirely from that cache plus one
 // call to the status endpoint, never from a runtime-side enumeration.
 //
-// That has one direct consequence: SupportsResume is false. This driver's
-// cache does not survive its own process restarting, so a restarted driver
-// reports none of its pre-restart sessions — even though opencode's own
-// SQLite store still has them — until they are recreated or a future
-// revision adds a way to rediscover them (by-id GET works regardless of
-// which process created a session, so this is a real gap to close, not a
-// structural one).
+// The cache is memory, so without more it would not survive a restart of the
+// service — even though opencode's own SQLite store still has the sessions, and
+// a by-id GET works regardless of which process created one. With a state
+// directory (WithStateDir, muster #282) it does: see "Surviving a restart".
+//
+// # Surviving a restart (muster #282)
+//
+// With WithStateDir, Create writes one record per session (persist.go): the
+// runtime's session id, the working directory, the sandbox request, the NAMES of
+// the env the create carried, and where the session's scoped directory is. No env
+// value and no server credential is ever written. The scoped directory — where
+// opencode keeps its database — lives under the state directory instead of the
+// temp directory, and stopping the service leaves it alone; only closing the
+// session removes it.
+//
+// At start, New relaunches a process per record (resume.go), with the environment
+// rebuilt from this machine's sessionEnv files, and confirms each with a by-id
+// read. A session whose create carried caller-supplied env cannot be relaunched
+// faithfully — the values were never kept — so it is listed `unknown`, with a
+// reason saying it needs re-creation, rather than relaunched with less than it
+// was given. So is one that cannot be relaunched for any other reason (the
+// sandbox is no longer enforceable, its directory is gone, the runtime lost it):
+// a restart adopts and never silently drops. A turn the service's stop cut short
+// is reported as `lastTurn.outcome: "interrupted"`, not as an ordinary idle.
+// SupportsResume is true exactly when a state directory is configured. Without
+// one nothing is written and the old behaviour holds.
+//
+// Two limits. The idempotency table stays in memory, so a create retried across a
+// restart starts a new session. And a session's conversation now lives in the
+// state directory, which should be as private as the service's own state.
 //
 // # Two traps from #55's measured findings, both handled in state.go
 //
@@ -128,6 +151,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -181,6 +205,11 @@ type Driver struct {
 	sandboxWhy  string
 	sandboxRead []string
 
+	// stateDir is where sessions are remembered across a restart (muster #282);
+	// empty means they are not. store is derived from it in New.
+	stateDir string
+	store    *recordStore
+
 	// baseURL and password are the shared-mode seam's inputs (WithBaseURL,
 	// WithCredential); New folds them into shared.
 	baseURL  string
@@ -215,6 +244,16 @@ type knownSession struct {
 	name      string
 	agent     string
 	startedAt time.Time
+
+	// dir is the session's scoped directory, kept for a session with no server
+	// so closing it can remove what it left (muster #282).
+	dir string
+	// unknown is why this session has no running server: it was found on disk
+	// after a restart and could not be relaunched. srv is nil exactly then.
+	unknown string
+	// interrupted is set on a relaunched session whose last turn did not finish
+	// before the service stopped. A new turn (Send) clears it.
+	interrupted *fleet.TurnEnd
 }
 
 type idemEntry struct {
@@ -224,9 +263,9 @@ type idemEntry struct {
 
 // idempotencyRetention mirrors the tmux driver's window: long enough to
 // cover a caller's realistic retry, short enough not to grow without
-// bound. In-memory only, deliberately — see the package doc's SupportsResume
-// note; persisting this without also persisting session recovery would be
-// half of #10's guarantee, which is worse than honestly declaring neither.
+// bound. In-memory only: sessions survive a restart (muster #282) but this table
+// does not, so a create retried across one starts a new session — a limit the
+// package doc states rather than hides.
 const idempotencyRetention = 10 * time.Minute
 
 // Option configures a Driver.
@@ -260,6 +299,17 @@ func WithRuntimePath(dirs []string) Option { return func(d *Driver) { d.runtimeP
 // This is the only place such a grant can come from — a create can add paths of
 // its own but can never widen the allow-lists the profile is built on.
 func WithSandboxReadPaths(dirs []string) Option { return func(d *Driver) { d.sandboxRead = dirs } }
+
+// WithStateDir makes sessions survive a service restart (muster #282): one
+// record per session, and the sessions' scoped directories, live under dir. With
+// it SupportsResume is true; without it nothing is written and a restart forgets
+// every session, as before. Ignored in shared mode, where the server is not this
+// driver's to restart.
+//
+// The directory holds each session's runtime database and conversation, so it
+// should be as private as the service's own state: records and directories are
+// created readable by the service user alone.
+func WithStateDir(dir string) Option { return func(d *Driver) { d.stateDir = dir } }
 
 // WithDeadline sets DriverCapabilities.DeadlineMs (§4.4). Non-positive
 // values are ignored, so a zero-value Option never produces an
@@ -357,10 +407,30 @@ func New(ctx context.Context, machine fleet.MachineId, opts ...Option) (*Driver,
 	if err := checkSessionEnvEntries(d.sessionEnv); err != nil {
 		return nil, err
 	}
+	if d.stateDir != "" {
+		if !filepath.IsAbs(d.stateDir) {
+			return nil, fmt.Errorf("opencode: the state directory %q must be an absolute path", d.stateDir)
+		}
+		base := filepath.Join(d.stateDir, "opencode")
+		d.store = &recordStore{dir: filepath.Join(base, "sessions")}
+		if d.sessionRoot == "" {
+			// A session's database must outlive the service, so its directory
+			// cannot live under the temp directory (muster #282).
+			d.sessionRoot = filepath.Join(base, "dirs")
+		}
+		for _, dir := range []string{d.store.dir, d.sessionRoot} {
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				return nil, fmt.Errorf("opencode: creating the state directory: %w", err)
+			}
+		}
+	}
 	if d.sessionRoot == "" {
 		d.sessionRoot = os.TempDir()
 	}
 	d.sandbox, d.sandboxWhy = sandboxSupport(false)
+	if d.store != nil {
+		d.resume(ctx)
+	}
 	return d, nil
 }
 
@@ -384,7 +454,8 @@ func (d *Driver) Shutdown() error {
 		wg.Add(1)
 		go func(s *server) {
 			defer wg.Done()
-			s.teardown()
+			// The service stopping is not the session closing (muster #282).
+			s.pauseForShutdown()
 		}(s)
 	}
 	wg.Wait()
@@ -425,7 +496,10 @@ func (d *Driver) Capabilities() fleet.DriverCapabilities {
 		ObservesState:    true,
 		DeliversRawKeys:  false,
 		ConfirmsDelivery: false,
-		SupportsResume:   false,
+		// True only with a state directory (muster #282): every session is then
+		// remembered, relaunched at start and confirmed by id, and one that cannot
+		// be relaunched faithfully is listed unknown with the reason.
+		SupportsResume: d.store != nil,
 		SupportsPin: fleet.PinSupport{
 			Model:  true,
 			Effort: false,
@@ -523,6 +597,11 @@ func (d *Driver) forgetSeen(id string) {
 	d.mu.Lock()
 	delete(d.seen, id)
 	d.mu.Unlock()
+	if d.store != nil {
+		// Only ever called once the runtime confirmed the session is gone, which is
+		// also when it stops being worth finding again (muster #282).
+		_ = d.store.remove(id)
+	}
 }
 
 // knownIDs returns a snapshot of every session this driver has cached,

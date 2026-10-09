@@ -67,6 +67,17 @@ func runFakeOpencode(args []string) {
 	sessionID := "ses_" + hex.EncodeToString(id[:])
 	created := time.Now().UnixMilli()
 	var session *wireSession
+	// Like the real runtime, the stand-in keeps its session in a store under
+	// XDG_DATA_HOME, so a second process started on the same directory finds the
+	// session by id (muster #282). A test plants fake-messages.json there to give
+	// the session a history.
+	storeFile := os.Getenv("XDG_DATA_HOME") + "/fake-session.json"
+	if raw, err := os.ReadFile(storeFile); err == nil {
+		var prior wireSession
+		if json.Unmarshal(raw, &prior) == nil && prior.ID != "" {
+			session, sessionID = &prior, prior.ID
+		}
+	}
 
 	var busMu sync.Mutex
 	bus := map[int]chan string{}
@@ -99,6 +110,9 @@ func runFakeOpencode(args []string) {
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			session = &wireSession{ID: sessionID, Directory: r.URL.Query().Get("directory"), Title: body.Title,
 				Agent: body.Agent, Time: wireTime{Created: created, Updated: created}}
+			if raw, err := json.Marshal(session); err == nil {
+				_ = os.WriteFile(storeFile, raw, 0o600)
+			}
 			writeJSON(w, session)
 		case path == "/session/status":
 			writeJSON(w, statusMap{})
@@ -106,13 +120,18 @@ func runFakeOpencode(args []string) {
 			writeJSON(w, session)
 		case path == "/session/"+sessionID && r.Method == http.MethodDelete && session != nil:
 			session = nil
+			_ = os.Remove(storeFile)
 			writeJSON(w, true)
 		case path == "/session/"+sessionID+"/prompt_async":
 			w.WriteHeader(http.StatusNoContent)
 		case path == "/session/"+sessionID+"/abort":
 			writeJSON(w, true)
 		case path == "/session/"+sessionID+"/message":
-			writeJSON(w, []wireMessage{})
+			msgs := []wireMessage{}
+			if raw, err := os.ReadFile(os.Getenv("XDG_DATA_HOME") + "/fake-messages.json"); err == nil {
+				_ = json.Unmarshal(raw, &msgs)
+			}
+			writeJSON(w, msgs)
 		case path == "/event" && r.Method == http.MethodGet:
 			// The bus (muster #284). Frames posted to /__test/emit reach every
 			// open connection; a line posted to /__test/log goes to stderr, the

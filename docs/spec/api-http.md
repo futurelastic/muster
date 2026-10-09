@@ -1498,7 +1498,10 @@ A session out of quota is **not** one of these: it reports `quota_blocked`
 (§2.3), because nothing a caller sends will unblock it.
 
 `state.lastTurn` — when present — says how the most recent turn **ended**:
-`{"outcome":"failed","reason":"…","retryable":true}`. It exists because a turn
+`{"outcome":"failed","reason":"…","retryable":true}`, or — for a session a
+service restart found again — `{"outcome":"interrupted",…}`: the turn began and
+never finished because the service stopped, which is not the same as having
+finished. It exists because a turn
 that died and a turn that finished leave the same screen: an error, a settled
 status line, an empty composer. Both are honestly `idle`, and a supervisor that
 cannot tell them apart silently abandons the work.
