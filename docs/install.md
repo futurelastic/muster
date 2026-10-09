@@ -101,6 +101,21 @@ order of this page and the order of its output are the same.
    it delivers `BTab`, which cycles the permission mode (#188) — so give it to a
    principal you would trust to loosen any session it can reach; `relay` is only
    needed where peers exist.
+
+   To change a principal that already exists — a later release adds a verb with
+   its own grant — do not hand-edit the file:
+
+   ```sh
+   muster principal grant supervisor remote-control
+   muster principal revoke supervisor remote-control
+   ```
+
+   Grant names are checked against the build, the config is replaced atomically
+   after a dated backup (`config.json.<YYYYMMDD-HHMMSS>.bak`, `0600`), and the
+   resulting set is printed as `{principal, grants}`. It edits the file only:
+   restart the service to apply it, then confirm with `whoami`. It is local to
+   the machine and has no HTTP route. `human-relay` is refused unless
+   `--allow-human-relay` is given, which prints the shared-principal warning.
    Rows: `config.load`, `token.source`, `principals.supervisor`,
    `principals.relay`, `local.mutations`.
 

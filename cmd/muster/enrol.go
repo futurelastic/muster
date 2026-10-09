@@ -55,6 +55,7 @@ func usageEnrol() string {
 	return strings.Join([]string{
 		"usage: muster principal add <name> --grants=read[,send,...] [--config PATH] [--token-file PATH]",
 		"       muster principal list [--config PATH]",
+		"       muster principal grant|revoke <name> <grant>... [--config PATH]   (muster principal grant -h)",
 		"",
 		"grants: " + strings.Join(grantNames(), " · "),
 		"",
@@ -80,6 +81,17 @@ func runPrincipal(args []string) (handled bool, err error) {
 	}
 	if len(args) < 2 {
 		return true, errors.New(usageEnrol())
+	}
+
+	switch args[1] {
+	case "grant", "revoke":
+		for _, a := range args[2:] {
+			if a == "-h" || a == "--help" {
+				fmt.Println(usageGrants())
+				return true, nil
+			}
+		}
+		return true, runGrantEdit(args[1] == "revoke", args[2:], os.Stdout)
 	}
 
 	cfgPath := os.Getenv("FLEET_CONFIG")
@@ -167,7 +179,7 @@ func addPrincipal(cfgPath, name, grantList, tokenFile string) error {
 	list, _ := doc["principals"].([]any)
 	for _, entry := range list {
 		if m, ok := entry.(map[string]any); ok && m["name"] == name {
-			return fmt.Errorf("principal %q already exists; remove it first if you mean to change its grants", name)
+			return fmt.Errorf("principal %q already exists; use `muster principal grant|revoke` to change its grants", name)
 		}
 	}
 
