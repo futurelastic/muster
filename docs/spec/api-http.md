@@ -134,6 +134,7 @@ GET /v1/runtimes
                                        "supportsPin": { "model": true,
                                                         "effort": false,
                                                         "agent": true },
+                                       "validatesModel": true,
                                        "remoteControl": { "toggle": true,
                                                           "off": true },
                                        "source": "observed",

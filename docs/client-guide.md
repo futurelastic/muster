@@ -150,6 +150,7 @@ rather than assume when one is missing:
 "capabilities": { "observesState": true, "deliversRawKeys": true,
                   "confirmsDelivery": true, "supportsResume": true,
                   "supportsPin": { "model": true, "effort": true, "agent": true },
+                  "validatesModel": false,
                   "source": "observed", "deadlineMs": 30000 }
 ```
 
@@ -763,7 +764,11 @@ is the server's answer, not your input — sending one is ignored, not honoured)
 
 `agent`, `model` and `effort` are **hints**. A driver that cannot pin one says
 so rather than silently substituting a default — check `supportsPin` in
-`/v1/runtimes` before relying on any of them. **A value that WOULD be
+`/v1/runtimes` before relying on any of them. A model id is runtime-specific
+(one model has different spellings on different runtimes), so also read
+`validatesModel`: `true` means an unknown `model` is refused `invalid` at
+creation, naming the id and the closest valid ones; `false` means it is
+accepted and fails only at the first turn. **A value that WOULD be
 mistaken for a flag is refused outright at creation** (`invalid`, naming the
 field) rather than silently dropped; a value that reaches the runtime intact
 can still be defaulted or ignored there, which is what the response's `agent`

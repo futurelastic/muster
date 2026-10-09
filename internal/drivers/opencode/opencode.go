@@ -491,6 +491,9 @@ var _ driver.Driver = (*Driver)(nil)
 // reflects Create's own refusals: Model and Agent are genuinely honoured
 // (opencode's create body carries both), Effort is not — there is no
 // analogous parameter, and Create refuses rather than silently drop it.
+// ValidatesModel is true: Create checks a requested model against the
+// runtime's own catalog (catalog.go) — though where a runtime offers no usable
+// catalog the create proceeds unchecked, as before.
 func (d *Driver) Capabilities() fleet.DriverCapabilities {
 	return fleet.DriverCapabilities{
 		ObservesState:    true,
@@ -505,6 +508,7 @@ func (d *Driver) Capabilities() fleet.DriverCapabilities {
 			Effort: false,
 			Agent:  true,
 		},
+		ValidatesModel: true,
 		// IsolatesEnvironment: each session has its own process, started
 		// with a built environment (env.go). Shared mode — the test seam —
 		// has one server for everyone and cannot.

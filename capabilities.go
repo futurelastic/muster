@@ -184,6 +184,14 @@ type DriverCapabilities struct {
 
 	SupportsPin PinSupport `json:"supportsPin"`
 
+	// ValidatesModel reports whether the driver checks SessionSpec.Model
+	// against the runtime's own list of models at create and refuses an
+	// unknown id as invalid, naming it (muster #287). It is separate from
+	// SupportsPin.Model, which says the hint is passed on: false here means a
+	// wrong id is accepted at create and fails only at the first turn. Like
+	// every flag here it inherits `source: assumed` from an unreached peer.
+	ValidatesModel bool `json:"validatesModel"`
+
 	// RemoteControl declares whether a running session's remote control can be
 	// turned on and off through the API (muster #269). Absent means the driver
 	// cannot — and, like every flag in this block, an unreached peer reports it

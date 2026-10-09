@@ -1818,6 +1818,7 @@ DriverCapabilities {
   supportsResume  : boolean   // sessions survive a service restart
   deliversToInbox : boolean   // has an inbox delivery path wired for at least some targets
   supportsPin     : { model: boolean, effort: boolean, agent: boolean }
+  validatesModel  : boolean   // checks `model` against the runtime's own list at create and refuses an unknown id `invalid` (§4.3, muster #287)
   remoteControl?  : { toggle: boolean, off: boolean }   // can turn a RUNNING session's remote control on (and off); absent = cannot (muster #269)
   deliveryModules? : DeliveryModuleStatus[]   // optional external delivery modules enabled here (§2.15); absent = none
   deadlineMs      : number    // declared upper bound on any single call
@@ -1869,6 +1870,20 @@ created with `sandbox` reports the profile in force in `state.sandbox` on every 
 listing — the paths and posture actually granted, defaults included — so a reader confirms the
 profile rather than assumes it from the request. Like every flag here it inherits `source: assumed`
 from an unreached peer.
+
+**`validatesModel` answers "is a wrong `model` caught at create, or only at the first turn"**
+(muster #287). `supportsPin.model` says the hint is passed to the runtime; the same model carries
+different ids on different runtimes, so a wrong spelling is otherwise accepted and the session
+reads as healthy until it is given work. `true` means the driver reads the runtime's own list of
+usable models on every create, never a list compiled into this service (catalogs change with
+runtime releases and with the credentials a session was given), and refuses an id that is not on it
+as `invalid`, naming the id and, when something on the list is a near spelling, the closest ids. The
+refusal comes before any session exists: nothing is left behind and the process started for it is
+stopped. `false` means a wrong id is accepted and fails later, as before. Two limits: a runtime
+that returns no usable list (an older release without the endpoint, an error, or an empty list)
+leaves that one create unchecked, because "could not tell" is not "wrong"; and a listed id is
+accepted by the check, not guaranteed to succeed at the first turn. Like every flag here it
+inherits `source: assumed` from an unreached peer.
 
 **`isolatesEnvironment` answers "can a session here be started with ONLY the environment its
 create asked for"** (muster #280). `true` means the driver starts each session in a process of its

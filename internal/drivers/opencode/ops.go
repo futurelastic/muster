@@ -150,6 +150,15 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 		}
 		srv = started
 	}
+	if spec.Model != "" {
+		// muster #287: a wrong id would otherwise be accepted here and fail at
+		// the first turn, opaquely. Refused before any session exists, and the
+		// process started for it is torn down again.
+		if err := d.checkModel(ctx, srv, spec.Model); err != nil {
+			d.discardServer(srv)
+			return fleet.Session{}, err
+		}
+	}
 
 	var sess wireSession
 	path := "/session?directory=" + url.QueryEscape(string(spec.Cwd))
