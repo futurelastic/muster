@@ -121,3 +121,76 @@ func handleTurns(svc *Service) http.HandlerFunc {
 		writeJSON(w, http.StatusOK, page)
 	}
 }
+
+// handleComposer returns the unsent text in a session's composer together with
+// the digest `discard` accepts for it (api-http.md §3.3, muster #276).
+//
+// # Why its own route, and why `read`
+//
+// The text can hold anything an operator typed, so it is never carried on the
+// listing, on a single-session read or on the event stream — those reach every
+// principal holding `read` without anyone asking for the words. A route that is
+// asked for, and audited, is the only shape that keeps the text out of them.
+//
+// The grant is the existing `read`; no new grant exists (ruled 2026-10-09). The
+// trade-off was accepted knowingly: every principal that holds `read` can now
+// read whatever an operator left typed and unsent, so the only lever for hiding
+// it is withholding `read` (docs/api.md, the grant table). It deliberately does
+// not also require `relay` for a peer target, the same ruling #81 made for
+// reads; the peer applies its own table to the asserted caller (§13).
+//
+// Every read leaves an audit line — the caller, the session, how many
+// characters left — whatever the outcome. Never the text.
+func handleComposer(svc *Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		machine := fleet.MachineId(r.PathValue("machine"))
+		id := r.PathValue("id")
+
+		aw := &auditWriter{ResponseWriter: w}
+		w = aw
+		chars := 0
+		defer func() {
+			log.Printf("audit: actor=%q verb=read-composer route=%s target=%s/%s chars=%d outcome=%s status=%d",
+				callerFrom(r).Principal, routeOf(r), machine, id, chars, outcomeOf(aw.status), aw.status)
+		}()
+
+		req := requestFrom(r)
+		// Same stance as turns: a startedAt that does not parse is refused here,
+		// not silently dropped, because dropping it removes the one check the
+		// caller asked for on a read of another session's words.
+		if r.URL.Query().Get("startedAt") != "" && req.Expect.StartedAt == nil {
+			writeError(w, &fleet.Error{Kind: fleet.ErrorInvalid, Machine: machine,
+				Message: "startedAt is not an RFC 3339 timestamp"})
+			return
+		}
+
+		d, resolvedRuntime, via, resErr := svc.resolveSessionDriver(r.Context(), req, machine, id, fleet.RuntimeId(r.URL.Query().Get("runtime")), parseDeadline(r))
+		if resErr != nil {
+			writeError(w, resErr)
+			return
+		}
+		setResolutionHeaders(w, resolvedRuntime, via)
+		reader, ok := d.(driver.ComposerReader)
+		if !ok {
+			writeError(w, &fleet.Error{
+				Kind:    fleet.ErrorUnsupported,
+				Message: "this runtime cannot report what is sitting unsent in a session's composer",
+				Machine: machine,
+			})
+			return
+		}
+
+		deadline := effectiveDeadline(d.Capabilities().DeadlineMs, parseDeadline(r))
+		ctx, cancel := context.WithTimeout(r.Context(), deadline)
+		defer cancel()
+
+		out, err := reader.Composer(ctx, req, fleet.SessionRef{Machine: machine, ID: id})
+		if err != nil {
+			writeDriverError(w, machine, deadline, err)
+			return
+		}
+		chars = len([]rune(out.Text))
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusOK, out)
+	}
+}

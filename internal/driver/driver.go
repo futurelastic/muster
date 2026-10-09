@@ -602,6 +602,30 @@ type TurnReader interface {
 	Turns(ctx context.Context, req fleet.Request, ref fleet.SessionRef, q fleet.TurnsQuery) (fleet.TurnsPage, error)
 }
 
+// ComposerReader is an OPTIONAL capability (muster #276): a driver that can say
+// what text is sitting unsent in a session's composer, not merely that some is.
+//
+// Optional for the same reason TurnReader is: a service type-asserts and reports
+// the absence as `unsupported` rather than forcing every driver to stub it.
+//
+// # What an implementation owes the caller
+//
+//   - The text is the composer's own, as `discard` would compare it, and
+//     ComposerDigest is the digest `discard` accepts for exactly that text. A
+//     read and a discard that follows it therefore agree by construction.
+//   - A composer the driver cannot read as a whole (clipped by the window,
+//     covered by a dialog, replaced by a feedback panel) is a refusal with
+//     ErrAmbiguousTarget's meaning, never an empty answer: "nothing is there"
+//     would be a claim about text the driver has not seen (§5.7).
+//   - corroboration: req.Expect.StartedAt, when given, refuses a session that
+//     has been replaced under the same id.
+//
+// A relaying driver forwards the call to the machine that owns the session; that
+// machine's service applies its own authorization to the asserted caller (§13).
+type ComposerReader interface {
+	Composer(ctx context.Context, req fleet.Request, ref fleet.SessionRef) (fleet.ComposerRead, error)
+}
+
 // ReservedEnvReporter is an OPTIONAL capability: a driver whose delivery
 // module needs to be the sole setter of some environment variables for a
 // session's agent process (#180). Session create refuses caller-supplied env

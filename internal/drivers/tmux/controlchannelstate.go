@@ -16,7 +16,8 @@ import (
 //
 //  1. The footer label wins whenever it is there. It is the runtime's own
 //     chrome and the only source that distinguishes connecting and
-//     reconnecting.
+//     reconnecting. The bridge's id (#276) is the one thing added to it, from
+//     the record, while the record's newest entry says the channel is up.
 //  2. Otherwise the newest remote-control entry in the runtime's own record
 //     since this process launched decides between active and off, or, when
 //     it is the runtime's own disconnection notice, reads `failed` once the
@@ -55,16 +56,32 @@ const launchRemoteControlOption = "@colab-launch-rc"
 // resolveControlChannel applies the order above. footer is whatever the screen
 // reader found (nil for none).
 func (d *Driver) resolveControlChannel(footer *fleet.ControlChannel, conv *fleet.ConversationRef, row paneRow) *fleet.ControlChannel {
-	if footer != nil {
+	if d.conversations == nil || conv == nil || !conv.Known {
 		return footer
 	}
-	if d.conversations == nil || conv == nil || !conv.Known {
-		return nil
-	}
 	read := d.controlRecordCached(d.conversations.recordPath(row.cwd, conv.ID), row.created)
+	if footer != nil {
+		// The label decides the state; the record still knows the bridge's id
+		// (#276). Attached only while the newest entry says the channel is up, to
+		// a copy: the footer's own value is returned untouched when there is
+		// nothing to add.
+		if read.state == fleet.ControlChannelActive && read.bridgeID != "" && footer.BridgeID == nil &&
+			footer.State != fleet.ControlChannelFailed {
+			channel := *footer
+			id := read.bridgeID
+			channel.BridgeID = &id
+			return &channel
+		}
+		return footer
+	}
 	switch {
 	case read.state != "":
-		return &fleet.ControlChannel{State: read.state}
+		ch := &fleet.ControlChannel{State: read.state}
+		if read.bridgeID != "" {
+			id := read.bridgeID
+			ch.BridgeID = &id
+		}
+		return ch
 	case read.notice != nil:
 		// The verdict depends on the clock, so it is made here and never stored
 		// in the cached read. Inside the window the answer is nothing, not `off`

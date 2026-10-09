@@ -758,6 +758,27 @@ GET /v1/machines/{machine}/sessions/{id}/turns?since=&limit=&startedAt=&runtime=
 → 501 unsupported    the runtime, or the peer's build, cannot read turns
 ```
 
+```
+GET /v1/machines/{machine}/sessions/{id}/composer?startedAt=&runtime=
+→ 200 { "text": "...", "composerDigest": "..." }   ← the unsent text, and the digest `discard` accepts for it
+→ 200 { "text": "", "composerDigest": "" }         ← the composer was read and holds nothing
+→ 400 invalid        startedAt not RFC 3339
+→ 401 unauthorized   a principal table is configured and the caller lacks `read`
+→ 404 not_found      no such session
+→ 409 conflict       the composer cannot be read as a whole (clipped by the window, covered
+                     by a dialog or a feedback panel) — never answered as "empty"; or startedAt
+                     disagrees with the live session
+→ 501 unsupported    the runtime, or the peer's build, cannot read a composer
+```
+
+The text is what `discard` compares against, and `composerDigest` is the same value
+`state.composerDigest` publishes, so a read followed by a `discard` agree by
+construction and a composer that changed in between is refused by `discard`'s own
+digest check (muster #276). The text is served **only** here: never on the listing,
+a single-session read or the event stream. It requires `read` and nothing else
+(ruled 2026-10-09); each read is audited (who, which session, how many characters
+left, never the text) and the response is `Cache-Control: no-store`.
+
 What the session's own agent wrote — **assistant turns only** (muster #258;
 session-abstraction.md §5.8 as narrowed by
 `docs/adr/258-assistant-turns-read.md`). A turn is the text of one entry the
@@ -1496,6 +1517,18 @@ retry helps; that mapping was never measured (#65) and this endpoint does
 not guess it. Absent whenever `state` is not `failed`, or is `failed` but no
 record, no readable one, or no matching entry can explain why — the same
 §5.7 discipline `controlChannel` itself already applies one field up.
+
+`state.controlChannel.bridgeId` — always present on a channel, a string or an
+explicit `null` (muster #276) — is the id the runtime's bridge published for the
+session when it brought the channel up: the last segment of the link the runtime
+itself printed, which is what a web viewer is opened with. It is read from the
+runtime's own durable record, never from a screen, and is an opaque token — do not
+branch on its shape. `null` is the whole of "none": the channel is off, failed or
+not read, the runtime wrote no link, or the record is unavailable to the driver. A
+later enable replaces it, and a change in it is a material state change (it fires
+`session.state`), because a caller holding the old one holds a stale link. A peer
+built before the field decodes to `null`. Readable by any principal holding `read`,
+like the rest of the listing.
 
 `state.permissionMode` — when present — is the permission mode the runtime shows
 the session to be in (muster #194): one of `default`, `acceptEdits`, `plan`,

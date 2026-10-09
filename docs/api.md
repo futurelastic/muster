@@ -33,6 +33,17 @@ to requires the `relay` grant on the service you called *and* the verb grant on
 the machine that actually performs it. Those are two separate refusals and you
 will meet them one at a time.
 
+> **What `read` now exposes (muster #276).** `read` is the weakest grant and the
+> one most principals hold, and two things reachable with it are not ordinary
+> listing data: `state.controlChannel.bridgeId`, the id that opens a session in
+> the web viewer, and `GET …/{id}/composer`, which returns **whatever an operator
+> left typed and unsent**. Both were accepted knowingly under `read` rather than
+> behind a grant of their own, so every principal holding `read` — automation
+> included — can read them. **If you need to keep composer text or the bridge id
+> from a principal, the only lever is to withhold `read` from it.** The composer
+> text never rides the listing or the event stream, and each read of it is
+> audited (who, which session, how many characters — never the text).
+
 > A read aimed at a peer — a fleet-scoped listing, or a path naming another
 > machine — needs only `read`, on the same principal table, whether the target
 > is local or a peer. It does **not** also cost `relay`, unlike a relayed
@@ -83,6 +94,7 @@ every configured peer, exactly one hop — peers never recurse.
 | `GET` | `/v1/machines/{machine}/sessions/{id}` | Read one session | — ⚠️ | yes |
 | `GET` | `…/{id}/environment` | What environment the process actually got | — ⚠️ | yes |
 | `GET` | `…/{id}/turns` | What the session's agent wrote — assistant turns only | `send` | yes |
+| `GET` | `…/{id}/composer` | The unsent text in the composer, with the digest `discard` accepts | `read` ⚠️ | yes |
 | `POST` | `…/{id}/input` | Deliver text to the composer | `send` | yes |
 | `POST` | `…/{id}/respond` | Answer a prompt the session is blocked on | `send` | yes |
 | `POST` | `…/{id}/keys` | Deliver one raw key to the screen (incl. `BTab`: cycles the permission mode) | `keys` ⚠️ | yes |
@@ -316,6 +328,34 @@ audited — who, which session, how many turns, whether a `pending` entry left
 whatever the agent chose to write**: an agent that echoes a secret into its own
 prose has put it where this route can return it. Reason it is allowed, and what
 it costs: `docs/adr/258-assistant-turns-read.md`.
+
+### `GET /v1/machines/{machine}/sessions/{id}/composer`
+
+The text sitting **unsent** in the session's composer, and the digest to pass to
+`discard` for it: `{"text": "…", "composerDigest": "…"}`. `state.composerDigest`
+says *whether* text is there; this says *what*, for a supervisor that must report
+stranded operator text verbatim so a person can decide whether to resubmit it.
+
+- **Its own route, never the listing or the event stream.** The text can hold
+  anything an operator typed; those surfaces reach every `read` principal without
+  being asked.
+- **The digest is `discard`'s.** It is the same value `state.composerDigest`
+  publishes, computed from the same text `discard` compares, so
+  `discard?expect=<composerDigest>` accepts it, and a composer that changed in
+  between is refused there.
+- **Empty is an answer:** `200` with `text: ""` and `composerDigest: ""`.
+- **Unreadable is a refusal, not an empty answer** — `409`, when the composer is
+  clipped by the window or covered by a dialog or a feedback panel. "Nothing is
+  there" would be a claim about text the driver never saw.
+- `startedAt` (RFC 3339) corroborates the session as everywhere else (`409` on a
+  mismatch, `400` when malformed); `runtime` selects the driver. `501` when the
+  runtime — or the peer's build — cannot read a composer.
+
+Needs `read` and nothing else — no new grant. **Every principal that holds `read`,
+automation included, can read whatever an operator left typed and unsent**; to
+hide it, withhold `read` (see the note under *Grants*). Each read is audited — who,
+which session, how many characters (`chars=N`), never the text — and the response
+carries `Cache-Control: no-store`.
 
 ---
 
@@ -972,7 +1012,7 @@ not in the response.
     "composerDigest": "…", "screenDigest": "…",
     "quota": { "since": "…", "resetHint": "…" },
     "lastTurn": { "outcome": "failed", "reason": "…", "retryable": true },
-    "controlChannel": { "state": "active", "reason": "" },
+    "controlChannel": { "state": "active", "bridgeId": "…" },
     "permissionMode": "acceptEdits"
   }
 }
@@ -994,6 +1034,12 @@ reader does not look, `failed` is also read from the runtime's own record
 and no recovery has followed within five minutes, with the notice as `reason`.
 Inside those five minutes nothing is reported. `connecting` and `reconnecting`
 have no record entry and are reported only when the footer shows them. A change fires `session.state`.
+**`controlChannel.bridgeId`** (#276) is the id the runtime's bridge published when
+the channel came up — the last segment of the link the runtime printed, which a web
+viewer is opened with — or an explicit `null` when the channel is off, failed or not
+read, or the runtime wrote none. It is an opaque token read from the runtime's own
+record; do not branch on its shape. A re-enable replaces it and fires
+`session.state`. Anyone holding `read` can see it (see the note under *Grants*).
 
 **`status`** — `starting`, `working`, `waiting_input`, `idle`, `quota_blocked`,
 `dead`, `unknown`. A closed set with a strict decoder: an unrecognised value is

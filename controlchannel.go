@@ -136,4 +136,20 @@ type ControlChannel struct {
 	// State itself — an empty Reason is "we don't know why", never evidence
 	// that there was no reason.
 	Reason string `json:"reason,omitempty"`
+
+	// BridgeID is the identifier the runtime's bridge published for this
+	// session when it brought the channel up (muster #276) — the last segment
+	// of the link the runtime itself printed, which is what a web viewer is
+	// opened with. It is read from the runtime's own durable record, the same
+	// region State is, and never from a screen.
+	//
+	// Null is the whole of "none": the channel is off, failed or not read, the
+	// runtime wrote no link, or the record is not available to this driver. It
+	// is serialized as an explicit null rather than omitted so a caller reading
+	// a channel that is present never has to tell "absent" from "unknown field".
+	// Do not branch on its shape; it is an opaque token.
+	//
+	// Readable by any principal holding `read`, and so is the link it identifies
+	// a session by: an operator who needs to withhold it withholds `read`.
+	BridgeID *string `json:"bridgeId"`
 }

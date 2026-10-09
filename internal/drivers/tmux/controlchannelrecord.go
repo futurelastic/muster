@@ -255,10 +255,13 @@ const (
 )
 
 type controlRecordEntry struct {
-	Type       string `json:"type"`
-	Subtype    string `json:"subtype"`
-	Content    string `json:"content"`
-	Timestamp  string `json:"timestamp"`
+	Type      string `json:"type"`
+	Subtype   string `json:"subtype"`
+	Content   string `json:"content"`
+	Timestamp string `json:"timestamp"`
+	// URL is the link the runtime printed when the channel came up, on a
+	// bridge_status entry (#276). Its last path segment is the bridge's id.
+	URL        string `json:"url"`
 	CommandRun *struct {
 		Command string `json:"command"`
 	} `json:"commandRun"`
@@ -286,6 +289,9 @@ type controlRecordEvent struct {
 	atOK bool
 	// text is the entry's content, set for a notice only.
 	text string
+	// bridgeID is the bridge's id, set for an active entry that carried a link
+	// (#276). Empty is "the runtime wrote none", never an error.
+	bridgeID string
 }
 
 // classifyControlRecordLine classifies one JSONL line. system is false for a
@@ -307,6 +313,7 @@ func classifyControlRecordLine(line string) (ev controlRecordEvent, system bool)
 	switch {
 	case e.Subtype == controlBridgeSubtype && strings.HasPrefix(e.Content, controlEnabledPhrase):
 		ev.kind = controlRecordActive
+		ev.bridgeID = bridgeIDFromURL(e.URL)
 	case e.Subtype == controlLocalSubtype && e.CommandRun != nil && e.CommandRun.Command == controlCommandName &&
 		strings.Contains(e.Content, controlDisconnectPhrase):
 		ev.kind = controlRecordOff
@@ -317,6 +324,34 @@ func classifyControlRecordLine(line string) (ev controlRecordEvent, system bool)
 	return ev, true
 }
 
+// bridgeIDFromURL is the identifier a bridge link ends in: its last path segment,
+// with any query, fragment or trailing slash dropped. It returns "" unless that
+// segment is a plain token (letters, digits, '_' and '-'), so an entry whose link
+// is missing or shaped some other way yields no id rather than a guess, and an id
+// that reaches a caller is always safe to put back into a URL path unescaped.
+//
+// This reads only the `url` field of a `system`/`bridge_status` entry, which the
+// caller has already filtered on type and subtype; it never looks at a message
+// body, the forgeable region the rest of this file stays out of.
+func bridgeIDFromURL(raw string) string {
+	if i := strings.IndexAny(raw, "?#"); i >= 0 {
+		raw = raw[:i]
+	}
+	raw = strings.TrimRight(raw, "/")
+	seg := raw[strings.LastIndex(raw, "/")+1:]
+	if seg == "" || len(seg) > 128 {
+		return ""
+	}
+	for _, r := range seg {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+		default:
+			return ""
+		}
+	}
+	return seg
+}
+
 // controlRecordRead is what folding one record established.
 type controlRecordRead struct {
 	// exists is false when the record file could not be opened at all — a fresh
@@ -325,6 +360,9 @@ type controlRecordRead struct {
 	// state is active or off when the newest relevant entry since launch said
 	// so; empty otherwise.
 	state fleet.ControlChannelState
+	// bridgeID is the id carried by the enable entry that state=active rests on
+	// (#276); empty for any other state, and for an enable that carried none.
+	bridgeID string
 	// notice is set when the runtime's own disconnection notice is the newest
 	// relevant entry since launch. Whether it means `failed` depends on how
 	// long ago it was written, which a cached read cannot know — see
@@ -424,6 +462,7 @@ func (s controlFoldState) result(gap bool) controlRecordRead {
 		res.state, res.covered = fleet.ControlChannelOff, true
 	default:
 		res.state, res.covered = fleet.ControlChannelActive, true
+		res.bridgeID = s.newest.bridgeID
 	}
 	return res
 }
