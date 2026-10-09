@@ -2373,6 +2373,15 @@ each time it looks makes `since` useless — it would always read "just now", an
 the field's only purpose is duration. A driver therefore carries the timestamp
 forward while the status is unchanged and resets it when the status changes.
 
+**A read that observed nothing is not a status change.** `unknown` is outside
+the state machine (above), so a driver whose read failed — a capture that came
+back empty — has learned nothing about the session and must not let that read
+end the status it last observed. When the next good read finds the same status
+as before the failed one, `since` is carried across the gap. While the gap
+lasts, the `unknown` it reports has its own `since`, the first failed read, and
+that does not move on each further failed read. Otherwise one failed capture
+would make every idle session read as active a moment ago (#278).
+
 **Duration is the passive discriminator for a class of stall that otherwise
 requires touching the session.** A pane holding unsent input looks identical
 whether a human is mid-sentence or the pane has stopped accepting input
