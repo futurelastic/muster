@@ -1,9 +1,15 @@
 package tmux
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
+	"os"
 	"strings"
+	"sync"
 	"time"
 
 	fleet "github.com/futurelastic/muster"
@@ -236,8 +242,9 @@ func (d *Driver) upgradeControlChannelFromRecord(ctx context.Context, st fleet.S
 //     footer when the runtime draws them there and are otherwise absent.
 //   - Entries older than the process's launch are ignored: a resumed
 //     conversation's record holds the previous process's bridge history.
-//   - A tail that does not reach back to the launch (a long conversation) is
-//     "not covered": no entry found is then NOT evidence there is none.
+//   - The record is folded from its start and the answer remembered per session
+//     (#271), so a long conversation keeps it. Only a line too long to decode is
+//     a gap, and a gap makes "no entry found" NOT evidence there is none.
 
 const (
 	controlEnabledPhrase  = "/remote-control is active"
@@ -310,7 +317,7 @@ func classifyControlRecordLine(line string) (ev controlRecordEvent, system bool)
 	return ev, true
 }
 
-// controlRecordRead is what one walk of a record's tail established.
+// controlRecordRead is what folding one record established.
 type controlRecordRead struct {
 	// exists is false when the record file could not be opened at all — a fresh
 	// session the runtime has not written to yet.
@@ -327,52 +334,188 @@ type controlRecordRead struct {
 	// (an entry whose time cannot be read): neither may anything that falls
 	// back on its silence.
 	blocked bool
-	// covered is true when the walk saw everything since launch, so finding no
+	// covered is true when the fold saw everything since launch, so finding no
 	// entry means there is none.
 	covered bool
 }
 
-// controlChannelFromRecord reads the tail of one runtime record for the newest
-// remote-control entry written at or after since (the process's launch).
-func controlChannelFromRecord(path string, since time.Time) controlRecordRead {
-	lines, torn, ok := recordTail(path)
-	if !ok {
-		return controlRecordRead{}
+// Remembering the answer per session (muster #271).
+//
+// #269 first read the answer from the last recordTailBytes of the record. The
+// enable entry is written once, at the start, so in a long conversation it
+// fell out of that window and the field went absent for exactly the sessions
+// that live longest. The reader below keeps what it has folded instead: the
+// byte offset already consumed and the newest relevant entry found so far.
+// Each read consumes only what was appended since.
+//
+//   - The first read of a record (and the first after a service restart) is a
+//     full read from byte 0; every later one starts where the last stopped.
+//   - Only complete lines are consumed. A trailing fragment with no newline is
+//     the runtime mid-write: it is classified for THIS answer but not consumed,
+//     so the next read decodes it again whole.
+//   - The memory is keyed by record path (which carries the conversation id)
+//     and the process's launch time, and is dropped when either changes, when
+//     the file is replaced (a different file identity) or when it shrinks.
+//   - A line over recordLineLimit is skipped, never decoded, and remembered as
+//     a gap: absence of an entry is then not evidence, so `covered` stays false
+//     and the launch cannot claim `off` from it. The entries this reader keeps
+//     are a few hundred bytes; nothing it wants is lost to the skip.
+//   - A line that does not contain the bytes "system" cannot be a `system`
+//     entry, so it is not decoded at all. That is only a speed rule for a full
+//     read of a large record: it can skip a line, never make one match.
+type controlRecordFold struct {
+	mu sync.Mutex
+
+	path  string
+	since time.Time
+	// ident is the file identity the offset refers to; offset is the first byte
+	// not yet consumed.
+	ident  os.FileInfo
+	offset int64
+	// size and mod are the stat the last answer was computed against: an
+	// unchanged stat is answered from memory without opening the file.
+	size int64
+	mod  time.Time
+
+	state controlFoldState
+	// gap is true once a line was skipped for its length.
+	gap  bool
+	read controlRecordRead
+	init bool
+}
+
+// controlFoldState is the newest relevant entry since launch, the only thing a
+// fold has to remember. It is a value so a mid-write fragment can be applied to
+// a copy.
+type controlFoldState struct {
+	newest  controlRecordEvent
+	have    bool
+	blocked bool
+}
+
+// apply folds one decoded system entry into the state, exactly as a walk from
+// the newest entry backwards would have decided: the newest relevant entry
+// wins, and an entry from before the launch ends the history that counts.
+func (s *controlFoldState) apply(ev controlRecordEvent, since time.Time) {
+	if ev.atOK && ev.at.Before(since) {
+		*s = controlFoldState{}
+		return
 	}
+	switch ev.kind {
+	case controlRecordActive, controlRecordOff, controlRecordNotice:
+		if !ev.atOK {
+			*s = controlFoldState{blocked: true}
+			return
+		}
+		*s = controlFoldState{newest: ev, have: true}
+	}
+}
+
+func (s controlFoldState) result(gap bool) controlRecordRead {
 	res := controlRecordRead{exists: true}
-	inspected := 0
-	for i := len(lines) - 1; i >= 0 && inspected < recordTailCandidates; i-- {
-		inspected++
-		ev, system := classifyControlRecordLine(lines[i])
-		if !system {
+	switch {
+	case s.blocked:
+		res.blocked = true
+	case !s.have:
+		res.covered = !gap
+	case s.newest.kind == controlRecordNotice:
+		res.notice, res.covered = &controlDisconnectFact{text: s.newest.text, at: s.newest.at}, true
+	case s.newest.kind == controlRecordOff:
+		res.state, res.covered = fleet.ControlChannelOff, true
+	default:
+		res.state, res.covered = fleet.ControlChannelActive, true
+	}
+	return res
+}
+
+func (f *controlRecordFold) reset(path string, since time.Time) {
+	// Not *f = …: that would overwrite the mutex advance is holding.
+	f.path, f.since = path, since
+	f.ident, f.offset, f.size, f.mod = nil, 0, 0, time.Time{}
+	f.state, f.gap, f.read, f.init = controlFoldState{}, false, controlRecordRead{}, false
+}
+
+// advance brings the fold up to the end of the record and returns the answer.
+func (f *controlRecordFold) advance(path string, since time.Time) controlRecordRead {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	fi, err := os.Stat(path)
+	if err != nil {
+		f.reset(path, since)
+		if os.IsNotExist(err) {
+			return controlRecordRead{} // not written yet: a real answer
+		}
+		// Present but unreadable is not "not written yet", and must not be
+		// allowed to fall through to a launch-based claim.
+		return controlRecordRead{exists: true, blocked: true}
+	}
+	if !f.init || f.path != path || !f.since.Equal(since) || f.ident == nil ||
+		!os.SameFile(f.ident, fi) || fi.Size() < f.offset {
+		f.reset(path, since)
+		f.ident = fi
+		f.init = true
+	}
+	if fi.Size() == f.size && fi.ModTime().Equal(f.mod) && f.size != 0 {
+		return f.read
+	}
+
+	file, err := os.Open(path)
+	if err != nil {
+		f.reset(path, since)
+		return controlRecordRead{exists: true, blocked: true}
+	}
+	defer file.Close()
+	if _, err := file.Seek(f.offset, io.SeekStart); err != nil {
+		f.reset(path, since)
+		return controlRecordRead{exists: true, blocked: true}
+	}
+	r := bufio.NewReaderSize(file, 64*1024)
+	var fragment []byte
+	for {
+		line, n, complete, rerr := readBoundedLine(r, recordLineLimit)
+		if !complete {
+			if rerr != nil && !errors.Is(rerr, io.EOF) {
+				f.reset(path, since)
+				return controlRecordRead{exists: true, blocked: true}
+			}
+			if n > 0 && n <= recordLineLimit {
+				buf := make([]byte, n)
+				if got, _ := file.ReadAt(buf, f.offset); got == n {
+					fragment = buf
+				}
+			}
+			break
+		}
+		f.offset += int64(n)
+		if line == nil {
+			f.gap = true
 			continue
 		}
-		if ev.atOK && ev.at.Before(since) {
-			// Everything from here back belongs to an earlier process: the walk
-			// has covered the whole of this one.
-			res.covered = true
-			return res
+		if !bytes.Contains(line, systemMarker) {
+			continue
 		}
-		switch ev.kind {
-		case controlRecordActive, controlRecordOff:
-			if !ev.atOK {
-				return controlRecordRead{exists: true, blocked: true}
-			}
-			res.state, res.covered = fleet.ControlChannelActive, true
-			if ev.kind == controlRecordOff {
-				res.state = fleet.ControlChannelOff
-			}
-			return res
-		case controlRecordNotice:
-			if !ev.atOK {
-				return controlRecordRead{exists: true, blocked: true}
-			}
-			res.notice, res.covered = &controlDisconnectFact{text: ev.text, at: ev.at}, true
-			return res
+		if ev, system := classifyControlRecordLine(string(line)); system {
+			f.state.apply(ev, since)
 		}
 	}
-	// Walked to the top of what was read. That is "everything" only when the
-	// read was not cut short on either side.
-	res.covered = !torn && inspected == len(lines)
-	return res
+	state := f.state
+	if len(fragment) > 0 && bytes.Contains(fragment, systemMarker) {
+		if ev, system := classifyControlRecordLine(string(fragment)); system {
+			state.apply(ev, since)
+		}
+	}
+	f.size, f.mod = fi.Size(), fi.ModTime()
+	f.read = state.result(f.gap)
+	return f.read
+}
+
+var systemMarker = []byte("system")
+
+// controlChannelFromRecord folds one runtime record from its start for the
+// newest remote-control entry written at or after since (the process's launch).
+// It remembers nothing; the driver's per-session memory is controlRecordCache.
+func controlChannelFromRecord(path string, since time.Time) controlRecordRead {
+	var f controlRecordFold
+	return f.advance(path, since)
 }

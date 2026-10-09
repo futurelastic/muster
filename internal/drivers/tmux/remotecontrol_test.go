@@ -145,18 +145,182 @@ func TestControlChannelFromRecord_MissingFileIsNotAnAnswer(t *testing.T) {
 	}
 }
 
-// A long conversation whose tail starts after the launch cannot say there is no
-// enable in it: not covered, so the launch must not be allowed to claim off.
-func TestControlChannelFromRecord_ATailThatDoesNotReachTheLaunchIsNotCovered(t *testing.T) {
+// rcPad returns enough ordinary entries to push whatever precedes them more
+// than the old tail window (recordTailBytes) behind the end of the record.
+func rcPad(t *testing.T) []string {
+	t.Helper()
 	filler := rcOtherEntry(t, "assistant", time.Second)
 	var lines []string
-	lines = append(lines, rcEnabledEntry(t, 0))
-	for len(strings.Join(lines, "\n")) < recordTailBytes+4096 {
+	for n := 0; n < recordTailBytes+4096; n += len(filler) + 1 {
 		lines = append(lines, filler)
 	}
+	return lines
+}
+
+func rcAppend(t *testing.T, path string, raw string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(raw); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// muster #271: the enable entry is written once, at the start. A conversation
+// that has grown past the old tail window must still read active.
+func TestControlChannelFromRecord_AnEnableMoreThanTheOldTailBehindStillReadsActive(t *testing.T) {
+	lines := append([]string{rcEnabledEntry(t, 0)}, rcPad(t)...)
 	got := controlChannelFromRecord(rcWriteRecord(t, lines...), rcLaunch)
-	if got.state != "" || got.covered {
-		t.Fatalf("got %+v, want no claim and not covered", got)
+	if got.state != fleet.ControlChannelActive || !got.covered {
+		t.Fatalf("got %+v, want active and covered", got)
+	}
+}
+
+// ... and a deep record with NO entry is covered, so the launch may still say
+// off: the fold read all of it.
+func TestControlChannelFromRecord_AFullyReadLongRecordWithNoEnableIsCovered(t *testing.T) {
+	got := controlChannelFromRecord(rcWriteRecord(t, rcPad(t)...), rcLaunch)
+	if got.state != "" || !got.covered {
+		t.Fatalf("got %+v, want no claim and covered", got)
+	}
+}
+
+// A line too long to decode is a gap: absence of an entry is no longer
+// evidence, so the launch cannot claim off from it.
+func TestControlChannelFromRecord_AnOversizeLineIsAGapNotCoverage(t *testing.T) {
+	huge := rcLine(t, map[string]any{"type": "user", "content": strings.Repeat("x", recordLineLimit+1024), "timestamp": rcStamp(time.Second)})
+	got := controlChannelFromRecord(rcWriteRecord(t, rcOtherEntry(t, "user", time.Second), huge), rcLaunch)
+	if got.state != "" || got.covered || got.blocked {
+		t.Fatalf("got %+v, want no claim, not covered, not blocked", got)
+	}
+	// An answer found around the gap still stands.
+	got = controlChannelFromRecord(rcWriteRecord(t, rcEnabledEntry(t, time.Second), huge), rcLaunch)
+	if got.state != fleet.ControlChannelActive {
+		t.Fatalf("got %+v, want active", got)
+	}
+}
+
+func TestControlRecordFold_ReadsOnlyWhatWasAppended(t *testing.T) {
+	path := rcWriteRecord(t, append([]string{rcEnabledEntry(t, 0)}, rcPad(t)...)...)
+	var f controlRecordFold
+	if got := f.advance(path, rcLaunch); got.state != fleet.ControlChannelActive {
+		t.Fatalf("first read: %+v", got)
+	}
+	first := f.offset
+	if fi, _ := os.Stat(path); first != fi.Size() {
+		t.Fatalf("offset = %d, want the whole record (%d)", first, fi.Size())
+	}
+
+	// Corrupt the already-consumed bytes in place, same size. A fold that
+	// re-read them would now lose the enable; one that remembers does not.
+	// (mtime is moved so the unchanged-stat shortcut is not what answers.)
+	raw, _ := os.ReadFile(path)
+	copy(raw, strings.Repeat("#", 64))
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rcAppend(t, path, rcOtherEntry(t, "user", 3*time.Second)+"\n")
+	if got := f.advance(path, rcLaunch); got.state != fleet.ControlChannelActive {
+		t.Fatalf("after an unrelated append: %+v, want the remembered active", got)
+	}
+
+	rcAppend(t, path, rcDisconnectEntry(t, 9*time.Second)+"\n")
+	if got := f.advance(path, rcLaunch); got.state != fleet.ControlChannelOff {
+		t.Fatalf("after a disconnect: %+v, want off", got)
+	}
+	rcAppend(t, path, rcEnabledEntry(t, 20*time.Second)+"\n")
+	if got := f.advance(path, rcLaunch); got.state != fleet.ControlChannelActive {
+		t.Fatalf("after a re-enable: %+v, want active", got)
+	}
+}
+
+// A line the runtime is still writing is read for this answer but not consumed.
+func TestControlRecordFold_AHalfWrittenLineIsReadWholeOnceItIsComplete(t *testing.T) {
+	path := rcWriteRecord(t, rcOtherEntry(t, "user", time.Second))
+	var f controlRecordFold
+	f.advance(path, rcLaunch)
+
+	enabled := rcEnabledEntry(t, 5*time.Second)
+	half := len(enabled) / 2
+	rcAppend(t, path, enabled[:half])
+	before := f.offset
+	if got := f.advance(path, rcLaunch); got.state != "" || got.blocked {
+		t.Fatalf("torn fragment: %+v, want no claim", got)
+	}
+	if f.offset != before {
+		t.Fatalf("a torn fragment was consumed: offset %d → %d", before, f.offset)
+	}
+	rcAppend(t, path, enabled[half:])
+	// No trailing newline yet: a complete document still counts for the answer.
+	if got := f.advance(path, rcLaunch); got.state != fleet.ControlChannelActive {
+		t.Fatalf("complete but unterminated line: %+v, want active", got)
+	}
+	if f.offset != before {
+		t.Fatalf("an unterminated line was consumed: offset %d → %d", before, f.offset)
+	}
+	rcAppend(t, path, "\n")
+	if got := f.advance(path, rcLaunch); got.state != fleet.ControlChannelActive || f.offset <= before {
+		t.Fatalf("terminated: %+v offset=%d", got, f.offset)
+	}
+}
+
+func TestControlRecordFold_ADifferentRecordOrLaunchStartsOver(t *testing.T) {
+	path := rcWriteRecord(t, rcEnabledEntry(t, time.Second))
+	var f controlRecordFold
+	if got := f.advance(path, rcLaunch); got.state != fleet.ControlChannelActive {
+		t.Fatalf("%+v", got)
+	}
+	// A later launch of the same conversation: the old enable is history.
+	if got := f.advance(path, rcLaunch.Add(time.Hour)); got.state != "" || !got.covered {
+		t.Fatalf("later launch: %+v, want nothing and covered", got)
+	}
+	// The record replaced by another file (rename over it), longer than before.
+	repl := filepath.Join(filepath.Dir(path), "replacement")
+	body := rcOtherEntry(t, "user", time.Second) + "\n" + rcDisconnectEntry(t, 2*time.Second) + "\n" + rcOtherEntry(t, "user", 3*time.Second) + "\n"
+	if err := os.WriteFile(repl, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(repl, path); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.advance(path, rcLaunch); got.state != fleet.ControlChannelOff {
+		t.Fatalf("replaced file: %+v, want off from the new file", got)
+	}
+	// The same file truncated.
+	if err := os.WriteFile(path, []byte(rcEnabledEntry(t, 4*time.Second)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.advance(path, rcLaunch); got.state != fleet.ControlChannelActive {
+		t.Fatalf("truncated file: %+v, want active from the new content", got)
+	}
+	// Gone entirely: not written yet.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.advance(path, rcLaunch); got.exists {
+		t.Fatalf("removed file: %+v, want the zero read", got)
+	}
+}
+
+// Through the driver: a service restart is a new Driver, which re-derives the
+// answer from a full read once and then follows the appends.
+func TestResolveControlChannel_ALongRecordSurvivesARestartAndGrowth(t *testing.T) {
+	d, row, conv := rcDriverWithRecord(t, append([]string{rcEnabledEntry(t, 0)}, rcPad(t)...)...)
+	row.launchRC = "1"
+	if got := rcStateName(d.resolveControlChannel(nil, conv, row)); got != "active" {
+		t.Fatalf("first read: %s, want active", got)
+	}
+	path := d.conversations.recordPath(row.cwd, conv.ID)
+	rcAppend(t, path, rcOtherEntry(t, "user", time.Minute)+"\n")
+	if got := rcStateName(d.resolveControlChannel(nil, conv, row)); got != "active" {
+		t.Fatalf("after growth: %s, want active", got)
+	}
+	d2 := New("testbox", WithRecordRoot(filepath.Dir(filepath.Dir(path))))
+	if got := rcStateName(d2.resolveControlChannel(nil, conv, row)); got != "active" {
+		t.Fatalf("after a restart: %s, want active", got)
 	}
 }
 
