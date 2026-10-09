@@ -147,11 +147,13 @@ func subscribeIso(t *testing.T, d *Driver) driver.EventStream {
 }
 
 // stubShell writes an executable that logs an error name to stderr and exits,
-// standing in for a runtime that cannot start.
+// standing in for a runtime that cannot start. Like the real runtime it logs
+// only when started with --print-logs (muster #288), so the test fails if the
+// driver stops passing the flag.
 func stubShell(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "opencode")
-	script := "#!/bin/sh\necho 'ERROR service=config error=ProviderConfigError bad provider' >&2\nexit 3\n"
+	script := "#!/bin/sh\nfor a in \"$@\"; do [ \"$a\" = --print-logs ] && echo 'ERROR service=config error=ProviderConfigError bad provider' >&2; done\nexit 3\n"
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}

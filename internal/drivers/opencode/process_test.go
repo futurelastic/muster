@@ -105,13 +105,20 @@ func TestStartProcess_CredentialNeverReachesArgv(t *testing.T) {
 	}
 	cmd := buildServeCmd(bin, "", port, "muster", cred, nil, "")
 
+	hasPrintLogs := false
 	for _, a := range cmd.Args {
+		if a == "--print-logs" {
+			hasPrintLogs = true
+		}
 		if strings.Contains(a, cred) {
 			t.Fatalf("credential leaked into argv: %v", cmd.Args)
 		}
 		if a == "--mdns" {
 			t.Fatal("--mdns was passed; it defaults the bind to 0.0.0.0 (#55)")
 		}
+	}
+	if !hasPrintLogs {
+		t.Fatalf("--print-logs missing from argv %v; the error-name capture has no log to read (#288)", cmd.Args)
 	}
 	foundInEnv := false
 	for _, e := range cmd.Env {
@@ -137,4 +144,20 @@ func stubBinary(t *testing.T) string {
 		t.Skip("no stand-in binary (true/echo) found on PATH")
 	}
 	return path
+}
+
+// muster #288: the sandboxed command is built from the same serve slice, so it
+// carries --print-logs too — checked on its own because the sandbox wrapper is
+// a separate branch of buildServeCmd.
+func TestBuildServeCmd_TheSandboxedCommandAlsoPrintsLogs(t *testing.T) {
+	cmd := buildServeCmd("/bin/true", "", 1234, "muster", "cred", nil, "(version 1)")
+	found := false
+	for _, a := range cmd.Args {
+		if a == "--print-logs" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("--print-logs missing from the sandboxed argv %v (#288)", cmd.Args)
+	}
 }
