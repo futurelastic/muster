@@ -100,6 +100,7 @@ GET /v1/health
         "maxInputBytes": 1024,
         "labels": { "maxKeys": 16, "maxKeyBytes": 128, "maxValueBytes": 128 },
         "supportsConversationId": true,
+        "supportsIsolateEnvironment": true,
         "supportsLaunchSettings": true,
         "launchSettingsOutsideBypass": ["crossSessionInbound"],
         "drivers": [...] }
@@ -124,6 +125,7 @@ GET /v1/runtimes
                                        "confirmsDelivery": true,
                                        "supportsResume": false,
                                        "deliversToInbox": false,
+                                       "isolatesEnvironment": false,
                                        "supportsPin": { "model": true,
                                                         "effort": false,
                                                         "agent": true },
@@ -446,8 +448,8 @@ Idempotency-Key: <caller-supplied, required>
 { "runtime": "...", "cwd": "/abs/path", "agent": "...", "model": "...",
   "effort": "...", "name": "...", "marker": "...", "remoteControl": true,
   "prompt": "...", "contextRef": "/abs/path", "trustCwd": false,
-  "env": {"NAME": "value"}, "resume": "<conversation id>",
-  "conversationId": "<caller-chosen uuid>",
+  "env": {"NAME": "value"}, "isolateEnvironment": true,
+  "resume": "<conversation id>", "conversationId": "<caller-chosen uuid>",
   "permissionMode": "bypass", "consents": ["folder-trust"],
   "mcpConfig": ["/abs/servers.json"],
   "settings": {"crossSessionInbound": "accept"}, "labels": {"issue": "153"} }
@@ -530,6 +532,16 @@ dropped. If a *later* read's own resolution disagrees with the id that was
 requested, that is reported as a fresh, named mismatch — `conversation` reads
 `known: false` naming both ids — never a silent overwrite of one with the
 other.
+
+**`isolateEnvironment: true` is a requirement, and a driver that cannot meet it answers
+`unsupported`** (muster #280; session-abstraction.md §2.1 and §4.3). A runtime that starts each
+session in a process of its own with a built environment reports `isolatesEnvironment: true` in
+`/v1/runtimes`; against any other the create is refused before anything is started, and a relay to a
+peer whose `/v1/health` lacks `supportsIsolateEnvironment` is refused on this side, before the peer
+sees it. The flag needs only `create`: it narrows what the session gets and grants nothing. Be exact
+about what a `201` then means — the session holds *only* the variables the create (and this
+machine's `sessionEnv`) named, **including the model-provider key it needs, which isolation cannot
+hide from the session's own tool shell**; give each lane its own spend-capped key.
 
 **A 201 for a create that asked to pin `agent`/`model`/`effort` is not proof
 the pin was applied** — a value this driver cannot pass through safely is

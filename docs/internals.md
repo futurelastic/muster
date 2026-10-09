@@ -22,8 +22,11 @@ internal/driver            the Driver interface and capability declaration
 internal/drivers/stub      a driver that answers unsupported everywhere
 internal/drivers/tmux      the first working driver — multiplexer + agent CLI
 internal/drivers/remote    the second — an HTTP client to a peer (federation)
-internal/drivers/opencode  the second LOCAL driver — a spawned subprocess,
-                           the first able to declare observesState: true
+internal/drivers/opencode  the second LOCAL driver — one spawned server per
+                           session, started with a built environment; the
+                           first able to declare observesState: true
+internal/sessionenv        the machine-declared session environment (#94),
+                           shared by the drivers that start a process
 internal/service           registry, one-hop fan-out, HTTP routing
 cmd/muster           the binary
 ```

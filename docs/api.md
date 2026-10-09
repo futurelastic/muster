@@ -369,9 +369,9 @@ carries `Cache-Control: no-store`.
 {
   "runtime": "", "cwd": "/abs/path", "agent": "", "model": "", "effort": "",
   "name": "", "prompt": "", "contextRef": "/abs/path", "marker": "",
-  "remoteControl": true, "trustCwd": false, "env": {}, "resume": "",
-  "conversationId": "", "permissionMode": "", "consents": [], "mcpConfig": [],
-  "settings": {}, "labels": {}
+  "remoteControl": true, "trustCwd": false, "env": {}, "isolateEnvironment": false,
+  "resume": "", "conversationId": "", "permissionMode": "", "consents": [],
+  "mcpConfig": [], "settings": {}, "labels": {}
 }
 ```
 
@@ -463,6 +463,14 @@ without `:`, values up to 128 bytes. Opaque to the service: it stores them and
 filters on them, and never interprets them. Over the bounds is a `400` naming
 the limit. Sending them needs only `create`. Relayed to a peer that predates
 labels, the create is refused `unsupported` before anything is started there.
+
+**`isolateEnvironment`** (#280) requires that the session carry only a built
+environment — a small documented base, this machine's `sessionEnv`, and your `env` — and
+nothing inherited from the service. A runtime that cannot do that
+(`isolatesEnvironment: false` in `GET /v1/runtimes`) answers `unsupported` before anything
+is started. Needs only `create`. It cannot hide the model-provider key the session needs
+from the session's own tool shell: give each lane its own spend-capped key. See
+session-abstraction.md §4.3 for the exact base environment and what isolation does not cover.
 
 **`conversationId`** (#224) is a caller-chosen UUID that asks the runtime to
 start a NEW conversation under it, instead of the driver deriving one after

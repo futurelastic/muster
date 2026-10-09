@@ -93,7 +93,7 @@ func TestGenerateCredential_IsNonEmptyAndNotConstant(t *testing.T) {
 // binary, and never starts the process (Start is not called).
 func TestStartProcess_CredentialNeverReachesArgv(t *testing.T) {
 	bin := stubBinary(t)
-	// buildServeCmd is the exact function startProcess calls — this test
+	// buildServeCmd is the exact function startServer calls — this test
 	// exercises the real code path, not a duplicate of it.
 	port, err := freePort()
 	if err != nil {
@@ -103,7 +103,7 @@ func TestStartProcess_CredentialNeverReachesArgv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := buildServeCmd(bin, "", port, "muster", cred)
+	cmd := buildServeCmd(bin, "", port, "muster", cred, nil)
 
 	for _, a := range cmd.Args {
 		if strings.Contains(a, cred) {

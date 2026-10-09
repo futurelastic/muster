@@ -484,6 +484,12 @@ func handleHealth(svc *Service) http.HandlerFunc {
 			// against an older peer rather than silently forwarded and
 			// dropped there.
 			"supportsConversationId": true,
+			// Whether the create endpoint understands `isolateEnvironment`
+			// (muster #280) — the same wire-protocol fact, for the same reason:
+			// a relaying peer asks before forwarding, so a create that REQUIRES an
+			// isolated environment is refused against an older build rather than
+			// forwarded and silently started with the service's own environment.
+			"supportsIsolateEnvironment": true,
 			// Whether the create endpoint understands `settings` (muster
 			// #247) — the same wire-protocol fact, for the same reason: a relaying
 			// peer asks before forwarding, so a create carrying launch settings
@@ -873,6 +879,11 @@ type createSessionBody struct {
 	PermissionMode string             `json:"permissionMode"`
 	Consents       []fleet.PromptKind `json:"consents"`
 
+	// IsolateEnvironment requires the session's process to carry only a built
+	// environment (muster #280). It only NARROWS what the session gets, so it
+	// needs no grant beyond create. See fleet.SessionSpec.IsolateEnvironment.
+	IsolateEnvironment bool `json:"isolateEnvironment"`
+
 	// ConversationId asks the runtime to start a NEW conversation under a
 	// caller-chosen UUID (muster #224) — mutually exclusive with Resume,
 	// which continues one. See fleet.SessionSpec.ConversationId.
@@ -1134,7 +1145,7 @@ func handleCreateSession(svc *Service) http.HandlerFunc {
 			Name: body.Name, Prompt: body.Prompt, ContextRef: body.ContextRef,
 			Marker: body.Marker, RemoteControl: body.RemoteControl,
 			TrustCwd: body.TrustCwd, Env: body.Env, Resume: body.Resume,
-			ConversationId: body.ConversationId,
+			ConversationId: body.ConversationId, IsolateEnvironment: body.IsolateEnvironment,
 			PermissionMode: body.PermissionMode, Consents: body.Consents,
 			McpConfig: body.McpConfig, Labels: body.Labels,
 			Settings: body.Settings,

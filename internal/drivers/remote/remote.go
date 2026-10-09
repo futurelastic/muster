@@ -187,6 +187,10 @@ type Driver struct {
 	// only a positive answer and re-asks before refusing, the same rule
 	// requireLabels already applies to labelLimits.
 	supportsConversationId *bool
+	// supportsIsolateEnvironment is what the peer's /v1/health said about the
+	// isolateEnvironment create field (muster #280), learned and trusted exactly
+	// like supportsConversationId — see requireIsolateEnvironment.
+	supportsIsolateEnvironment *bool
 	// supportsLaunchSettings is what the peer's /v1/health said about the
 	// `settings` create field (muster #247), cached and re-asked exactly as
 	// supportsConversationId is — see requireLaunchSettings.
@@ -453,6 +457,7 @@ func (d *Driver) RefreshCapabilities(ctx context.Context, req fleet.Request) err
 			d.maxInputBytes = h.MaxInputBytes
 			d.labelLimits = h.Labels
 			d.supportsConversationId = h.SupportsConversationId
+			d.supportsIsolateEnvironment = h.SupportsIsolateEnvironment
 			d.supportsLaunchSettings = h.SupportsLaunchSettings
 			d.launchSettingsOutsideBypass = h.LaunchSettingsOutsideBypass
 			d.mu.Unlock()
@@ -479,6 +484,10 @@ type peerHealthBody struct {
 	// machine that has it always sends true; absence, not the value, is what
 	// tells "predates the feature" from "has it".
 	SupportsConversationId *bool `json:"supportsConversationId"`
+	// SupportsIsolateEnvironment is absent on a peer that predates the
+	// isolateEnvironment create field (muster #280); the same bare-flag shape
+	// as SupportsConversationId, for the same reason.
+	SupportsIsolateEnvironment *bool `json:"supportsIsolateEnvironment"`
 	// SupportsLaunchSettings is absent on a peer that predates the `settings`
 	// create field (muster #247); the same bare-flag shape as
 	// SupportsConversationId, for the same reason.
@@ -553,6 +562,7 @@ func (d *Driver) requireConversationId(ctx context.Context, req fleet.Request) e
 	d.maxInputBytes = h.MaxInputBytes
 	d.labelLimits = h.Labels
 	d.supportsConversationId = h.SupportsConversationId
+	d.supportsIsolateEnvironment = h.SupportsIsolateEnvironment
 	d.supportsLaunchSettings = h.SupportsLaunchSettings
 	d.launchSettingsOutsideBypass = h.LaunchSettingsOutsideBypass
 	d.mu.Unlock()
@@ -561,6 +571,49 @@ func (d *Driver) requireConversationId(ctx context.Context, req fleet.Request) e
 			Kind: fleet.ErrorUnsupported,
 			Message: fmt.Sprintf("peer %s does not carry conversationId (older build); the create was not sent, "+
 				"because that peer would accept it and silently start a conversation under an id of its own choosing", d.machine),
+			Machine: d.machine,
+		}
+	}
+	return nil
+}
+
+// requireIsolateEnvironment refuses forwarding a create that REQUIRES an
+// isolated environment to a peer that would drop the requirement (muster #280)
+// — requireConversationId's pattern for a further field that predates on some
+// peers.
+//
+// A peer on an older build ignores a create-body field it does not know: it
+// would start the session with the service's whole environment, answer 201,
+// and the caller — who asked precisely for the opposite — would hold a session
+// that looks isolated and is not. Only a positive cached answer is trusted;
+// anything else is asked again, so an upgraded peer is not refused on stale
+// evidence. The peer then applies its own driver's refusal if that driver
+// cannot isolate.
+func (d *Driver) requireIsolateEnvironment(ctx context.Context, req fleet.Request) error {
+	d.mu.RLock()
+	supported := d.supportsIsolateEnvironment
+	d.mu.RUnlock()
+	if supported != nil && *supported {
+		return nil
+	}
+	h, err := d.peerHealth(ctx, req)
+	if err != nil {
+		return fmt.Errorf("remote: could not confirm %s carries isolateEnvironment, so the create was not sent: %w", d.machine, err)
+	}
+	d.mu.Lock()
+	d.build = h.Build
+	d.maxInputBytes = h.MaxInputBytes
+	d.labelLimits = h.Labels
+	d.supportsConversationId = h.SupportsConversationId
+	d.supportsIsolateEnvironment = h.SupportsIsolateEnvironment
+	d.supportsLaunchSettings = h.SupportsLaunchSettings
+	d.launchSettingsOutsideBypass = h.LaunchSettingsOutsideBypass
+	d.mu.Unlock()
+	if h.SupportsIsolateEnvironment == nil || !*h.SupportsIsolateEnvironment {
+		return &fleet.Error{
+			Kind: fleet.ErrorUnsupported,
+			Message: fmt.Sprintf("peer %s does not carry isolateEnvironment (older build); the create was not sent, "+
+				"because that peer would accept it and silently start a session with the service's own environment", d.machine),
 			Machine: d.machine,
 		}
 	}
@@ -620,6 +673,7 @@ func (d *Driver) requireLaunchSettings(ctx context.Context, req fleet.Request, s
 	d.maxInputBytes = h.MaxInputBytes
 	d.labelLimits = h.Labels
 	d.supportsConversationId = h.SupportsConversationId
+	d.supportsIsolateEnvironment = h.SupportsIsolateEnvironment
 	d.supportsLaunchSettings = h.SupportsLaunchSettings
 	d.launchSettingsOutsideBypass = h.LaunchSettingsOutsideBypass
 	d.mu.Unlock()
@@ -1189,6 +1243,12 @@ type createBody struct {
 	// confirmed it carries the field rather than send it there to be silently
 	// dropped by a build that predates it — see requireConversationId.
 	ConversationId string `json:"conversationId,omitempty"`
+	// IsolateEnvironment travels with the create (muster #280): a requirement
+	// that the session carry only a built environment. Create refuses a peer
+	// that has not confirmed it carries the field — see
+	// requireIsolateEnvironment — because an older peer would drop it and start
+	// the session with its whole environment.
+	IsolateEnvironment bool `json:"isolateEnvironment,omitempty"`
 	// McpConfig names PATHS, and the paths are the peer's. Forwarded rather
 	// than resolved here for the same reason ContextRef is: this machine's
 	// filesystem is not the one the session will read from, and a proxy that
@@ -1263,7 +1323,7 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 		McpConfig: spec.McpConfig, Settings: spec.Settings,
 		Marker: spec.Marker, RemoteControl: spec.RemoteControl,
 		Labels:         spec.Labels,
-		ConversationId: spec.ConversationId,
+		ConversationId: spec.ConversationId, IsolateEnvironment: spec.IsolateEnvironment,
 	}
 	if len(spec.Labels) > 0 {
 		if err := d.requireLabels(ctx, req); err != nil {
@@ -1272,6 +1332,11 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 	}
 	if spec.ConversationId != "" {
 		if err := d.requireConversationId(ctx, req); err != nil {
+			return fleet.Session{}, err
+		}
+	}
+	if spec.IsolateEnvironment {
+		if err := d.requireIsolateEnvironment(ctx, req); err != nil {
 			return fleet.Session{}, err
 		}
 	}

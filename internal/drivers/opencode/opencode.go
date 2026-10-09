@@ -22,6 +22,39 @@
 // to the child only through its environment (process.go's New). --mdns is
 // never passed — it defaults the bind to 0.0.0.0, which nothing here wants.
 //
+// # One server per session, with a built environment (muster #280)
+//
+// The driver used to run ONE `opencode serve` for every session, and that
+// process inherited the service's whole environment and working directory. A
+// shared process has no honest way to give one session a variable another does
+// not see, so a create carrying `env` was refused, and a caller that wanted a
+// session holding only a model-provider key had no way to get it.
+//
+// Now each create starts its own server (process.go): its own port, its own
+// credential, its own process group, started in the session's own working
+// directory with an environment that is BUILT rather than inherited (env.go) —
+// a small documented base, this machine's sessionEnv, and the create's env.
+// Close and Shutdown kill the whole process group and remove the session's
+// scoped HOME/TMPDIR/XDG directory, so nothing outlives the session.
+//
+// Three limits are stated here so nobody reads more into it than it does. The
+// model-provider key a session needs is in its environment, and opencode
+// exposes that environment to its tool shell: isolation scopes every OTHER
+// credential and cannot protect the model key itself, so give each lane its
+// own spend-capped key. The filesystem is not confined: a session can read what
+// the service user can (the sandbox, #281, is where that belongs). And the
+// working directory's AGENTS.md and CLAUDE.md reach the runtime (up to 64 KB;
+// @path imports are not followed by one of the harnesses measured).
+//
+// A consequence operators will meet: a session no longer sees the service
+// user's own opencode login or configuration (HOME is the session's). The
+// provider credential it needs arrives through the create's env or this
+// machine's sessionEnv, or through a project-level opencode.json in the
+// session's working directory.
+//
+// WithBaseURL keeps a "shared mode" for tests: one already-running server, no
+// isolation, and Capabilities.IsolatesEnvironment says so.
+//
 // # This driver's session universe is what it has cached, not a runtime enumeration
 //
 // GET /session (list every session) is documented as returning the whole
@@ -86,13 +119,17 @@ package opencode
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	fleet "github.com/futurelastic/muster"
 	"github.com/futurelastic/muster/internal/driver"
+	"github.com/futurelastic/muster/internal/sessionenv"
 )
 
 // DefaultRuntime is the runtime id this driver registers under.
@@ -101,41 +138,51 @@ const DefaultRuntime fleet.RuntimeId = "opencode"
 const (
 	defaultBin        = "opencode"
 	defaultUsername   = "muster"
-	defaultDeadlineMs = 8000
+	defaultDeadlineMs = 30000
 	readyTimeout      = 10 * time.Second
 	readyPollInterval = 100 * time.Millisecond
 )
 
-// Driver implements driver.Driver over one opencode server this driver
-// itself owns the lifecycle of.
+// Driver implements driver.Driver over opencode servers this driver itself
+// owns the lifecycle of: one server — one process, one process group, one
+// credential, one scoped environment — PER SESSION (muster #280).
+//
+// WithBaseURL turns the driver into "shared mode": it talks to one
+// already-running server it did not start, for tests. Shared mode cannot
+// isolate anything and says so (Capabilities.IsolatesEnvironment is false).
 type Driver struct {
 	machine  fleet.MachineId
 	runtime  fleet.RuntimeId
 	bin      string
-	workdir  string
 	deadline time.Duration
 	now      func() time.Time
-
-	baseURL  string
 	username string
-	// password is this driver's own credential for its own opencode
-	// server — never a caller's, and a local driver ignores
-	// fleet.Caller.Credential entirely (see caller.go: "a local driver
-	// typically uses the first [Principal] and ignores the second
-	// [Credential]"). Generated once, held only in memory, and passed to
-	// the child process through its environment — never argv, never a
-	// file this driver writes (Boss's provider ruling on #55). NEVER
-	// logged.
-	password string
 	client   *http.Client
 
-	proc *process // nil when this Driver was built with WithBaseURL for tests
+	// sessionEnv is this machine's declared identity for its sessions (#94);
+	// sessionRoot is where session-scoped directories are made (the OS temp
+	// directory by default); runtimePath is the operator's extra PATH
+	// directories, none under the service user's home. See env.go.
+	sessionEnv  []sessionenv.Entry
+	sessionRoot string
+	runtimePath []string
 
-	mu   sync.RWMutex
-	seen map[string]knownSession // id -> what this driver has locally cached; see package doc's scope boundary
+	// baseURL and password are the shared-mode seam's inputs (WithBaseURL,
+	// WithCredential); New folds them into shared.
+	baseURL  string
+	password string
+	// shared is the one server of shared mode; nil in the production,
+	// isolated mode, where every session carries its own *server.
+	shared *server
 
-	idemMu sync.Mutex
-	idem   map[string]idemEntry
+	mu     sync.RWMutex
+	seen   map[string]knownSession // id -> what this driver has locally cached; see package doc's scope boundary
+	live   map[*server]struct{}    // every server this driver started and has not torn down, session created or not
+	closed bool
+
+	idemMu   sync.Mutex
+	idem     map[string]idemEntry
+	inflight map[string]chan struct{} // idempotency key -> closed when the create holding it finishes
 }
 
 // knownSession is what this driver remembers locally about a session it has
@@ -143,6 +190,9 @@ type Driver struct {
 // runtime's own (unreliable, see List's doc comment) bulk listing endpoint,
 // and the memory State's existence check writes back to.
 type knownSession struct {
+	// srv is the server this session lives on: the routing table for every
+	// call about it. Its own process in isolated mode, d.shared in shared mode.
+	srv       *server
 	cwd       fleet.AbsolutePath
 	name      string
 	agent     string
@@ -168,10 +218,23 @@ type Option func(*Driver)
 // default) resolves "opencode" on PATH.
 func WithBinary(bin string) Option { return func(d *Driver) { d.bin = bin } }
 
-// WithWorkdir sets the child process's working directory. Empty inherits
-// this process's own — opencode does not need to run from any particular
-// directory since every session names its own via ?directory=.
-func WithWorkdir(dir string) Option { return func(d *Driver) { d.workdir = dir } }
+// WithSessionEnv declares this machine's identity for its sessions (muster
+// #94): the same entries the multiplexer driver applies, with the same
+// precedence table, so a variable the operator configures reaches a session on
+// either runtime. A name this driver sets itself (HOME, TMPDIR, XDG_*,
+// OPENCODE_SERVER_*) is refused at New.
+func WithSessionEnv(entries []sessionenv.Entry) Option {
+	return func(d *Driver) { d.sessionEnv = entries }
+}
+
+// WithSessionRoot sets the directory session-scoped directories are made in.
+// Empty (the default) uses the OS temp directory.
+func WithSessionRoot(dir string) Option { return func(d *Driver) { d.sessionRoot = dir } }
+
+// WithRuntimePath adds directories to the PATH a session gets, ahead of the
+// system directories. Each must be absolute and not under the service user's
+// home (checked at New).
+func WithRuntimePath(dirs []string) Option { return func(d *Driver) { d.runtimePath = dirs } }
 
 // WithDeadline sets DriverCapabilities.DeadlineMs (§4.4). Non-positive
 // values are ignored, so a zero-value Option never produces an
@@ -216,10 +279,9 @@ func WithCredential(username, password string) Option {
 
 func withClock(f func() time.Time) Option { return func(d *Driver) { d.now = f } }
 
-// New builds a Driver. Unless WithBaseURL was supplied, it probes for the
-// opencode binary (never a startup crash when it is absent — see Probe),
-// picks a port, generates a credential, starts the server, and waits for
-// it to answer before returning.
+// New builds a Driver. Unless WithBaseURL was supplied it probes for the
+// opencode binary (never a startup crash when it is absent — see Probe) and
+// starts NOTHING: a server is started for each session, at Create.
 //
 // A non-nil error here is itself the "absent install is a first-class
 // answer" contract discharged: it is returned to the caller (ordinarily
@@ -237,7 +299,9 @@ func New(ctx context.Context, machine fleet.MachineId, opts ...Option) (*Driver,
 		username: defaultUsername,
 		client:   &http.Client{},
 		seen:     make(map[string]knownSession),
+		live:     make(map[*server]struct{}),
 		idem:     make(map[string]idemEntry),
+		inflight: make(map[string]chan struct{}),
 	}
 	for _, o := range opts {
 		o(d)
@@ -245,27 +309,74 @@ func New(ctx context.Context, machine fleet.MachineId, opts ...Option) (*Driver,
 
 	if d.baseURL != "" {
 		// Test/advanced seam: the caller already has a server (real or
-		// fake) and told us where it is. Nothing to spawn or probe.
+		// fake) and told us where it is. Nothing to spawn or probe, and
+		// nothing to isolate: one server serves every session.
+		d.shared = &server{baseURL: d.baseURL, username: d.username, password: d.password}
 		return d, nil
 	}
 
-	p, err := startProcess(ctx, d.bin, d.workdir, d.username)
-	if err != nil {
+	if !groupsSupported {
+		return nil, errors.New("opencode: this platform cannot signal a process group, so a session's tools " +
+			"could outlive its close; the driver refuses to start")
+	}
+	avail := Probe(ctx, d.bin)
+	if !avail.Installed {
+		return nil, fmt.Errorf("opencode: not available on this machine: %w", avail.Err)
+	}
+	d.bin = avail.Path
+	if err := checkRuntimePath(d.runtimePath); err != nil {
 		return nil, err
 	}
-	d.proc = p
-	d.baseURL = p.baseURL
-	d.password = p.password
+	if err := checkSessionEnvEntries(d.sessionEnv); err != nil {
+		return nil, err
+	}
+	if d.sessionRoot == "" {
+		d.sessionRoot = os.TempDir()
+	}
 	return d, nil
 }
 
-// Shutdown stops the opencode server this Driver started. A no-op for a
-// Driver built with WithBaseURL, which never started one.
+// Shutdown stops every server this Driver started, kills each one's process
+// group and removes each one's session directory. Idempotent, and a no-op for
+// a Driver built with WithBaseURL, which started none. After it, Create
+// refuses.
 func (d *Driver) Shutdown() error {
-	if d.proc == nil {
-		return nil
+	d.mu.Lock()
+	d.closed = true
+	servers := make([]*server, 0, len(d.live))
+	for s := range d.live {
+		servers = append(servers, s)
 	}
-	return d.proc.stop()
+	d.seen = make(map[string]knownSession)
+	d.mu.Unlock()
+
+	var wg sync.WaitGroup
+	for _, s := range servers {
+		wg.Add(1)
+		go func(s *server) {
+			defer wg.Done()
+			s.teardown()
+		}(s)
+	}
+	wg.Wait()
+	return nil
+}
+
+// trackServer registers a started server so Shutdown can find it even before
+// its session exists. It reports false when the driver has been shut down.
+func (d *Driver) trackServer(s *server) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
+		return false
+	}
+	s.onTeardown = func(s *server) {
+		d.mu.Lock()
+		delete(d.live, s)
+		d.mu.Unlock()
+	}
+	d.live[s] = struct{}{}
+	return true
 }
 
 var _ driver.Driver = (*Driver)(nil)
@@ -291,7 +402,11 @@ func (d *Driver) Capabilities() fleet.DriverCapabilities {
 			Effort: false,
 			Agent:  true,
 		},
-		DeadlineMs: d.deadline.Milliseconds(),
+		// IsolatesEnvironment: each session has its own process, started
+		// with a built environment (env.go). Shared mode — the test seam —
+		// has one server for everyone and cannot.
+		IsolatesEnvironment: d.shared == nil,
+		DeadlineMs:          d.deadline.Milliseconds(),
 		// A local driver is describing itself — no network between the
 		// claim and its subject (same reasoning as the tmux driver's
 		// Capabilities).

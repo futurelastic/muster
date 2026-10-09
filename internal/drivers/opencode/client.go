@@ -92,8 +92,8 @@ type wireMessage struct {
 	Info wireMessageInfo `json:"info"`
 }
 
-// do performs one request against this driver's own opencode server,
-// authenticating as this driver (never as the caller — see Driver.password's
+// do performs one request against one of this driver's own opencode servers
+// (the session's, in isolated mode), authenticating as this driver (never as the caller — see Driver.password's
 // doc comment; a local driver ignores fleet.Caller.Credential entirely).
 //
 // A transport failure and an HTTP error status are both turned into a
@@ -102,7 +102,7 @@ type wireMessage struct {
 // therefore receives either a clean decode or a typed error — never a
 // response that merely looks empty, which is the distinction §5.7 and
 // #55's second trap both turn on.
-func (d *Driver) do(ctx context.Context, method, path string, body, out any) error {
+func (d *Driver) do(ctx context.Context, srv *server, method, path string, body, out any) error {
 	var rdr io.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
@@ -111,11 +111,11 @@ func (d *Driver) do(ctx context.Context, method, path string, body, out any) err
 		}
 		rdr = bytes.NewReader(raw)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, d.baseURL+path, rdr)
+	req, err := http.NewRequestWithContext(ctx, method, srv.baseURL+path, rdr)
 	if err != nil {
 		return fmt.Errorf("opencode: building request: %w", err)
 	}
-	req.SetBasicAuth(d.username, d.password)
+	req.SetBasicAuth(srv.username, srv.password)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -178,6 +178,13 @@ func (d *Driver) do(ctx context.Context, method, path string, body, out any) err
 func isNotFound(err error) bool {
 	fe, ok := err.(*fleet.Error)
 	return ok && fe.Kind == fleet.ErrorNotFound
+}
+
+// isUnreachable reports whether err is the ErrorUnreachable do produces for a
+// transport failure — nothing answered.
+func isUnreachable(err error) bool {
+	fe, ok := err.(*fleet.Error)
+	return ok && fe.Kind == fleet.ErrorUnreachable
 }
 
 // sourceStateFor maps a transport-level failure onto the closed SourceState
