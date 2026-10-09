@@ -32,6 +32,9 @@ func TestCapabilities_DeclaresObservedStateAndItsRealLimits(t *testing.T) {
 	if caps.SupportsPin.Effort {
 		t.Error("SupportsPin.Effort = true; there is no analogous parameter and Create refuses it")
 	}
+	if !caps.ValidatesModel {
+		t.Error("ValidatesModel = false; Create checks a model against the runtime's own catalog (#287)")
+	}
 	if caps.Source != "observed" {
 		t.Errorf("Source = %q, want \"observed\" — a local driver describing itself", caps.Source)
 	}

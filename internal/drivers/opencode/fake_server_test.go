@@ -38,6 +38,12 @@ type fakeServer struct {
 	// read-failure half of #55's discrimination.
 	statusDown bool
 
+	// catalog, when non-nil, is served by GET /config/providers as provider id
+	// to model ids; nil makes the endpoint 404, like a runtime without it.
+	// catalogStatus, when set, makes the endpoint answer that status instead.
+	catalog       map[string][]string
+	catalogStatus int
+
 	requests []recordedRequest
 
 	// bus is the GET /event side (muster #284): the open connections, so a
@@ -94,6 +100,8 @@ func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodPost && r.URL.Path == "/session":
 		f.handleCreate(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/config/providers":
+		f.handleProviders(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/event":
 		f.handleEvent(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/session":
@@ -398,4 +406,37 @@ func (f *fakeServer) busConns() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.bus)
+}
+
+// handleProviders serves GET /config/providers in the runtime's shape:
+// {providers: [{id, models: {<model id>: {...}}}], default: {...}}.
+func (f *fakeServer) handleProviders(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	catalog, status := f.catalog, f.catalogStatus
+	f.mu.Unlock()
+	if status != 0 {
+		w.WriteHeader(status)
+		return
+	}
+	if catalog == nil {
+		http.NotFound(w, r)
+		return
+	}
+	type provider struct {
+		ID     string              `json:"id"`
+		Models map[string]struct{} `json:"models"`
+	}
+	out := struct {
+		Providers []provider        `json:"providers"`
+		Default   map[string]string `json:"default"`
+	}{Default: map[string]string{}}
+	for id, models := range catalog {
+		p := provider{ID: id, Models: map[string]struct{}{}}
+		for _, m := range models {
+			p.Models[m] = struct{}{}
+		}
+		out.Providers = append(out.Providers, p)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
 }
