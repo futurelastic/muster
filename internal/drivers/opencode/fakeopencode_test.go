@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -50,6 +52,7 @@ func runFakeOpencode(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	port := fs.Int("port", 0, "")
 	host := fs.String("hostname", "127.0.0.1", "")
+	_ = fs.Bool("print-logs", false, "")
 	_ = fs.Parse(args)
 
 	if fileExists(".fake-fail-ready") {
@@ -64,6 +67,10 @@ func runFakeOpencode(args []string) {
 	sessionID := "ses_" + hex.EncodeToString(id[:])
 	created := time.Now().UnixMilli()
 	var session *wireSession
+
+	var busMu sync.Mutex
+	bus := map[int]chan string{}
+	nextBus := 0
 
 	writeJSON := func(w http.ResponseWriter, v any) {
 		w.Header().Set("Content-Type", "application/json")
@@ -106,6 +113,50 @@ func runFakeOpencode(args []string) {
 			writeJSON(w, true)
 		case path == "/session/"+sessionID+"/message":
 			writeJSON(w, []wireMessage{})
+		case path == "/event" && r.Method == http.MethodGet:
+			// The bus (muster #284). Frames posted to /__test/emit reach every
+			// open connection; a line posted to /__test/log goes to stderr, the
+			// log the driver captures.
+			w.Header().Set("Content-Type", "text/event-stream")
+			fl, _ := w.(http.Flusher)
+			ch := make(chan string, 16)
+			busMu.Lock()
+			nextBus++
+			n := nextBus
+			bus[n] = ch
+			busMu.Unlock()
+			defer func() {
+				busMu.Lock()
+				delete(bus, n)
+				busMu.Unlock()
+			}()
+			fmt.Fprint(w, "data: {\"type\":\"server.connected\",\"properties\":{}}\n\n")
+			if fl != nil {
+				fl.Flush()
+			}
+			for {
+				select {
+				case frame := <-ch:
+					fmt.Fprint(w, frame)
+					if fl != nil {
+						fl.Flush()
+					}
+				case <-r.Context().Done():
+					return
+				}
+			}
+		case path == "/__test/emit" && r.Method == http.MethodPost:
+			raw, _ := io.ReadAll(r.Body)
+			busMu.Lock()
+			for _, ch := range bus {
+				ch <- "data: " + string(raw) + "\n\n"
+			}
+			busMu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		case path == "/__test/log" && r.Method == http.MethodPost:
+			raw, _ := io.ReadAll(r.Body)
+			fmt.Fprintln(os.Stderr, string(raw))
+			w.WriteHeader(http.StatusNoContent)
 		case path == "/__test/env":
 			writeJSON(w, map[string]any{"env": os.Environ(), "cwd": cwd, "pid": os.Getpid()})
 		case path == "/__test/sh" && r.Method == http.MethodPost:

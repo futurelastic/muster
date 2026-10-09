@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"time"
 
 	fleet "github.com/futurelastic/muster"
 )
@@ -98,15 +99,11 @@ func (d *Driver) lastTurnFailure(ctx context.Context, srv *server, id string) *f
 		return nil
 	}
 
-	reason := info.Error.Name
-	if info.Error.Data.Message != "" {
-		reason += ": " + info.Error.Data.Message
+	// The name is the runtime's own, and where the API gave only its generic
+	// placeholder, the one its log gave (muster #284) — see turnFailure.
+	at := time.Now()
+	if info.Time.Created > 0 {
+		at = time.UnixMilli(info.Time.Created)
 	}
-	// IsRetryable is only ever populated by the runtime for the "APIError"
-	// variant (client.go's wireAssistantError doc). Every other Name leaves
-	// the zero value, which is correctly read here as "not claimed
-	// retryable" — the runtime never said either way for those, and this
-	// must not guess yes on their behalf.
-	retryable := info.Error.Name == "APIError" && info.Error.Data.IsRetryable
-	return &fleet.TurnEnd{Outcome: "failed", Reason: reason, Retryable: retryable}
+	return d.turnFailure(ctx, srv, info.Error, at, false)
 }

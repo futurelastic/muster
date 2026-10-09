@@ -109,10 +109,14 @@
 // which is a safe fit for §2.3's model without real design work of its own
 // (a session-abstraction concept, not a wire mapping exercise). Inventing
 // one to make the method non-empty would be exactly the emulation §5.6
-// forbids. Likewise Subscribe: opencode publishes a global SSE event bus
-// (GET /event) that could in principle back a real Subscribe, but wiring
-// its event vocabulary honestly onto SubscribeFilter and fleet.Event is
-// its own piece of work and is left undone here rather than half-mapped.
+// forbids.
+//
+// # Events
+//
+// Subscribe is backed by the runtime's own event bus (GET /event), one
+// connection per session process; subscribe.go has the mapping, what is
+// dropped, and how a dropped connection is reported (muster #284).
+//
 // KeySender is not implemented at all — this substrate has no screen for a
 // raw key to land on, and DeliversRawKeys: false says so structurally
 // rather than through a stub that always refuses.
@@ -184,6 +188,10 @@ type Driver struct {
 	// shared is the one server of shared mode; nil in the production,
 	// isolated mode, where every session carries its own *server.
 	shared *server
+
+	// subs are the open event streams (subscribe.go); subMu guards the set.
+	subMu sync.Mutex
+	subs  map[*subscription]struct{}
 
 	mu     sync.RWMutex
 	seen   map[string]knownSession // id -> what this driver has locally cached; see package doc's scope boundary
@@ -316,6 +324,7 @@ func New(ctx context.Context, machine fleet.MachineId, opts ...Option) (*Driver,
 		username: defaultUsername,
 		client:   &http.Client{},
 		seen:     make(map[string]knownSession),
+		subs:     make(map[*subscription]struct{}),
 		live:     make(map[*server]struct{}),
 		idem:     make(map[string]idemEntry),
 		inflight: make(map[string]chan struct{}),
@@ -368,6 +377,7 @@ func (d *Driver) Shutdown() error {
 	}
 	d.seen = make(map[string]knownSession)
 	d.mu.Unlock()
+	d.endSubscriptions()
 
 	var wg sync.WaitGroup
 	for _, s := range servers {
