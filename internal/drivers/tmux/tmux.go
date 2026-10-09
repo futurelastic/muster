@@ -417,6 +417,10 @@ type Driver struct {
 	// noteDelivery/deliveryMarkFor and deliveryMarkRetention.
 	delivered map[string]deliveryMark
 
+	// usage is the running token sum per runtime record (muster #285); see
+	// usagerecord.go.
+	usage usageReader
+
 	// resumeIntents remembers, per session, the conversation id a create
 	// asked the runtime to resume — the durable note #72 needs to say
 	// whether that was honoured, once the session's own conversation
@@ -959,6 +963,7 @@ func (d *Driver) Capabilities() fleet.DriverCapabilities {
 		// was readable at that moment (a dialog owns the screen), not that
 		// nobody looked.
 		ObservesPermissionMode: true,
+		ReportsUsage:           true, // muster #285: from the runtime's own record
 		// #85: this driver latches Session.RuntimeSurface off the same
 		// footer label ObservesControlChannel already reads, once
 		// corroborated — see surface.go's runtimeSurfaceFor.
@@ -1860,6 +1865,9 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 	// nothing dispatched through Send pays nothing extra here.
 	for i := range sessions {
 		sessions[i].State.Turns = d.turnsFor(sessions[i].ID, string(sessions[i].Cwd), sessions[i].Conversation)
+		// muster #285: unlike `turns`, not gated on a delivery mark — a session
+		// nothing was dispatched into still spends.
+		sessions[i].State.Usage = d.usageFor(string(sessions[i].Cwd), sessions[i].Conversation)
 	}
 
 	// muster #269: where the screen reader found no label, the runtime's own
@@ -2233,6 +2241,7 @@ func (d *Driver) State(ctx context.Context, req fleet.Request, ref fleet.Session
 		// `turns` from its own pre-resolved Conversation, State does its own
 		// lookup.
 		st = d.upgradeTurnsFromRecord(ctx, st, r.cwd, r.session, r.created, r.paneID, r.pid)
+		st = d.upgradeUsageFromRecord(ctx, st, r.cwd, r.session, r.created, r.paneID, r.pid) // muster #285
 		// Same rewrite List applies, generalised to a one-session read (#10)
 		// — see quotaBlockedState's own comment for why a session's own
 		// state must not be reported as an unqualified "starting"/"idle"/

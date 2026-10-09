@@ -101,6 +101,10 @@ var specFieldTypes = map[string]any{
 
 	// #230: footer notices read below the composer.
 	"Warning": Warning{},
+
+	// #285: the runtime's own account of what a session spent.
+	"Usage":     Usage{},
+	"TurnUsage": TurnUsage{},
 }
 
 // specFieldExceptions records a Go field that a normative type block
