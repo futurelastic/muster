@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"os"
 	"strings"
+	"sync"
 	"time"
 
 	fleet "github.com/futurelastic/muster"
@@ -15,11 +17,25 @@ import (
 // (§10) with an in-memory table — see the package doc's SupportsResume
 // note for why this driver does not attempt to survive a restart.
 //
+// In the production (isolated) mode a create STARTS A SERVER: it builds the
+// session's environment (env.go), makes its scoped directory, execs a fresh
+// `opencode serve` in a process group of its own, waits for it to answer, and
+// only then creates the session on it — opencode assigns the session id, so
+// the id cannot be known before the process exists. A failure at any of those
+// steps tears the server and its directory down again and stores no idempotency
+// entry, so a retry starts clean. Because that takes seconds rather than
+// milliseconds, two concurrent creates with the SAME key must not each start a
+// server: the second waits for the first and then replays its result (§10).
+//
 // Agent, Model and Effort are §2.1's "hints, not guarantees": this driver
 // genuinely honours Agent and Model (opencode's own create body carries
-// both) and REFUSES rather than silently drops Effort, Env, ContextRef,
+// both) and REFUSES rather than silently drops Effort, ContextRef,
 // McpConfig, Settings (muster #247), PermissionMode, Resume and ConversationId (muster #224) —
-// none of which this substrate has an honest mechanism for. TrustCwd and
+// none of which this substrate has an honest mechanism for. Env is honoured
+// (muster #280) by building the session's environment; it is refused only in
+// shared mode, where one server serves every session and has no way to give
+// one a variable another does not see — and there IsolateEnvironment is
+// refused too. TrustCwd and
 // Consents are left as no-ops: a substrate with no such boot-time question
 // honours them by having nothing to do (session.go's own rule for a HINT),
 // and opencode's session.create is a plain REST call with no interactive
@@ -32,23 +48,37 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 			Kind: fleet.ErrorInvalid, Message: "create: idempotency key is required (§10)", Machine: d.machine,
 		}
 	}
-	if ref, ok := d.idemLookup(key); ok {
-		// A repeat of an already-completed create: report the same applied
-		// facts the original create observed and cached (markSeen), not a
-		// fresh echo of this call's own spec — muster #84 is exactly
-		// the failure of reporting a request as if it were a fact.
-		info, _ := d.wasSeen(ref.ID)
-		return fleet.Session{
-			SessionRef: ref, Cwd: spec.Cwd, Agent: fleet.AgentId(info.agent),
-			Pins: pinOutcomeForAgent(spec, info.agent),
-		}, nil
+	// One create per key at a time: a repeat of a completed key replays it, a
+	// repeat of an IN-FLIGHT key waits for it and then replays or, if it
+	// failed, takes over.
+	for {
+		if ref, ok := d.idemLookup(key); ok {
+			// A repeat of an already-completed create: report the same applied
+			// facts the original create observed and cached (markSeen), not a
+			// fresh echo of this call's own spec — muster #84 is exactly
+			// the failure of reporting a request as if it were a fact.
+			info, _ := d.wasSeen(ref.ID)
+			return fleet.Session{
+				SessionRef: ref, Cwd: spec.Cwd, Agent: fleet.AgentId(info.agent),
+				Pins: pinOutcomeForAgent(spec, info.agent),
+			}, nil
+		}
+		wait, leader := d.idemBegin(key)
+		if leader {
+			defer d.idemEnd(key)
+			break
+		}
+		select {
+		case <-wait:
+		case <-ctx.Done():
+			return fleet.Session{}, ctx.Err()
+		}
 	}
 	if spec.Cwd == "" {
 		return fleet.Session{}, &fleet.Error{Kind: fleet.ErrorInvalid, Message: "create: cwd is required", Machine: d.machine}
 	}
-	for name, set := range map[string]bool{
+	refused := map[string]bool{
 		"effort":     spec.Effort != "",
-		"env":        len(spec.Env) > 0,
 		"contextRef": spec.ContextRef != "",
 		"mcpConfig":  len(spec.McpConfig) > 0,
 		// muster #247: launch-time CLI settings have no meaning for a runtime
@@ -61,10 +91,14 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 		// this driver has no honest way to make it start under a caller's
 		// instead. Refused for the same reason as resume, three lines above.
 		"conversationId": spec.ConversationId != "",
-		// muster #280: a driver in shared mode (one server for every session)
-		// has no way to give a session an environment of its own.
-		"isolateEnvironment": spec.IsolateEnvironment,
-	} {
+	}
+	if d.shared != nil {
+		// muster #280: one server for every session has no way to give one
+		// session a variable another does not see, nor to isolate anything.
+		refused["env"] = len(spec.Env) > 0
+		refused["isolateEnvironment"] = spec.IsolateEnvironment
+	}
+	for name, set := range refused {
 		if set {
 			return fleet.Session{}, &fleet.Error{
 				Kind:    fleet.ErrorUnsupported,
@@ -73,9 +107,6 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 			}
 		}
 	}
-
-	ctx, cancel := d.bounded(ctx)
-	defer cancel()
 
 	body := map[string]any{}
 	if spec.Name != "" {
@@ -96,10 +127,30 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 		body["model"] = map[string]string{"providerID": providerID, "id": modelID}
 	}
 
+	ctx, cancel := d.bounded(ctx)
+	defer cancel()
+
+	srv := d.shared
+	if srv == nil {
+		started, err := d.startSessionServer(ctx, spec)
+		if err != nil {
+			return fleet.Session{}, err
+		}
+		srv = started
+	}
+
 	var sess wireSession
 	path := "/session?directory=" + url.QueryEscape(string(spec.Cwd))
-	if err := d.do(ctx, "POST", path, body, &sess); err != nil {
+	if err := d.do(ctx, srv, "POST", path, body, &sess); err != nil {
+		d.discardServer(srv)
 		return fleet.Session{}, err
+	}
+	if _, dup := d.wasSeen(sess.ID); dup && d.shared == nil {
+		// A fresh process was handed an id this driver already routes to
+		// another one. Cannot happen with opencode's ids; refusing is safer
+		// than letting two sessions share a key in the routing table.
+		d.discardServer(srv)
+		return fleet.Session{}, fmt.Errorf("create: the runtime returned session id %q, which another session already holds", sess.ID)
 	}
 	startedAt := time.UnixMilli(sess.Time.Created)
 	ref := fleet.SessionRef{Machine: d.machine, ID: sess.ID, Name: sess.Title}
@@ -107,10 +158,10 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 	if cwd == "" {
 		cwd = spec.Cwd
 	}
-	d.markSeen(sess.ID, knownSession{cwd: cwd, name: sess.Title, agent: sess.Agent, startedAt: startedAt})
+	d.markSeen(sess.ID, knownSession{srv: srv, cwd: cwd, name: sess.Title, agent: sess.Agent, startedAt: startedAt})
 
 	if spec.Prompt != "" {
-		if err := d.sendPrompt(ctx, sess.ID, spec.Prompt); err != nil {
+		if err := d.sendPrompt(ctx, srv, sess.ID, spec.Prompt); err != nil {
 			// The session exists but could not be started. Reported as a
 			// failure of THIS create — a caller retrying with the same
 			// idempotency key gets the session back (see below) and may
@@ -124,6 +175,68 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 		SessionRef: ref, Cwd: spec.Cwd, Agent: fleet.AgentId(sess.Agent),
 		Pins: pinOutcomeForAgent(spec, sess.Agent),
 	}, nil
+}
+
+// startSessionServer starts the one server a session will live on: resolves
+// the session's environment (refusing before any side effect), makes its
+// scoped directory, and execs the server. The directory is removed again if
+// the server does not come up.
+func (d *Driver) startSessionServer(ctx context.Context, spec fleet.SessionSpec) (*server, error) {
+	extra, err := d.sessionEnvFor(spec)
+	if err != nil {
+		return nil, err
+	}
+	d.mu.RLock()
+	closed := d.closed
+	d.mu.RUnlock()
+	if closed {
+		return nil, &fleet.Error{Kind: fleet.ErrorUnreachable, Message: "create: this driver has been shut down", Machine: d.machine}
+	}
+	dir, err := sessionDirs(d.sessionRoot)
+	if err != nil {
+		return nil, err
+	}
+	srv, err := startServer(ctx, d.bin, string(spec.Cwd), d.username, d.buildEnv(dir, extra))
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return nil, err
+	}
+	srv.dir = dir
+	if !d.trackServer(srv) {
+		srv.teardown()
+		return nil, &fleet.Error{Kind: fleet.ErrorUnreachable, Message: "create: this driver has been shut down", Machine: d.machine}
+	}
+	return srv, nil
+}
+
+// discardServer tears down a server whose session never came to exist. A
+// no-op in shared mode, where the server is not this driver's to stop.
+func (d *Driver) discardServer(srv *server) {
+	if d.shared == nil {
+		srv.teardown()
+	}
+}
+
+// idemBegin claims key for one create. leader is true when the caller now owns
+// it; otherwise wait is closed when the create that does own it finishes.
+func (d *Driver) idemBegin(key string) (wait <-chan struct{}, leader bool) {
+	d.idemMu.Lock()
+	defer d.idemMu.Unlock()
+	if ch, ok := d.inflight[key]; ok {
+		return ch, false
+	}
+	d.inflight[key] = make(chan struct{})
+	return nil, true
+}
+
+// idemEnd releases key and wakes anyone waiting on it.
+func (d *Driver) idemEnd(key string) {
+	d.idemMu.Lock()
+	defer d.idemMu.Unlock()
+	if ch, ok := d.inflight[key]; ok {
+		delete(d.inflight, key)
+		close(ch)
+	}
 }
 
 // pinOutcomeForAgent reports what this driver actually knows about the two
@@ -154,12 +267,12 @@ func pinOutcomeForAgent(spec fleet.SessionSpec, appliedAgent string) *fleet.PinO
 
 // sendPrompt is the shared body of Create's optional opening message and
 // Send's ordinary delivery.
-func (d *Driver) sendPrompt(ctx context.Context, id, text string) error {
+func (d *Driver) sendPrompt(ctx context.Context, srv *server, id, text string) error {
 	body := map[string]any{
 		"parts": []map[string]string{{"type": "text", "text": text}},
 	}
 	path := "/session/" + url.PathEscape(id) + "/prompt_async"
-	return d.do(ctx, "POST", path, body, nil)
+	return d.do(ctx, srv, "POST", path, body, nil)
 }
 
 // Send delivers input (§3) via opencode's prompt_async, which starts the
@@ -196,13 +309,14 @@ func (d *Driver) Send(ctx context.Context, req fleet.Request, ref fleet.SessionR
 	if !opts.Submit {
 		return fleet.DeliveryReceipt{}, driver.ErrUnsupported
 	}
-	if _, ok := d.wasSeen(ref.ID); !ok {
+	known, ok := d.wasSeen(ref.ID)
+	if !ok {
 		return fleet.DeliveryReceipt{}, fmt.Errorf("%w: %q", fleet.ErrNoSuchSession, ref.ID)
 	}
 	ctx, cancel := d.bounded(ctx)
 	defer cancel()
 
-	if err := d.sendPrompt(ctx, ref.ID, text); err != nil {
+	if err := d.sendPrompt(ctx, known.srv, ref.ID, text); err != nil {
 		if isNotFound(err) {
 			return fleet.DeliveryReceipt{}, fmt.Errorf("%w: %q", fleet.ErrNoSuchSession, ref.ID)
 		}
@@ -228,14 +342,24 @@ func (d *Driver) Send(ctx context.Context, req fleet.Request, ref fleet.SessionR
 // this driver does not attempt to resolve any further than the runtime
 // itself can).
 func (d *Driver) State(ctx context.Context, req fleet.Request, ref fleet.SessionRef) (fleet.SessionState, error) {
-	if _, ok := d.wasSeen(ref.ID); !ok {
+	known, ok := d.wasSeen(ref.ID)
+	if !ok {
 		return fleet.SessionState{}, fmt.Errorf("%w: %q", fleet.ErrNoSuchSession, ref.ID)
+	}
+	srv := known.srv
+	// muster #280: in isolated mode the session IS its process. One that has
+	// exited is a session that no longer exists — read from the process itself,
+	// not inferred from a failed HTTP call (which would be "unreachable", a
+	// different and retryable thing).
+	if d.shared == nil && srv.proc.exited() {
+		return fleet.InferredState(fleet.StatusDead,
+			"the session's runtime process has exited", nil), nil
 	}
 	ctx, cancel := d.bounded(ctx)
 	defer cancel()
 
 	var statuses statusMap
-	if err := d.do(ctx, "GET", "/session/status", nil, &statuses); err != nil {
+	if err := d.do(ctx, srv, "GET", "/session/status", nil, &statuses); err != nil {
 		// §5.7, applied at the single-session grain: the read failed, so
 		// this is an error — never a synthesized idle. Propagated as-is,
 		// which the HTTP layer maps to 504/401 (writeDriverError adopts
@@ -251,11 +375,11 @@ func (d *Driver) State(ctx context.Context, req fleet.Request, ref fleet.Session
 	// before but that has since been deleted (by another client, or by
 	// this driver's own Close) is `dead`, not `idle`.
 	var sess wireSession
-	err := d.do(ctx, "GET", "/session/"+url.PathEscape(ref.ID), nil, &sess)
+	err := d.do(ctx, srv, "GET", "/session/"+url.PathEscape(ref.ID), nil, &sess)
 	switch {
 	case err == nil:
 		d.markSeen(sess.ID, knownSession{
-			cwd: fleet.AbsolutePath(sess.Directory), name: sess.Title, agent: sess.Agent,
+			srv: srv, cwd: fleet.AbsolutePath(sess.Directory), name: sess.Title, agent: sess.Agent,
 			startedAt: time.UnixMilli(sess.Time.Created),
 		})
 		st := classify(false, wireStatus{})
@@ -264,7 +388,7 @@ func (d *Driver) State(ctx context.Context, req fleet.Request, ref fleet.Session
 		// no way to see that on its own — it only ever sees the status map
 		// — so it is checked here, once, on the one path that reaches a
 		// confirmed-idle verdict.
-		st.LastTurn = d.lastTurnFailure(ctx, ref.ID)
+		st.LastTurn = d.lastTurnFailure(ctx, srv, ref.ID)
 		return st, nil
 	case isNotFound(err):
 		return fleet.InferredState(fleet.StatusDead,
@@ -287,13 +411,14 @@ func (d *Driver) Respond(ctx context.Context, req fleet.Request, ref fleet.Sessi
 // Interrupt asks the runtime to abort a session's current turn (§3, 202
 // intent-only semantics on the wire — see fleet.Ack).
 func (d *Driver) Interrupt(ctx context.Context, req fleet.Request, ref fleet.SessionRef) (fleet.Ack, error) {
-	if _, ok := d.wasSeen(ref.ID); !ok {
+	known, ok := d.wasSeen(ref.ID)
+	if !ok {
 		return fleet.Ack{}, fmt.Errorf("%w: %q", fleet.ErrNoSuchSession, ref.ID)
 	}
 	ctx, cancel := d.bounded(ctx)
 	defer cancel()
 	path := "/session/" + url.PathEscape(ref.ID) + "/abort"
-	if err := d.do(ctx, "POST", path, nil, nil); err != nil {
+	if err := d.do(ctx, known.srv, "POST", path, nil, nil); err != nil {
 		if isNotFound(err) {
 			return fleet.Ack{}, fmt.Errorf("%w: %q", fleet.ErrNoSuchSession, ref.ID)
 		}
@@ -310,29 +435,45 @@ func (d *Driver) Interrupt(ctx context.Context, req fleet.Request, ref fleet.Ses
 // caller supplied nothing. Both are §5.4's "at least one independent
 // attribute", applied to the one attribute this substrate actually offers
 // — time.created never changes for a given id here.
+//
+// In isolated mode closing the session closes its PROCESS (muster #280): the
+// server's whole process group is killed and its scoped directory removed, so
+// nothing the session started outlives it. One process holds one session, so
+// an id cannot have been recycled inside it and an unreachable server is no
+// reason to refuse — the caller's expectation is then checked against the
+// cached start time, and the process is torn down regardless.
 func (d *Driver) Close(ctx context.Context, req fleet.Request, ref fleet.SessionRef) (fleet.Ack, error) {
 	prior, seen := d.wasSeen(ref.ID)
 	if !seen {
 		return fleet.Ack{}, fmt.Errorf("%w: %q", fleet.ErrNoSuchSession, ref.ID)
 	}
 	priorStart := prior.startedAt
+	srv := prior.srv
+	isolated := d.shared == nil
 	ctx, cancel := d.bounded(ctx)
 	defer cancel()
 
 	var sess wireSession
-	err := d.do(ctx, "GET", "/session/"+url.PathEscape(ref.ID), nil, &sess)
-	if err != nil {
-		if isNotFound(err) {
-			// #78: the runtime itself just confirmed this id is gone — the
-			// cache entry describes a session that no longer exists, on
-			// exactly the same authority Close's own success path relies
-			// on below, so it is pruned here too rather than only there.
-			d.forgetSeen(ref.ID)
-			return fleet.Ack{}, fmt.Errorf("%w: %q", fleet.ErrNoSuchSession, ref.ID)
-		}
+	liveStart := priorStart
+	err := d.do(ctx, srv, "GET", "/session/"+url.PathEscape(ref.ID), nil, &sess)
+	switch {
+	case err == nil:
+		liveStart = time.UnixMilli(sess.Time.Created)
+	case isNotFound(err):
+		// #78: the runtime itself just confirmed this id is gone — the
+		// cache entry describes a session that no longer exists, on
+		// exactly the same authority Close's own success path relies
+		// on below, so it is pruned here too rather than only there.
+		d.forgetSeen(ref.ID)
+		d.discardServer(srv)
+		return fleet.Ack{}, fmt.Errorf("%w: %q", fleet.ErrNoSuchSession, ref.ID)
+	case isolated && isUnreachable(err):
+		// The server is gone or not answering; the session's process is the
+		// session, so closing it is exactly "tear it down". Corroborate with
+		// what this driver last saw (liveStart == priorStart).
+	default:
 		return fleet.Ack{}, err
 	}
-	liveStart := time.UnixMilli(sess.Time.Created)
 
 	if want := req.Expect.StartedAt; want != nil {
 		if !liveStart.Equal(*want) {
@@ -346,12 +487,18 @@ func (d *Driver) Close(ctx context.Context, req fleet.Request, ref fleet.Session
 			fleet.ErrAmbiguousTarget, ref.ID)
 	}
 
-	if err := d.do(ctx, "DELETE", "/session/"+url.PathEscape(ref.ID), nil, nil); err != nil {
-		if isNotFound(err) {
+	if err := d.do(ctx, srv, "DELETE", "/session/"+url.PathEscape(ref.ID), nil, nil); err != nil {
+		switch {
+		case isNotFound(err):
 			d.forgetSeen(ref.ID)
+			d.discardServer(srv)
 			return fleet.Ack{}, fmt.Errorf("%w: %q", fleet.ErrNoSuchSession, ref.ID)
+		case isolated:
+			// Best effort: the process is about to be killed, which removes the
+			// session more thoroughly than the request would have.
+		default:
+			return fleet.Ack{}, err
 		}
-		return fleet.Ack{}, err
 	}
 	// #78: List answers entirely from this driver's own cache (knownIDs),
 	// and nothing had ever pruned a closed session from it — a session the
@@ -360,6 +507,7 @@ func (d *Driver) Close(ctx context.Context, req fleet.Request, ref fleet.Session
 	// documented workaround for the runtime's own unreliable bulk listing,
 	// not the defect. Only the missing prune on a confirmed close is.
 	d.forgetSeen(ref.ID)
+	d.discardServer(srv)
 	return fleet.Ack{Accepted: true}, nil
 }
 
@@ -419,24 +567,53 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 	known := d.knownIDs()
 	now := d.now()
 	sourceStatus := fleet.SourceOK
-	var statusErr error
-	var statuses statusMap
-	if err := d.do(ctx, "GET", "/session/status", nil, &statuses); err != nil {
-		statusErr = err
-		// Session identity is known (this driver's own cache); which of
-		// them are busy is not. Degraded, not unreachable — this machine
-		// answered, only partially.
-		sourceStatus = fleet.SourceDegraded
+
+	// One status read per DISTINCT server, concurrently. In shared mode that is
+	// one read; in isolated mode one per live session, and a session whose
+	// process has exited is reported dead without any read.
+	type statusRead struct {
+		statuses statusMap
+		err      error
 	}
+	reads := make(map[*server]*statusRead)
+	for _, info := range known {
+		if _, ok := reads[info.srv]; !ok {
+			reads[info.srv] = &statusRead{}
+		}
+	}
+	var wg sync.WaitGroup
+	for srv, r := range reads {
+		if d.shared == nil && srv.proc.exited() {
+			continue
+		}
+		wg.Add(1)
+		go func(srv *server, r *statusRead) {
+			defer wg.Done()
+			r.err = d.do(ctx, srv, "GET", "/session/status", nil, &r.statuses)
+		}(srv, r)
+	}
+	wg.Wait()
 
 	out := make([]fleet.Session, 0, len(known))
+	var firstErr error
 	for id, info := range known {
+		r := reads[info.srv]
 		var st fleet.SessionState
-		if statusErr != nil {
+		switch {
+		case d.shared == nil && info.srv.proc.exited():
+			st = fleet.InferredState(fleet.StatusDead, "the session's runtime process has exited", nil)
+		case r.err != nil:
+			// Session identity is known (this driver's own cache); which of
+			// them are busy is not. Degraded, not unreachable — this machine
+			// answered, only partially.
+			if firstErr == nil {
+				firstErr = r.err
+			}
+			sourceStatus = fleet.SourceDegraded
 			st = fleet.UnknownState(fleet.ConfidenceObserved,
-				fmt.Sprintf("session identity is known but its status could not be read: %v", statusErr))
-		} else {
-			ws, present := statuses[id]
+				fmt.Sprintf("session identity is known but its status could not be read: %v", r.err))
+		default:
+			ws, present := r.statuses[id]
 			st = classify(present, ws)
 		}
 
@@ -455,8 +632,8 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 	}
 
 	src := fleet.SourceStatus{Machine: d.machine, Status: sourceStatus, ObservedAt: now}
-	if statusErr != nil {
-		src.Error = statusErr.Error()
+	if firstErr != nil {
+		src.Error = firstErr.Error()
 	}
 	return fleet.NewCollection(out, []fleet.SourceStatus{src})
 }

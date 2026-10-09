@@ -112,8 +112,9 @@ func TestIntegration_CreateAndCloseARealSession(t *testing.T) {
 // status endpoint report busy and then idle again. This is the one test
 // in the package that spends real provider money — reserved, tagged, and
 // skipped by default per the hard constraint. A provider must already be
-// configured for opencode (`opencode auth login`, or its own
-// environment) — this test does not configure one, on the same reasoning
+// configured for opencode, and since a session's environment is built rather than
+// inherited (muster #280) it reaches the session only through the variables
+// FLEET_OPENCODE_SPEND_ENV names — this test does not configure one, on the same reasoning
 // requireOpencodeIntegration does not try to detect it: enabling the
 // env var is a human asserting the environment is ready.
 func TestIntegration_LiveStatusTransition_SpendsProviderMoney(t *testing.T) {
@@ -131,9 +132,20 @@ func TestIntegration_LiveStatusTransition_SpendsProviderMoney(t *testing.T) {
 	}
 	defer d.Shutdown()
 
+	// A session's environment is built, not inherited (muster #280), so the
+	// provider key it needs must be handed to it. FLEET_OPENCODE_SPEND_ENV
+	// names the variables to forward from this test's own environment,
+	// comma-separated (for example the provider's key variable).
+	env := map[string]string{}
+	for _, name := range strings.Split(os.Getenv("FLEET_OPENCODE_SPEND_ENV"), ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			env[name] = os.Getenv(name)
+		}
+	}
+
 	dir := t.TempDir()
 	ref, err := d.Create(ctx, fleet.RequestFrom(fleet.Caller{Principal: "integration-test"}), "integration-key-2",
-		fleet.SessionSpec{Cwd: fleet.AbsolutePath(dir), Name: "muster #55 live"})
+		fleet.SessionSpec{Cwd: fleet.AbsolutePath(dir), Name: "muster #55 live", Env: env})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

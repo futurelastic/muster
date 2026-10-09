@@ -85,9 +85,9 @@ func classify(present bool, st wireStatus) fleet.SessionState {
 // request per session there is a real, unbounded cost this function's
 // single-session caller does not have. Left as a deliberate gap, not an
 // oversight — worth its own issue if List needs the same honesty.
-func (d *Driver) lastTurnFailure(ctx context.Context, id string) *fleet.TurnEnd {
+func (d *Driver) lastTurnFailure(ctx context.Context, srv *server, id string) *fleet.TurnEnd {
 	var msgs []wireMessage
-	if err := d.do(ctx, "GET", "/session/"+url.PathEscape(id)+"/message?limit=1", nil, &msgs); err != nil {
+	if err := d.do(ctx, srv, "GET", "/session/"+url.PathEscape(id)+"/message?limit=1", nil, &msgs); err != nil {
 		return nil
 	}
 	if len(msgs) == 0 {

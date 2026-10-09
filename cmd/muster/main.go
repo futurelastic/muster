@@ -36,6 +36,13 @@
 //	                       optional runtime, unlike FLEET_RUNTIME's tmux.
 //	FLEET_OPENCODE_BIN     path to the opencode binary. Defaults to
 //	                       "opencode" on PATH.
+//	FLEET_OPENCODE_PATH    comma-separated absolute directories added to the
+//	                       PATH an opencode session gets, ahead of the system
+//	                       ones (muster issue #280). A session's environment is
+//	                       BUILT, not inherited, so a runtime it needs (an
+//	                       interpreter, a build tool) must be on a system
+//	                       directory or listed here; a directory under the
+//	                       service user's home is refused.
 //	FLEET_PEERS            comma-separated name=url list, e.g.
 //	                       "other=https://other.example:PORT". Peers are
 //	                       statically configured; there is no discovery
@@ -245,6 +252,7 @@ import (
 	"github.com/futurelastic/muster/internal/drivers/stub"
 	"github.com/futurelastic/muster/internal/drivers/tmux"
 	"github.com/futurelastic/muster/internal/service"
+	"github.com/futurelastic/muster/internal/sessionenv"
 	"github.com/futurelastic/muster/internal/state"
 )
 
@@ -343,6 +351,23 @@ func main() {
 	// subscriptions, §14 D9). Never used for a proxied unary call — those
 	// authenticate as this machine and assert the caller (§6, §13).
 	svc.SetPeerCredential(peerCredential(token, cfgFile, self))
+
+	// muster issue #94: an identity this machine's sessions carry, declared
+	// once here instead of every caller passing the same variable on every
+	// create forever. Config-file-only, like TrustRoots and DefaultRuntime —
+	// which credential a machine's sessions should hold is a fact about this
+	// machine, not the fleet. Validated once at startup (sessionenv.Validate)
+	// for the same reason DefaultRuntime is: a typo here should be a message an
+	// operator reads once, not a refusal every later caller meets. Parsed
+	// BEFORE the runtime switch because more than one driver applies it (the
+	// multiplexer driver and, since #280, the opencode driver).
+	var sessionEnvEntries []sessionenv.Entry
+	if cfgFile != nil && len(cfgFile.SessionEnv) > 0 {
+		sessionEnvEntries = cfgFile.sessionEnv()
+		if err := sessionenv.Validate(sessionEnvEntries); err != nil {
+			log.Fatalf("muster: %v", err)
+		}
+	}
 
 	// --- local runtime -------------------------------------------------
 	var (
@@ -450,21 +475,11 @@ func main() {
 			opts = append(opts, tmux.WithTrustSeed(trustStatePath, home, trustRoots))
 			log.Printf("muster: trust-seed configured for %d root(s)", len(trustRoots))
 		}
-		// muster issue #94: an identity this machine's sessions carry,
-		// declared once here instead of every caller passing the same
-		// variable on every create forever. Config-file-only, like
-		// TrustRoots and DefaultRuntime above — which credential a
-		// machine's sessions should hold is a fact about this machine, not
-		// the fleet. Validated once at startup (ValidateSessionEnv) for the
-		// same reason DefaultRuntime is: a typo here should be a message an
-		// operator reads once, not a refusal every later caller meets.
-		if cfgFile != nil && len(cfgFile.SessionEnv) > 0 {
-			entries := cfgFile.sessionEnv()
-			if err := tmux.ValidateSessionEnv(entries); err != nil {
-				log.Fatalf("muster: %v", err)
-			}
-			opts = append(opts, tmux.WithSessionEnv(entries))
-			log.Printf("muster: sessionEnv configured for %d entry(ies) (#94)", len(entries))
+		// muster issue #94: this machine's declared session identity,
+		// parsed and validated above the runtime switch.
+		if len(sessionEnvEntries) > 0 {
+			opts = append(opts, tmux.WithSessionEnv(sessionEnvEntries))
+			log.Printf("muster: sessionEnv configured for %d entry(ies) (#94)", len(sessionEnvEntries))
 		}
 		// muster #122: #119's inbox delivery path only engages once a
 		// resolver is actually wired — verified live after #119's own
@@ -576,7 +591,15 @@ func main() {
 	var opencodeDriver *opencode.Driver
 	if getenv("FLEET_RUNTIME_OPENCODE", "") == "1" {
 		bin := os.Getenv("FLEET_OPENCODE_BIN")
-		d, err := opencode.New(context.Background(), self, opencode.WithBinary(bin))
+		// muster #280: opencode sessions run in a process of their own with a
+		// BUILT environment. The machine's sessionEnv reaches them too, and
+		// FLEET_OPENCODE_PATH (comma-separated, absolute, none under the
+		// service user's home) adds directories to the PATH they get, ahead of
+		// the system ones.
+		d, err := opencode.New(context.Background(), self,
+			opencode.WithBinary(bin),
+			opencode.WithSessionEnv(sessionEnvEntries),
+			opencode.WithRuntimePath(splitList(os.Getenv("FLEET_OPENCODE_PATH"))))
 		if err != nil {
 			log.Printf("muster: opencode runtime not started, continuing without it: %v", err)
 		} else if err := svc.RegisterLocalDriver(opencode.DefaultRuntime, d); err != nil {
@@ -834,7 +857,8 @@ func main() {
 		sm.StopDeliveryModules()
 	}
 
-	// This process spawned the opencode server; nothing else will stop it.
+	// This process spawned an opencode server for each live session (#280);
+	// nothing else will stop them.
 	if opencodeDriver != nil {
 		if err := opencodeDriver.Shutdown(); err != nil {
 			log.Printf("muster: stopping opencode server: %v", err)

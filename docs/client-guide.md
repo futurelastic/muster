@@ -735,6 +735,7 @@ Idempotency-Key: 4f1c9e2a-…          ← REQUIRED
   "trustCwd": true,                  ← optional consent to the folder-trust question (see below)
   "consents": ["folder-trust"],      ← optional, the general form of the line above; also "external-imports"
   "env": {"MY_SESSION_ID": "…"},     ← optional, delivered out of band — never argv
+  "isolateEnvironment": true,        ← optional REQUIREMENT: only a built environment, nothing from the service; `unsupported` where the runtime cannot (api.md)
   "resume": "<conversation id>",     ← optional, continue a prior conversation
   "conversationId": "<caller uuid>", ← optional, START a new one under this id; mutually exclusive with resume
   "permissionMode": "bypass",        ← optional, needs the send grant

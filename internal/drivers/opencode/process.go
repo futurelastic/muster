@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -54,11 +56,66 @@ func Probe(ctx context.Context, bin string) Availability {
 	return Availability{Installed: true, Path: path, Version: strings.TrimSpace(string(out))}
 }
 
-// process owns one spawned opencode server subprocess.
+// process owns one spawned opencode server subprocess and its process group.
 type process struct {
-	cmd      *exec.Cmd
+	cmd *exec.Cmd
+	// done is closed when the single Wait on cmd returns, so "has it exited"
+	// is a channel read anywhere (readiness, State, stop) and Wait is called
+	// exactly once.
+	done chan struct{}
+}
+
+// exited reports whether the child has already been reaped.
+func (p *process) exited() bool {
+	if p == nil {
+		return true
+	}
+	select {
+	case <-p.done:
+		return true
+	default:
+		return false
+	}
+}
+
+// server is one running opencode server this driver talks to: its address and
+// credential, the process behind it, and the session-scoped directory it owns.
+//
+// In the production (isolated) mode there is one per session, so its
+// credential and environment are that session's alone. In shared mode — the
+// test seam WithBaseURL — there is exactly one and proc/dir are nil.
+type server struct {
 	baseURL  string
+	username string
+	// password is this server's own credential. Generated per process, held
+	// only in memory, and handed to the child through its environment — never
+	// argv, never a file this driver writes (the provider ruling on #55).
+	// NEVER logged.
 	password string
+	proc     *process
+	// dir is the session-scoped directory (HOME, TMPDIR, XDG_*), removed with
+	// the server. Empty in shared mode.
+	dir string
+
+	once       sync.Once
+	onTeardown func(*server)
+}
+
+// teardown stops the server's process group and removes its session-scoped
+// directory. Safe to call any number of times, from any goroutine.
+func (s *server) teardown() {
+	if s == nil {
+		return
+	}
+	s.once.Do(func() {
+		s.proc.stop()
+		if s.dir != "" {
+			_ = os.RemoveAll(s.dir)
+		}
+		if s.onTeardown != nil {
+			s.onTeardown(s)
+		}
+	})
 }
 
 // freePort asks the OS for an unused TCP port on 127.0.0.1 and returns it
@@ -92,11 +149,15 @@ func generateCredential() (string, error) {
 }
 
 // buildServeCmd builds the exec.Cmd for `opencode serve`, and is the one
-// place that decides its argv and environment — factored out of
-// startProcess so process_test.go can assert its shape directly (credential
-// via env only, never argv; --mdns never present) against the real code
-// path rather than a duplicate of it.
-func buildServeCmd(bin, workdir string, port int, username, password string) *exec.Cmd {
+// place that decides its argv and environment — factored out of startServer so
+// process_test.go can assert its shape directly (credential via env only,
+// never argv; --mdns never present) against the real code path rather than a
+// duplicate of it.
+//
+// env is the BUILT environment (env.go): the child gets exactly that plus its
+// own server credential, and nothing is inherited from this process. A nil env
+// is therefore an empty environment, not "inherit".
+func buildServeCmd(bin, workdir string, port int, username, password string, env []string) *exec.Cmd {
 	cmd := exec.Command(bin, "serve",
 		"--port", strconv.Itoa(port),
 		"--hostname", "127.0.0.1",
@@ -111,10 +172,13 @@ func buildServeCmd(bin, workdir string, port int, username, password string) *ex
 	// ruling on #55) — never as a command-line argument, which a process
 	// table on the same machine can read, and never written to any file
 	// this driver controls.
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(append([]string(nil), env...),
 		"OPENCODE_SERVER_PASSWORD="+password,
 		"OPENCODE_SERVER_USERNAME="+username,
 	)
+	// Its own process group, so stop can take down everything the session's
+	// tools spawned and not just the server (muster #280).
+	configureGroup(cmd)
 	// Discarded rather than captured: this driver's own diagnostics come
 	// from the HTTP layer it talks to the server over, and capturing
 	// stdout/stderr here would be one more place the credential could
@@ -125,50 +189,68 @@ func buildServeCmd(bin, workdir string, port int, username, password string) *ex
 	return cmd
 }
 
-// startProcess probes for the binary, then picks a port, generates a
-// credential, execs `opencode serve`, and waits for the server to answer
-// before returning. A failure at any step returns an error rather than
-// panicking or calling log.Fatal — this package has no opinion on whether
-// the absence of opencode should be fatal to its caller, and muster
-// (the only caller today) chooses "log and continue without this
-// runtime", precisely so one optional third-party binary being missing
-// never takes the whole fleet daemon down.
-func startProcess(ctx context.Context, bin, workdir, username string) (*process, error) {
-	avail := Probe(ctx, bin)
-	if !avail.Installed {
-		return nil, fmt.Errorf("opencode: not available on this machine: %w", avail.Err)
-	}
+// startAttempts bounds how often startServer retries after the child dies
+// before becoming ready — the signature of losing the freePort race to
+// another process that bound the port in between.
+const startAttempts = 3
 
-	port, err := freePort()
-	if err != nil {
-		return nil, err
-	}
-	cred, err := generateCredential()
-	if err != nil {
-		return nil, err
-	}
+// startServer execs `opencode serve` for one session and waits for it to
+// answer before returning. A failure at any step returns an error rather than
+// panicking or calling log.Fatal — this package has no opinion on whether the
+// absence of opencode should be fatal to its caller.
+//
+// freePort-then-exec has a gap in which another process can take the port. It
+// is closed by checking, not by hoping: readiness counts only a 200 (a 401
+// would mean a DIFFERENT server holds the port, with a different credential)
+// and a child that exits before answering is retried on a fresh port.
+func startServer(ctx context.Context, bin, workdir, username string, env []string) (*server, error) {
+	var lastErr error
+	for attempt := 0; attempt < startAttempts; attempt++ {
+		port, err := freePort()
+		if err != nil {
+			return nil, err
+		}
+		cred, err := generateCredential()
+		if err != nil {
+			return nil, err
+		}
+		cmd := buildServeCmd(bin, workdir, port, username, cred, env)
+		if err := cmd.Start(); err != nil {
+			return nil, fmt.Errorf("opencode: starting server: %w", err)
+		}
+		p := &process{cmd: cmd, done: make(chan struct{})}
+		go func() {
+			_ = cmd.Wait()
+			close(p.done)
+		}()
 
-	cmd := buildServeCmd(avail.Path, workdir, port, username, cred)
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("opencode: starting server: %w", err)
-	}
-
-	p := &process{
-		cmd:      cmd,
-		baseURL:  fmt.Sprintf("http://127.0.0.1:%d", port),
-		password: cred,
-	}
-
-	if err := waitReady(ctx, p.baseURL, username, cred); err != nil {
-		_ = p.stop()
+		s := &server{
+			baseURL:  fmt.Sprintf("http://127.0.0.1:%d", port),
+			username: username,
+			password: cred,
+			proc:     p,
+		}
+		err = waitReady(ctx, s.baseURL, username, cred, p.done)
+		if err == nil {
+			return s, nil
+		}
+		p.stop()
+		if errors.Is(err, errExitedBeforeReady) {
+			lastErr = err
+			continue
+		}
 		return nil, fmt.Errorf("opencode: server did not become ready: %w", err)
 	}
-	return p, nil
+	return nil, fmt.Errorf("opencode: server did not become ready after %d attempts: %w", startAttempts, lastErr)
 }
 
-// waitReady polls the server's own session listing (authenticated) until
-// it answers or ctx / the readiness budget runs out.
-func waitReady(ctx context.Context, baseURL, username, password string) error {
+// errExitedBeforeReady is waitReady's answer when the child died before it
+// ever answered.
+var errExitedBeforeReady = errors.New("the server process exited before it answered")
+
+// waitReady polls the server's own session listing (authenticated) until it
+// answers 200, the child exits, or ctx / the readiness budget runs out.
+func waitReady(ctx context.Context, baseURL, username, password string, exited <-chan struct{}) error {
 	cctx, cancel := context.WithTimeout(ctx, readyTimeout)
 	defer cancel()
 
@@ -182,12 +264,10 @@ func waitReady(ctx context.Context, baseURL, username, password string) error {
 			req.SetBasicAuth(username, password)
 			if resp, err := client.Do(req); err == nil {
 				resp.Body.Close()
-				if resp.StatusCode < 500 {
-					// Any non-5xx means the HTTP server is up and
-					// applying auth (200 with the right credential; 401
-					// would mean a credential mismatch, which is a bug
-					// in this package, not "not ready" — either way the
-					// process is answering).
+				// Only a 200 is "ready": the right credential was accepted by
+				// the server this driver started. A 401 means another process
+				// holds the port (the freePort race), a 5xx means not yet.
+				if resp.StatusCode == http.StatusOK {
 					return nil
 				}
 			}
@@ -195,26 +275,32 @@ func waitReady(ctx context.Context, baseURL, username, password string) error {
 		select {
 		case <-cctx.Done():
 			return cctx.Err()
+		case <-exited:
+			return errExitedBeforeReady
 		case <-ticker.C:
 		}
 	}
 }
 
-// stop terminates the child process. Idempotent-ish: calling it twice is
-// harmless (Kill/Wait on an already-dead process just returns an error
-// this method swallows).
-func (p *process) stop() error {
-	if p.cmd == nil || p.cmd.Process == nil {
-		return nil
+// stop terminates the child and everything in its process group. Idempotent.
+//
+// SIGTERM to the group first, a grace period, then SIGKILL to the group
+// ALWAYS — also when the leader exited on its own, because a tool the session
+// ran can outlive the server it ran under (muster #280: a `sleep` re-parented
+// to init after a timeout was measured on a first one-shot wrapper). ESRCH from
+// an already-empty group is ignored.
+func (p *process) stop() {
+	if p == nil || p.cmd == nil || p.cmd.Process == nil {
+		return
 	}
-	_ = p.cmd.Process.Signal(syscall.SIGTERM)
-	done := make(chan error, 1)
-	go func() { done <- p.cmd.Wait() }()
+	signalGroup(p.cmd, syscall.SIGTERM)
 	select {
-	case <-done:
+	case <-p.done:
 	case <-time.After(3 * time.Second):
-		_ = p.cmd.Process.Kill()
-		<-done
 	}
-	return nil
+	signalGroup(p.cmd, syscall.SIGKILL)
+	select {
+	case <-p.done:
+	case <-time.After(5 * time.Second):
+	}
 }

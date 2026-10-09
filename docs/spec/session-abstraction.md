@@ -131,6 +131,16 @@ disagrees with the requested id is a loud, named mismatch, never a silent
 overwrite of one with the other — the same invariant §2.9 already states for
 a replaced process's stale identifier.
 
+**`isolateEnvironment` is a requirement, not a hint** (muster #280). It asks that the
+session's process carry ONLY a built environment — a small documented base, this machine's
+`sessionEnv` entries that apply (#94), and the create's own `env` — and nothing inherited from the
+service. A driver that cannot deliver that (`isolatesEnvironment: false`, §4.3) refuses the create
+`unsupported`, before any side effect, rather than start a session that leaks the service's
+environment into a caller that asked for less (§5.6); a relay to a peer that predates the field is
+refused the same way (api-http.md §3.3). It is a plain boolean: there is no honest request for the
+opposite, and a driver that always isolates simply honours it. What it does and does not promise is
+in §4.3.
+
 **`labels` are caller facts, not hints and not configuration** (muster #153). A caller
 attaches what IT knows about a session — the unit of work it serves, the working tree it uses, what
 kind of session it is — and the service stores them, returns them on every read of that session,
@@ -1755,6 +1765,39 @@ capability that silently read `false` on an unreachable peer, with nothing
 to mark the value as unconfirmed, is precisely the defect `source` exists to
 prevent (see below), and adding a flag is not a license to re-introduce it
 by accident.
+
+**`isolatesEnvironment` answers "can a session here be started with ONLY the environment its
+create asked for"** (muster #280). `true` means the driver starts each session in a process of its
+own with a *built* environment; `false` means sessions share a process or a shell that inherits the
+service's. A create that carries `isolateEnvironment: true` against a `false` driver is refused
+`unsupported`. For the opencode driver the built environment is exactly:
+
+- `PATH`: system directories only (`/usr/local/bin`, `/usr/bin`, `/bin`, `/usr/sbin`, `/sbin`, plus
+  `/opt/homebrew/bin` on darwin), after any directories the operator allow-listed (never one under the
+  service user's home);
+- `LANG`, copied from the service only when it is set;
+- `HOME`, `TMPDIR`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` and `XDG_CACHE_HOME`, all
+  inside a directory owned by that one session and removed with it, so opencode reads no shared user
+  configuration and keeps no database shared across sessions;
+- `OPENCODE_DISABLE_CLAUDE_CODE=1`, because by default opencode loads the user's Claude Code
+  instructions and skills;
+- this machine's `sessionEnv` entries that apply, then the create's `env`;
+- the session's own server credential, which reaches only that session's process.
+
+Close and shutdown kill the session's whole process group, not just the server, so nothing the
+session's tools started outlives it. A descendant that detaches into a new session of its own
+escapes a group kill; confining the filesystem and process tree is the sandbox's job, not this
+flag's.
+
+**What isolation does not do, stated plainly.** (1) The model-provider key a session needs is *in
+its environment*, and the runtime exposes that environment to its tool shell (`env` lists it).
+Isolation scopes every *other* credential; it cannot protect the model key itself, so give each lane
+its own spend-capped key. (2) It does not confine the filesystem: a session can still read what the
+service user can. (3) A repository's own instruction files reach the runtime: it loads the working
+directory's `AGENTS.md` and `CLAUDE.md` (up to 64 KB each; `@path` imports are not followed by one of
+the two harnesses measured). (4) The interpreters a session's tools use must be on a system or
+allow-listed directory — an interpreter under the user's home stops being readable once a sandbox
+confines the home.
 
 **`deliversToInbox` answers "is the inbox path even wired here", never "will
 this call use it"** (muster #119, #122). Send's own per-target capability
