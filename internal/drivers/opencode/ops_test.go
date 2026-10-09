@@ -664,9 +664,6 @@ func TestUnimplementedOperations_ReturnErrUnsupported_NeverEmulate(t *testing.T)
 	if _, err := d.Rename(ctx, req, sref, "new-name"); !errors.Is(err, driver.ErrUnsupported) {
 		t.Errorf("Rename: err = %v, want ErrUnsupported", err)
 	}
-	if _, err := d.Subscribe(ctx, req, driver.SubscribeFilter{}); !errors.Is(err, driver.ErrUnsupported) {
-		t.Errorf("Subscribe: err = %v, want ErrUnsupported", err)
-	}
 	if ks, ok := driver.Driver(d).(driver.KeySender); ok {
 		t.Errorf("driver unexpectedly implements KeySender: %v — DeliversRawKeys must stay honest", ks)
 	}

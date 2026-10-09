@@ -167,7 +167,11 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 	if cwd == "" {
 		cwd = spec.Cwd
 	}
-	d.markSeen(sess.ID, knownSession{srv: srv, cwd: cwd, name: sess.Title, agent: sess.Agent, startedAt: startedAt})
+	created := knownSession{srv: srv, cwd: cwd, name: sess.Title, agent: sess.Agent, startedAt: startedAt}
+	d.markSeen(sess.ID, created)
+	// Before the opening prompt: a subscription connects to this session's bus
+	// now, so the prompt's first change is on the stream (muster #284).
+	d.announceCreated(srv, created, ref)
 
 	if spec.Prompt != "" {
 		if err := d.sendPrompt(ctx, srv, sess.ID, spec.Prompt); err != nil {
@@ -555,6 +559,9 @@ func (d *Driver) Close(ctx context.Context, req fleet.Request, ref fleet.Session
 	// documented workaround for the runtime's own unreliable bulk listing,
 	// not the defect. Only the missing prune on a confirmed close is.
 	d.forgetSeen(ref.ID)
+	// Announced before the teardown, and the server marked gone first, so the
+	// bus connection ending with the process is not reported as a gap (#284).
+	d.announceClosed(srv, prior, fleet.SessionRef{Machine: d.machine, ID: ref.ID, Name: prior.name})
 	d.discardServer(srv)
 	return fleet.Ack{Accepted: true}, nil
 }
@@ -687,16 +694,4 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 		src.Error = firstErr.Error()
 	}
 	return fleet.NewCollection(out, []fleet.SourceStatus{src})
-}
-
-// Subscribe is not implemented. opencode publishes a global SSE event bus
-// (GET /event) that could in principle back this, but mapping its event
-// vocabulary onto SubscribeFilter and fleet.Event honestly — which events
-// mean session.state, which mean something this model has no analogue
-// for — is real design work left undone here rather than half-mapped.
-// ErrUnsupported, not ErrNotReady: nothing about this being "not yet" would
-// change by asking again (§5.6, and see driver.ErrNotReady's own doc
-// comment for the case that distinction exists to cover).
-func (d *Driver) Subscribe(ctx context.Context, req fleet.Request, filter driver.SubscribeFilter) (driver.EventStream, error) {
-	return nil, driver.ErrUnsupported
 }

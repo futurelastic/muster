@@ -39,6 +39,19 @@ type fakeServer struct {
 	statusDown bool
 
 	requests []recordedRequest
+
+	// bus is the GET /event side (muster #284): the open connections, so a
+	// test can publish to all of them or cut them, and a status that makes the
+	// endpoint answer something other than a stream.
+	bus       map[int]*busConn
+	nextBus   int
+	busStatus int
+}
+
+// busConn is one open GET /event connection.
+type busConn struct {
+	events chan string
+	cut    chan struct{}
 }
 
 type recordedRequest struct {
@@ -54,6 +67,7 @@ func newFakeServer(t *testing.T) *fakeServer {
 		sessions: map[string]wireSession{},
 		statuses: statusMap{},
 		messages: map[string][]wireMessage{},
+		bus:      map[int]*busConn{},
 	}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.handle))
 	t.Cleanup(f.srv.Close)
@@ -80,6 +94,8 @@ func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodPost && r.URL.Path == "/session":
 		f.handleCreate(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/event":
+		f.handleEvent(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/session":
 		f.handleList(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/session/status":
@@ -303,4 +319,83 @@ func newDriverWithOptions(t *testing.T, f *fakeServer, extra ...Option) (*Driver
 		WithHTTPClient(f.srv.Client()),
 	}, extra...)
 	return New(context.Background(), "test-machine", opts...)
+}
+
+// handleEvent serves GET /event as the runtime does: a text/event-stream whose
+// every frame is one JSON {type, properties} object, opened by server.connected.
+func (f *fakeServer) handleEvent(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	status := f.busStatus
+	f.mu.Unlock()
+	if status != 0 {
+		w.WriteHeader(status)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	flusher, _ := w.(http.Flusher)
+	c := &busConn{events: make(chan string, 64), cut: make(chan struct{})}
+	f.mu.Lock()
+	f.nextBus++
+	n := f.nextBus
+	f.bus[n] = c
+	f.mu.Unlock()
+	defer func() {
+		f.mu.Lock()
+		delete(f.bus, n)
+		f.mu.Unlock()
+	}()
+
+	write := func(frame string) {
+		_, _ = fmt.Fprint(w, frame)
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+	write("data: {\"type\":\"server.connected\",\"properties\":{}}\n\n")
+	for {
+		select {
+		case frame := <-c.events:
+			write(frame)
+		case <-c.cut:
+			return
+		case <-r.Context().Done():
+			return
+		}
+	}
+}
+
+// emit publishes one bus event to every open GET /event connection.
+func (f *fakeServer) emit(typ string, props any) {
+	raw, err := json.Marshal(map[string]any{"type": typ, "properties": props})
+	if err != nil {
+		f.t.Fatalf("emit: %v", err)
+	}
+	f.emitRaw("data: " + string(raw) + "\n\n")
+}
+
+// emitRaw publishes a frame as written, for tests of the framing itself.
+func (f *fakeServer) emitRaw(frame string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, c := range f.bus {
+		c.events <- frame
+	}
+}
+
+// cutBus ends every open GET /event connection from the server's side, the way
+// a dying or restarting runtime would.
+func (f *fakeServer) cutBus() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, c := range f.bus {
+		close(c.cut)
+	}
+}
+
+// busConns reports how many GET /event connections are open.
+func (f *fakeServer) busConns() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.bus)
 }

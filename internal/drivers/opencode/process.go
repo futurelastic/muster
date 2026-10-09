@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -101,6 +102,15 @@ type server struct {
 	// dir is the session-scoped directory (HOME, TMPDIR, XDG_*), removed with
 	// the server. Empty in shared mode.
 	dir string
+	// logs is the tail of the process's own log (muster #284); nil in shared
+	// mode, where the server is not this driver's to read. Every method on it
+	// tolerates nil.
+	logs *logCapture
+	// gone is set once the loss of this server's session has been announced on
+	// the event plane, so a deliberate close and the bus connection ending
+	// right after it do not both report. Isolated mode only: in shared mode a
+	// session's end does not end the connection.
+	gone atomic.Bool
 
 	once       sync.Once
 	onTeardown func(*server)
@@ -194,11 +204,12 @@ func buildServeCmd(bin, workdir string, port int, username, password string, env
 	// Its own process group, so stop can take down everything the session's
 	// tools spawned and not just the server (muster #280).
 	configureGroup(cmd)
-	// Discarded rather than captured: this driver's own diagnostics come
-	// from the HTTP layer it talks to the server over, and capturing
-	// stdout/stderr here would be one more place the credential could
-	// theoretically be echoed back and retained (opencode does not do
-	// this, but the discipline costs nothing and removes the question).
+	// Stdout is discarded: this driver's diagnostics come from the HTTP layer
+	// it talks to the server over. Stderr is nil here too and is replaced by
+	// startServer with a bounded in-memory capture (logcapture.go, muster #284)
+	// that exposes an error NAME and never the text, so the old reasoning —
+	// one more place the credential could be echoed back and retained — still
+	// holds: nothing a caller can read comes out of it.
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	return cmd
@@ -230,6 +241,12 @@ func startServer(ctx context.Context, bin, workdir, username string, env []strin
 			return nil, err
 		}
 		cmd := buildServeCmd(bin, workdir, port, username, cred, env, profile)
+		logs := newLogCapture()
+		cmd.Stderr = logs
+		// A tool the session ran can hold the stderr pipe open after the server
+		// itself is gone; without a bound, Wait would then not return and the
+		// process would read as still running.
+		cmd.WaitDelay = 2 * time.Second
 		if err := cmd.Start(); err != nil {
 			return nil, fmt.Errorf("opencode: starting server: %w", err)
 		}
@@ -244,6 +261,7 @@ func startServer(ctx context.Context, bin, workdir, username string, env []strin
 			username: username,
 			password: cred,
 			proc:     p,
+			logs:     logs,
 		}
 		err = waitReady(ctx, s.baseURL, username, cred, p.done)
 		if err == nil {
@@ -252,6 +270,10 @@ func startServer(ctx context.Context, bin, workdir, username string, env []strin
 		p.stop()
 		if errors.Is(err, errExitedBeforeReady) {
 			lastErr = err
+			if name := logs.errorName(time.Time{}); name != "" {
+				// The runtime's own name for why it died (muster #284), not its log.
+				lastErr = fmt.Errorf("%w (the runtime logged %s)", err, name)
+			}
 			continue
 		}
 		return nil, fmt.Errorf("opencode: server did not become ready: %w", err)
