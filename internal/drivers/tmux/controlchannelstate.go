@@ -1,7 +1,6 @@
 package tmux
 
 import (
-	"os"
 	"sync"
 	"time"
 
@@ -82,43 +81,29 @@ func (d *Driver) resolveControlChannel(footer *fleet.ControlChannel, conv *fleet
 	return nil
 }
 
-// controlRecordCache keeps the last read of each record, keyed on the file's
-// size and modification time, so a quiet session is not re-read on every poll.
+// controlRecordCache keeps one fold per record (muster #271): what it has
+// consumed of the file and the newest remote-control entry found, so a quiet
+// session costs a stat and a growing one costs only what was appended.
 type controlRecordCache struct {
 	mu sync.Mutex
-	m  map[string]controlRecordCacheEntry
-}
-
-type controlRecordCacheEntry struct {
-	size   int64
-	mod    time.Time
-	exists bool
-	since  time.Time
-	read   controlRecordRead
+	m  map[string]*controlRecordFold
 }
 
 func (d *Driver) controlRecordCached(path string, since time.Time) controlRecordRead {
-	fi, err := os.Stat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return controlRecordRead{} // not written yet: a real answer
-		}
-		// Present but unreadable is not "not written yet", and must not be
-		// allowed to fall through to a launch-based claim.
-		return controlRecordRead{exists: true, blocked: true}
-	}
 	c := &d.controlRecords
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if e, ok := c.m[path]; ok && e.size == fi.Size() && e.mod.Equal(fi.ModTime()) && e.since.Equal(since) {
-		return e.read
+	f := c.m[path]
+	if f == nil {
+		if c.m == nil {
+			c.m = map[string]*controlRecordFold{}
+		}
+		f = &controlRecordFold{}
+		c.m[path] = f
 	}
-	read := controlChannelFromRecord(path, since)
-	if c.m == nil {
-		c.m = map[string]controlRecordCacheEntry{}
-	}
-	c.m[path] = controlRecordCacheEntry{size: fi.Size(), mod: fi.ModTime(), since: since, read: read}
-	return read
+	c.mu.Unlock()
+	// The read happens under the fold's own lock, not the map's: the first read
+	// of a large record is a full one and must not stall every other session.
+	return f.advance(path, since)
 }
 
 // latchSurfaceFromChannel is List's #85 latch for a channel read from the
