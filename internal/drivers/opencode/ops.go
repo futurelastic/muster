@@ -30,8 +30,10 @@ import (
 // Agent, Model and Effort are §2.1's "hints, not guarantees": this driver
 // genuinely honours Agent and Model (opencode's own create body carries
 // both) and REFUSES rather than silently drops Effort, ContextRef,
-// McpConfig, Settings (muster #247), PermissionMode, Resume and ConversationId (muster #224) —
-// none of which this substrate has an honest mechanism for. Env is honoured
+// McpConfig, Settings (muster #247), Resume and ConversationId (muster #224) —
+// none of which this substrate has an honest mechanism for. PermissionMode
+// "bypass" (muster #283) is honoured only together with a sandbox this driver
+// enforces, and refused `unsupported` otherwise (permission.go). Env is honoured
 // (muster #280) by building the session's environment; it is refused only in
 // shared mode, where one server serves every session and has no way to give
 // one a variable another does not see — and there IsolateEnvironment is
@@ -83,9 +85,8 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 		"mcpConfig":  len(spec.McpConfig) > 0,
 		// muster #247: launch-time CLI settings have no meaning for a runtime
 		// with no CLI to hand them to.
-		"settings":       len(spec.Settings) > 0,
-		"permissionMode": spec.PermissionMode != "",
-		"resume":         spec.Resume != "",
+		"settings": len(spec.Settings) > 0,
+		"resume":   spec.Resume != "",
 		// muster #224: opencode's session.create has no equivalent of
 		// Claude Code's --session-id — this substrate assigns its own id and
 		// this driver has no honest way to make it start under a caller's
@@ -106,6 +107,12 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 			Message: "create: this driver cannot enforce a sandbox: " + d.sandboxWhy + " (refusing rather than start the session unconfined)",
 			Machine: d.machine,
 		}
+	}
+	// muster #283: bypass is honoured inside an enforced sandbox only. Checked
+	// after the sandbox refusal above so a host that cannot confine says so in
+	// the capability's own words.
+	if err := d.checkBypass(spec); err != nil {
+		return fleet.Session{}, err
 	}
 	for name, set := range refused {
 		if set {
@@ -187,7 +194,7 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 			ID: sess.ID, Cwd: string(cwd), Name: sess.Title, Agent: sess.Agent,
 			SpecAgent: string(spec.Agent), SpecMarker: spec.Marker,
 			StartedAtMs: sess.Time.Created, Dir: srv.dir, EnvNames: callerEnvNames,
-			Sandbox: spec.Sandbox,
+			Sandbox: spec.Sandbox, PermissionMode: spec.PermissionMode,
 		}
 		if srv.sandbox != nil && srv.sandbox.PackageCache != nil {
 			rec.CacheCopy = srv.sandbox.PackageCache.Copy
@@ -281,10 +288,23 @@ func (d *Driver) startServerIn(ctx context.Context, spec fleet.SessionSpec, exis
 			extra[packageCacheEnv] = string(plan.cache.Path)
 		}
 	}
-	srv, err := startServer(ctx, d.bin, string(spec.Cwd), d.username, d.buildEnv(dir, extra), profile)
+	var args []string
+	if spec.PermissionMode == fleet.PermissionModeBypass {
+		// muster #283: the posture lives in this session's own directory and
+		// its own command line, never in a file another session would read.
+		if err := writeBypassConfig(dir); err != nil {
+			cleanup()
+			return nil, &fleet.Error{Kind: fleet.ErrorInvalid, Message: "create: " + err.Error(), Machine: d.machine}
+		}
+		args = bypassArgs()
+	}
+	srv, err := startServer(ctx, d.bin, string(spec.Cwd), d.username, d.buildEnv(dir, extra), profile, args...)
 	if err != nil {
 		cleanup()
 		return nil, err
+	}
+	if spec.PermissionMode == fleet.PermissionModeBypass {
+		srv.permission = fleet.PermissionModeBypass
 	}
 	if plan != nil {
 		srv.sandbox = plan.state()
@@ -451,6 +471,7 @@ func (d *Driver) State(ctx context.Context, req fleet.Request, ref fleet.Session
 	// read, so it is stamped on whatever the read concluded — including dead.
 	if known, ok := d.wasSeen(ref.ID); ok && known.srv != nil {
 		st.Sandbox = known.srv.sandbox
+		st.PermissionMode = known.srv.permission // muster #283
 	}
 	return st, nil
 }
@@ -485,7 +506,9 @@ func (d *Driver) readState(ctx context.Context, ref fleet.SessionRef) (fleet.Ses
 		return fleet.SessionState{}, err
 	}
 	if ws, present := statuses[ref.ID]; present {
-		return classify(true, ws), nil
+		// muster #283: busy is the runtime's word for "its turn has not ended",
+		// which a turn stopped on a permission ask also satisfies.
+		return d.withPermission(ctx, srv, ref.ID, classify(true, ws)), nil
 	}
 
 	// Absent from a map we just read successfully. Confirm the session
@@ -750,13 +773,19 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 		default:
 			ws, present := r.statuses[id]
 			st = classify(present, ws)
+			if present {
+				// One extra read per BUSY session, never per idle one: a
+				// parked ask must not show as working in a listing either (#283).
+				st = d.withPermission(ctx, info.srv, id, st)
+			}
 			if !present && info.interrupted != nil {
 				st.LastTurn = info.interrupted // muster #282
 			}
 		}
 
 		if info.srv != nil {
-			st.Sandbox = info.srv.sandbox // muster #281
+			st.Sandbox = info.srv.sandbox           // muster #281
+			st.PermissionMode = info.srv.permission // muster #283
 		}
 		startedAt := info.startedAt
 		sess := fleet.Session{

@@ -134,6 +134,15 @@
 // one to make the method non-empty would be exactly the emulation §5.6
 // forbids.
 //
+// # Permissions (muster #283)
+//
+// A tool-permission ask is SEEN but not answered. A session the runtime has
+// stopped on one reads `waiting_input` with a `tool-permission` prompt that
+// carries no options, instead of `working`; `permissionMode: "bypass"` stops
+// asks from arising by configuring the session's own runtime to approve its
+// tools, and is honoured only inside a sandbox this driver enforces. See
+// permission.go.
+//
 // # Events
 //
 // Subscribe is backed by the runtime's own event bus (GET /event), one
@@ -516,8 +525,12 @@ func (d *Driver) Capabilities() fleet.DriverCapabilities {
 		// Sandbox: nil where this host cannot deny files, unix sockets and
 		// system services together (sandbox.go) — a capability absent, never a
 		// weaker profile under the same name.
-		Sandbox:    d.sandbox,
-		DeadlineMs: d.deadline.Milliseconds(),
+		Sandbox: d.sandbox,
+		// muster #283: in isolated mode this driver wrote the session's
+		// configuration itself and reports it back; shared mode has no posture
+		// of its own to report.
+		ObservesPermissionMode: d.shared == nil,
+		DeadlineMs:             d.deadline.Milliseconds(),
 		// A local driver is describing itself — no network between the
 		// claim and its subject (same reasoning as the tmux driver's
 		// Capabilities).

@@ -44,6 +44,12 @@ type fakeServer struct {
 	catalog       map[string][]string
 	catalogStatus int
 
+	// permissions are the asks GET /permission lists (muster #283);
+	// permissionStatus, when set, makes the endpoint answer that status instead
+	// (404 is a runtime without it).
+	permissions      []wirePermissionAsk
+	permissionStatus int
+
 	requests []recordedRequest
 
 	// bus is the GET /event side (muster #284): the open connections, so a
@@ -102,6 +108,8 @@ func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 		f.handleCreate(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/config/providers":
 		f.handleProviders(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/permission":
+		f.handlePermission(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/event":
 		f.handleEvent(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/session":
@@ -175,6 +183,19 @@ func (f *fakeServer) handleList(w http.ResponseWriter, r *http.Request) {
 	f.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
+}
+
+func (f *fakeServer) handlePermission(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	status := f.permissionStatus
+	asks := append([]wirePermissionAsk{}, f.permissions...)
+	f.mu.Unlock()
+	if status != 0 {
+		http.Error(w, "no such route", status)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(asks)
 }
 
 func (f *fakeServer) handleStatus(w http.ResponseWriter, r *http.Request) {

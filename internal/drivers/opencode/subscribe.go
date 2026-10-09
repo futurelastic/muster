@@ -49,7 +49,9 @@ import (
 // Everything else the bus publishes — message and part updates, file and LSP
 // events, session.updated (a title change; rename is unsupported here),
 // permission and question prompts (Respond is unsupported here), heartbeats — is
-// DROPPED. None of it is invented into an existing kind. Events about a session
+// DROPPED. So a session parked on a permission ask emits no event of its own:
+// State and List read it as `waiting_input` (muster #283), but the stream still
+// shows the `working` it last said until something else changes. None of it is invented into an existing kind. Events about a session
 // this driver did not create (a child session the runtime started for itself)
 // are dropped too: they are not in this driver's session universe.
 //

@@ -96,6 +96,11 @@ func (d *Driver) resumeOne(ctx context.Context, it loaded) {
 // relaunch starts a server for rec's session and confirms the runtime has it.
 // On any failure the server is stopped and the session's directory is left alone.
 func (d *Driver) relaunch(ctx context.Context, rec *sessionRecord) (*server, *fleet.TurnEnd, error) {
+	if rec.PermissionMode != "" && rec.Sandbox == nil {
+		// Cannot arise from a create this driver accepted; a record edited by hand
+		// is refused rather than relaunched pre-approved with nothing confining it.
+		return nil, nil, fmt.Errorf("its record asks for permission mode %q without a sandbox, which this driver never starts", rec.PermissionMode)
+	}
 	if rec.Sandbox != nil && d.sandbox == nil {
 		return nil, nil, fmt.Errorf("it was created in a sandbox and this driver can no longer enforce one (%s); "+
 			"it is not relaunched unconfined", d.sandboxWhy)
@@ -111,7 +116,7 @@ func (d *Driver) relaunch(ctx context.Context, rec *sessionRecord) (*server, *fl
 
 	spec := fleet.SessionSpec{
 		Cwd: fleet.AbsolutePath(rec.Cwd), Agent: fleet.AgentId(rec.SpecAgent), Marker: rec.SpecMarker,
-		Sandbox: rec.Sandbox,
+		Sandbox: rec.Sandbox, PermissionMode: rec.PermissionMode,
 	}
 	srv, err := d.startServerIn(ctx, spec, rec.Dir, rec.CacheCopy)
 	if err != nil {

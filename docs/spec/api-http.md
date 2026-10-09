@@ -691,6 +691,18 @@ without asking, and between "may start a session" and "may start a session that
 needs no permission for anything", the second is plainly the larger authority.
 An unrecognised value is refused rather than passed through.
 
+**A driver may honour `bypass` only inside a boundary of its own** (muster #283). The local
+opencode driver pre-approves every tool *only when the same create asks for a `sandbox` it
+enforces*; with none, or in a mode that cannot confine one session, the create is refused
+`unsupported` and the reason says so — approving everything is safe exactly when something other
+than the approval is the boundary, and a weaker posture is never started under the same name. The
+posture is applied through that session's own runtime configuration and never a file another
+session would read, and `state.permissionMode` reads `bypass` for it, including after a service
+restart. A session that nevertheless stops on an ask the configuration did not cover reads
+`waiting_input` with a `tool-permission` prompt (no options: the driver cannot answer it), never
+`working`; a list of asks that could not be read leaves the status as it was and says so in
+`evidence`, because an unasked question is not the answer "none".
+
 **`mcpConfig` names tool-server configuration files, by PATH.** Each entry is
 absolute, and the flag is emitted once per entry rather than joined — a joined
 list reaches the runtime as a single filename containing a separator, which

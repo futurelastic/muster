@@ -66,6 +66,9 @@ type sessionRecord struct {
 	EnvNames []string `json:"envNames,omitempty"`
 	// Sandbox is the profile the create asked for: paths and a network posture.
 	Sandbox *fleet.SandboxSpec `json:"sandbox,omitempty"`
+	// PermissionMode is the posture the create asked for ("bypass" or empty), so
+	// a relaunch writes the same configuration and starts with the same argument.
+	PermissionMode string `json:"permissionMode,omitempty"`
 	// CacheCopy says how a private package cache in Dir was made, so a relaunch
 	// reuses it instead of copying again.
 	CacheCopy string `json:"cacheCopy,omitempty"`
