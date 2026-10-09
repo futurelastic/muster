@@ -182,7 +182,7 @@ func generateCredential() (string, error) {
 // buildServeCmd builds the exec.Cmd for `opencode serve`, and is the one
 // place that decides its argv and environment — factored out of startServer so
 // process_test.go can assert its shape directly (credential via env only,
-// never argv; --mdns never present) against the real code path rather than a
+// never argv; --mdns never present; --print-logs always present) against the real code path rather than a
 // duplicate of it.
 //
 // env is the BUILT environment (env.go): the child gets exactly that plus its
@@ -192,6 +192,10 @@ func buildServeCmd(bin, workdir string, port int, username, password string, env
 	serve := []string{"serve",
 		"--port", strconv.Itoa(port),
 		"--hostname", "127.0.0.1",
+		// muster #288: without this the runtime logs nothing to stderr, and
+		// the bounded capture (logcapture.go) has no error name to read.
+		// One slice feeds both the plain and the sandboxed command.
+		"--print-logs",
 		// Deliberately no --mdns: it defaults the bind to 0.0.0.0
 		// (measured on #55), which nothing here wants — this server is
 		// reached only by this driver, over loopback.

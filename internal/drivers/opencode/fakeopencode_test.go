@@ -52,8 +52,8 @@ func runFakeOpencode(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	port := fs.Int("port", 0, "")
 	host := fs.String("hostname", "127.0.0.1", "")
-	_ = fs.Bool("print-logs", false, "")
-	_ = fs.Bool("pure", false, "") // muster #283: a bypass session starts with it
+	printLogs := fs.Bool("print-logs", false, "") // muster #288: the stand-in logs to stderr only when told to, like the runtime
+	_ = fs.Bool("pure", false, "")                // muster #283: a bypass session starts with it
 	_ = fs.Parse(args)
 
 	if fileExists(".fake-fail-ready") {
@@ -175,7 +175,9 @@ func runFakeOpencode(args []string) {
 			w.WriteHeader(http.StatusNoContent)
 		case path == "/__test/log" && r.Method == http.MethodPost:
 			raw, _ := io.ReadAll(r.Body)
-			fmt.Fprintln(os.Stderr, string(raw))
+			if *printLogs {
+				fmt.Fprintln(os.Stderr, string(raw))
+			}
 			w.WriteHeader(http.StatusNoContent)
 		case path == "/__test/env":
 			writeJSON(w, map[string]any{"env": os.Environ(), "cwd": cwd, "pid": os.Getpid(), "args": os.Args})
