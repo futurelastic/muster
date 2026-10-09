@@ -55,9 +55,10 @@ func mustCreate(t *testing.T, d *Driver, key string, spec fleet.SessionSpec) fle
 }
 
 type insideView struct {
-	Env []string `json:"env"`
-	Cwd string   `json:"cwd"`
-	Pid int      `json:"pid"`
+	Env  []string `json:"env"`
+	Cwd  string   `json:"cwd"`
+	Pid  int      `json:"pid"`
+	Args []string `json:"args"`
 }
 
 func (v insideView) vars() map[string]string {

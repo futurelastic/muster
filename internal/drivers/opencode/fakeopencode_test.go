@@ -53,6 +53,7 @@ func runFakeOpencode(args []string) {
 	port := fs.Int("port", 0, "")
 	host := fs.String("hostname", "127.0.0.1", "")
 	_ = fs.Bool("print-logs", false, "")
+	_ = fs.Bool("pure", false, "") // muster #283: a bypass session starts with it
 	_ = fs.Parse(args)
 
 	if fileExists(".fake-fail-ready") {
@@ -177,7 +178,7 @@ func runFakeOpencode(args []string) {
 			fmt.Fprintln(os.Stderr, string(raw))
 			w.WriteHeader(http.StatusNoContent)
 		case path == "/__test/env":
-			writeJSON(w, map[string]any{"env": os.Environ(), "cwd": cwd, "pid": os.Getpid()})
+			writeJSON(w, map[string]any{"env": os.Environ(), "cwd": cwd, "pid": os.Getpid(), "args": os.Args})
 		case path == "/__test/sh" && r.Method == http.MethodPost:
 			// A tool the session runs: a shell started BY the runtime's process,
 			// as the agent's own commands are, so it inherits whatever profile the
