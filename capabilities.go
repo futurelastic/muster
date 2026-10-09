@@ -144,6 +144,14 @@ type DriverCapabilities struct {
 	// temporarily unreachable machine can never report a bare false and
 	// become permanently incapable in a caller's cache (§4.3, D3).
 	ReportsRuntimeSurface bool `json:"reportsRuntimeSurface"`
+	// IsolatesEnvironment reports whether the driver starts a session's process
+	// with a BUILT environment — a small documented base, the machine's
+	// sessionEnv entries and the create's env, and nothing inherited from the
+	// service (muster #280). A caller that needs it sets
+	// SessionSpec.IsolateEnvironment and a driver reporting false refuses that
+	// create as unsupported; a caller can also read this flag first. Like every
+	// flag here it inherits `source: assumed` from an unreached peer.
+	IsolatesEnvironment bool `json:"isolatesEnvironment"`
 	// ConfirmsDelivery reports whether the driver can distinguish
 	// "submitted" from "queued".
 	ConfirmsDelivery bool `json:"confirmsDelivery"`

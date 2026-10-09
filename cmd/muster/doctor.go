@@ -18,9 +18,9 @@ import (
 	"time"
 
 	fleet "github.com/futurelastic/muster"
-	"github.com/futurelastic/muster/internal/drivers/tmux"
 	"github.com/futurelastic/muster/internal/inboxclient"
 	"github.com/futurelastic/muster/internal/service"
+	"github.com/futurelastic/muster/internal/sessionenv"
 )
 
 // `muster doctor` — is this installation complete? (muster #160)
@@ -511,7 +511,7 @@ func validateConfigExtras(cfg *fileConfig, getenv func(string) string) error {
 	}
 	if len(cfg.SessionEnv) > 0 {
 		entries := cfg.sessionEnv()
-		if err := tmux.ValidateSessionEnv(entries); err != nil {
+		if err := sessionenv.Validate(entries); err != nil {
 			msg := err.Error()
 			for _, e := range entries {
 				msg = redact(msg, e.FromFile, "<fromFile>")

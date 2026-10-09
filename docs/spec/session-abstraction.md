@@ -84,6 +84,7 @@ SessionSpec {
   prompt?    : string             // initial input
   contextRef?: AbsolutePath       // see §5.3 — never inline, never argv
   env?       : map<string,string> // out of band only, never argv (§5.3)
+  isolateEnvironment?: boolean    // the session's process carries ONLY a built environment, never the service's own; a driver that cannot refuses `unsupported` (§4.3)
   resume?    : string             // a prior conversation this session continues
   conversationId?: string         // a caller-chosen UUID this session starts a NEW conversation under; mutually exclusive with resume
   permissionMode?: string         // a non-default permission posture; "bypass" is the only value
@@ -1714,6 +1715,7 @@ DriverCapabilities {
   observesControlChannel: boolean // can report `controlChannel` (§2.3); absent state is answerable only against this
   observesPermissionMode: boolean // can report `permissionMode` (§2.3); absent state is answerable only against this
   reportsRuntimeSurface: boolean // can say anything about `runtimeSurface` (§2.13); absent state is answerable only against this
+  isolatesEnvironment: boolean // starts a session's process with a BUILT environment, nothing inherited from the service (§2.1 `isolateEnvironment`, muster #280)
   confirmsDelivery: boolean   // can distinguish submitted from queued
   supportsResume  : boolean   // sessions survive a service restart
   deliversToInbox : boolean   // has an inbox delivery path wired for at least some targets

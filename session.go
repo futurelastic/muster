@@ -135,6 +135,24 @@ type SessionSpec struct {
 	// A refused create says so; a truncated one does not.
 	Env map[string]string `json:"env,omitempty"`
 
+	// IsolateEnvironment requires that the session's process carries ONLY the
+	// environment this create asked for: a small documented base, this
+	// machine's configured sessionEnv entries, and Env — nothing inherited from
+	// the service's own environment (muster #280).
+	//
+	// It is a requirement, not a preference. A driver that cannot deliver it
+	// (DriverCapabilities.IsolatesEnvironment is false) REFUSES the create as
+	// unsupported rather than start a session that leaks the service's
+	// environment into a caller that asked for less (§2.1, §5.6). It is a plain
+	// boolean because there is no honest request for the opposite: "please leak"
+	// is not something a caller asks for, and a driver that always isolates
+	// (opencode) simply honours it without effect.
+	//
+	// What it does not do: it cannot protect a credential the session needs and
+	// was given in Env — the model-provider key lives in the session's own
+	// environment — and it does not confine the filesystem (see §4.3).
+	IsolateEnvironment bool `json:"isolateEnvironment,omitempty"`
+
 	// Resume names a prior conversation this session continues.
 	//
 	// Distinct from DriverCapabilities.SupportsResume, which answers a different

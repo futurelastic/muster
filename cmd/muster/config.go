@@ -6,8 +6,8 @@ import (
 	"os"
 
 	fleet "github.com/futurelastic/muster"
-	"github.com/futurelastic/muster/internal/drivers/tmux"
 	"github.com/futurelastic/muster/internal/service"
+	"github.com/futurelastic/muster/internal/sessionenv"
 )
 
 // fileConfig is the on-disk form of what a fleet member needs to know about
@@ -76,7 +76,7 @@ type fileConfig struct {
 	// SessionEnv declares an identity this machine's sessions carry —
 	// muster issue #94. Each entry names a variable, a fromFile path
 	// this machine reads FRESH ON EVERY CREATE (never cached at daemon
-	// start — see internal/drivers/tmux.SessionEnvEntry's doc comment for
+	// start — see internal/sessionenv.Entry's doc comment for
 	// why that split is the entire feature), a required flag, and an
 	// optional appliesTo scope.
 	//
@@ -177,20 +177,20 @@ func (c *fileConfig) principals() ([]service.Principal, error) {
 	return out, nil
 }
 
-// sessionEnv converts the wire shape into internal/drivers/tmux's own type,
+// sessionEnv converts the wire shape into internal/sessionenv's own type,
 // the same division principals() keeps: this file only knows the JSON shape,
-// the driver package owns what a valid entry means (ValidateSessionEnv is
+// the sessionenv package owns what a valid entry means (Validate is
 // called by the caller, not here — same reasoning as principals() leaving
 // grant validation to its own call site).
-func (c *fileConfig) sessionEnv() []tmux.SessionEnvEntry {
+func (c *fileConfig) sessionEnv() []sessionenv.Entry {
 	if len(c.SessionEnv) == 0 {
 		return nil
 	}
-	out := make([]tmux.SessionEnvEntry, 0, len(c.SessionEnv))
+	out := make([]sessionenv.Entry, 0, len(c.SessionEnv))
 	for _, e := range c.SessionEnv {
-		entry := tmux.SessionEnvEntry{Name: e.Name, FromFile: e.FromFile, Required: e.Required}
+		entry := sessionenv.Entry{Name: e.Name, FromFile: e.FromFile, Required: e.Required}
 		if e.AppliesTo != nil {
-			entry.AppliesTo = tmux.SessionEnvScope{
+			entry.AppliesTo = sessionenv.Scope{
 				Agents:  e.AppliesTo.Agents,
 				Markers: e.AppliesTo.Markers,
 			}

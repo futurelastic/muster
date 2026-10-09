@@ -61,6 +61,9 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 		// this driver has no honest way to make it start under a caller's
 		// instead. Refused for the same reason as resume, three lines above.
 		"conversationId": spec.ConversationId != "",
+		// muster #280: a driver in shared mode (one server for every session)
+		// has no way to give a session an environment of its own.
+		"isolateEnvironment": spec.IsolateEnvironment,
 	} {
 		if set {
 			return fleet.Session{}, &fleet.Error{

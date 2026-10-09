@@ -4675,6 +4675,19 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 	if key == "" {
 		return fleet.Session{}, errors.New("create: idempotency key is required (§10)")
 	}
+	// muster #280: this driver starts a session inside a login shell that
+	// inherits the service's environment, so it has no honest way to deliver a
+	// BUILT one. A create that requires isolation is refused as unsupported —
+	// before any side effect — rather than started with the service's whole
+	// environment (§2.1: refuse rather than drop a hint silently).
+	if spec.IsolateEnvironment {
+		return fleet.Session{}, &fleet.Error{
+			Kind: fleet.ErrorUnsupported,
+			Message: "create: this driver cannot isolate a session's environment (it starts sessions in a shell " +
+				"that inherits the service's own); refusing rather than start a session that leaks it",
+			Machine: d.machine,
+		}
+	}
 	// A completed key returns what it produced; a pending one means this
 	// driver was interrupted mid-create and must find out what happened
 	// before doing anything (§10, see idempotency.go).

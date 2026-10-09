@@ -10,6 +10,7 @@ import (
 	"time"
 
 	fleet "github.com/futurelastic/muster"
+	"github.com/futurelastic/muster/internal/sessionenv"
 )
 
 // The environment a created session receives, and the record of it.
@@ -251,24 +252,7 @@ func validateEnv(env map[string]string) error {
 	return nil
 }
 
-func validEnvName(name string) bool {
-	if name == "" {
-		return false
-	}
-	for i, r := range name {
-		switch {
-		case r == '_':
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z':
-		case r >= '0' && r <= '9':
-			if i == 0 {
-				return false
-			}
-		default:
-			return false
-		}
-	}
-	return true
-}
+func validEnvName(name string) bool { return sessionenv.ValidName(name) }
 
 // envRecordPath picks somewhere to stage one session's record.
 func (d *Driver) envRecordPath() string {
