@@ -59,6 +59,20 @@ It mints the credential, validates the grants before writing, and leaves the
 running service untouched until it is reloaded. `muster principal list`
 shows who holds what, without printing anyone's token.
 
+When a later release adds a verb with its own grant, the operator adds it to
+the existing principal instead of editing the file:
+
+```sh
+muster principal grant my-supervisor remote-control
+muster principal revoke my-supervisor remote-control
+```
+
+Both validate the grant name against the build, keep a dated backup of the
+config beside it, and print the resulting set as `{principal, grants}` (the
+keys `GET /v1/whoami` uses). The running service keeps its old table until it
+is restarted, so check `whoami` afterwards. `human-relay` is refused unless
+`--allow-human-relay` is passed.
+
 Grants are per verb, so you can be given exactly what you need:
 
 | grant | lets you |

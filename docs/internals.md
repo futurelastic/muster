@@ -268,8 +268,9 @@ Stated plainly so nobody rediscovers them the expensive way.
   per-verb grants and an audited outcome, and enrolment is now a command
   (`muster principal add`) that mints a token and validates grants before
   writing. What is still missing is the rest of a lifecycle: nothing expires, a
-  compromised token is revoked by editing a file, and there is no way to change
-  a principal's grants except by removing and re-adding it.
+  compromised token is revoked by editing a file. Changing grants is a command
+  (`muster principal grant|revoke`, #274), but it edits the file and does not
+  reload a running service.
 - **`SourceState` has no member for "reachable but unsupported"** — currently
   squeezed into `degraded`.
 - **Enumeration cost is the real scaling risk, not the network** — and the fix

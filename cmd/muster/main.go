@@ -192,7 +192,7 @@
 //
 // Operator subcommands run and exit without starting the service:
 //
-//	muster principal add|list   enrol a client (enrol.go)
+//	muster principal add|list|grant|revoke   enrol a client, change its grants (enrol.go, grants.go)
 //	muster doctor [--json]      read-only check that this installation is
 //	                                  complete — token, config, grants, state
 //	                                  directory, inbox index, peers (doctor.go,
@@ -1001,7 +1001,7 @@ func usageTop() string {
 		"usage: muster serve                    start the service (configured by FLEET_* environment only)",
 		"       muster doctor [--json] ...      read-only installation check (muster doctor --help)",
 		"       muster compat --claude PATH     check a candidate runtime build (muster compat --help)",
-		"       muster principal add|list       enrol or list clients (muster principal)",
+		"       muster principal add|list|grant|revoke   enrol, list or re-grant clients (muster principal)",
 		"       muster --version                print the build",
 		"       muster -h | --help              print this usage",
 		"",
