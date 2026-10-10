@@ -12,6 +12,7 @@ exposure: released
 # exposure: released (2026-10-02, #250) — adopters install tagged versions from public npm. Was `self`.
 # A merge still reaches nothing by itself; the tag does.
 autonomy: auto-trunk
+ci-grant: reviewer   # owner 2026-10-09/10: the coordinator may mint a ci-reviewer grant for a TRUNK RED: patch
 # autonomy: granted by the maintainer in a live session (2026-09-14, #164)
 trunk: main
 # trunk: detected (the repo's default branch, 2026-08-17)
