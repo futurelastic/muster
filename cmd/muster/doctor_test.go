@@ -81,14 +81,26 @@ func runDoctorTest(vars map[string]string, args ...string) (code int, stdout, st
 	return code, out.String(), errb.String()
 }
 
+// executable writes a stand-in for the tmux binary. On Windows it is a file
+// like any other: the doctor's tmux row judges a POSIX execute bit that Windows
+// does not report, so the tests that assert THAT row's pass skip there
+// themselves (execBitRowsSkipOnWindows) — the ones that only need some tmux
+// path to be configured keep running.
 func executable(t *testing.T, dir string) string {
 	t.Helper()
-	skipOnWindows(t, "the doctor's tmux row reads a POSIX execute bit that Windows does not report")
 	p := filepath.Join(dir, "fake-tmux")
 	if err := os.WriteFile(p, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	return p
+}
+
+// execBitRowsSkipOnWindows skips a case that asserts a row which judges a POSIX
+// execute bit. The row itself is a separate, known gap (see the issue filed for
+// #311); the skip says so in the gate's summary instead of hiding it.
+func execBitRowsSkipOnWindows(t *testing.T) {
+	t.Helper()
+	skipOnWindows(t, "the row judges a POSIX execute bit, which Windows does not report")
 }
 
 // --- rows ---------------------------------------------------------------------
@@ -422,20 +434,26 @@ func TestDoctorRuntime(t *testing.T) {
 		name, runtime, bin string
 		look               func(string) (string, error)
 		want               rowStatus
+		needsExecBit       bool
 	}{
-		{"stub", "stub", "", notFound, statusPass},
-		{"explicit binary", "tmux", bin, notFound, statusPass},
-		{"explicit binary missing", "tmux", bin + ".missing", found, statusFail},
-		{"only on shell PATH", "tmux", "", found, statusWarn},
-		{"bare name on PATH", "tmux", "tmux", found, statusWarn},
-		{"bare name nowhere", "tmux", "tmux", notFound, statusFail},
-		{"nowhere", "tmux", "", notFound, statusFail},
-		{"unknown runtime", "screen", "", found, statusFail},
+		{"stub", "stub", "", notFound, statusPass, false},
+		{"explicit binary", "tmux", bin, notFound, statusPass, true},
+		{"explicit binary missing", "tmux", bin + ".missing", found, statusFail, false},
+		{"only on shell PATH", "tmux", "", found, statusWarn, false},
+		{"bare name on PATH", "tmux", "tmux", found, statusWarn, false},
+		{"bare name nowhere", "tmux", "tmux", notFound, statusFail, false},
+		{"nowhere", "tmux", "", notFound, statusFail, false},
+		{"unknown runtime", "screen", "", found, statusFail, false},
 	}
 	for _, tc := range cases {
-		if row := checkRuntime(tc.runtime, tc.bin, tc.look); row.Status != tc.want {
-			t.Errorf("%s: got %+v, want %s", tc.name, row, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.needsExecBit {
+				execBitRowsSkipOnWindows(t)
+			}
+			if row := checkRuntime(tc.runtime, tc.bin, tc.look); row.Status != tc.want {
+				t.Errorf("got %+v, want %s", row, tc.want)
+			}
+		})
 	}
 }
 
@@ -552,7 +570,14 @@ func TestDoctorIsReadOnly(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			info, _ := d.Info()
+			// os.Stat, not d.Info(): on Windows a DirEntry carries the metadata
+			// the PARENT's listing cached, which lags a child created since —
+			// the directory's own mtime reads old until something refreshes
+			// it, and a snapshot taken twice then disagrees with itself.
+			info, err := os.Stat(p)
+			if err != nil {
+				return err
+			}
 			b.WriteString(p + " " + info.Mode().String() + " " + info.ModTime().String() + "\n")
 			return nil
 		})
@@ -645,25 +670,29 @@ func TestDoctorOpencodeRuntimeRow(t *testing.T) {
 	tmuxBin := executable(t, dir)
 
 	cases := []struct {
-		name string
-		vars map[string]string
-		path string
-		want rowStatus
+		name         string
+		vars         map[string]string
+		path         string
+		want         rowStatus
+		needsExecBit bool
 	}{
-		{"not enabled", map[string]string{"FLEET_TMUX_BIN": tmuxBin}, "", statusSkip},
+		{"not enabled", map[string]string{"FLEET_TMUX_BIN": tmuxBin}, "", statusSkip, false},
 		{"enabled, absolute path to an executable", map[string]string{
-			"FLEET_TMUX_BIN": tmuxBin, "FLEET_RUNTIME_OPENCODE": "1", "FLEET_OPENCODE_BIN": runnable}, "", statusPass},
+			"FLEET_TMUX_BIN": tmuxBin, "FLEET_RUNTIME_OPENCODE": "1", "FLEET_OPENCODE_BIN": runnable}, "", statusPass, true},
 		{"enabled, absolute path that is missing", map[string]string{
-			"FLEET_TMUX_BIN": tmuxBin, "FLEET_RUNTIME_OPENCODE": "1", "FLEET_OPENCODE_BIN": filepath.Join(dir, "nope")}, "", statusFail},
+			"FLEET_TMUX_BIN": tmuxBin, "FLEET_RUNTIME_OPENCODE": "1", "FLEET_OPENCODE_BIN": filepath.Join(dir, "nope")}, "", statusFail, false},
 		{"enabled, a file that cannot be run", map[string]string{
-			"FLEET_TMUX_BIN": tmuxBin, "FLEET_RUNTIME_OPENCODE": "1", "FLEET_OPENCODE_BIN": notRunnable}, "", statusFail},
+			"FLEET_TMUX_BIN": tmuxBin, "FLEET_RUNTIME_OPENCODE": "1", "FLEET_OPENCODE_BIN": notRunnable}, "", statusFail, true},
 		{"enabled, bare name found on this shell's PATH", map[string]string{
-			"FLEET_TMUX_BIN": tmuxBin, "FLEET_RUNTIME_OPENCODE": "1"}, dir, statusWarn},
+			"FLEET_TMUX_BIN": tmuxBin, "FLEET_RUNTIME_OPENCODE": "1"}, dir, statusWarn, true},
 		{"enabled, bare name found nowhere", map[string]string{
-			"FLEET_TMUX_BIN": tmuxBin, "FLEET_RUNTIME_OPENCODE": "1"}, t.TempDir(), statusFail},
+			"FLEET_TMUX_BIN": tmuxBin, "FLEET_RUNTIME_OPENCODE": "1"}, t.TempDir(), statusFail, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.needsExecBit {
+				execBitRowsSkipOnWindows(t)
+			}
 			if tc.path != "" {
 				t.Setenv("PATH", tc.path)
 			}
