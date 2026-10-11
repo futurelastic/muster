@@ -34,8 +34,10 @@ ALLOW=(
 )
 
 # The cmd/muster tests that are Windows-clean: the platform-specific ones
-# (TestWindows*) and the platform-neutral ones this port added.
-CMD_RUN='^(TestWindows|TestServeWithNoLocalDriver|TestParseTaskXML|TestJudgeTask|TestIsConnRefused|TestOpenLogFile|TestTeeLog|TestDefaultRuntime|TestCheckRuntimeName|TestCompatRefuses|TestDoctorRuntime)'
+# (TestWindows*) and the platform-neutral ones this port added. Exact names:
+# a prefix would also pick up the older tests of the same stem, which assume
+# a terminal runtime.
+CMD_RUN='^(TestWindows|TestServeWithNoLocalDriver$|TestParseTaskXML|TestJudgeTask$|TestIsConnRefusedMatchesARealRefusal$|TestOpenLogFileCreatesOwnerOnlyAndAppends$|TestTeeLogKeepsTheFileWhenTheOtherWriterFails$|TestDefaultRuntimeIsNoneOnWindowsAndTmuxElsewhere$|TestCheckRuntimeName$|TestCompatRefusesOnWindowsOnly$|TestDoctorRuntimeRowFollowsTheRuntimeChoice$)'
 
 MUST_PASS=(
 	TestKillReachesAGrandchildSpawnedBeforeAttachReturned
