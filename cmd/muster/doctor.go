@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
 	fleet "github.com/futurelastic/muster"
@@ -23,6 +22,12 @@ import (
 	"github.com/futurelastic/muster/internal/service"
 	"github.com/futurelastic/muster/internal/sessionenv"
 )
+
+// doctorServiceTask answers the service.task row. A variable so the generic
+// doctor tests are not at the mercy of whether the machine they run on has a
+// scheduled task of that name; main_run_test.go replaces it for them, and the
+// Windows tests that are about the row put the real one back.
+var doctorServiceTask = checkServiceTask
 
 // `muster doctor` — is this installation complete? (muster #160)
 //
@@ -304,10 +309,18 @@ func runChecks(ctx context.Context, env doctorEnv) []doctorRow {
 	// --- runtime ------------------------------------------------------------
 	runtime := getenv("FLEET_RUNTIME")
 	if runtime == "" {
-		runtime = "tmux"
+		runtime = defaultRuntime()
 	}
 	c.add(checkRuntime(runtime, getenv("FLEET_TMUX_BIN"), env.LookPath))
 	c.add(checkOpencodeRuntime(getenv("FLEET_RUNTIME_OPENCODE") == "1", getenv("FLEET_OPENCODE_BIN")))
+
+	// --- the service manager's own record (Windows only) -----------------------
+	// muster installs no service manager; where the supported one is a scheduled
+	// task, this row reads what that task says. No row elsewhere, so a Unix
+	// report is unchanged.
+	if row, ok := doctorServiceTask(getenv); ok {
+		c.add(row)
+	}
 
 	// --- grants -------------------------------------------------------------
 	supervisorSet := supervisorGrants()
@@ -801,11 +814,26 @@ func checkBind(raw string) doctorRow {
 }
 
 func checkRuntime(runtime, tmuxBin string, lookPath func(string) (string, error)) doctorRow {
+	return checkRuntimeOn(hostOS(), runtime, tmuxBin, lookPath)
+}
+
+// checkRuntimeOn is checkRuntime with the operating system named, so a test can
+// ask what Windows would say from any machine.
+func checkRuntimeOn(goos, runtime, tmuxBin string, lookPath func(string) (string, error)) doctorRow {
 	row := doctorRow{ID: "runtime"}
+	if err := checkRuntimeName(goos, runtime); err != nil {
+		row.Status = statusFail
+		row.Summary = err.Error() + " — the service refuses to start"
+		return row
+	}
 	switch runtime {
 	case "stub":
 		row.Status = statusPass
 		row.Summary = "FLEET_RUNTIME=stub"
+	case "none":
+		row.Status = statusPass
+		row.Summary = "FLEET_RUNTIME=none — no primary local runtime"
+		row.Detail = "the local runtimes are the optional ones enabled below (FLEET_RUNTIME_OPENCODE); with none enabled the service has no local sessions and fronts its peers"
 	case "tmux":
 		if lookPath == nil {
 			lookPath = exec.LookPath
@@ -845,7 +873,7 @@ func checkRuntime(runtime, tmuxBin string, lookPath func(string) (string, error)
 		row.Detail = "a service manager usually starts the service with a bare PATH that lacks it — set FLEET_TMUX_BIN in the unit"
 	default:
 		row.Status = statusFail
-		row.Summary = fmt.Sprintf("unknown FLEET_RUNTIME %q (want tmux or stub) — the service refuses to start", runtime)
+		row.Summary = fmt.Sprintf("unknown FLEET_RUNTIME %q (want tmux, stub or none) — the service refuses to start", runtime)
 	}
 	return row
 }
@@ -1142,7 +1170,7 @@ func describeNetErr(err error) string {
 	switch {
 	case errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout()):
 		return "timed out"
-	case errors.Is(err, syscall.ECONNREFUSED):
+	case isConnRefused(err):
 		return "connection refused"
 	}
 	var dns *net.DNSError

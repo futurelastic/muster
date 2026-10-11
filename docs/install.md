@@ -243,3 +243,181 @@ order of this page and the order of its output are the same.
     to report, not this machine's.
 
 From here on, every change is a deploy: [`deploy.md`](deploy.md).
+
+## Windows
+
+muster runs on Windows as a per-user service, started by a scheduled task. Read
+[the decision](adr/303-windows-ships-without-an-interactive-terminal-driver.md)
+before relying on it for anything but the subprocess runtime: **a Windows
+machine has no interactive-terminal driver.** What it does have is the
+`opencode` runtime, driven as a child process, and the whole HTTP API, the
+principal table and federation. The procedure above applies; this section is
+what differs.
+
+### What a Windows machine reports
+
+- `FLEET_RUNTIME` defaults to `none`: no primary local driver. `tmux` is refused
+  at startup, naming the decision. `muster compat` refuses too, because there is
+  no terminal runtime for it to check.
+- Set `FLEET_RUNTIME_OPENCODE=1` and `FLEET_OPENCODE_BIN` (an absolute path) to
+  enable the one local runtime. `GET /v1/runtimes` then lists exactly one local
+  row, `opencode`, with no `sandbox` entry: the sandbox is not enforceable on
+  Windows, so a create that asks for one is refused `unsupported`, never started
+  unconfined. With the runtime not enabled the service has no local sessions and
+  fronts its peers.
+- The terminal runtime is **absent** from the list, not `unavailable`: nothing
+  enabled it and nothing could. A client that keys capabilities by
+  `(machine, runtime)` needs no change.
+
+### Where things live
+
+| What | Where | Notes |
+|---|---|---|
+| the binary | `%LOCALAPPDATA%\Programs\muster\muster.exe` | a fixed path the task executes; the launcher is not what a task runs |
+| config and tokens | `%APPDATA%\muster` | `config.json` and one `<principal>.token` per principal |
+| state | `%LOCALAPPDATA%\muster\state` | `FLEET_STATE_DIR`; created owner-only |
+| service log | `%LOCALAPPDATA%\muster\muster.log` | `FLEET_LOG_FILE`; created owner-only, appended to |
+
+Owner-only means a protected access list naming only the current user, applied
+when the object is created. `muster doctor` reports the state directory's list
+(`state.dir`) rather than guessing from a mode that does not exist here.
+
+**Write the config as UTF-8 without a byte-order mark.** Windows PowerShell 5's
+`Set-Content -Encoding UTF8` and `Out-File` add one, and the JSON reader does not
+accept it. From any PowerShell:
+
+```powershell
+$dir = Join-Path $env:APPDATA 'muster'
+New-Item -ItemType Directory -Force $dir | Out-Null
+[IO.File]::WriteAllText((Join-Path $dir 'config.json'), '{}', [Text.UTF8Encoding]::new($false))
+```
+
+### Install
+
+The Windows packages are built and tested by every release but are **not
+published to npm yet**, so `npm i -g @futurelastic/muster` does not give a
+Windows machine a binary. Two routes work today:
+
+1. **Build from source** on any machine with Go, stamping it as step 1 does:
+
+   ```powershell
+   $v = git describe --tags --match 'v[0-9]*'
+   $env:GOOS = 'windows'; $env:GOARCH = 'amd64'   # or arm64; unneeded on Windows itself
+   go build -ldflags "-X github.com/futurelastic/muster.version=$v" -o muster.exe .\cmd\muster
+   ```
+
+   then copy `muster.exe` to the path in the table above.
+2. **Assemble the npm packages locally** from a release build, as CI's
+   end-to-end job does (`scripts/e2e-windows.ps1`): `scripts/build-release.sh`,
+   then `node scripts/assemble-npm.mjs --all`, then `npm pack` and
+   `npm install -g` the launcher and the `win32-x64` tarball. The platform
+   package is `@futurelastic/muster-win32-x64` (or `-win32-arm64`); npm names
+   follow `process.platform`.
+
+### Enrol a client
+
+Steps 5 and 6 above, unchanged — `muster principal add` writes the token file
+beside the config, owner-only:
+
+```powershell
+$cfg = Join-Path $env:APPDATA 'muster\config.json'
+muster principal add supervisor --grants=read,create,send,interrupt,close,rename,discard,keys --config=$cfg
+```
+
+A client reads the token from that file; it is never put in an environment
+variable.
+
+### The service: a scheduled task
+
+muster installs no service manager here either. The supported shape is a task
+that runs `muster.exe serve` when the user signs in. Each setting is there
+because the default is wrong for a service:
+
+```powershell
+$exe    = Join-Path $env:LOCALAPPDATA 'Programs\muster\muster.exe'
+$who    = "$env:USERDOMAIN\$env:USERNAME"
+$action = New-ScheduledTaskAction -Execute $exe -Argument 'serve'
+$trigger  = New-ScheduledTaskTrigger -AtLogOn -User $who
+$settings = New-ScheduledTaskSettingsSet `
+  -ExecutionTimeLimit ([TimeSpan]::Zero) `
+  -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+  -MultipleInstances IgnoreNew `
+  -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+$principal = New-ScheduledTaskPrincipal -UserId $who -LogonType Interactive -RunLevel Limited
+Register-ScheduledTask -TaskName muster -Action $action -Trigger $trigger `
+  -Settings $settings -Principal $principal
+```
+
+- **Execution time limit 0 (`PT0S`).** Task Scheduler's default is 72 hours, after
+  which it ends the task. The service then stops with no error anywhere.
+- **Battery settings off.** The defaults refuse to start on battery and stop
+  when the machine goes onto it.
+- **Restart on failure, and ignore new instances.** A crash is retried; a second
+  start while one is running does nothing.
+- **Interactive token, limited.** It runs as the user who owns the sessions,
+  without elevation, and only while they are signed in.
+
+A task cannot carry its own environment. `FLEET_*` come from the **user's**
+environment, which a task started as that user is given:
+
+```powershell
+[Environment]::SetEnvironmentVariable('FLEET_MACHINE', 'machine-w', 'User')
+[Environment]::SetEnvironmentVariable('FLEET_CONFIG', "$env:APPDATA\muster\config.json", 'User')
+[Environment]::SetEnvironmentVariable('FLEET_STATE_DIR', "$env:LOCALAPPDATA\muster\state", 'User')
+[Environment]::SetEnvironmentVariable('FLEET_ADDR', '127.0.0.1:9470', 'User')   # a fixed port of your choice
+[Environment]::SetEnvironmentVariable('FLEET_LOG_FILE', "$env:LOCALAPPDATA\muster\muster.log", 'User')
+[Environment]::SetEnvironmentVariable('FLEET_RUNTIME_OPENCODE', '1', 'User')
+[Environment]::SetEnvironmentVariable('FLEET_OPENCODE_BIN', 'C:\path\to\opencode.exe', 'User')
+```
+
+Put no secret there, for the reason in step 8. Variables set this way are read
+when a process starts, so sign out and in, or start the task again, after
+changing them.
+
+A scheduled task gives the process a console window; muster releases it when it
+is the only process on that console, so no window stays on the desktop. Started
+from a shell, it keeps the shell's console.
+
+### Check it
+
+`muster doctor` runs as on any machine (step 9) and adds one row on Windows,
+`service.task`, which reads the task with `schtasks /Query /XML`:
+
+| Finding | Status |
+|---|---|
+| no task of that name | fail |
+| execution time limit absent (the 72 h default) or anything but `PT0S` | fail |
+| battery settings on; the action runs a different executable than this one; no at-log-on trigger | warn |
+| the definition could not be read | unknown |
+
+The task is looked up as `muster`; set `FLEET_TASK_NAME` for doctor to look for
+another name. Run doctor from a shell that has the same `FLEET_*` as the task.
+
+Stopping the service ends it without a graceful shutdown: there is no
+console-signal route to a service the scheduler started. Everything it started
+is in a Job Object that ends with it ([ADR 306](adr/306-windows-process-tree-and-owner-only-files.md)),
+so a stop does not leave runtime processes behind.
+
+### Terminal sessions: a peer in WSL
+
+A Windows machine serves terminal sessions by federation, not natively: run the
+Linux build inside WSL with its **own** machine id, and list it as a peer of the
+Windows service (step 6, both halves). The Windows service relays; the terminal
+driver runs where tmux runs and keeps its guarantees. Two muster processes per
+machine is the cost, and it is the operator's to bear.
+
+### What is not verified
+
+Said here so nobody has to find it out:
+
+- **The Windows packages are unpublished.** They are assembled and installed in
+  CI, never from the registry.
+- **arm64 is cross-built and never run.** Only `amd64` is exercised.
+- **The WSL peer route has not been run.** The Windows-to-WSL direction relies on
+  WSL's localhost forwarding; the reverse direction depends on the WSL network
+  mode. Treat both as configuration to prove on the machine.
+- **The scheduled task is exercised on a CI runner,** which may not give it an
+  interactive desktop; CI says which start path it took. A task on a signed-in
+  desktop has not been observed there.
+- **No Windows service (SCM) form exists.** A task runs only while the user is
+  signed in.

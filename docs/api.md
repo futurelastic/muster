@@ -211,6 +211,14 @@ retried, `GET /v1/sessions` adds a `degraded` source for this machine whose
 `complete` is `false` until it registers. A runtime that is not retried (not
 installed, say) adds no such source.
 
+A machine lists only the drivers registered **there**. On Windows that is the
+`opencode` runtime and nothing else: there is no interactive-terminal driver
+(ADR 303), so no terminal-runtime row exists — **absent**, not `unavailable`, since
+nothing enabled it and nothing could. A Windows machine with no runtime enabled
+lists none, and a peer's rows appear under the peer's own machine id. The
+`opencode` row there carries no `sandbox` entry: the sandbox is not enforceable
+on Windows, so a create asking for one is refused `unsupported`.
+
 `capabilities.deliveryModules` (#185) lists the optional external delivery
 modules this machine enabled — `name`, `status` (`starting`, `available`,
 `unavailable` or `disabled`), a `reason` when it is not available, the module's

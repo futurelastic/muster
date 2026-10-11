@@ -8,6 +8,6 @@
   "bugs": { "url": "https://github.com/futurelastic/muster/issues" },
   "os": ["@OS@"],
   "cpu": ["@CPU@"],
-  "files": ["bin/muster", "README.md", "LICENSE"],
+  "files": ["bin/@BIN@", "README.md", "LICENSE"],
   "publishConfig": { "access": "public", "provenance": true }
 }

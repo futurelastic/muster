@@ -206,6 +206,10 @@ a platform package whose version differs from its own. Release candidates
 publish under the `next` dist-tag (`npx @futurelastic/muster@next`); `latest`
 only ever moves to a final release.
 
+Windows is built and tested by every release but not published to npm yet, and
+has no interactive-terminal driver; see
+[`docs/install.md`](docs/install.md#windows).
+
 Configure it with the `FLEET_*` environment the [Quickstart](#quickstart) shows
 and start it with `muster serve`. A service that survives a reboot is
 [`docs/install.md`](docs/install.md). Build from source only to hack on it.

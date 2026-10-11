@@ -20,7 +20,12 @@
 //	                       is not already covered — a service is not
 //	                       diagnosable if it can be cut off from its own
 //	                       machine by the failure being diagnosed.
-//	FLEET_RUNTIME          "tmux" (default) or "stub".
+//	FLEET_RUNTIME          "tmux" (default), "stub", or "none": no primary
+//	                       local driver, so the only local runtime is
+//	                       whatever FLEET_RUNTIME_OPENCODE enables (or none,
+//	                       and the service fronts its peers). "none" is the
+//	                       DEFAULT on Windows, where "tmux" is refused at
+//	                       startup (ADR 303, runtime.go).
 //	FLEET_TMUX_BIN         path to the multiplexer binary. Defaults to
 //	                       "tmux" on PATH — which a non-interactive ssh
 //	                       session may not have.
@@ -39,6 +44,11 @@
 //	                       (muster #297), and a version check that merely
 //	                       timed out is retried in the background until it
 //	                       answers.
+//	FLEET_LOG_FILE         path of a file the service log is ALSO written to,
+//	                       on every OS (logfile.go). Created owner-only and
+//	                       appended to. Off by default. A service a scheduler
+//	                       starts has no stderr anyone reads, so on Windows
+//	                       this is how a failed start is read at all.
 //	FLEET_OPENCODE_BIN     path to the opencode binary. Defaults to
 //	                       "opencode" on PATH.
 //	FLEET_OPENCODE_PATH    comma-separated absolute directories added to the
@@ -325,6 +335,20 @@ func main() {
 		os.Exit(code)
 	}
 
+	// From here on this process is the service. FLEET_LOG_FILE is wired before
+	// anything can log or fail, so a refusal to start is in the file too.
+	if path := os.Getenv("FLEET_LOG_FILE"); path != "" {
+		f, err := openLogFile(path)
+		if err != nil {
+			log.Fatalf("muster: %v", err)
+		}
+		defer f.Close()
+		log.SetOutput(newTeeLog(f, os.Stderr))
+	}
+	// A scheduler starts the service with a console window of its own; release
+	// it when nothing else is using it (console_windows.go). A no-op elsewhere.
+	detachConsole()
+
 	self := fleet.MachineId(getenv("FLEET_MACHINE", "local"))
 
 	// Logged before anything else can fail, so a crash report says which
@@ -410,8 +434,14 @@ func main() {
 		// The zero value (nothing enabled) is the default and changes nothing.
 		deliveryModules deliveryModuleSetup
 	)
-	switch name := getenv("FLEET_RUNTIME", "tmux"); name {
-	case "tmux":
+	runtimeName := getenv("FLEET_RUNTIME", defaultRuntime())
+	// Refused before anything is built, so a build that cannot run a driver never
+	// reaches the case that would construct it (ADR 303).
+	if err := checkRuntimeName(hostOS(), runtimeName); err != nil {
+		log.Fatalf("muster: %v", err)
+	}
+	switch runtimeName {
+	case runtimeTmux:
 		// FLEET_TMUX_BIN exists because a non-interactive ssh session gets a
 		// bare PATH (/usr/bin:/bin:/usr/sbin:/sbin on the machines this was
 		// deployed to), and the multiplexer lives in a package manager's
@@ -602,13 +632,20 @@ func main() {
 			go runTrustSeedLoop(d, trustSeedInterval())
 		}
 		localDriver, runtimeID = d, tmux.DefaultRuntime
-	case "stub":
+	case runtimeStub:
 		localDriver, runtimeID = &stub.Driver{DeadlineMs: 5000}, "stub"
-	default:
-		log.Fatalf("muster: unknown FLEET_RUNTIME %q (want tmux or stub)", name)
+	case runtimeNone:
+		// No primary driver. localDriver stays nil, and nothing below needs one:
+		// the reconcile and module blocks type-assert it (a nil interface fails
+		// the assertion), and the sweep, listings and /v1/runtimes read only what
+		// is registered. An optional runtime enabled below is then the machine's
+		// one local runtime; none enabled leaves a service that fronts its peers.
+		log.Print("muster: FLEET_RUNTIME=none — no primary local runtime on this machine")
 	}
-	if err := svc.RegisterLocalDriver(runtimeID, localDriver); err != nil {
-		log.Fatalf("muster: registering local runtime: %v", err)
+	if localDriver != nil {
+		if err := svc.RegisterLocalDriver(runtimeID, localDriver); err != nil {
+			log.Fatalf("muster: registering local runtime: %v", err)
+		}
 	}
 
 	// --- second local driver (muster issue #55) --------------------
@@ -896,7 +933,7 @@ func main() {
 			log.Fatalf("muster: listen %s: %v", a, err)
 		}
 		listeners = append(listeners, ln)
-		log.Printf("muster: listening on %s (machine=%s runtime=%s)", ln.Addr(), self, runtimeID)
+		log.Printf("muster: listening on %s (machine=%s runtime=%s)", ln.Addr(), self, runtimeLabel(runtimeID))
 	}
 
 	for _, ln := range listeners {

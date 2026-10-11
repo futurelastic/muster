@@ -52,9 +52,26 @@ func writeTestConfig(t *testing.T, dir string, principals []testPrincipal, peers
 	return path
 }
 
+// testGetenv reads vars. An unset FLEET_RUNTIME reads as "tmux", the default
+// these tests were written against: the service's own default is "none" on
+// Windows (ADR 303), and a test about the terminal runtime's rows must mean the
+// same thing on every platform. A test about the default itself sets nothing and
+// asks defaultRuntime directly (runtime_test.go).
+func testGetenv(vars map[string]string) func(string) string {
+	return func(k string) string {
+		if v, ok := vars[k]; ok {
+			return v
+		}
+		if k == "FLEET_RUNTIME" {
+			return "tmux"
+		}
+		return ""
+	}
+}
+
 func testDoctorEnv(vars map[string]string) doctorEnv {
 	return doctorEnv{
-		Getenv:   func(k string) string { return vars[k] },
+		Getenv:   testGetenv(vars),
 		Skip:     map[string]bool{},
 		Timeout:  2 * time.Second,
 		HTTP:     &http.Client{Timeout: 2 * time.Second},
@@ -77,7 +94,7 @@ func runDoctorTest(vars map[string]string, args ...string) (code int, stdout, st
 	var out, errb bytes.Buffer
 	// No working directory: the clone row (#201) is about whichever clone the
 	// tests happen to run in, and is tested on its own in doctor_hooks_test.go.
-	_, code = runDoctorAt("", append([]string{"doctor"}, args...), func(k string) string { return vars[k] }, &out, &errb)
+	_, code = runDoctorAt("", append([]string{"doctor"}, args...), testGetenv(vars), &out, &errb)
 	return code, out.String(), errb.String()
 }
 
@@ -450,7 +467,7 @@ func TestDoctorRuntime(t *testing.T) {
 			if tc.needsExecBit {
 				execBitRowsSkipOnWindows(t)
 			}
-			if row := checkRuntime(tc.runtime, tc.bin, tc.look); row.Status != tc.want {
+			if row := checkRuntimeOn("linux", tc.runtime, tc.bin, tc.look); row.Status != tc.want {
 				t.Errorf("got %+v, want %s", row, tc.want)
 			}
 		})

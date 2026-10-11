@@ -62,6 +62,7 @@ func TestRunCompatIsOnlyForCompat(t *testing.T) {
 // Flags are taken both as `--flag=value` (as doctor takes them) and as
 // `--flag value` (as the usage line spells them).
 func TestRunCompatParsesFlags(t *testing.T) {
+	skipOnWindows(t, "muster compat is refused on Windows (ADR 303), so its flag and report paths are unreachable there; the refusal is TestWindowsCompatRefuses")
 	for name, args := range map[string][]string{
 		"spaced": {"compat", "--claude", "/opt/c/claude", "--only", "F-LIMIT,H-RC", "--pack", "/tmp/p", "--timeout", "90s", "--json"},
 		"equals": {"compat", "--claude=/opt/c/claude", "--only=F-LIMIT,H-RC", "--pack=/tmp/p", "--timeout=90s", "--json"},
@@ -86,6 +87,7 @@ func TestRunCompatParsesFlags(t *testing.T) {
 }
 
 func TestRunCompatDefaultTimeout(t *testing.T) {
+	skipOnWindows(t, "muster compat is refused on Windows (ADR 303), so its flag and report paths are unreachable there; the refusal is TestWindowsCompatRefuses")
 	call := withChecker(t, reportWith(compat.Result{ID: "F-LIMIT", Pass: true}), nil)
 	run(t, "compat", "--claude", "/x")
 	if d := time.Until(call.deadline); !call.hadDL || d > compatDefaultTimeout || d < compatDefaultTimeout-time.Minute {
@@ -95,6 +97,7 @@ func TestRunCompatDefaultTimeout(t *testing.T) {
 
 // A bad invocation exits 2, prints the usage, and never reaches the checker.
 func TestRunCompatBadInvocations(t *testing.T) {
+	skipOnWindows(t, "muster compat is refused on Windows (ADR 303), so its flag and report paths are unreachable there; the refusal is TestWindowsCompatRefuses")
 	cases := map[string][]string{
 		"no --claude":               {"compat"},
 		"--claude without a value":  {"compat", "--claude"},
@@ -134,6 +137,7 @@ func TestRunCompatBadInvocations(t *testing.T) {
 }
 
 func TestRunCompatHelp(t *testing.T) {
+	skipOnWindows(t, "muster compat is refused on Windows (ADR 303), so its flag and report paths are unreachable there; the refusal is TestWindowsCompatRefuses")
 	withChecker(t, compat.Report{}, nil)
 	handled, code, stdout, stderr := run(t, "compat", "--help")
 	if !handled || code != 0 || !strings.Contains(stdout, "usage: muster compat") || stderr != "" {
@@ -145,6 +149,7 @@ func TestRunCompatHelp(t *testing.T) {
 // certify. The pinned mapping lives in internal/compat; this pins that the
 // command uses it.
 func TestRunCompatExitCodesFollowTheReport(t *testing.T) {
+	skipOnWindows(t, "muster compat is refused on Windows (ADR 303), so its flag and report paths are unreachable there; the refusal is TestWindowsCompatRefuses")
 	must := func(pass, errored bool) compat.Result {
 		return compat.Result{ID: "X-M", Gate: compat.GateMust, Pass: pass, Error: errored, Detail: "d"}
 	}
@@ -169,6 +174,7 @@ func TestRunCompatExitCodesFollowTheReport(t *testing.T) {
 // --json prints ONLY the report on stdout, so it can be piped; progress and
 // diagnostics go to stderr.
 func TestRunCompatJSONIsPureAndValid(t *testing.T) {
+	skipOnWindows(t, "muster compat is refused on Windows (ADR 303), so its flag and report paths are unreachable there; the refusal is TestWindowsCompatRefuses")
 	withChecker(t, reportWith(compat.Result{ID: "F-LIMIT", Pass: true, Detail: "ok"}), nil)
 	_, code, stdout, _ := run(t, "compat", "--claude", "/x", "--json")
 	if code != 0 {
@@ -195,6 +201,7 @@ func TestRunCompatJSONIsPureAndValid(t *testing.T) {
 }
 
 func TestRunCompatTextReport(t *testing.T) {
+	skipOnWindows(t, "muster compat is refused on Windows (ADR 303), so its flag and report paths are unreachable there; the refusal is TestWindowsCompatRefuses")
 	withChecker(t, reportWith(compat.Result{ID: "F-LIMIT", Pass: true, Detail: "ok"}), nil)
 	_, code, stdout, _ := run(t, "compat", "--claude", "/x")
 	if code != 0 || !strings.Contains(stdout, "F-LIMIT") || !strings.Contains(stdout, "PASS") {
@@ -207,6 +214,7 @@ func TestRunCompatTextReport(t *testing.T) {
 // shown — the verdict is never hidden — but the exit code says the run was not
 // clean.
 func TestRunCompatErrors(t *testing.T) {
+	skipOnWindows(t, "muster compat is refused on Windows (ADR 303), so its flag and report paths are unreachable there; the refusal is TestWindowsCompatRefuses")
 	withChecker(t, compat.Report{}, errors.New("--claude \"/x\": no such file"))
 	handled, code, stdout, stderr := run(t, "compat", "--claude", "/x")
 	if !handled || code != 2 || stdout != "" || !strings.Contains(stderr, "no such file") {
@@ -221,6 +229,7 @@ func TestRunCompatErrors(t *testing.T) {
 }
 
 func TestRunCompatPassesTheBuild(t *testing.T) {
+	skipOnWindows(t, "muster compat is refused on Windows (ADR 303), so its flag and report paths are unreachable there; the refusal is TestWindowsCompatRefuses")
 	call := withChecker(t, reportWith(compat.Result{ID: "F-LIMIT", Pass: true}), nil)
 	run(t, "compat", "--claude", "/x")
 	// Under `go test` the VCS stamp is absent, so only its presence as a

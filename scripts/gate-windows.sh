@@ -57,6 +57,14 @@ MUST_PASS=(
 	TestEnrolAddWritesAnOwnerOnlyTokenFileAndTheMatchingPrincipal
 	TestEnrolRefusalsWriteNothing
 	TestRunPrincipalAddAndListThroughTheCommandLine
+	TestWindowsRefusesTmuxRuntime
+	TestWindowsDefaultRuntimeIsNone
+	TestWindowsCompatRefuses
+	TestWindowsServiceTaskRowReadsTheTask
+	TestServeWithNoLocalDriver
+	TestParseTaskXMLAcceptsEveryEncodingSchtasksProduces
+	TestJudgeTask
+	TestIsConnRefusedMatchesARealRefusal
 )
 
 echo "== go build =="
