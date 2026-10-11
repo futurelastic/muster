@@ -24,6 +24,7 @@ import (
 // process's repository selectors irrelevant to a test.
 func isolateGit(t *testing.T) {
 	t.Helper()
+	skipOnWindows(t, "the hook row reads the POSIX execute bit and the installer is a shell script")
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git is not installed")
 	}

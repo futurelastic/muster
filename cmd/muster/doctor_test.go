@@ -9,9 +9,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/futurelastic/muster/internal/privfs"
 )
 
 // --- helpers ------------------------------------------------------------------
@@ -78,6 +81,11 @@ func runDoctorTest(vars map[string]string, args ...string) (code int, stdout, st
 	return code, out.String(), errb.String()
 }
 
+// executable writes a stand-in for the tmux binary. On Windows it is a file
+// like any other: the doctor's tmux row judges a POSIX execute bit that Windows
+// does not report, so the tests that assert THAT row's pass skip there
+// themselves (execBitRowsSkipOnWindows) — the ones that only need some tmux
+// path to be configured keep running.
 func executable(t *testing.T, dir string) string {
 	t.Helper()
 	p := filepath.Join(dir, "fake-tmux")
@@ -85,6 +93,14 @@ func executable(t *testing.T, dir string) string {
 		t.Fatal(err)
 	}
 	return p
+}
+
+// execBitRowsSkipOnWindows skips a case that asserts a row which judges a POSIX
+// execute bit. The row itself is a separate, known gap (#312); the skip says so
+// in the gate's summary instead of hiding it.
+func execBitRowsSkipOnWindows(t *testing.T) {
+	t.Helper()
+	skipOnWindows(t, "the row judges a POSIX execute bit, which Windows does not report")
 }
 
 // --- rows ---------------------------------------------------------------------
@@ -257,36 +273,70 @@ func TestDoctorModeClass(t *testing.T) {
 	}
 }
 
+// The state.dir row answers "is this directory writable and private to its
+// owner" with the platform's own vocabulary: a POSIX mode and access(2) on
+// Unix, the directory's access list (privfs.Check) elsewhere. The rows that do
+// not depend on that vocabulary run everywhere; the rest are written twice, so
+// neither platform's answer is asserted through the other's mechanism.
 func TestDoctorStateDir(t *testing.T) {
 	root := t.TempDir()
-	mk := func(name string, mode os.FileMode) string {
-		p := filepath.Join(root, name)
-		if err := os.Mkdir(p, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chmod(p, mode); err != nil {
-			t.Fatal(err)
-		}
-		return p
-	}
 	file := filepath.Join(root, "file")
 	if err := os.WriteFile(file, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cases := []struct {
+	type stateCase struct {
 		name     string
 		dir      string
 		want     rowStatus
 		needUser bool
-	}{
+	}
+	cases := []stateCase{
 		{"unset", "", statusWarn, false},
 		{"a file", file, statusFail, false},
-		{"not writable", mk("ro", 0o500), statusFail, true},
-		{"too open", mk("open", 0o755), statusWarn, false},
-		{"0700", mk("good", 0o700), statusPass, false},
 		{"not yet created", filepath.Join(root, "later", "state"), statusPass, false},
 	}
-	t.Cleanup(func() { _ = os.Chmod(filepath.Join(root, "ro"), 0o700) })
+	if runtime.GOOS != "windows" {
+		mk := func(name string, mode os.FileMode) string {
+			p := filepath.Join(root, name)
+			if err := os.Mkdir(p, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(p, mode); err != nil {
+				t.Fatal(err)
+			}
+			return p
+		}
+		cases = append(cases,
+			stateCase{"not writable", mk("ro", 0o500), statusFail, true},
+			stateCase{"too open", mk("open", 0o755), statusWarn, false},
+			stateCase{"0700", mk("good", 0o700), statusPass, false},
+		)
+		t.Cleanup(func() { _ = os.Chmod(filepath.Join(root, "ro"), 0o700) })
+	} else {
+		// Created the way the service creates it: the owner-only protected list
+		// applied at creation, which the row must read back as a pass.
+		good := filepath.Join(root, "good")
+		if err := privfs.MkdirAll(good); err != nil {
+			t.Fatal(err)
+		}
+		cases = append(cases, stateCase{"owner-only list", good, statusPass, false})
+		// Created the ordinary way, it inherits the parent's list. Whether that
+		// list names anyone else depends on the account and the runner's
+		// temporary directory, so the expected row is whatever privfs reads —
+		// and a list that happens to be owner-only already proves nothing.
+		open := filepath.Join(root, "open")
+		if err := os.Mkdir(open, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		switch rep := privfs.Check(open); rep.Verdict {
+		case privfs.Loose:
+			cases = append(cases, stateCase{"inherited list names someone else", open, statusWarn, false})
+		case privfs.Unknown:
+			cases = append(cases, stateCase{"inherited list unreadable", open, statusUnknown, false})
+		default:
+			t.Logf("the runner's temporary directory is already owner-only; the inherited-list row is not exercised (windows, #303)")
+		}
+	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.needUser && os.Geteuid() == 0 {
@@ -384,20 +434,26 @@ func TestDoctorRuntime(t *testing.T) {
 		name, runtime, bin string
 		look               func(string) (string, error)
 		want               rowStatus
+		needsExecBit       bool
 	}{
-		{"stub", "stub", "", notFound, statusPass},
-		{"explicit binary", "tmux", bin, notFound, statusPass},
-		{"explicit binary missing", "tmux", bin + ".missing", found, statusFail},
-		{"only on shell PATH", "tmux", "", found, statusWarn},
-		{"bare name on PATH", "tmux", "tmux", found, statusWarn},
-		{"bare name nowhere", "tmux", "tmux", notFound, statusFail},
-		{"nowhere", "tmux", "", notFound, statusFail},
-		{"unknown runtime", "screen", "", found, statusFail},
+		{"stub", "stub", "", notFound, statusPass, false},
+		{"explicit binary", "tmux", bin, notFound, statusPass, true},
+		{"explicit binary missing", "tmux", bin + ".missing", found, statusFail, false},
+		{"only on shell PATH", "tmux", "", found, statusWarn, false},
+		{"bare name on PATH", "tmux", "tmux", found, statusWarn, false},
+		{"bare name nowhere", "tmux", "tmux", notFound, statusFail, false},
+		{"nowhere", "tmux", "", notFound, statusFail, false},
+		{"unknown runtime", "screen", "", found, statusFail, false},
 	}
 	for _, tc := range cases {
-		if row := checkRuntime(tc.runtime, tc.bin, tc.look); row.Status != tc.want {
-			t.Errorf("%s: got %+v, want %s", tc.name, row, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.needsExecBit {
+				execBitRowsSkipOnWindows(t)
+			}
+			if row := checkRuntime(tc.runtime, tc.bin, tc.look); row.Status != tc.want {
+				t.Errorf("got %+v, want %s", row, tc.want)
+			}
+		})
 	}
 }
 
@@ -514,7 +570,14 @@ func TestDoctorIsReadOnly(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			info, _ := d.Info()
+			// os.Stat, not d.Info(): on Windows a DirEntry carries the metadata
+			// the PARENT's listing cached, which lags a child created since —
+			// the directory's own mtime reads old until something refreshes
+			// it, and a snapshot taken twice then disagrees with itself.
+			info, err := os.Stat(p)
+			if err != nil {
+				return err
+			}
 			b.WriteString(p + " " + info.Mode().String() + " " + info.ModTime().String() + "\n")
 			return nil
 		})
@@ -607,25 +670,29 @@ func TestDoctorOpencodeRuntimeRow(t *testing.T) {
 	tmuxBin := executable(t, dir)
 
 	cases := []struct {
-		name string
-		vars map[string]string
-		path string
-		want rowStatus
+		name         string
+		vars         map[string]string
+		path         string
+		want         rowStatus
+		needsExecBit bool
 	}{
-		{"not enabled", map[string]string{"FLEET_TMUX_BIN": tmuxBin}, "", statusSkip},
+		{"not enabled", map[string]string{"FLEET_TMUX_BIN": tmuxBin}, "", statusSkip, false},
 		{"enabled, absolute path to an executable", map[string]string{
-			"FLEET_TMUX_BIN": tmuxBin, "FLEET_RUNTIME_OPENCODE": "1", "FLEET_OPENCODE_BIN": runnable}, "", statusPass},
+			"FLEET_TMUX_BIN": tmuxBin, "FLEET_RUNTIME_OPENCODE": "1", "FLEET_OPENCODE_BIN": runnable}, "", statusPass, true},
 		{"enabled, absolute path that is missing", map[string]string{
-			"FLEET_TMUX_BIN": tmuxBin, "FLEET_RUNTIME_OPENCODE": "1", "FLEET_OPENCODE_BIN": filepath.Join(dir, "nope")}, "", statusFail},
+			"FLEET_TMUX_BIN": tmuxBin, "FLEET_RUNTIME_OPENCODE": "1", "FLEET_OPENCODE_BIN": filepath.Join(dir, "nope")}, "", statusFail, false},
 		{"enabled, a file that cannot be run", map[string]string{
-			"FLEET_TMUX_BIN": tmuxBin, "FLEET_RUNTIME_OPENCODE": "1", "FLEET_OPENCODE_BIN": notRunnable}, "", statusFail},
+			"FLEET_TMUX_BIN": tmuxBin, "FLEET_RUNTIME_OPENCODE": "1", "FLEET_OPENCODE_BIN": notRunnable}, "", statusFail, true},
 		{"enabled, bare name found on this shell's PATH", map[string]string{
-			"FLEET_TMUX_BIN": tmuxBin, "FLEET_RUNTIME_OPENCODE": "1"}, dir, statusWarn},
+			"FLEET_TMUX_BIN": tmuxBin, "FLEET_RUNTIME_OPENCODE": "1"}, dir, statusWarn, true},
 		{"enabled, bare name found nowhere", map[string]string{
-			"FLEET_TMUX_BIN": tmuxBin, "FLEET_RUNTIME_OPENCODE": "1"}, t.TempDir(), statusFail},
+			"FLEET_TMUX_BIN": tmuxBin, "FLEET_RUNTIME_OPENCODE": "1"}, t.TempDir(), statusFail, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.needsExecBit {
+				execBitRowsSkipOnWindows(t)
+			}
 			if tc.path != "" {
 				t.Setenv("PATH", tc.path)
 			}

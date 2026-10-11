@@ -43,6 +43,7 @@ func fmRepoRoot(t *testing.T) string {
 // fmRequireTools skips unless a Go toolchain and a POSIX shell are on PATH.
 func fmRequireTools(t *testing.T) {
 	t.Helper()
+	skipOnWindows(t, "scripts/fetch-module.sh and deploy.sh are POSIX shell scripts for Unix hosts")
 	if _, err := exec.LookPath("go"); err != nil {
 		t.Skip("go is not on PATH")
 	}
@@ -619,6 +620,7 @@ func TestFetchModule_NoToolchainSilent(t *testing.T) {
 // Neither script is run for real here; this only keeps both parseable, which
 // is the one failure a deploy would otherwise meet on a live machine.
 func TestDeploy_ScriptParses(t *testing.T) {
+	skipOnWindows(t, "deploy.sh and fetch-module.sh are POSIX shell scripts for Unix hosts")
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh is not on PATH")
 	}
