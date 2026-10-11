@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -78,6 +79,16 @@ func TestWindowsServiceTaskRowReadsTheTask(t *testing.T) {
 	})
 	if !ok || row.Status != statusPass || asked != "muster-test" {
 		t.Errorf("row = %+v ok=%v asked=%q", row, ok, asked)
+	}
+
+	// The row is part of what doctor reports on Windows: through runChecks, not
+	// only through the function that builds it.
+	origRow := doctorServiceTask
+	doctorServiceTask = checkServiceTask
+	t.Cleanup(func() { doctorServiceTask = origRow })
+	rows := runChecks(context.Background(), testDoctorEnv(map[string]string{"FLEET_RUNTIME": "none", "FLEET_TOKEN": "t"}))
+	if r := rowByID(t, rows, "service.task"); r.Status != statusPass {
+		t.Errorf("doctor's service.task row = %+v, want pass", r)
 	}
 
 	querySchtasks = func(string) ([]byte, error) { return nil, errors.New("not found") }

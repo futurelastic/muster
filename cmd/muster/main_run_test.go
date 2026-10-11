@@ -15,5 +15,8 @@ func TestMain(m *testing.M) {
 		main()
 		os.Exit(0)
 	}
+	// The generic doctor tests run on whatever machine this is; whether it has a
+	// scheduled task of the service's name is not what they are about.
+	doctorServiceTask = func(func(string) string) (doctorRow, bool) { return doctorRow{}, false }
 	os.Exit(m.Run())
 }

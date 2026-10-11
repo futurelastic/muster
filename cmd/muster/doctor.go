@@ -23,6 +23,12 @@ import (
 	"github.com/futurelastic/muster/internal/sessionenv"
 )
 
+// doctorServiceTask answers the service.task row. A variable so the generic
+// doctor tests are not at the mercy of whether the machine they run on has a
+// scheduled task of that name; main_run_test.go replaces it for them, and the
+// Windows tests that are about the row put the real one back.
+var doctorServiceTask = checkServiceTask
+
 // `muster doctor` — is this installation complete? (muster #160)
 //
 // # Why this exists
@@ -312,7 +318,7 @@ func runChecks(ctx context.Context, env doctorEnv) []doctorRow {
 	// muster installs no service manager; where the supported one is a scheduled
 	// task, this row reads what that task says. No row elsewhere, so a Unix
 	// report is unchanged.
-	if row, ok := checkServiceTask(getenv); ok {
+	if row, ok := doctorServiceTask(getenv); ok {
 		c.add(row)
 	}
 
