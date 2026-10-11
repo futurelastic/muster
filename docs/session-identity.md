@@ -46,7 +46,7 @@ A list under `sessionEnv` in the same JSON file `principals`, `peers`,
 | `name` | The variable a session's process will see. Same shape rule every env name in this project follows: letters, digits, underscore, not starting with a digit. |
 | `fromFile` | An absolute path this machine reads **fresh on every create** — see "Restart enables it; rotation needs nothing" below. |
 | `required` | Fail closed (`true`) or silently omit (`false`) when the file cannot be read. Per entry, not machine-wide — see "Fail-closed, per entry". |
-| `appliesTo` | Optional. `agents` and/or `markers`, matched against `SessionSpec.Agent` / `SessionSpec.Marker`. Absent or both-empty matches every session on the machine. |
+| `appliesTo` | Optional. `runtimes`, `agents` and/or `markers`: `runtimes` is matched against the runtime the session is created on, `agents` / `markers` against `SessionSpec.Agent` / `SessionSpec.Marker`. Absent or all-empty matches every session on every runtime the machine registers — see "Scoping: `appliesTo`". |
 
 Nothing here is optional to *validate*: every entry is checked once, at daemon
 start, against the same rule set a Go test exercises directly
@@ -165,7 +165,8 @@ and `appliesTo` is the escape hatch when one genuinely needs to differ
 ## Scoping: `appliesTo`
 
 `appliesTo.agents` and `appliesTo.markers` match `SessionSpec.Agent` and
-`SessionSpec.Marker`. A scope naming neither is the common case — an operator
+`SessionSpec.Marker`; `appliesTo.runtimes` matches the runtime the session is
+created on. A scope naming none of them is the common case — an operator
 declaring an identity for the whole machine — and a session outside a scoped
 entry's reach never meets that entry at all: not provisioned, not required,
 not compared against.
@@ -174,6 +175,57 @@ This exists so the first session that must deliberately act as something
 other than the configured identity costs a configuration edit, not a code
 change and a deploy on the exact path where a bug means every new session on
 the machine refuses.
+
+### How the three selectors combine
+
+`runtimes` is a gate in front of `agents`/`markers`, not a third alternative
+beside them:
+
+```
+runtimes  AND  ( agents  OR  markers )
+```
+
+An empty list on any axis means "any" for that axis. So:
+
+| `appliesTo` | Reaches |
+|---|---|
+| *(absent)* | every session on every runtime |
+| `{"runtimes": ["opencode"]}` | every session on that runtime, whatever its agent or marker |
+| `{"agents": ["sid"]}` | sessions of that agent, on every runtime — unchanged from before `runtimes` existed |
+| `{"runtimes": ["opencode"], "agents": ["sid"]}` | that agent's sessions on that runtime only |
+| `{"runtimes": ["opencode"], "agents": ["sid"], "markers": ["filing"]}` | on that runtime, sessions of that agent **or** carrying that marker |
+
+`agents` and `markers` alternate with each other exactly as they always did;
+adding `runtimes` narrows what they reach and never widens it.
+
+The runtime matched is **the one serving the create** — the driver's own id —
+not the `runtime` a caller put in the request, which is empty whenever the
+caller took the default and which a caller must not be able to use to pull a
+credential into a runtime it was not scoped to.
+
+### Hazard: an unscoped entry reaches every runtime, including ones registered later
+
+A `sessionEnv` entry with no `appliesTo.runtimes` is delivered to the sessions
+of **every** runtime this machine registers. That includes a runtime enabled
+long after the entry was written: switching on a second runtime does not ask
+the operator again about the credentials the machine already declares, and a
+third-party agent process in that runtime then starts with them in its
+environment. A required entry cannot be removed by a caller's `env` either —
+that is what required means.
+
+So a credential that belongs to one runtime's sessions should say so:
+
+```json
+{"name": "SOME_API_TOKEN", "fromFile": "/absolute/path", "required": true,
+ "appliesTo": {"runtimes": ["claude-code-tmux"]}}
+```
+
+Runtime ids are the `runtime` values `GET /v1/runtimes` reports. Each id is
+checked once, at daemon start (and by `muster doctor`), against the runtimes
+this build can register — a misspelled id is a startup message, not an entry
+that silently never applies. The check is against what the build *knows*, not
+what is running, so one configuration file can be shared by machines that do
+not all enable the optional runtime.
 
 ## Two different refusals, and why they answer differently on the wire
 
@@ -289,7 +341,8 @@ Checklist for enabling an entry on a machine:
 2. Create a session that falls inside the entry's `appliesTo` scope (or the
    whole machine, if unscoped). From inside it, run the tool the credential
    authenticates and read back the identity it reports.
-3. Create a session **outside** the scope (a different `agent`/`marker`) and
+3. Create a session **outside** the scope (a different `agent`/`marker`, or a
+   session on a different runtime when the entry names `runtimes`) and
    confirm the variable is genuinely absent — the negative case, and the one
    `appliesTo` exists to make possible.
 4. For a `required` entry, point `fromFile` at a path that does not exist and

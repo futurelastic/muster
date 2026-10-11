@@ -511,7 +511,7 @@ func validateConfigExtras(cfg *fileConfig, getenv func(string) string) error {
 	}
 	if len(cfg.SessionEnv) > 0 {
 		entries := cfg.sessionEnv()
-		if err := sessionenv.Validate(entries); err != nil {
+		if err := sessionenv.Validate(entries, knownRuntimeIDs()); err != nil {
 			msg := err.Error()
 			for _, e := range entries {
 				msg = redact(msg, e.FromFile, "<fromFile>")

@@ -492,6 +492,15 @@ what would otherwise answer, silently. A create with no allowed provider usable 
 or a `model` on a provider outside the set, is `unsupported` with the reason; a turn that still
 ran on one reads `state.lastTurn.outcome: "failed"` naming it.
 
+**Which runtime a machine-declared variable reaches** (#294) is the operator's decision, in the
+configuration file's `sessionEnv`, not a field of the create. An entry's `appliesTo.runtimes` lists
+runtime ids (the `runtime` values of `GET /v1/runtimes`); the entry is provisioned only for sessions
+created on one of them. It combines with the other selectors as `runtimes` AND (`agents` OR
+`markers`), and an empty selector means "any". **An entry with no `appliesTo.runtimes` reaches
+every runtime the machine registers, including one registered later** — scope a credential that
+belongs to one runtime. An id the service does not know is a startup error. Reference:
+[`session-identity.md`](session-identity.md).
+
 **`conversationId`** (#224) is a caller-chosen UUID that asks the runtime to
 start a NEW conversation under it, instead of the driver deriving one after
 the fact — so the `201` already carries `conversation` (`known: true`,

@@ -385,7 +385,7 @@ func main() {
 	var sessionEnvEntries []sessionenv.Entry
 	if cfgFile != nil && len(cfgFile.SessionEnv) > 0 {
 		sessionEnvEntries = cfgFile.sessionEnv()
-		if err := sessionenv.Validate(sessionEnvEntries); err != nil {
+		if err := sessionenv.Validate(sessionEnvEntries, knownRuntimeIDs()); err != nil {
 			log.Fatalf("muster: %v", err)
 		}
 	}

@@ -43,21 +43,52 @@ import (
 
 // Scope narrows which sessions one Entry applies to.
 //
-// The zero value matches every session on this machine — Agents and Markers
+// The zero value matches every session on this machine, on every runtime this
+// machine registers — including a runtime registered later. Agents and Markers
 // are the escape hatch for the session that must deliberately act as something
 // other than the configured identity, so that exception costs an operator a
-// configuration edit rather than a code change and a deploy.
+// configuration edit rather than a code change and a deploy. Runtimes is the
+// other kind of narrowing: it says which runtime's sessions may carry the
+// variable at all, which an operator needs for a credential that belongs to one
+// runtime and must not reach another.
+//
+// The axes combine as Runtimes AND (Agents OR Markers). An empty axis means
+// "any". The agents-or-markers pair kept the meaning it had before Runtimes
+// existed; Runtimes is a gate in front of it, never a third alternative.
 type Scope struct {
+	// Runtimes matches the runtime the session is created on — the id of the
+	// driver serving the create, not a hint the caller sent (a caller that
+	// supplied none still gets a session on the default runtime).
+	Runtimes []string
 	// Agents matches SessionSpec.Agent.
 	Agents []string
 	// Markers matches SessionSpec.Marker.
 	Markers []string
 }
 
-// Matches reports whether spec falls inside the scope. A scope naming neither
-// axis matches everything — the common case, an operator declaring an identity
-// for the whole machine rather than carving out an agent.
-func (s Scope) Matches(spec fleet.SessionSpec) bool {
+// Matches reports whether a session created by the driver for runtime, with
+// spec, falls inside the scope. A scope naming no axis matches everything — the
+// common case, an operator declaring an identity for the whole machine rather
+// than carving out a runtime or an agent.
+//
+// runtime is passed by the driver rather than read from spec.Runtime: that
+// field is the caller's own hint and is empty precisely when the caller took
+// the default, which is the case a credential must be correctly withheld or
+// delivered for. A scope naming Runtimes never matches an empty runtime —
+// withheld rather than delivered when the runtime is not known.
+func (s Scope) Matches(runtime fleet.RuntimeId, spec fleet.SessionSpec) bool {
+	if len(s.Runtimes) > 0 {
+		found := false
+		for _, r := range s.Runtimes {
+			if runtime != "" && string(runtime) == r {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
 	if len(s.Agents) == 0 && len(s.Markers) == 0 {
 		return true
 	}
@@ -96,7 +127,16 @@ type Entry struct {
 // Validate checks every entry's shape once, at startup, so a misconfiguration
 // is a message an operator reads at daemon start rather than a create-time
 // refusal every later caller meets.
-func Validate(entries []Entry) error {
+//
+// knownRuntimes is the set of runtime ids this build can register. It is a
+// parameter, not something Validate looks up, because the drivers do not exist
+// yet when the configuration is first checked — and it is the ids the build
+// KNOWS, not the ones that happen to be running, so one configuration file
+// shared across machines does not become a startup failure on a machine that
+// has an optional runtime switched off. An entry naming an id outside the set
+// is a typo. A nil set skips that check, for a caller that only wants the
+// shape.
+func Validate(entries []Entry, knownRuntimes []fleet.RuntimeId) error {
 	seen := make(map[string]bool, len(entries))
 	for _, e := range entries {
 		if !ValidName(e.Name) {
@@ -117,8 +157,36 @@ func Validate(entries []Entry) error {
 			return fmt.Errorf("sessionEnv: %q is declared more than once", e.Name)
 		}
 		seen[e.Name] = true
+		for _, r := range e.AppliesTo.Runtimes {
+			// An empty id would never match anything, so the entry would be
+			// silently inert — the same fault a typo is, caught the same way.
+			if r == "" {
+				return fmt.Errorf("sessionEnv: %q's appliesTo.runtimes has an empty runtime id", e.Name)
+			}
+			if knownRuntimes != nil && !containsRuntime(knownRuntimes, r) {
+				return fmt.Errorf("sessionEnv: %q's appliesTo.runtimes names %q, which is not a "+
+					"runtime this service has (want one of: %s)", e.Name, r, joinRuntimes(knownRuntimes))
+			}
+		}
 	}
 	return nil
+}
+
+func containsRuntime(known []fleet.RuntimeId, id string) bool {
+	for _, k := range known {
+		if string(k) == id {
+			return true
+		}
+	}
+	return false
+}
+
+func joinRuntimes(known []fleet.RuntimeId) string {
+	names := make([]string, len(known))
+	for i, k := range known {
+		names[i] = string(k)
+	}
+	return strings.Join(names, ", ")
 }
 
 // ValidName reports whether name is usable as an environment variable name:
@@ -153,6 +221,10 @@ func ValidName(name string) bool {
 // A session outside an entry's AppliesTo scope never meets that entry at all:
 // not provisioned, not required, not compared against.
 //
+// runtime is the id of the driver doing the provisioning — the runtime this
+// session is being created on. It is what AppliesTo.Runtimes is matched
+// against; see Scope.Matches for why it is not read from spec.
+//
 // skip, when non-nil, is asked about each in-scope entry name and drops the
 // entry entirely (neither read nor required) when it returns true — a driver
 // whose delivery module owns a variable's namespace says so here.
@@ -178,14 +250,14 @@ func ValidName(name string) bool {
 //     unreadable, or empty. No correction to the request fixes it, so it is a
 //     typed *fleet.Error with Kind ErrorUnsupported (501), and the message
 //     addresses the operator, not the caller.
-func Provision(entries []Entry, spec fleet.SessionSpec, machine fleet.MachineId, skip func(name string) bool) (map[string]string, error) {
+func Provision(entries []Entry, spec fleet.SessionSpec, machine fleet.MachineId, runtime fleet.RuntimeId, skip func(name string) bool) (map[string]string, error) {
 	if len(entries) == 0 {
 		return spec.Env, nil
 	}
 
 	var merged map[string]string
 	for _, entry := range entries {
-		if !entry.AppliesTo.Matches(spec) {
+		if !entry.AppliesTo.Matches(runtime, spec) {
 			continue
 		}
 		if skip != nil && skip(entry.Name) {
