@@ -69,17 +69,27 @@ var bypassPermissions = map[string]string{
 // with, beyond the ones every session gets.
 func bypassArgs() []string { return []string{pureFlag} }
 
-// writeBypassConfig writes the session's own opencode.json under dir. Called for a
-// fresh session and again for a relaunch, so the file always matches the record.
-func writeBypassConfig(dir string) error {
+// writeSessionConfig writes the session's own opencode.json under dir. Called
+// for a fresh session and again for a relaunch, so the file always matches the
+// record and the operator's current settings.
+//
+// Every session this driver starts gets one: it carries the provider policy
+// (provider.go, muster #293) and, for a bypass session only, the tool posture
+// (muster #283). The two never share a decision — a session with no bypass has
+// no `permission` entry at all.
+func writeSessionConfig(dir string, bypass bool, providers providerPolicy) error {
 	path := filepath.Join(dir, permissionConfigRel)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("opencode: creating the session's config directory: %w", err)
 	}
-	raw, err := json.MarshalIndent(map[string]any{
-		"$schema":    "https://opencode.ai/config.json",
-		"permission": bypassPermissions,
-	}, "", "  ")
+	cfg := map[string]any{"$schema": "https://opencode.ai/config.json"}
+	for k, v := range providers.configKeys() {
+		cfg[k] = v
+	}
+	if bypass {
+		cfg["permission"] = bypassPermissions
+	}
+	raw, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return fmt.Errorf("opencode: encoding the session's config: %w", err)
 	}

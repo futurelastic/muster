@@ -703,6 +703,21 @@ restart. A session that nevertheless stops on an ask the configuration did not c
 `working`; a list of asks that could not be read leaves the status as it was and says so in
 `evidence`, because an unasked question is not the answer "none".
 
+**A driver whose runtime ships a hosted provider of its own may not let a session fall back to
+it** (muster #293). Measured: a session on a machine with no provider credential ran its first
+turn on the runtime's built-in hosted provider and reported an ordinary idle — prompts, file
+contents and tool output went to a third party nobody chose. The local opencode driver therefore
+fails closed, by operator configuration and never by a request field: that provider is disabled
+in each session's own runtime configuration by default (at create and again at relaunch), and
+`FLEET_OPENCODE_PROVIDERS` names the only providers a session may use instead (naming the
+built-in one is how an operator asks for it). A create the policy leaves with no usable provider —
+the runtime lists none that is allowed, or lists nothing at all — is refused `unsupported` with the
+reason, before any session exists; so is one whose `model` is on a provider outside the set. A
+runtime that does not answer the catalog read at all is still "could not tell", and the create
+proceeds. A turn that nevertheless ran on a provider outside the set reads as `idle` with
+`lastTurn: {"outcome":"failed","reason":"…"}` naming the provider and model, never as an
+unremarkable idle.
+
 **`mcpConfig` names tool-server configuration files, by PATH.** Each entry is
 absolute, and the flag is emitted once per entry rather than joined — a joined
 list reaches the runtime as a single filename containing a separator, which
@@ -1518,6 +1533,11 @@ finished. It exists because a turn
 that died and a turn that finished leave the same screen: an error, a settled
 status line, an empty composer. Both are honestly `idle`, and a supervisor that
 cannot tell them apart silently abandons the work.
+
+A turn that finished normally but ran on a provider the machine's operator
+did not allow (muster #293) is reported here too, as `failed`, with the provider
+in `reason` — it is the only way an idle session says it went somewhere it
+should not have.
 
 Absent means the screen said nothing about it — **not** that the turn
 succeeded (§5.7). `retryable` is the runtime's own word for the failure, not

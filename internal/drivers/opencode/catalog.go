@@ -103,21 +103,44 @@ func editDistance(a, b string) int {
 	return prev[len(b)]
 }
 
+// catalogRead is what asking the runtime for its catalog came to.
+type catalogRead int
+
+const (
+	// catalogUnknown: the runtime gave no usable answer — the endpoint is absent
+	// (an older runtime), it answered an error, or its body is not the shape
+	// this driver reads. That is "this driver could not tell", never "none".
+	catalogUnknown catalogRead = iota
+	// catalogListed: at least one model was listed.
+	catalogListed
+	// catalogEmpty: the runtime answered, in the shape this driver reads, and
+	// listed no provider with a model. No provider is usable on this server.
+	catalogEmpty
+)
+
 // readCatalog asks the session's own server which models it would accept.
 //
-// ok is false — and err nil — when the runtime gave no usable answer: the
-// endpoint is absent (an older runtime), it answered an error, or it listed no
-// model at all. That is "this driver could not tell", not "the model is
-// wrong", so the create proceeds exactly as it did before the check existed
-// (§5.7: absence of evidence is not evidence of absence). A server that does
-// not answer at all is an error, because the create would fail on it anyway.
-func (d *Driver) readCatalog(ctx context.Context, srv *server) (cat modelCatalog, ok bool, err error) {
+// The answer keeps "could not tell" (catalogUnknown) apart from "listed
+// nothing" (catalogEmpty), which the first version of this check folded
+// together. Unknown proceeds exactly as it did before the check existed (§5.7:
+// absence of evidence is not evidence of absence). Empty is a positive answer —
+// the runtime says no provider here has a usable model — and muster #293 refuses
+// a create on it: a session started there can only fall back to something the
+// operator did not choose. "Listed nothing" requires the answer to carry the
+// providers list, so a body of some other shape is still unknown.
+//
+// A server that does not answer at all is an error, because the create would
+// fail on it anyway.
+func (d *Driver) readCatalog(ctx context.Context, srv *server) (cat modelCatalog, read catalogRead, err error) {
 	var wire wireProviders
 	if err := d.do(ctx, srv, "GET", "/config/providers", nil, &wire); err != nil {
 		if isUnreachable(err) {
-			return nil, false, err
+			return nil, catalogUnknown, err
 		}
-		return nil, false, nil
+		return nil, catalogUnknown, nil
+	}
+	if wire.Providers == nil {
+		return nil, catalogUnknown, nil
 	}
 	for _, p := range wire.Providers {
 		for id := range p.Models {
@@ -125,26 +148,92 @@ func (d *Driver) readCatalog(ctx context.Context, srv *server) (cat modelCatalog
 		}
 	}
 	sort.Strings(cat)
-	return cat, len(cat) > 0, nil
+	if len(cat) == 0 {
+		return nil, catalogEmpty, nil
+	}
+	return cat, catalogListed, nil
 }
 
-// checkModel refuses a create whose model the runtime's catalog does not list.
-// The catalog is read from the runtime on every create, never compiled in:
-// catalogs change with runtime releases and with the credentials a session was
-// given.
-func (d *Driver) checkModel(ctx context.Context, srv *server, model string) error {
-	cat, ok, err := d.readCatalog(ctx, srv)
+// within returns the entries whose provider the policy permits.
+func (c modelCatalog) within(p providerPolicy) modelCatalog {
+	var out modelCatalog
+	for _, id := range c {
+		if p.permits(providerOfModel(id)) {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// checkProviders refuses a create the provider policy leaves nothing to run on,
+// and one whose model the runtime does not list. Called with the session's own
+// server up and before any session exists on it. The catalog is read from the
+// runtime on every create, never compiled in: catalogs change with runtime
+// releases and with the credentials a session was given.
+//
+// model may be empty: the session then runs on whatever the runtime picks from
+// what is usable, which is exactly why "nothing usable" has to be a refusal.
+func (d *Driver) checkProviders(ctx context.Context, srv *server, model string) error {
+	cat, read, err := d.readCatalog(ctx, srv)
 	if err != nil {
 		return err
 	}
-	if !ok || cat.has(model) {
+	switch read {
+	case catalogUnknown:
+		return nil
+	case catalogEmpty:
+		return d.noUsableProvider(nil)
+	}
+	usable := cat.within(d.providers)
+	if len(usable) == 0 {
+		return d.noUsableProvider(cat)
+	}
+	if model == "" || usable.has(model) {
 		return nil
 	}
 	msg := fmt.Sprintf("create: model %q is not in the runtime's own catalog", model)
-	if near := cat.closest(model, 3); len(near) > 0 {
+	if near := usable.closest(model, 3); len(near) > 0 {
 		msg += "; closest: " + strings.Join(quoteAll(near), ", ")
 	}
 	return &fleet.Error{Kind: fleet.ErrorInvalid, Message: msg, Machine: d.machine}
+}
+
+// noUsableProvider is the refusal for a runtime that offers nothing the policy
+// allows. listed is what the runtime did list (empty when it listed nothing), so
+// the reason can say which providers were skipped.
+func (d *Driver) noUsableProvider(listed modelCatalog) error {
+	msg := "create: no model provider is usable: the runtime lists none that this machine allows (allowed: " +
+		d.providers.describe() + ")"
+	if len(listed) > 0 {
+		seen := map[string]bool{}
+		var skipped []string
+		for _, id := range listed {
+			if p := providerOfModel(id); !seen[p] {
+				seen[p] = true
+				skipped = append(skipped, p)
+			}
+		}
+		msg += "; it lists only " + strings.Join(quoteAll(skipped), ", ")
+	} else {
+		msg += "; it lists no provider at all, so the session has no credential for any"
+	}
+	msg += ". Give the session a credential for an allowed provider, or change the operator's provider setting; " +
+		"a session is never started on a provider nobody chose"
+	return &fleet.Error{Kind: fleet.ErrorUnsupported, Message: msg, Machine: d.machine}
+}
+
+// checkModelProvider refuses, before anything is started, a model whose
+// provider the policy does not allow.
+func (d *Driver) checkModelProvider(model string) error {
+	if p := providerOfModel(model); !d.providers.permits(p) {
+		return &fleet.Error{
+			Kind: fleet.ErrorUnsupported,
+			Message: fmt.Sprintf("create: model %q is on provider %q, which this machine does not allow (allowed: %s)",
+				model, p, d.providers.describe()),
+			Machine: d.machine,
+		}
+	}
+	return nil
 }
 
 func quoteAll(in []string) []string {

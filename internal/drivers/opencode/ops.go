@@ -141,6 +141,10 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 			}
 		}
 		body["model"] = map[string]string{"providerID": providerID, "id": modelID}
+		// muster #293: before a process exists, so a refusal costs nothing.
+		if err := d.checkModelProvider(spec.Model); err != nil {
+			return fleet.Session{}, err
+		}
 	}
 
 	ctx, cancel := d.bounded(ctx)
@@ -157,14 +161,14 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 		}
 		srv = started
 	}
-	if spec.Model != "" {
-		// muster #287: a wrong id would otherwise be accepted here and fail at
-		// the first turn, opaquely. Refused before any session exists, and the
-		// process started for it is torn down again.
-		if err := d.checkModel(ctx, srv, spec.Model); err != nil {
-			d.discardServer(srv)
-			return fleet.Session{}, err
-		}
+	// muster #287: a wrong id would otherwise be accepted here and fail at the
+	// first turn, opaquely. muster #293: a runtime with nothing the operator
+	// allows would otherwise answer on whatever it has, so that is a refusal too —
+	// read for every create, with or without a model. Refused before any session
+	// exists, and the process started for it is torn down again.
+	if err := d.checkProviders(ctx, srv, spec.Model); err != nil {
+		d.discardServer(srv)
+		return fleet.Session{}, err
 	}
 
 	var sess wireSession
@@ -289,13 +293,17 @@ func (d *Driver) startServerIn(ctx context.Context, spec fleet.SessionSpec, exis
 		}
 	}
 	var args []string
-	if spec.PermissionMode == fleet.PermissionModeBypass {
-		// muster #283: the posture lives in this session's own directory and
-		// its own command line, never in a file another session would read.
-		if err := writeBypassConfig(dir); err != nil {
-			cleanup()
-			return nil, &fleet.Error{Kind: fleet.ErrorInvalid, Message: "create: " + err.Error(), Machine: d.machine}
-		}
+	bypass := spec.PermissionMode == fleet.PermissionModeBypass
+	// muster #283, #293: the tool posture and the provider policy live in this
+	// session's own directory, never in a file another session would read. The
+	// provider policy goes to EVERY session — a session with no credential must
+	// not fall back to the runtime's hosted provider — and is written again on a
+	// relaunch, so a changed operator setting applies from the next start.
+	if err := writeSessionConfig(dir, bypass, d.providers); err != nil {
+		cleanup()
+		return nil, &fleet.Error{Kind: fleet.ErrorInvalid, Message: "create: " + err.Error(), Machine: d.machine}
+	}
+	if bypass {
 		args = bypassArgs()
 	}
 	srv, err := startServer(ctx, d.bin, string(spec.Cwd), d.username, d.buildEnv(dir, extra), profile, args...)

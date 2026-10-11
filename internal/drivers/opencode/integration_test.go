@@ -2,6 +2,7 @@ package opencode
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -245,4 +246,40 @@ func TestIntegration_RefusedTurnReportsFailedLastTurn(t *testing.T) {
 	}
 	t.Fatal("did not observe a failed LastTurn within the deadline — either the refusal never " +
 		"happened (provider behaviour changed) or #77's fix regressed")
+}
+
+// muster #293, the measured case: a real runtime, no provider credential (the
+// session's environment is built, so none leaks in). By default the runtime's
+// hosted provider is off and the create is refused with the reason; naming that
+// provider is how it is asked for.
+func TestIntegration_NoCredentialIsRefusedByDefaultAndAllowedOnPurpose(t *testing.T) {
+	requireOpencodeIntegration(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	req := fleet.RequestFrom(fleet.Caller{Principal: "test"})
+
+	d, err := New(ctx, "test-machine", WithSessionRoot(t.TempDir()))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer d.Shutdown()
+	_, err = d.Create(ctx, req, "k-default", fleet.SessionSpec{Cwd: fleet.AbsolutePath(t.TempDir())})
+	var fe *fleet.Error
+	if !errors.As(err, &fe) || fe.Kind != fleet.ErrorUnsupported || !strings.Contains(fe.Message, "no model provider is usable") {
+		t.Fatalf("Create with no credential = %v, want the unsupported refusal naming that no provider is usable", err)
+	}
+
+	allowed, err := New(ctx, "test-machine", WithSessionRoot(t.TempDir()), WithProviders([]string{"opencode"}))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer allowed.Shutdown()
+	sess, err := allowed.Create(ctx, req, "k-allowed", fleet.SessionSpec{Cwd: fleet.AbsolutePath(t.TempDir())})
+	if err != nil {
+		t.Fatalf("Create with the built-in provider allowed on purpose: %v", err)
+	}
+	if _, err := allowed.Close(ctx, req, sess.SessionRef); err != nil {
+		t.Errorf("Close: %v", err)
+	}
 }

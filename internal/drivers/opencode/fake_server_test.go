@@ -450,7 +450,7 @@ func (f *fakeServer) handleProviders(w http.ResponseWriter, r *http.Request) {
 	out := struct {
 		Providers []provider        `json:"providers"`
 		Default   map[string]string `json:"default"`
-	}{Default: map[string]string{}}
+	}{Providers: []provider{}, Default: map[string]string{}}
 	for id, models := range catalog {
 		p := provider{ID: id, Models: map[string]struct{}{}}
 		for _, m := range models {
