@@ -22,8 +22,10 @@ import (
 // commits with no scan in front of it and says nothing: measured, a commit
 // quoting a key-shaped value went through in silence in such a clone, where
 // the scanner run by hand would have refused it. #199 ruled that a branch push
-// is not scanned by CI *because* the hook is the guard that works first — so
-// the hook being absent is not a small thing to leave unreported.
+// is not scanned by CI *because* the hook is the guard that works first (#299
+// has since put branch pushes through CI, but the hook is still the only guard
+// that runs before a value is published) — so the hook being absent is not a
+// small thing to leave unreported.
 //
 // Every other row here answers for the installation. This one answers for the
 // clone doctor is run from, which is a different object: an installed
