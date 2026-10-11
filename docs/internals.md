@@ -155,15 +155,28 @@ answers when asked. It cannot warn at the moment of a commit, because the only
 thing git runs at that moment is the hook that is missing. Why a row and not an
 installer run on the operator's behalf: [ADR 201](adr/201-precommit-guard-visibility.md).
 
-**A branch push is not scanned by CI** (#199, ruled). A scan after the push finds
-nothing sooner than the hook and trunk's own run do, and it cannot un-publish
-anything. Adding one also costs something either way. The ship step reads a
-branch's CI as a class at its head sha, and with no run at all the class is
-`none`, which is what is true here. A scan-only run would read `green` with no
-test behind it; running the whole workflow would make every ship wait on the
-`-race` suite, where a flake can block it. The scan step already copes with a
-branch push (`origin/<trunk>..HEAD`), so reopening this is a trigger edit plus a
-choice about the `go` job's `if`.
+**A branch push runs the whole CI workflow** (#299, superseding #199 ruling 1).
+#199 first ruled that a push to any branch other than trunk is not a trigger:
+a scan after the push finds nothing sooner than the hook and trunk's own run do,
+and it cannot un-publish anything, and running the whole workflow would make
+every ship wait on the `-race` suite, where a flake can block it. The owner then
+ruled (2026-10-11) that tests run on runners and never on a developer machine,
+which needs a run on the branch itself, so the trigger now covers the
+session-branch globs (`feat/**`, `fix/**`, `docs/**`, `chore/**`, `refactor/**`,
+`test/**`, `perf/**`, `design/**`) as well as trunk and pull requests. Each
+concern from #199 is answered:
+
+- **Exposure.** A branch push has already published the branch, so the trigger
+  adds none. The scan step scopes a branch push as `origin/<trunk>..HEAD`.
+- **A misleading class.** The scan-only run that read `green` with no test behind
+  it cannot occur: the whole workflow runs, so the `go` job (`scripts/gate.sh`,
+  `-race`) runs on the same head and `green` means the suite passed.
+- **Flakes.** A flake now blocks that branch's ship. That is the accepted cost of
+  `gate.authoritative: ci`; the quick local check is `scripts/smoke.sh`.
+
+A branch with an open pull request fires both the `push` and the `pull_request`
+trigger, so it gets two runs. That is a cost in minutes, not a correctness
+problem.
 
 ### Test fixtures that look like credentials
 
@@ -227,7 +240,7 @@ evidence, not on taste.
 | A session's permission mode is published in `state`, read off the runtime's own indicator row; absent means nothing read, `unknown` means read and unnamed, never a guess | [ADR 194](adr/194-permission-mode-in-state.md) |
 | The pre-commit guard being off is reported by a `doctor` row, from the clone; nothing installs it on the operator's behalf | [ADR 201](adr/201-precommit-guard-visibility.md) |
 | An optional external delivery module is a child process speaking JSON lines; off by default; a lane is chosen at create; a send is never delivered twice | [ADR 185](adr/185-optional-external-delivery-modules.md) |
-| CI does not scan a branch push; a key-shaped fixture is fixed by changing its value, and an ignore entry only repairs history already published | [Secret scanning](#secret-scanning-and-fixtures-that-look-like-secrets) (#199) |
+| CI runs the whole workflow on a session-branch push (supersedes #199 ruling 1, #299); a key-shaped fixture is fixed by changing its value, and an ignore entry only repairs history already published | [Secret scanning](#secret-scanning-and-fixtures-that-look-like-secrets) (#199, #299) |
 
 **Go, zero dependencies.** Chosen at zero lines of code, on the reasoning that
 language cost is lowest at the start and compounds afterwards. A static binary

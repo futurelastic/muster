@@ -18,10 +18,16 @@ trunk: main
 # trunk: detected (the repo's default branch, 2026-08-17)
 stack: Go — standard library only, no third-party dependencies
 # stack: supplied by --stack (2026-08-17)
-gate: scripts/gate.sh
-# gate: the repo's declared quality gate — gofmt -l, go build, go vet, go test
-# -race. ci.yml's `go` job calls this exact file, so a session's local run and
-# CI answer the same question by construction and cannot drift apart (#233).
+gate:
+  smoke: scripts/smoke.sh
+  authoritative: ci
+# gate (#299): tests run on runners, not on a developer machine. `smoke` is the
+# quick local check — gofmt, build, vet and `go test` on only the packages the
+# change touched. It is NOT the full suite. `authoritative: ci` makes the
+# verdict the branch's own CI run: ci.yml fires on a push to a session branch
+# and its `go` job runs scripts/gate.sh (gofmt -l, go build, go vet,
+# go test -race ./...) on a hosted runner. gate.sh stays the one full-gate file
+# CI calls, so a hand-run and CI answer the same question (#233).
 
 release:
   # (2026-10-02, #250) public-tool: every green trunk head gets a candidate (rc -> npm `next`),

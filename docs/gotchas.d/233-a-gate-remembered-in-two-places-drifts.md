@@ -39,3 +39,7 @@ The second gap (no CI on a branch push) was deliberately left open here — see
 against secret-scan-on-every-push cost and -race flakiness blocking every
 ship. It only reopens if it recurs after the gate-script fix; re-measure
 before reviving `push: branches: ['**']`.
+
+Reopened by #299: the owner ruled that tests run on runners, so ci.yml now fires
+on a session-branch push and the `go` job (`scripts/gate.sh`) runs there. See
+`docs/internals.md`, "Secret scanning, and fixtures that look like secrets".
