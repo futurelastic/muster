@@ -150,6 +150,7 @@ func TestDoctorHumanRelayWarningNamesTheOrderAndTheEscape(t *testing.T) {
 // A warning is never a failure (ADR 160), and --skip silences it where it is
 // deliberate — a fleet whose callers are all agents.
 func TestDoctorHumanRelayWarnsWithoutFailingAndSkips(t *testing.T) {
+	skipOnWindows(t, "asserts the whole run's exit code, and the runtime row in it judges a POSIX execute bit (#312)")
 	dir, bin, index := humanRelayFixture(t)
 	state := filepath.Join(dir, "state")
 	if err := os.Mkdir(state, 0o700); err != nil {
@@ -192,6 +193,7 @@ func TestDoctorHumanRelayWarnsWithoutFailingAndSkips(t *testing.T) {
 // at the table AND at the other way out, and hiding the row does not un-refuse
 // the service — the row says so.
 func TestDoctorHumanRelayFailsWithoutATableAndPointsAtTheFix(t *testing.T) {
+	skipOnWindows(t, "asserts the whole run's exit code, and the runtime row in it judges a POSIX execute bit (#312)")
 	dir, bin, index := humanRelayFixture(t)
 	vars := map[string]string{
 		"FLEET_MACHINE": "m1", "FLEET_TOKEN": "t", "FLEET_INBOX_INDEX": index, "FLEET_TMUX_BIN": bin,

@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/futurelastic/muster/internal/privfs"
 )
 
 const grantsFixture = `{
@@ -100,8 +103,16 @@ func TestGrantWritesADatedBackupOfTheOriginal(t *testing.T) {
 	if string(got) != grantsFixture {
 		t.Errorf("backup is not the original bytes:\n%s", got)
 	}
-	if st, _ := os.Stat(b); st.Mode().Perm() != 0o600 {
-		t.Errorf("backup mode = %v, want 0600 (it holds every token)", st.Mode().Perm())
+	// It holds every token, so it must be owner-only. Asked through privfs, which
+	// reads the mode on Unix and the access list on Windows; the exact mode is
+	// additionally pinned where a mode exists.
+	if rep := privfs.Check(b); rep.Verdict != privfs.OwnerOnly {
+		t.Errorf("backup is %s (%s), want owner-only (it holds every token)", rep.Verdict, rep.Detail)
+	}
+	if runtime.GOOS != "windows" {
+		if st, _ := os.Stat(b); st.Mode().Perm() != 0o600 {
+			t.Errorf("backup mode = %v, want 0600", st.Mode().Perm())
+		}
 	}
 }
 

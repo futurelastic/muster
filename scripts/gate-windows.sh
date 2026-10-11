@@ -12,8 +12,6 @@
 #   1. An allowlist, not `./...`. The module has a terminal driver and a large
 #      test corpus that is Unix-only by design (ADR 303). Packages join the
 #      list as their tests are made Windows-clean; widening it is a follow-up.
-#      cmd/muster is on it by NAME, not whole: its test corpus is Unix-shaped,
-#      so only the tests listed in CMD_RUN run there (#307).
 #   2. A printed SKIP summary. A skipped test is green to `go test`, which is
 #      how "the process-tree tests pass" can be true of a run that skipped them.
 #   3. A must-pass list. Each name below must appear as `--- PASS:` in the log;
@@ -31,13 +29,8 @@ ALLOW=(
 	./internal/drivers/opencode
 	./internal/privfs
 	./internal/state
+	./cmd/muster
 )
-
-# The cmd/muster tests that are Windows-clean: the platform-specific ones
-# (TestWindows*) and the platform-neutral ones this port added. Exact names:
-# a prefix would also pick up the older tests of the same stem, which assume
-# a terminal runtime.
-CMD_RUN='^(TestWindows|TestServeWithNoLocalDriver$|TestParseTaskXML|TestJudgeTask$|TestIsConnRefusedMatchesARealRefusal$|TestOpenLogFileCreatesOwnerOnlyAndAppends$|TestTeeLogKeepsTheFileWhenTheOtherWriterFails$|TestDefaultRuntimeIsNoneOnWindowsAndTmuxElsewhere$|TestCheckRuntimeName$|TestCompatRefusesOnWindowsOnly$|TestDoctorRuntimeRowFollowsTheRuntimeChoice$)'
 
 MUST_PASS=(
 	TestKillReachesAGrandchildSpawnedBeforeAttachReturned
@@ -56,6 +49,14 @@ MUST_PASS=(
 	TestIsolation_RuntimePathReachesTheSession
 	TestSandboxRefusedOnAHostWithoutTheMechanism
 	TestCreatedFileHasOwnerOnlyProtectedDACL
+	TestSaveThenLoadRoundTrips
+	TestStoreDirectoryAndDocumentAreOwnerOnly
+	TestCorruptDocumentIsReportedAndNeverReplaced
+	TestDoctorStateDir
+	TestGrantWritesADatedBackupOfTheOriginal
+	TestEnrolAddWritesAnOwnerOnlyTokenFileAndTheMatchingPrincipal
+	TestEnrolRefusalsWriteNothing
+	TestRunPrincipalAddAndListThroughTheCommandLine
 	TestWindowsRefusesTmuxRuntime
 	TestWindowsDefaultRuntimeIsNone
 	TestWindowsCompatRefuses
@@ -85,10 +86,6 @@ echo "== go test ${RACE} (allowlist: ${ALLOW[*]}) =="
 status=0
 # shellcheck disable=SC2086
 go test $RACE -count=1 -timeout 20m -v "${ALLOW[@]}" 2>&1 | tee "$log" || status=$?
-
-echo "== go test ${RACE} ./cmd/muster -run ${CMD_RUN} =="
-# shellcheck disable=SC2086
-go test $RACE -count=1 -timeout 10m -v -run "$CMD_RUN" ./cmd/muster 2>&1 | tee -a "$log" || status=$?
 
 echo
 echo "== SKIP summary =="
