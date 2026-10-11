@@ -255,6 +255,10 @@ func TestResume_ACrashedServicesServerIsReapedBeforeRelaunch(t *testing.T) {
 	if !alive(oldPid) {
 		t.Fatal("the first server is not running")
 	}
+	// Where the service's death takes its servers with it (Windows: the job is
+	// kill-on-close), make it happen; elsewhere this does nothing and the
+	// reaping below is what stops the old server.
+	simulateCrash(d1)
 	d2 := newStateDriver(t, state)
 	t.Cleanup(func() { _ = d2.Shutdown() })
 	waitGone(t, "the previous service's server", oldPid)

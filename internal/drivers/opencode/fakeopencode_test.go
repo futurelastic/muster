@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -47,11 +48,46 @@ func TestMain(m *testing.M) {
 			fmt.Println("fake-opencode 0.0.0")
 			os.Exit(0)
 		case "serve":
+			if serveFailLoggedStub(os.Args[2:]) {
+				os.Exit(3)
+			}
 			runFakeOpencode(os.Args[2:])
 			os.Exit(0)
 		}
 	}
 	os.Exit(m.Run())
+}
+
+// failLoggedSuffix names the file beside this executable that makes it behave
+// as a runtime that cannot start: it logs a provider-configuration error name
+// to stderr, but only when started with --print-logs (muster #288), then exits.
+// A file rather than an environment variable because the driver gives its child
+// an environment of its own. It is how Windows, which has no #!/bin/sh script to
+// write, stands in for a runtime that dies at start (stubShell).
+const failLoggedSuffix = ".fail-logged"
+
+// serveFailLoggedStub reports whether this process is such a stand-in, after
+// doing what it does.
+func serveFailLoggedStub(args []string) bool {
+	exe, err := os.Executable()
+	if err != nil || !fileExists(exe+failLoggedSuffix) {
+		return false
+	}
+	for _, a := range args {
+		if a == "--print-logs" {
+			fmt.Fprintln(os.Stderr, "ERROR service=config error=ProviderConfigError bad provider")
+		}
+	}
+	return true
+}
+
+// skipOnWindows skips a test that covers a Unix tool or a POSIX path, saying so
+// in the form the Windows gate expects.
+func skipOnWindows(t *testing.T, why string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip(why + " (windows, #303)")
+	}
 }
 
 func fileExists(p string) bool {
@@ -200,7 +236,7 @@ func runFakeOpencode(args []string) {
 				Cmd string `json:"cmd"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
-			out, err := exec.Command("/bin/sh", "-c", body.Cmd).CombinedOutput()
+			out, err := shellCommand(body.Cmd).CombinedOutput()
 			rc := 0
 			if ee, ok := err.(*exec.ExitError); ok {
 				rc = ee.ExitCode()
@@ -212,7 +248,7 @@ func runFakeOpencode(args []string) {
 			// A long-lived grandchild, as a tool the session ran would be. It is
 			// found through the BUILT PATH, so the test also proves the base PATH
 			// is usable.
-			cmd := exec.Command("sleep", "600")
+			cmd := longSleeper()
 			if err := cmd.Start(); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -151,6 +152,26 @@ func subscribeIso(t *testing.T, d *Driver) driver.EventStream {
 // driver stops passing the flag.
 func stubShell(t *testing.T) string {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		// No shell script to write: a copy of the test binary that, beside a
+		// marker file, behaves as the failing runtime (serveFailLoggedStub).
+		exe, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(t.TempDir(), "opencode.exe")
+		in, err := os.ReadFile(exe)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, in, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path+failLoggedSuffix, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
 	path := filepath.Join(t.TempDir(), "opencode")
 	script := "#!/bin/sh\nfor a in \"$@\"; do [ \"$a\" = --print-logs ] && echo 'ERROR service=config error=ProviderConfigError bad provider' >&2; done\nexit 3\n"
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {

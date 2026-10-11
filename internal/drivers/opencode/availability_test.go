@@ -57,6 +57,7 @@ func TestProbe_MissingBinaryIsNotInstalled(t *testing.T) {
 // (b) A file that is there and cannot be run is "not executable", not "not
 // installed" — the fix is a mode, not an install.
 func TestProbe_NonExecutableFileIsNotExecutable(t *testing.T) {
+	skipOnWindows(t, "a file's executability is a POSIX mode bit")
 	p := filepath.Join(t.TempDir(), "opencode")
 	if err := os.WriteFile(p, []byte("#!/bin/sh\n"), 0o644); err != nil {
 		t.Fatal(err)
