@@ -524,8 +524,13 @@ reports the peer `unreachable` from that memory without dialling. A background
 probe (`GET /v1/health`) retries on a doubling backoff from 2 s to 30 s, and
 the first answer of any kind — even a refusal — clears the state. A deadline
 the *caller* shortened below the service's own bound, and a caller that hangs
-up, are not evidence about the peer and never count. `scope=local` never
-touches a peer in any state. The wire shape is unchanged; only the wait is.
+up, are not evidence about the peer and never count by themselves. They do
+prompt the service to ask for itself: it sends its own `GET /v1/health` under
+its own budget (at most one in flight per peer) and counts *that* outcome, so
+a peer that went dark is marked down even when every caller gives up sooner
+than the service's bound, while a slow peer that answers inside the service's
+own budget is never marked down, whatever its callers' timeouts. `scope=local`
+never touches a peer in any state. The wire shape is unchanged; only the wait is.
 While a peer is marked down, mutations to it are refused the same way, so a
 false positive costs at most one backoff interval.
 
