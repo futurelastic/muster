@@ -33,7 +33,7 @@ func ownerOnlyProtected(t *testing.T, p string, wantInherit bool) {
 		t.Fatalf("%s: %d entries, want exactly one: %q", p, len(d.ACEs), text)
 	}
 	a := d.ACEs[0]
-	if a.Type != "A" || a.Trustee != sid || a.Rights&0x1F01FF != 0x1F01FF {
+	if a.Type != "A" || !sameTrustee(a.Trustee, sid) || a.Rights&0x1F01FF != 0x1F01FF {
 		t.Errorf("%s: entry = %+v, want full control for %s: %q", p, a, sid, text)
 	}
 	if got := a.Flags["OI"] && a.Flags["CI"]; got != wantInherit {
