@@ -232,16 +232,21 @@ func TestBypassInASandboxConfiguresOnlyThatSessionsOwnRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the session's own config was not written: %v", err)
 	}
+	// external_directory is an object of rules (muster #298), the three tool
+	// families are plain actions: decode each entry as it is written.
 	var cfg struct {
-		Permission map[string]string `json:"permission"`
+		Permission map[string]json.RawMessage `json:"permission"`
 	}
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		t.Fatalf("config is not JSON: %v", err)
 	}
 	for _, tool := range []string{"edit", "bash", "webfetch"} {
-		if cfg.Permission[tool] != "allow" {
-			t.Errorf("permission.%s = %q, want allow", tool, cfg.Permission[tool])
+		if got := string(cfg.Permission[tool]); got != `"allow"` {
+			t.Errorf("permission.%s = %s, want \"allow\"", tool, got)
 		}
+	}
+	if _, ok := cfg.Permission["external_directory"]; !ok {
+		t.Errorf("permission.external_directory is missing, so a path outside the working directory parks the session: %s", raw)
 	}
 
 	v := inside(t, d, sess.ID)

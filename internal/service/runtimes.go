@@ -265,3 +265,41 @@ func (s *Service) retryingRuntimesLocked() map[fleet.RuntimeId]unavailableRuntim
 	}
 	return out
 }
+
+// pendingRuntimeSources reports one degraded source per enabled runtime that is
+// still being retried, in runtime-id order, for ListSessions (muster #300).
+//
+// The runtime has no driver, so no driver reported on it; its sessions, which a
+// runtime that persists them keeps on disk the whole time, are simply not in the
+// list. Degraded is the nearest honest member of the closed source set (§9):
+// the machine answered, and the answer is not the whole of what it holds. The
+// source names the runtime and gives the cause — the same sentence
+// GET /v1/runtimes carries — so a reader knows which sessions are missing and
+// where to look.
+//
+// Only a runtime still being retried is reported. One that needs somebody's
+// hands (not installed, not executable) has nothing waiting to arrive, and a
+// permanently degraded source would make `complete` carry no information on a
+// machine that merely has a runtime enabled it does not have.
+func pendingRuntimeSources(machine fleet.MachineId, pending map[fleet.RuntimeId]unavailableRuntime, now time.Time) []fleet.SourceStatus {
+	if len(pending) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(pending))
+	for rt := range pending {
+		ids = append(ids, string(rt))
+	}
+	sort.Strings(ids)
+	out := make([]fleet.SourceStatus, 0, len(ids))
+	for _, id := range ids {
+		u := pending[fleet.RuntimeId(id)]
+		out = append(out, fleet.SourceStatus{
+			Machine: machine,
+			Status:  fleet.SourceDegraded,
+			Error: fmt.Sprintf("runtime %q is enabled but not available yet (%s); its sessions are not listed until it registers: %s",
+				id, u.cause, u.reason),
+			ObservedAt: now,
+		})
+	}
+	return out
+}

@@ -294,12 +294,13 @@ func (d *Driver) startServerIn(ctx context.Context, spec fleet.SessionSpec, exis
 	}
 	var args []string
 	bypass := spec.PermissionMode == fleet.PermissionModeBypass
-	// muster #283, #293: the tool posture and the provider policy live in this
+	// muster #283, #293, #298: the tool posture, the outside-directory rules
+	// (derived from the sandbox plan above) and the provider policy live in this
 	// session's own directory, never in a file another session would read. The
 	// provider policy goes to EVERY session — a session with no credential must
 	// not fall back to the runtime's hosted provider — and is written again on a
 	// relaunch, so a changed operator setting applies from the next start.
-	if err := writeSessionConfig(dir, bypass, d.providers); err != nil {
+	if err := writeSessionConfig(dir, bypass, plan, d.providers); err != nil {
 		cleanup()
 		return nil, &fleet.Error{Kind: fleet.ErrorInvalid, Message: "create: " + err.Error(), Machine: d.machine}
 	}
