@@ -108,3 +108,19 @@ func TestParseSDDL_RefusesWhatItCannotRead(t *testing.T) {
 		})
 	}
 }
+
+func TestJudge_ADomainRelativeAliasIsTheUserOnlyWhenTheUserIsThatAccount(t *testing.T) {
+	d, err := parseSDDL("D:P(A;;FA;;;LA)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, why := judge(d, "S-1-5-21-1-2-3-500"); v != OwnerOnly {
+		t.Errorf("the built-in administrator's own entry: verdict = %s (%s), want owner-only", v, why)
+	}
+	if v, _ := judge(d, user); v != Loose {
+		t.Errorf("an entry for the built-in administrator is not private to another user: verdict = %s, want loose", v)
+	}
+	if v, _ := judge(d, "S-1-5-32-500"); v != Loose {
+		t.Errorf("a non-domain SID must not match the alias: verdict = %s, want loose", v)
+	}
+}

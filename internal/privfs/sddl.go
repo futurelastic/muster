@@ -200,7 +200,7 @@ func judge(d dacl, user string) (Verdict, string) {
 		switch {
 		case a.Type != "A":
 			others = append(others, fmt.Sprintf("a %q entry for %s", a.Type, a.Trustee))
-		case a.Trustee != user:
+		case !sameTrustee(a.Trustee, user):
 			others = append(others, fmt.Sprintf("access for %s", a.Trustee))
 		default:
 			// Whatever rights it grants, an allow entry for the user alone is
@@ -216,6 +216,29 @@ func judge(d dacl, user string) (Verdict, string) {
 		return Loose, "the access list does not grant the owner any access"
 	}
 	return OwnerOnly, ""
+}
+
+// sameTrustee reports whether the trustee as rendered in an entry is the user.
+//
+// Two aliases are domain-relative, so they cannot be expanded without the
+// machine's own SID: "LA" is the account whose relative id is 500 (the built-in
+// administrator) and "LG" is 501. When the user IS that account, the system
+// renders the user's own entry as the alias, never as the long SID — the
+// Windows runner this was first measured on runs as exactly that account.
+func sameTrustee(trustee, user string) bool {
+	if trustee == user {
+		return true
+	}
+	if !strings.HasPrefix(user, "S-1-5-21-") {
+		return false
+	}
+	switch trustee {
+	case "LA":
+		return strings.HasSuffix(user, "-500")
+	case "LG":
+		return strings.HasSuffix(user, "-501")
+	}
+	return false
 }
 
 func dedupe(in []string) []string {
