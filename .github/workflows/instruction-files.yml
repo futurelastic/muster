@@ -1,0 +1,9 @@
+# Copy to .github/workflows/instruction-files.yml — CLAUDE.md must be @AGENTS.md + tool blocks (#588).
+name: instruction-files
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  instruction-files:
+    uses: futurelastic/colab-handbook/.github/workflows/instruction-files.yml@main
