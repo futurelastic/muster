@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -128,7 +127,7 @@ func assertGone(t *testing.T, tmuxBin string, w *compatWorld, pids []int) {
 	}
 	for _, pid := range pids {
 		cfcWaitFor(t, "pane process "+strconv.Itoa(pid)+" to end", 5*time.Second, func() bool {
-			return syscall.Kill(pid, 0) == syscall.ESRCH
+			return pidGone(pid)
 		})
 	}
 	for _, d := range []string{"projects", "sessions"} {
