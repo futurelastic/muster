@@ -204,6 +204,13 @@ somebody to change something. A create naming such a runtime answers
 `reason: "runtime-unavailable"` — 504 and `retryable: true` while it is being
 retried, 501 otherwise — and not the 404 an id nobody enabled gets.
 
+The same runtime is not hidden elsewhere (#300). `GET /v1/health`'s `drivers`
+lists it with the same `status`, `cause` and `reason`. While it is being
+retried, `GET /v1/sessions` adds a `degraded` source for this machine whose
+`error` names the runtime — its sessions are not in `items` yet — and
+`complete` is `false` until it registers. A runtime that is not retried (not
+installed, say) adds no such source.
+
 `capabilities.deliveryModules` (#185) lists the optional external delivery
 modules this machine enabled — `name`, `status` (`starting`, `available`,
 `unavailable` or `disabled`), a `reason` when it is not available, the module's

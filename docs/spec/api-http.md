@@ -109,7 +109,15 @@ GET /v1/health
         "supportsSandbox": true,
         "supportsLaunchSettings": true,
         "launchSettingsOutsideBypass": ["crossSessionInbound"],
-        "drivers": [...] }
+        "drivers": [ { "machine": "...", "runtime": "...",
+                       "status": "available",
+                       "capabilities": { ... } },
+                     { "machine": "...", "runtime": "...",   ← enabled, no working driver
+                       "status": "unavailable",
+                       "cause": "probe-timeout",
+                       "reason": "the ... runtime is enabled, but ...",
+                       "capabilities": { "deadlineMs": 30000,
+                                         "source": "assumed" } } ] }
 
 GET /v1/machines[?verify=1]
 → 200 { "items": [ { "machine": "...", "self": true, "status": "ok",
@@ -219,6 +227,15 @@ error carries `reason: "runtime-unavailable"`: `unreachable` (504) with
 `retryable: true` while the runtime is being retried — nothing is known yet,
 ask again — and `unsupported` (501) with `retryable: false` for a cause that
 needs somebody's hands. The runtime's `cause` is on `GET /v1/runtimes`.
+
+**`drivers` on `GET /v1/health` lists an enabled runtime with no working
+driver too** (muster #300), with the same `status`, `cause` and `reason`, in
+the same order (registered first, then unavailable, each by runtime id), and
+the same conservative `capabilities`. Absence there would read as "never
+enabled" for the same reason it did on `GET /v1/runtimes`. A `drivers` row from
+a build that predates #300 has no `status` and is available; a reader that
+needs to know whether a runtime can serve reads `status`, never the row's
+presence.
 
 **`deliversToInbox` is how an operator confirms muster #119's inbox
 delivery path is actually live on a machine, without inferring it from a
@@ -362,6 +379,24 @@ A `scope=local` response carries exactly one `SourceStatus`. The proxying
 service **adopts** that record rather than synthesizing a fresh one (§13.2) — a
 peer that answers promptly while reporting itself `degraded` must not be
 relayed as `ok`.
+
+**A runtime that is enabled and still being retried (§3.1, muster #300) makes
+the list say so.** Such a runtime has no driver, so no driver listed it — and a
+runtime that persists its sessions has them on disk the whole time. The list
+therefore carries one more source for this machine, `status: "degraded"`, per
+runtime in that state, whose `error` names the runtime, its `cause` and the
+same `reason` sentence `GET /v1/runtimes` gives. Its sessions are absent from
+`items`; the source is how a reader knows, and `complete` is `false` for as
+long as it is there — "could not list this runtime yet" is a different fact
+from "has no sessions" (§5.7). The source disappears when the runtime
+registers, with no restart. A runtime whose cause is not retried (not
+installed, not executable, a refused configuration) is **not** reported here:
+nothing is on its way, and a source that stays degraded for ever would stop
+`complete` meaning anything on a machine that merely has a runtime enabled it
+does not have. That runtime is on `GET /v1/runtimes` and `GET /v1/health` with
+its cause. With no registered driver at all, the service's own `ok` source
+(*"nothing here"*) is withheld while a runtime is pending: the one source is
+the degraded one.
 
 **`label=key:value` keeps only sessions carrying that pair** (muster
 #153). Repeatable, and every pair must match; exact on key and value; the split
