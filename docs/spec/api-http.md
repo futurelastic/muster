@@ -790,6 +790,14 @@ for an ask that has since been resolved (muster #296; a runtime "question" is no
 `unsupported` with the reason); a list of asks that could not be read leaves the status as it was and says so in
 `evidence`, because an unasked question is not the answer "none".
 
+**A path outside the working directory is decided by the boundary, not asked** (muster #298). A
+`bypass` session inside an enforced sandbox is configured so that a tool naming a path the sandbox
+does not open is denied with an error the model can read, and a path the sandbox does open is
+allowed, so an unattended session never parks on an ask that protects nothing: the sandbox already
+refuses the same access through a shell. The rules are the sandbox plan's own paths, so a create's
+`readPaths` and `writePaths` are covered, and they are written again at relaunch. Without `bypass` the driver writes no such rule and an
+ask still reads as `waiting_input`.
+
 **A driver whose runtime ships a hosted provider of its own may not let a session fall back to
 it** (muster #293). Measured: a session on a machine with no provider credential ran its first
 turn on the runtime's built-in hosted provider and reported an ordinary idle — prompts, file

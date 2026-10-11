@@ -871,6 +871,17 @@ Rules that follow from how the row behaves on the one runtime measured:
 safety property, and it is why raw keys are a separate endpoint rather than a
 flag here.
 
+**A path outside the working directory, under `bypass`** (#298). The runtime asks
+separately before a tool names a path outside the working directory directly, and
+an unattended session would stop there. Inside a sandbox that ask protects
+nothing — the same path reached through a shell is refused by the sandbox and the
+turn goes on — so a `bypass` session's own configuration answers it in advance:
+every path the sandbox opens (the working directory, the session's own directory,
+`readPaths`, `writePaths`, the package cache and the read-only system roots) is
+allowed, and every other path is denied. A deny is an error the model reads and
+the turn continues; the session never reads `waiting_input` for it. Without
+`bypass` nothing changes, and an ask there still reads as blocked, below.
+
 **A tool-permission ask on an opencode session** (#296). A session parked on one
 reads `waiting_input` with `prompt.kind: "tool-permission"`, and answering it is
 the same call, sent to the runtime's own permission-reply endpoint:

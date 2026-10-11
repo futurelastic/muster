@@ -38,6 +38,35 @@ import (
 // another session would also read: the environment is built, so the user's
 // config is not in it.
 //
+// # A path outside the working directory (muster #298)
+//
+// The three families above are not the only thing a bypass session is asked
+// about. A tool that names a path outside the working directory directly — a
+// read, a write, a listing — raises a separate `external_directory` ask, and an
+// unattended session parks on it until somebody interrupts it. The ask protects
+// nothing here: the sandbox is the boundary, and the same path reached through a
+// shell is refused by the sandbox and the turn goes on.
+//
+// So a bypass session's configuration answers that question in advance, from
+// the sandbox plan it is already running under: the paths the sandbox itself
+// opens (read, write, the session's own directory and its package cache) are
+// allowed, and everything else is denied. A deny is an error the model can read,
+// not an ask, so the turn never parks. Without bypass nothing is written and the
+// ask is still a blocked session, as below.
+//
+// Two properties of the runtime's matching are load-bearing, and the entry is
+// built around them rather than left to map ordering:
+//
+//   - The LAST matching rule wins. The catch-all deny must come first and the
+//     allows after it; written the other way round, it would deny the paths it
+//     just allowed. externalDirectoryRules keeps the order explicit.
+//   - A rule is a glob where `*` crosses directory separators and `?` is any one
+//     character. The runtime asks about `<parent directory>/*`, so allowing
+//     `<root>/*` covers everything beneath root and not root's siblings. A root
+//     containing either metacharacter would match more than it names, so it is
+//     left out: a deny that is too narrow is a readable error, an allow that is
+//     too wide is not a boundary at all.
+//
 // # A parked ask reads as blocked, never as busy
 //
 // A session can still park on an ask the configuration did not cover (a tool
@@ -104,15 +133,71 @@ var bypassPermissions = map[string]string{
 // with, beyond the ones every session gets.
 func bypassArgs() []string { return []string{pureFlag} }
 
+// externalDirectoryRule is one pattern of the `external_directory` permission and
+// the action taken for a path it matches.
+type externalDirectoryRule struct {
+	pattern, action string
+}
+
+// externalDirectoryRules is the ordered rule list of the `external_directory`
+// permission. It marshals as a JSON object with its keys in slice order — the
+// runtime reads an object's entries in the order they are written and lets the
+// last match win, so a Go map (keys sorted) would make the result depend on how
+// the characters happen to collate.
+type externalDirectoryRules []externalDirectoryRule
+
+func (r externalDirectoryRules) MarshalJSON() ([]byte, error) {
+	var b strings.Builder
+	b.WriteByte('{')
+	for i, rule := range r {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		k, err := json.Marshal(rule.pattern)
+		if err != nil {
+			return nil, err
+		}
+		v, err := json.Marshal(rule.action)
+		if err != nil {
+			return nil, err
+		}
+		b.Write(k)
+		b.WriteByte(':')
+		b.Write(v)
+	}
+	b.WriteByte('}')
+	return []byte(b.String()), nil
+}
+
+// externalDirectoryFor renders the plan as the `external_directory` rules a
+// bypass session is configured with: deny everything, then allow each path the
+// sandbox opens. Deny comes first because the last matching rule wins.
+//
+// plan.read already holds every path plan.write holds (planSandboxFor), so one
+// list is the whole set the sandbox opens.
+func externalDirectoryFor(plan *sandboxPlan) externalDirectoryRules {
+	rules := externalDirectoryRules{{pattern: "*", action: "deny"}}
+	for _, root := range plan.read {
+		if root == "" || root == string(filepath.Separator) || strings.ContainsAny(root, "*?") {
+			continue
+		}
+		rules = append(rules, externalDirectoryRule{
+			pattern: strings.TrimRight(root, string(filepath.Separator)) + "/*", action: "allow",
+		})
+	}
+	return rules
+}
+
 // writeSessionConfig writes the session's own opencode.json under dir. Called
 // for a fresh session and again for a relaunch, so the file always matches the
 // record and the operator's current settings.
 //
 // Every session this driver starts gets one: it carries the provider policy
 // (provider.go, muster #293) and, for a bypass session only, the tool posture
-// (muster #283). The two never share a decision — a session with no bypass has
-// no `permission` entry at all.
-func writeSessionConfig(dir string, bypass bool, providers providerPolicy) error {
+// (muster #283) and the outside-directory rules derived from plan (muster #298).
+// The decisions never share a path — a session with no bypass has no
+// `permission` entry at all.
+func writeSessionConfig(dir string, bypass bool, plan *sandboxPlan, providers providerPolicy) error {
 	path := filepath.Join(dir, permissionConfigRel)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("opencode: creating the session's config directory: %w", err)
@@ -122,7 +207,18 @@ func writeSessionConfig(dir string, bypass bool, providers providerPolicy) error
 		cfg[k] = v
 	}
 	if bypass {
-		cfg["permission"] = bypassPermissions
+		// checkBypass refuses a bypass create with no sandbox, so a nil plan here
+		// is a caller bug. Writing the tool posture without the directory rules
+		// would leave a pre-approved session with no boundary at all.
+		if plan == nil {
+			return errors.New("opencode: a bypass session needs the sandbox plan its permissions are derived from")
+		}
+		perm := make(map[string]any, len(bypassPermissions)+1)
+		for k, v := range bypassPermissions {
+			perm[k] = v
+		}
+		perm["external_directory"] = externalDirectoryFor(plan)
+		cfg["permission"] = perm
 	}
 	raw, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
