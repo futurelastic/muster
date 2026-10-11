@@ -33,6 +33,17 @@ func TestMain(m *testing.M) {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "--version":
+			// muster #297: a stand-in that does not answer until a file
+			// exists, so a test can make the version check hang past the
+			// probe's deadline and later let it answer — a real hang and a
+			// real answer, with no real binary and no long wait. The wait is
+			// bounded so a probe killed mid-test never leaves this process
+			// behind.
+			if gate := os.Getenv("FAKE_OPENCODE_VERSION_GATE"); gate != "" {
+				for i := 0; i < 1500 && !fileExists(gate); i++ {
+					time.Sleep(10 * time.Millisecond)
+				}
+			}
 			fmt.Println("fake-opencode 0.0.0")
 			os.Exit(0)
 		case "serve":

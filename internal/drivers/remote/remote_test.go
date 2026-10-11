@@ -1218,3 +1218,69 @@ func TestSendCarriesTheRemoteControlAssertion(t *testing.T) {
 		t.Fatalf("Fleet-Remote-Control = %q on a send that asserted nothing", rec.remoteCtl)
 	}
 }
+
+// muster #297 (n): a peer that lists an enabled runtime it cannot use, ahead
+// of one it can, must not be read as having that runtime's floor
+// capabilities — and a row from a peer that predates `status` is adopted as
+// before.
+func TestRefreshCapabilitiesSkipsAnUnavailableRuntimeRow(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path != "/v1/runtimes" {
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"items": []fleet.RuntimeInfo{
+				{
+					Machine: "peerbox", Runtime: "late-runtime", Status: fleet.RuntimeUnavailable,
+					Cause: fleet.CauseProbeTimeout, Reason: "did not answer in time",
+					Capabilities: fleet.DriverCapabilities{DeadlineMs: 30000, Source: fleet.CapabilitiesAssumed},
+				},
+				{
+					Machine: "peerbox", Runtime: "working-runtime", Status: fleet.RuntimeAvailable,
+					Capabilities: fleet.DriverCapabilities{SupportsResume: true, DeadlineMs: 5000, Source: fleet.CapabilitiesObserved},
+				},
+			},
+			"sources":  []fleet.SourceStatus{{Machine: "peerbox", Status: fleet.SourceOK, ObservedAt: time.Now()}},
+			"complete": true,
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	d := New("peerbox", srv.URL)
+	if err := d.RefreshCapabilities(context.Background(), caller); err != nil {
+		t.Fatal(err)
+	}
+	if got := d.Runtime(); got != "working-runtime" {
+		t.Errorf("adopted runtime = %q, want the available row, not the unavailable one", got)
+	}
+	if !d.Capabilities().SupportsResume {
+		t.Error("did not adopt the available row's capabilities")
+	}
+}
+
+// A peer that only has an unavailable runtime reports no usable runtime for
+// itself: the probe says so rather than adopting a floor as an answer.
+func TestRefreshCapabilitiesWithOnlyAnUnavailableRowIsAnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"items": []fleet.RuntimeInfo{{
+				Machine: "peerbox", Runtime: "late-runtime", Status: fleet.RuntimeUnavailable,
+				Capabilities: fleet.DriverCapabilities{DeadlineMs: 30000, Source: fleet.CapabilitiesAssumed},
+			}},
+			"sources":  []fleet.SourceStatus{{Machine: "peerbox", Status: fleet.SourceOK, ObservedAt: time.Now()}},
+			"complete": true,
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	d := New("peerbox", srv.URL)
+	if err := d.RefreshCapabilities(context.Background(), caller); err == nil {
+		t.Fatal("RefreshCapabilities adopted an unavailable runtime as the peer's answer")
+	}
+	if d.CapabilitiesKnown() {
+		t.Error("capabilities read as known after only an unavailable row")
+	}
+}

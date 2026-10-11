@@ -125,23 +125,24 @@
 //
 // # What this driver deliberately does not attempt
 //
-// Respond, Discard, Rename and Keys all return driver.ErrUnsupported.
-// opencode has no boot-time enumerated-menu prompt matching
-// fleet.SessionPrompt's shape — its blocking questions are tool-permission
-// approvals and, in a newer API, structured "question" replies, neither of
-// which is a safe fit for §2.3's model without real design work of its own
-// (a session-abstraction concept, not a wire mapping exercise). Inventing
-// one to make the method non-empty would be exactly the emulation §5.6
-// forbids.
+// Discard, Rename and Keys all return driver.ErrUnsupported. Respond answers a
+// tool-permission ask and nothing else: opencode's other blocking surface, a
+// structured "question" reply, is not a safe fit for §2.3's model without real
+// design work of its own (a session-abstraction concept, not a wire mapping
+// exercise), so a session parked on one is answered `unsupported` with the
+// reason. Inventing a mapping to make that case non-empty would be exactly the
+// emulation §5.6 forbids.
 //
-// # Permissions (muster #283)
+// # Permissions (muster #283, #296)
 //
-// A tool-permission ask is SEEN but not answered. A session the runtime has
-// stopped on one reads `waiting_input` with a `tool-permission` prompt that
-// carries no options, instead of `working`; `permissionMode: "bypass"` stops
-// asks from arising by configuring the session's own runtime to approve its
-// tools, and is honoured only inside a sandbox this driver enforces. See
-// permission.go.
+// A session the runtime has stopped on a tool-permission ask reads
+// `waiting_input` with a `tool-permission` prompt instead of `working`, whose
+// options are the three answers Respond takes (allow once, allow always,
+// reject) and whose nonce is the ask's own id; Respond answers it through the
+// runtime's permission-reply endpoint and refuses an answer meant for an ask that
+// has since been resolved. `permissionMode: "bypass"` stops asks from arising by
+// configuring the session's own runtime to approve its tools, and is honoured
+// only inside a sandbox this driver enforces. See permission.go.
 //
 // # Events
 //
@@ -181,6 +182,11 @@ const (
 	readyPollInterval = 100 * time.Millisecond
 )
 
+// DefaultDeadlineMs is the deadline a driver built without WithDeadline
+// declares. It is exported so the service can describe a runtime that has no
+// driver yet with the same number its driver will declare (muster #297).
+const DefaultDeadlineMs = defaultDeadlineMs
+
 // Driver implements driver.Driver over opencode servers this driver itself
 // owns the lifecycle of: one server — one process, one process group, one
 // credential, one scoped environment — PER SESSION (muster #280).
@@ -193,9 +199,11 @@ type Driver struct {
 	runtime  fleet.RuntimeId
 	bin      string
 	deadline time.Duration
-	now      func() time.Time
-	username string
-	client   *http.Client
+	// probeTimeout bounds the startup `--version` probe (WithProbeTimeout).
+	probeTimeout time.Duration
+	now          func() time.Time
+	username     string
+	client       *http.Client
 
 	// sessionEnv is this machine's declared identity for its sessions (#94);
 	// sessionRoot is where session-scoped directories are made (the OS temp
@@ -354,6 +362,18 @@ func WithDeadline(ms int64) Option {
 	}
 }
 
+// WithProbeTimeout bounds the `--version` probe New runs (muster #297). A
+// non-positive value is ignored, like WithDeadline: the default (5s) stands.
+// The service retries a probe that timed out with a longer bound — a binary
+// that is slow under load is the same binary later.
+func WithProbeTimeout(d time.Duration) Option {
+	return func(x *Driver) {
+		if d > 0 {
+			x.probeTimeout = d
+		}
+	}
+}
+
 // WithBaseURL points this driver at an already-running server instead of
 // spawning one, and skips Probe entirely. This is the test seam: paired
 // with WithHTTPClient it lets state_test.go and client_test.go exercise
@@ -396,20 +416,27 @@ func withClock(f func() time.Time) Option { return func(d *Driver) { d.now = f }
 // without this runtime, in that caller's case — rather than this package
 // ever calling log.Fatal or panicking on a machine that simply does not
 // have opencode installed.
+//
+// When the refusal is about the binary — not found, not runnable, or its
+// version check did not answer in time — the error is a
+// *driver.UnavailableError carrying which, so a caller can retry the one cause
+// that time fixes (muster #297). Any other error is a refusal of the
+// configuration, and no retry changes it.
 func New(ctx context.Context, machine fleet.MachineId, opts ...Option) (*Driver, error) {
 	d := &Driver{
-		machine:  machine,
-		runtime:  DefaultRuntime,
-		bin:      defaultBin,
-		deadline: defaultDeadlineMs * time.Millisecond,
-		now:      time.Now,
-		username: defaultUsername,
-		client:   &http.Client{},
-		seen:     make(map[string]knownSession),
-		subs:     make(map[*subscription]struct{}),
-		live:     make(map[*server]struct{}),
-		idem:     make(map[string]idemEntry),
-		inflight: make(map[string]chan struct{}),
+		machine:      machine,
+		runtime:      DefaultRuntime,
+		bin:          defaultBin,
+		deadline:     defaultDeadlineMs * time.Millisecond,
+		probeTimeout: defaultProbeTimeout,
+		now:          time.Now,
+		username:     defaultUsername,
+		client:       &http.Client{},
+		seen:         make(map[string]knownSession),
+		subs:         make(map[*subscription]struct{}),
+		live:         make(map[*server]struct{}),
+		idem:         make(map[string]idemEntry),
+		inflight:     make(map[string]chan struct{}),
 	}
 	for _, o := range opts {
 		o(d)
@@ -433,21 +460,30 @@ func New(ctx context.Context, machine fleet.MachineId, opts ...Option) (*Driver,
 		return nil, errors.New("opencode: this platform cannot signal a process group, so a session's tools " +
 			"could outlive its close; the driver refuses to start")
 	}
-	avail := Probe(ctx, d.bin)
-	if !avail.Installed {
-		return nil, fmt.Errorf("opencode: not available on this machine: %w", avail.Err)
-	}
-	d.bin = avail.Path
+	// Everything that is pure configuration is checked BEFORE the probe, for
+	// two reasons (muster #297): a misconfigured runtime is not retried — the
+	// service reads the plain error as "start-failed", which no amount of
+	// waiting fixes — and a retry never repeats work that cannot change.
 	if err := checkRuntimePath(d.runtimePath); err != nil {
 		return nil, err
 	}
 	if err := checkSessionEnvEntries(d.sessionEnv); err != nil {
 		return nil, err
 	}
-	if d.stateDir != "" {
-		if !filepath.IsAbs(d.stateDir) {
-			return nil, fmt.Errorf("opencode: the state directory %q must be an absolute path", d.stateDir)
+	if d.stateDir != "" && !filepath.IsAbs(d.stateDir) {
+		return nil, fmt.Errorf("opencode: the state directory %q must be an absolute path", d.stateDir)
+	}
+	avail := probe(ctx, d.bin, d.probeTimeout)
+	if !avail.Installed {
+		// Typed, so the caller can tell a binary that was slow from one that
+		// is not there: only the first is worth trying again.
+		return nil, &driver.UnavailableError{
+			Cause: avail.Cause,
+			Err:   fmt.Errorf("opencode: not available on this machine: %w", avail.Err),
 		}
+	}
+	d.bin = avail.Path
+	if d.stateDir != "" {
 		base := filepath.Join(d.stateDir, "opencode")
 		d.store = &recordStore{dir: filepath.Join(base, "sessions")}
 		if d.sessionRoot == "" {

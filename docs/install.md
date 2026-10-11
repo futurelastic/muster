@@ -195,6 +195,12 @@ order of this page and the order of its output are the same.
      manager starts processes with a bare `PATH` that usually lacks it, and
      the failure appears only under the manager, never in your shell
      (row: `runtime`);
+   - when `FLEET_RUNTIME_OPENCODE=1`, set `FLEET_OPENCODE_BIN` to the opencode
+     binary's absolute path, for the same reason (row: `runtime.opencode`,
+     which resolves the binary and never runs it). A runtime that is enabled but
+     not usable does not stop the service: it is listed on `GET /v1/runtimes`
+     as `unavailable` with a `cause`, and a version check that merely timed out
+     under load is retried until it answers;
    - run as the user who owns the sessions it will manage;
    - restart the process when it exits, and start it at boot;
    - put **no secret** in the unit's environment. With a principal table,

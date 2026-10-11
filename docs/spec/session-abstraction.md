@@ -1468,6 +1468,24 @@ follows — never an echo of what was requested. What was requested lives in
 `pins.*.requested` instead, correctly labelled as a request rather than a
 fact.
 
+**Where the local driver reads `agent` from (muster #301).** Not from the
+create request — that memory lasts thirty minutes and exists only for a session
+this service created. The runtime is started with `--agent <name>` on its own
+command line, and a process's command line does not change, so the driver reads
+it from the process table: for every live session, whoever created it, however
+old, across a service restart. It looks at the processes in the session's
+terminal foreground group that are not an interactive shell, shallowest first;
+two different values at the same depth are a disagreement and are reported as
+absence rather than a pick. `agent` is absent — omitted, never empty — when the
+runtime was started without one. When the process table cannot be read for a
+listing, the field is absent for every session in it and that listing's source
+is `degraded`: absent then means *unknown*, not *none*. Where a create's
+request is still on file and the process shows a value, `pins.agent` resolves:
+`applied` is what the process shows, `honoured` says whether it equals the
+request, `source` is `observed`. A driver that cannot read it declares
+`reportsAgent: false` (§4.3), and an `agent` list filter then matches nothing
+there.
+
 ### 2.13 RuntimeSurfaceRef
 
 ```
@@ -1876,6 +1894,7 @@ DriverCapabilities {
   observesControlChannel: boolean // can report `controlChannel` (§2.3); absent state is answerable only against this
   observesPermissionMode: boolean // can report `permissionMode` (§2.3); absent state is answerable only against this. A driver may report it from a posture it configured itself (the local opencode driver reports `bypass`, muster #283) and leave it absent for a session it set nothing on; and a driver may honour `permissionMode: "bypass"` only together with an enforced `sandbox` (§2.1), refusing `unsupported` otherwise
   reportsUsage    : boolean   // can read `usage` (§2.3, muster #285) from its runtime; absent usage is answerable only against this: true = "not yet known", false = never
+  reportsAgent    : boolean   // can read `agent` (§2.1/§2.12, muster #301) for any live session it lists, not only one it created; absent agent is answerable only against this: true = the runtime was started without one, false = never reported (and an `agent` list filter matches nothing)
   reportsRuntimeSurface: boolean // can say anything about `runtimeSurface` (§2.13); absent state is answerable only against this
   isolatesEnvironment: boolean // starts a session's process with a BUILT environment, nothing inherited from the service (§2.1 `isolateEnvironment`, muster #280)
   sandbox?        : SandboxSupport  // can wrap a session in an OS sandbox (§2.1 `sandbox`, muster #281): { mechanism, denies[], network[], packageCache[] }; absent = cannot, and a create asking for one is refused `unsupported`
@@ -2361,7 +2380,12 @@ fail, so three guardrails govern it:
 
 1. **A default naming an unregistered runtime fails at startup**, never on
    the first request that needs it. Otherwise a typo becomes a fleet-wide
-   `not_found` indistinguishable from every session having vanished.
+   `not_found` indistinguishable from every session having vanished. A
+   runtime the operator enabled whose driver is merely late — its version
+   check did not answer in time and is being retried — is accepted as a
+   default: refusing it would make a slow check at startup fatal to the whole
+   service. One that needs somebody's hands (not installed, not executable) is
+   refused like a typo.
 2. **Resolving via the default is visible in the response**, not only in a
    log. A caller that named its own runtime and a caller that received the
    default are in different epistemic positions, and §5.7 already forbids
@@ -2381,7 +2405,9 @@ fail, so three guardrails govern it:
    - the check cannot be completed for every driver (one errors for a
      reason other than "never had this id") and nothing else affirms the id
      → refused rather than guessed, for the same reason as the case above:
-     an unreachable driver might be the one that actually holds it.
+     an unreachable driver might be the one that actually holds it. An
+     enabled runtime that has no driver yet but is being retried (muster
+     #297) is in this set by construction — it cannot be asked.
    - every driver affirmatively confirms absence → a genuine miss, the same
      shape `create`'s own ambiguous case has (there is equally nothing to
      route TO) — only here does the configured default apply.

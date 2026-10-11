@@ -79,9 +79,67 @@ func AssumedPeerStanding() PeerStanding {
 	return PeerStanding{GrantsToMe: []string{}, Source: CapabilitiesAssumed}
 }
 
+// RuntimeStatus is whether a runtime an operator enabled can take work right
+// now (api-http.md §3.1, muster #297).
+type RuntimeStatus string
+
+const (
+	// RuntimeAvailable: a driver is registered and answering.
+	RuntimeAvailable RuntimeStatus = "available"
+	// RuntimeUnavailable: the operator enabled the runtime but no working
+	// driver exists for it at this moment. RuntimeInfo.Cause says why.
+	RuntimeUnavailable RuntimeStatus = "unavailable"
+)
+
+// UnavailableCause is the machine-readable reason an enabled runtime has no
+// working driver. A client branches on it instead of parsing Reason.
+//
+// The set is open on read: a decoder must accept a value it does not know and
+// treat it as "unavailable, reason unstated" — a later build may name a cause
+// this one never heard of.
+type UnavailableCause string
+
+const (
+	// CauseNotInstalled: the runtime's binary was not found.
+	CauseNotInstalled UnavailableCause = "not-installed"
+	// CauseNotExecutable: something is there, and it cannot be run.
+	CauseNotExecutable UnavailableCause = "not-executable"
+	// CauseProbeTimeout: the version probe did not answer within its
+	// deadline. The only cause the service retries on its own — a binary
+	// that is slow under load is the same binary a minute later.
+	CauseProbeTimeout UnavailableCause = "probe-timeout"
+	// CauseProbeFailed: the probe ran and failed some other way.
+	CauseProbeFailed UnavailableCause = "probe-failed"
+	// CauseStartFailed: the runtime was refused for a reason that is not the
+	// binary — its configuration, or this platform.
+	CauseStartFailed UnavailableCause = "start-failed"
+)
+
+// Retryable reports whether the service tries again on its own. Everything
+// else needs somebody to change something first.
+func (c UnavailableCause) Retryable() bool { return c == CauseProbeTimeout }
+
 // RuntimeInfo is one entry of GET /v1/runtimes (api-http.md §3.1).
+//
+// Status, Cause and Reason were added by muster #297. A row from a build that
+// predates them has none of the three, and that reads as available: such a
+// build only ever listed runtimes with a working driver. Use Available, not a
+// comparison against RuntimeAvailable, so the absent value is read the same
+// way everywhere.
 type RuntimeInfo struct {
 	Machine      MachineId          `json:"machine"`
 	Runtime      RuntimeId          `json:"runtime"`
 	Capabilities DriverCapabilities `json:"capabilities"`
+	// Status is "available" or "unavailable". This build sets it on every row
+	// it emits.
+	Status RuntimeStatus `json:"status,omitempty"`
+	// Cause is set only when the runtime is unavailable.
+	Cause UnavailableCause `json:"cause,omitempty"`
+	// Reason is a sentence for people, set only when the runtime is
+	// unavailable. It never carries the resolved path of the runtime's binary.
+	Reason string `json:"reason,omitempty"`
 }
+
+// Available reports whether the row describes a runtime with a working
+// driver. An absent Status is available.
+func (r RuntimeInfo) Available() bool { return r.Status != RuntimeUnavailable }

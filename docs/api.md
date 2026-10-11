@@ -85,7 +85,7 @@ every configured peer, exactly one hop — peers never recurse.
 | `GET` | `/v1/health` | Build stamp, uptime, drivers, current event cursor | — ⚠️ | no |
 | `GET` | `/v1/machines` | Known machines and whether they answered | — ⚠️ | always |
 | `GET` | `/v1/whoami` | What the presented credential may do | none — authentication only | no |
-| `GET` | `/v1/runtimes` | Drivers present and the capabilities they declare | — ⚠️ | always |
+| `GET` | `/v1/runtimes` | Drivers present (and enabled runtimes that are not usable, with why) and the capabilities they declare | — ⚠️ | always |
 | `GET` | `/v1/sessions` | List sessions, filtered | — ⚠️ | `scope` |
 | `GET` | `/v1/sessions/closed` | Sessions that ended within the retention window | — ⚠️ | `scope` |
 | `GET` | `/v1/sessions/watch` | Long-poll the event feed | — ⚠️ | `scope` |
@@ -187,9 +187,29 @@ absent key means an older build, never "not listed".
 
 ### `GET /v1/runtimes`
 
-`{items: [{machine, runtime, capabilities}], sources, complete}`. Consult this
-before relying on a capability — a driver that cannot do something says so here
-rather than failing at the call.
+`{items: [{machine, runtime, status, capabilities}], sources, complete}`. Consult
+this before relying on a capability — a driver that cannot do something says so
+here rather than failing at the call.
+
+A runtime the operator enabled is listed **even when it has no working driver**
+(#297). Its row has `status: "unavailable"`, a `cause` (`not-installed`,
+`not-executable`, `probe-timeout`, `probe-failed` or `start-failed` — an open
+set, so treat one you do not know as "unavailable, reason unstated") and a
+`reason` sentence; its `capabilities` are the unconfirmed floor
+(`source: "assumed"`) and describe nothing the runtime can do. A row with **no**
+`status` comes from a build that predates the field and is available.
+`probe-timeout` is retried in the background until the runtime answers, and the
+row then becomes `available` with no restart; every other cause waits for
+somebody to change something. A create naming such a runtime answers
+`reason: "runtime-unavailable"` — 504 and `retryable: true` while it is being
+retried, 501 otherwise — and not the 404 an id nobody enabled gets.
+
+The same runtime is not hidden elsewhere (#300). `GET /v1/health`'s `drivers`
+lists it with the same `status`, `cause` and `reason`. While it is being
+retried, `GET /v1/sessions` adds a `degraded` source for this machine whose
+`error` names the runtime — its sessions are not in `items` yet — and
+`complete` is `false` until it registers. A runtime that is not retried (not
+installed, say) adds no such source.
 
 `capabilities.deliveryModules` (#185) lists the optional external delivery
 modules this machine enabled — `name`, `status` (`starting`, `available`,
@@ -850,6 +870,51 @@ Rules that follow from how the row behaves on the one runtime measured:
 `respond` refuses when it sees no prompt it recognises. That refusal is its
 safety property, and it is why raw keys are a separate endpoint rather than a
 flag here.
+
+**A path outside the working directory, under `bypass`** (#298). The runtime asks
+separately before a tool names a path outside the working directory directly, and
+an unattended session would stop there. Inside a sandbox that ask protects
+nothing — the same path reached through a shell is refused by the sandbox and the
+turn goes on — so a `bypass` session's own configuration answers it in advance:
+every path the sandbox opens (the working directory, the session's own directory,
+`readPaths`, `writePaths`, the package cache and the read-only system roots) is
+allowed, and every other path is denied. A deny is an error the model reads and
+the turn continues; the session never reads `waiting_input` for it. Without
+`bypass` nothing changes, and an ask there still reads as blocked, below.
+
+**A tool-permission ask on an opencode session** (#296). A session parked on one
+reads `waiting_input` with `prompt.kind: "tool-permission"`, and answering it is
+the same call, sent to the runtime's own permission-reply endpoint:
+
+```json
+"prompt": { "question": "the runtime is asking permission to use bash: make test",
+            "options": ["Allow once", "Allow always", "Reject"],
+            "kind": "tool-permission", "nonce": "per_…" }
+```
+
+```json
+{ "choice": 1, "nonce": "per_…" }
+```
+
+- **`choice` names the answer**: `1` allow once, `2` allow always (the runtime's
+  own meaning: the patterns the ask offers are approved for the rest of that
+  session), `3` reject. `submitted` means the runtime processed the reply and the
+  turn moves on; a reject ends the turn the way the runtime ends it.
+- **Nothing is answered by default.** `choice: 0` is refused — nothing is
+  highlighted, and the one default available is to run a tool nobody read — as
+  are `cancel` (to dismiss is to reject, which you say with `choice: 3`),
+  `choices` and `text`. A refusal sends nothing.
+- **The nonce is the ask's own id**, which the runtime does not reuse. An answer
+  carrying the nonce of an ask that has since been resolved is refused, never
+  applied to the next ask; so is one that crossed a resolution in flight. Send it
+  always: without it the answer lands on the ask pending at that moment, and the
+  receipt says nothing verified it.
+- **Only this session's ask is ever answered**, and a session with nothing
+  pending is refused rather than queued.
+- **A runtime "question" is not mapped.** A session parked on a structured
+  question answers `respond` with `unsupported` and says why; `interrupt` is how
+  to leave it. A list of asks that could not be read is an error, not a refusal:
+  an unasked question is not the answer "none".
 
 ### `POST …/{id}/keys` — one raw key
 
