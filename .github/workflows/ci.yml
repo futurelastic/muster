@@ -118,7 +118,8 @@ jobs:
   # packages that have a Windows implementation, because a Job Object that
   # compiles and does not contain its tree is the failure this exists to catch.
   # scripts/gate-windows.sh owns the allowlist, the SKIP summary and the
-  # must-pass list, as scripts/gate.sh does for the Linux job.
+  # must-pass list, as scripts/gate.sh does for the Linux job; and
+  # scripts/e2e-windows.ps1 then runs the installed service end to end (#307).
   windows:
     name: Windows platform layer
     runs-on: windows-latest
@@ -134,3 +135,14 @@ jobs:
       - name: gate (scripts/gate-windows.sh)
         shell: bash
         run: ./scripts/gate-windows.sh
+
+      # The pieces together (#307): build the windows release, assemble and
+      # install the npm packages, enrol a principal, run doctor, start the
+      # service (through its scheduled task when the runner allows it, and the
+      # output says which), then create / get / close a session and assert
+      # nothing is left running. The script owns what it asserts; its Done-when
+      # is in #307. The unit-level Windows behaviour is the gate above.
+      - name: end to end (scripts/e2e-windows.ps1)
+        shell: pwsh
+        timeout-minutes: 25
+        run: ./scripts/e2e-windows.ps1

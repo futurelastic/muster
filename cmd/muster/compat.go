@@ -59,6 +59,10 @@ func runCompat(args []string, getenv func(string) string, stdout, stderr io.Writ
 	if len(args) == 0 || args[0] != "compat" {
 		return false, 0
 	}
+	if why := compatRefusal(hostOS()); why != "" {
+		fmt.Fprintf(stderr, "muster compat: %s\n", why)
+		return true, 2
+	}
 	// A panic anywhere below has already run the harness's teardown while
 	// unwinding (it is deferred), so all that is left to do is say so and exit
 	// with "could not certify" rather than a stack trace and an ambiguous code.

@@ -21,9 +21,15 @@
 #             `--version` with something other than the tag it is published
 #             under — the one check a downloader can make.
 #
-# Output files are named muster-<version>-<os>-<arch>. The name is part of the
-# contract: SHA256SUMS lists these exact names, so `shasum -a 256 -c` run next
-# to a downloaded file verifies it without anyone renaming anything.
+# Output files are named muster-<version>-<os>-<arch>, with ".exe" appended for
+# windows. The name is part of the contract: SHA256SUMS lists these exact names,
+# so `shasum -a 256 -c` run next to a downloaded file verifies it without
+# anyone renaming anything.
+#
+# The windows binaries are built on every run but are not published to npm
+# (scripts/assemble-npm.mjs leaves them out unless told otherwise): they are
+# there so the Windows end-to-end job (scripts/e2e-windows.ps1) installs what the
+# release would build, and so their promotion later is a one-line change.
 set -eu
 
 if [ $# -lt 1 ] || [ $# -gt 2 ]; then
@@ -52,10 +58,12 @@ mkdir -p "$OUTDIR"
 OUTDIR=$(cd "$OUTDIR" && pwd)
 rm -f "$OUTDIR"/muster-"$VERSION"-* "$OUTDIR"/SHA256SUMS
 
-for target in darwin/arm64 darwin/amd64 linux/amd64 linux/arm64; do
+for target in darwin/arm64 darwin/amd64 linux/amd64 linux/arm64 windows/amd64 windows/arm64; do
 	os=${target%/*}
 	arch=${target#*/}
-	out="$OUTDIR/muster-${VERSION}-${os}-${arch}"
+	ext=""
+	[ "$os" = windows ] && ext=".exe"
+	out="$OUTDIR/muster-${VERSION}-${os}-${arch}${ext}"
 	echo "build-release: ${os}/${arch} -> $(basename "$out")"
 	# CGO_ENABLED=0: the service is standard-library only, and a static binary
 	# runs on a Linux host whatever libc it has. -trimpath keeps the builder's

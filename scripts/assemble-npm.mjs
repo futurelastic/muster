@@ -1,13 +1,19 @@
 #!/usr/bin/env node
 // Assemble the five npm packages for a release (#243).
 //
-//   node scripts/assemble-npm.mjs BINDIR TAG OUTDIR
+//   node scripts/assemble-npm.mjs [--all] BINDIR TAG OUTDIR
 //
-//   BINDIR  where scripts/build-release.sh put muster-<TAG>-<os>-<arch>.
+//   --all   also assemble the platforms marked published:false (windows). They
+//           are built by every release but not published: this flag is how the
+//           Windows end-to-end job installs them, and how a later release
+//           promotes them. Without it they are neither assembled, nor in
+//           PUBLISH_ORDER, nor in the launcher's optionalDependencies.
+//   BINDIR  where scripts/build-release.sh put muster-<TAG>-<os>-<arch>[.exe].
 //   TAG     the release tag, v<digit>...; the npm version is the tag without
-//           the leading "v", and is the SAME for all five packages.
+//           the leading "v", and is the SAME for every package.
 //   OUTDIR  receives one directory per package, ready for `npm publish`:
-//             muster-<os>-<cpu>/   the four platform packages
+//             muster-<os>-<cpu>/   the platform packages (os is npm's
+//                                  process.platform: darwin, linux, win32)
 //             muster/              the launcher
 //           and a PUBLISH_ORDER file: platform packages first, launcher last,
 //           so the launcher never points at a version that does not exist yet.
@@ -18,12 +24,20 @@ import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, r
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// Go GOOS/GOARCH -> npm os/cpu. The package suffix is npm's vocabulary.
+// Go GOOS/GOARCH -> npm os/cpu. The package suffix is npm's vocabulary, i.e.
+// process.platform-process.arch, which is how the launcher finds its binary:
+// windows is `win32`, not `windows`.
+//
+// published:false marks a platform that is built and can be assembled, but is
+// not part of a normal release (see --all above). `ext` is the binary's suffix,
+// both in the build output name and inside the package.
 export const PLATFORMS = [
-  { goos: 'darwin', goarch: 'arm64', os: 'darwin', cpu: 'arm64' },
-  { goos: 'darwin', goarch: 'amd64', os: 'darwin', cpu: 'x64' },
-  { goos: 'linux', goarch: 'amd64', os: 'linux', cpu: 'x64' },
-  { goos: 'linux', goarch: 'arm64', os: 'linux', cpu: 'arm64' },
+  { goos: 'darwin', goarch: 'arm64', os: 'darwin', cpu: 'arm64', ext: '', published: true },
+  { goos: 'darwin', goarch: 'amd64', os: 'darwin', cpu: 'x64', ext: '', published: true },
+  { goos: 'linux', goarch: 'amd64', os: 'linux', cpu: 'x64', ext: '', published: true },
+  { goos: 'linux', goarch: 'arm64', os: 'linux', cpu: 'arm64', ext: '', published: true },
+  { goos: 'windows', goarch: 'amd64', os: 'win32', cpu: 'x64', ext: '.exe', published: false },
+  { goos: 'windows', goarch: 'arm64', os: 'win32', cpu: 'arm64', ext: '.exe', published: false },
 ];
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -39,7 +53,7 @@ export function distTag(version) {
   return version.includes('-') ? 'next' : 'latest';
 }
 
-export function assemble(binDir, tag, outDir) {
+export function assemble(binDir, tag, outDir, { all = false } = {}) {
   const version = versionFromTag(tag);
   rmSync(outDir, { recursive: true, force: true });
   mkdirSync(outDir, { recursive: true });
@@ -47,14 +61,17 @@ export function assemble(binDir, tag, outDir) {
   const optional = {};
 
   for (const p of PLATFORMS) {
+    if (!p.published && !all) continue;
     const suffix = `${p.os}-${p.cpu}`;
-    const src = join(binDir, `muster-${tag}-${p.goos}-${p.goarch}`);
+    const binName = `muster${p.ext}`;
+    const src = join(binDir, `muster-${tag}-${p.goos}-${p.goarch}${p.ext}`);
     if (!existsSync(src)) throw new Error(`missing binary ${src}`);
     const dir = join(outDir, `muster-${suffix}`);
     mkdirSync(join(dir, 'bin'), { recursive: true });
-    copyFileSync(src, join(dir, 'bin', 'muster'));
-    chmodSync(join(dir, 'bin', 'muster'), 0o755);
-    const fill = (s) => s.replaceAll('@PLATFORM@', suffix).replaceAll('@OS@', p.os).replaceAll('@CPU@', p.cpu);
+    copyFileSync(src, join(dir, 'bin', binName));
+    chmodSync(join(dir, 'bin', binName), 0o755);
+    const fill = (s) => s
+      .replaceAll('@PLATFORM@', suffix).replaceAll('@OS@', p.os).replaceAll('@CPU@', p.cpu).replaceAll('@BIN@', binName);
     const manifest = JSON.parse(fill(readFileSync(join(root, 'npm/platform/package.json'), 'utf8')));
     manifest.version = version;
     writeFileSync(join(dir, 'package.json'), JSON.stringify(manifest, null, 2) + '\n');
@@ -80,12 +97,15 @@ export function assemble(binDir, tag, outDir) {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  if (process.argv.length !== 5) {
-    console.error('usage: node scripts/assemble-npm.mjs BINDIR TAG OUTDIR');
+  const rest = process.argv.slice(2);
+  const all = rest.includes('--all');
+  const args = rest.filter((a) => a !== '--all');
+  if (args.length !== 3) {
+    console.error('usage: node scripts/assemble-npm.mjs [--all] BINDIR TAG OUTDIR');
     process.exit(2);
   }
   try {
-    const { version, order } = assemble(resolve(process.argv[2]), process.argv[3], resolve(process.argv[4]));
+    const { version, order } = assemble(resolve(args[0]), args[1], resolve(args[2]), { all });
     console.log(`assemble-npm: ${version} (dist-tag ${distTag(version)}): ${order.join(', ')}`);
   } catch (err) {
     console.error(`assemble-npm: ${err.message}`);
