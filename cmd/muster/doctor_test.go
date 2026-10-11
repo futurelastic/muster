@@ -9,9 +9,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/futurelastic/muster/internal/privfs"
 )
 
 // --- helpers ------------------------------------------------------------------
@@ -80,6 +83,7 @@ func runDoctorTest(vars map[string]string, args ...string) (code int, stdout, st
 
 func executable(t *testing.T, dir string) string {
 	t.Helper()
+	skipOnWindows(t, "the doctor's tmux row reads a POSIX execute bit that Windows does not report")
 	p := filepath.Join(dir, "fake-tmux")
 	if err := os.WriteFile(p, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
@@ -257,36 +261,70 @@ func TestDoctorModeClass(t *testing.T) {
 	}
 }
 
+// The state.dir row answers "is this directory writable and private to its
+// owner" with the platform's own vocabulary: a POSIX mode and access(2) on
+// Unix, the directory's access list (privfs.Check) elsewhere. The rows that do
+// not depend on that vocabulary run everywhere; the rest are written twice, so
+// neither platform's answer is asserted through the other's mechanism.
 func TestDoctorStateDir(t *testing.T) {
 	root := t.TempDir()
-	mk := func(name string, mode os.FileMode) string {
-		p := filepath.Join(root, name)
-		if err := os.Mkdir(p, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chmod(p, mode); err != nil {
-			t.Fatal(err)
-		}
-		return p
-	}
 	file := filepath.Join(root, "file")
 	if err := os.WriteFile(file, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cases := []struct {
+	type stateCase struct {
 		name     string
 		dir      string
 		want     rowStatus
 		needUser bool
-	}{
+	}
+	cases := []stateCase{
 		{"unset", "", statusWarn, false},
 		{"a file", file, statusFail, false},
-		{"not writable", mk("ro", 0o500), statusFail, true},
-		{"too open", mk("open", 0o755), statusWarn, false},
-		{"0700", mk("good", 0o700), statusPass, false},
 		{"not yet created", filepath.Join(root, "later", "state"), statusPass, false},
 	}
-	t.Cleanup(func() { _ = os.Chmod(filepath.Join(root, "ro"), 0o700) })
+	if runtime.GOOS != "windows" {
+		mk := func(name string, mode os.FileMode) string {
+			p := filepath.Join(root, name)
+			if err := os.Mkdir(p, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(p, mode); err != nil {
+				t.Fatal(err)
+			}
+			return p
+		}
+		cases = append(cases,
+			stateCase{"not writable", mk("ro", 0o500), statusFail, true},
+			stateCase{"too open", mk("open", 0o755), statusWarn, false},
+			stateCase{"0700", mk("good", 0o700), statusPass, false},
+		)
+		t.Cleanup(func() { _ = os.Chmod(filepath.Join(root, "ro"), 0o700) })
+	} else {
+		// Created the way the service creates it: the owner-only protected list
+		// applied at creation, which the row must read back as a pass.
+		good := filepath.Join(root, "good")
+		if err := privfs.MkdirAll(good); err != nil {
+			t.Fatal(err)
+		}
+		cases = append(cases, stateCase{"owner-only list", good, statusPass, false})
+		// Created the ordinary way, it inherits the parent's list. Whether that
+		// list names anyone else depends on the account and the runner's
+		// temporary directory, so the expected row is whatever privfs reads —
+		// and a list that happens to be owner-only already proves nothing.
+		open := filepath.Join(root, "open")
+		if err := os.Mkdir(open, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		switch rep := privfs.Check(open); rep.Verdict {
+		case privfs.Loose:
+			cases = append(cases, stateCase{"inherited list names someone else", open, statusWarn, false})
+		case privfs.Unknown:
+			cases = append(cases, stateCase{"inherited list unreadable", open, statusUnknown, false})
+		default:
+			t.Logf("the runner's temporary directory is already owner-only; the inherited-list row is not exercised (windows, #303)")
+		}
+	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.needUser && os.Geteuid() == 0 {

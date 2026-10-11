@@ -29,6 +29,7 @@ ALLOW=(
 	./internal/drivers/opencode
 	./internal/privfs
 	./internal/state
+	./cmd/muster
 )
 
 MUST_PASS=(
@@ -48,6 +49,14 @@ MUST_PASS=(
 	TestIsolation_RuntimePathReachesTheSession
 	TestSandboxRefusedOnAHostWithoutTheMechanism
 	TestCreatedFileHasOwnerOnlyProtectedDACL
+	TestSaveThenLoadRoundTrips
+	TestStoreDirectoryAndDocumentAreOwnerOnly
+	TestCorruptDocumentIsReportedAndNeverReplaced
+	TestDoctorStateDir
+	TestGrantWritesADatedBackupOfTheOriginal
+	TestEnrolAddWritesAnOwnerOnlyTokenFileAndTheMatchingPrincipal
+	TestEnrolRefusalsWriteNothing
+	TestRunPrincipalAddAndListThroughTheCommandLine
 )
 
 echo "== go build =="

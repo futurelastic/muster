@@ -96,6 +96,7 @@ func (s npxShim) calls(t *testing.T) []string {
 
 func npxRequireSh(t *testing.T) {
 	t.Helper()
+	skipOnWindows(t, "the npx source path is exercised through POSIX shell shims")
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh is not on PATH")
 	}

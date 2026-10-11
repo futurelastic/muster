@@ -80,7 +80,12 @@ list — never a pass it did not earn.
   it asks only for a regular, non-symlink file and **does not check who can
   write it** — a follow-up (read the file's list, as `privfs.Check` does).
 - The Windows CI job runs an allowlist (`scripts/gate-windows.sh`: procgroup,
-  privfs, the subprocess driver, modclient, state), prints every skip, and fails
-  if a named must-run test did not PASS. Widening it is a follow-up.
+  privfs, the subprocess driver, modclient, state, and `cmd/muster` since #311),
+  prints every skip, and fails if a named must-run test did not PASS. Widening
+  it further is a follow-up. In `cmd/muster` the tests that cover a Unix tool
+  (the shell installer scripts, the git hook row, the POSIX execute bit the tmux
+  row reads) skip with a message ending `(windows, #303)`; the state-directory
+  row, the grant-edit backup and principal enrolment run there and assert
+  through `privfs.Check`.
 - The sandbox remains macOS-only; the opencode tests that cover its profile
   skip on Windows with a message ending `(windows, #303)`.
