@@ -42,6 +42,30 @@ var ErrUnsupported = errors.New("driver: capability not supported")
 // was empty, which is a different fact and now has a different error.
 var ErrNotReady = errors.New("driver: capability not available yet")
 
+// UnavailableError is what a runtime's constructor returns when the operator
+// enabled the runtime and it cannot be started: the binary is missing, it
+// cannot be run, or its probe did not answer in time (muster #297).
+//
+// It exists so the caller can tell "try again" from "somebody must change
+// something" without parsing a message: Cause carries the answer and
+// Retryable states what to do about it.
+type UnavailableError struct {
+	Cause fleet.UnavailableCause
+	Err   error
+}
+
+func (e *UnavailableError) Error() string {
+	if e.Err == nil {
+		return "driver: runtime unavailable (" + string(e.Cause) + ")"
+	}
+	return e.Err.Error()
+}
+
+func (e *UnavailableError) Unwrap() error { return e.Err }
+
+// Retryable reports whether trying again, unchanged, can succeed.
+func (e *UnavailableError) Retryable() bool { return e.Cause.Retryable() }
+
 // SendOptions carries the optional fields of a Send call (the wire body's
 // "submit", api-http.md §3.3).
 type SendOptions struct {

@@ -434,6 +434,13 @@ func (d *Driver) RefreshCapabilities(ctx context.Context, req fleet.Request) err
 		if ri.Machine != d.machine {
 			continue
 		}
+		if !ri.Available() {
+			// An enabled runtime on the peer that has no working driver
+			// there (muster #297). Its capabilities are a floor nobody
+			// confirmed, and adopting them would describe a runtime this
+			// driver can never use; the next row may be the one that works.
+			continue
+		}
 		d.mu.Lock()
 		// Adopt what the peer said about itself, then stamp WHEN we heard
 		// it — the peer's own timestamp would be on the peer's clock (§11),

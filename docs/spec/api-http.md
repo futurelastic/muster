@@ -45,8 +45,8 @@ served, and the federated ones have been exercised peer to peer.
 | `unauthorized` | 401 / 403 | Caller not permitted for this verb on this machine |
 | `not_found` | 404 | The machine answered, and there is no such session |
 | `conflict` | 409 | Idempotency key reused with a different body; a replayed key whose session has since ended (`reason: "replay-of-ended-session"`, §3.3); or a destructive request whose `startedAt` disagrees with the live session (§5.4) — the request is well formed, the caller's belief is stale |
-| `unsupported` | 501 | Driver lacks the capability (§4.3 of the model) |
-| `unreachable` | 504 | **The machine did not answer.** Nothing is known. |
+| `unsupported` | 501 | Driver lacks the capability (§4.3 of the model); or a runtime this machine's operator enabled has no working driver and no retry under way (`reason: "runtime-unavailable"`, §3.1) |
+| `unreachable` | 504 | **The machine did not answer.** Nothing is known. Also a runtime that is enabled and still being retried (`reason: "runtime-unavailable"`, `retryable: true`, §3.1) |
 
 **`not_found` and `unreachable` must never be conflated.** One means the fleet
 knows the session does not exist; the other means the fleet knows nothing at
@@ -54,13 +54,18 @@ all. This is §5.7 expressed at the wire, and it is the single most important
 line in this document: a client that treats 504 as 404 will confidently report
 work as gone while it is running fine on an unreachable host.
 
-**`reason` further classifies some `conflict` bodies beyond what `kind` alone
+**`reason` further classifies some bodies beyond what `kind` alone
 distinguishes**, so a caller can branch without parsing `message`. Absent
-unless a case documents one — today the only one is `create`'s own
-`replay-of-ended-session` (§3.3), which also carries `session` (the ended
-session's own ref) and `closedAt` (when this machine observed the absence, an
-upper bound on the true end — the same rule `GET .../sessions/closed`'s own
-`closedAt` follows for a `ClosedByAbsent` tombstone, §3.2).
+unless a case documents one. Two cases do today:
+
+- `replay-of-ended-session` on a `conflict` — `create`'s own (§3.3). It also
+  carries `session` (the ended session's own ref) and `closedAt` (when this
+  machine observed the absence, an upper bound on the true end — the same rule
+  `GET .../sessions/closed`'s own `closedAt` follows for a `ClosedByAbsent`
+  tombstone, §3.2).
+- `runtime-unavailable` on an `unreachable` or an `unsupported` (muster #297)
+  — a call named, or was routed to, a runtime the operator enabled and that has
+  no working driver at this moment. See §3.1 for which kind carries it and why.
 
 **An id that is a live session's conversation id (muster #268).** `{id}` is
 always this service's session `id`; a session's *conversation* id (the runtime's
@@ -121,6 +126,7 @@ GET /v1/machines[?verify=1]
 
 GET /v1/runtimes
 → 200 { "items": [ { "machine": "...", "runtime": "...",
+                     "status": "available",
                      "capabilities": { "observesState": true,
                                        "deliversRawKeys": true,
                                        "confirmsDelivery": true,
@@ -138,7 +144,13 @@ GET /v1/runtimes
                                        "remoteControl": { "toggle": true,
                                                           "off": true },
                                        "source": "observed",
-                                       "observedAt": "..." } } ],
+                                       "observedAt": "..." } },
+                   { "machine": "...", "runtime": "...",         ← enabled, no working driver
+                     "status": "unavailable",
+                     "cause": "probe-timeout",
+                     "reason": "the ... runtime is enabled, but its version check did not answer in time; retrying in the background (attempt 3 failed)",
+                     "capabilities": { "deadlineMs": 30000,
+                                       "source": "assumed" } } ],
         "sources": [...], "complete": true }
 
 GET /v1/whoami[?machine=<id>][&peer=<id>]
@@ -170,6 +182,43 @@ acceptable because the answer is a report and grants nothing.
 
 Clients **must** consult `/v1/runtimes` before relying on a capability, and
 degrade rather than assume. A driver never emulates (§5.6).
+
+**A runtime the operator enabled is listed even when it has no working
+driver** (muster #297). It used to be omitted — a runtime whose version check
+was killed by its own deadline, on a machine busy restarting, simply was not
+there until the next restart, and from outside that read exactly like a
+runtime nobody had ever configured. Now:
+
+- `status` is `available` or `unavailable`. A row from a build that predates
+  the field has no `status`, and **an absent `status` means available**: such a
+  build only listed runtimes with a working driver.
+- An `unavailable` row also carries `cause` and `reason`. `cause` is one of
+  `not-installed` (the runtime's binary was not found), `not-executable` (it is
+  there and cannot be run), `probe-timeout` (its version check did not answer
+  within its deadline), `probe-failed` (the check ran and failed some other
+  way), `start-failed` (the runtime was refused for a reason that is not its
+  binary: its configuration, or the platform). **The set is open on read:** a
+  client must treat a `cause` it does not know as "unavailable, reason
+  unstated". `reason` is a sentence for people and never carries a path.
+- **Only `probe-timeout` is retried.** The service tries again in the
+  background, with a doubling wait, without an attempt limit; when the check
+  answers, the runtime is registered and its row becomes `available` — no
+  restart. Every other cause waits for somebody to change something, and the
+  row stays until the service restarts.
+- An unavailable row's `capabilities` are the conservative floor — every flag
+  false, `source: "assumed"`, the deadline its driver will declare. They
+  describe nothing the runtime can do; do not act on them.
+- **Row order is part of the contract:** rows for runtimes with a working
+  driver come first, then unavailable rows, then peer rows. A reader that takes
+  the first row for a machine — an older peer driver does — therefore never
+  takes an unavailable one.
+
+**A call that names, or is routed to, an unavailable runtime says so**,
+instead of the `not_found "unknown runtime"` an id nobody enabled gets. The
+error carries `reason: "runtime-unavailable"`: `unreachable` (504) with
+`retryable: true` while the runtime is being retried — nothing is known yet,
+ask again — and `unsupported` (501) with `retryable: false` for a cause that
+needs somebody's hands. The runtime's `cause` is on `GET /v1/runtimes`.
 
 **`deliversToInbox` is how an operator confirms muster #119's inbox
 delivery path is actually live on a machine, without inferring it from a
@@ -1364,7 +1413,14 @@ runtime existed to register.
 
 **Omitted with more than one local runtime registered** resolves
 existence-first, THEN a configured default as tiebreak
-(session-abstraction.md §7.1a, muster issue #60):
+(session-abstraction.md §7.1a, muster issue #60). A runtime the operator
+enabled that is still being retried (§3.1, muster #297) counts as one of those
+runtimes while it is: it cannot be asked and cannot be routed to yet, but
+routing as if it did not exist would send a create to whichever runtime happens
+to be up, and move a bare id's answer the moment the late runtime registers.
+It cannot confirm absence, so an id no other runtime holds is `invalid` (400)
+naming it; a create whose configured default is that runtime is
+`runtime-unavailable` (§3.1).
 
 - a nonempty `id` (every endpoint but `create`) is checked against every
   registered runtime's own record of what it has ever had. Exactly one

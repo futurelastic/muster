@@ -2361,7 +2361,12 @@ fail, so three guardrails govern it:
 
 1. **A default naming an unregistered runtime fails at startup**, never on
    the first request that needs it. Otherwise a typo becomes a fleet-wide
-   `not_found` indistinguishable from every session having vanished.
+   `not_found` indistinguishable from every session having vanished. A
+   runtime the operator enabled whose driver is merely late — its version
+   check did not answer in time and is being retried — is accepted as a
+   default: refusing it would make a slow check at startup fatal to the whole
+   service. One that needs somebody's hands (not installed, not executable) is
+   refused like a typo.
 2. **Resolving via the default is visible in the response**, not only in a
    log. A caller that named its own runtime and a caller that received the
    default are in different epistemic positions, and §5.7 already forbids
@@ -2381,7 +2386,9 @@ fail, so three guardrails govern it:
    - the check cannot be completed for every driver (one errors for a
      reason other than "never had this id") and nothing else affirms the id
      → refused rather than guessed, for the same reason as the case above:
-     an unreachable driver might be the one that actually holds it.
+     an unreachable driver might be the one that actually holds it. An
+     enabled runtime that has no driver yet but is being retried (muster
+     #297) is in this set by construction — it cannot be asked.
    - every driver affirmatively confirms absence → a genuine miss, the same
      shape `create`'s own ambiguous case has (there is equally nothing to
      route TO) — only here does the configured default apply.

@@ -85,7 +85,7 @@ every configured peer, exactly one hop — peers never recurse.
 | `GET` | `/v1/health` | Build stamp, uptime, drivers, current event cursor | — ⚠️ | no |
 | `GET` | `/v1/machines` | Known machines and whether they answered | — ⚠️ | always |
 | `GET` | `/v1/whoami` | What the presented credential may do | none — authentication only | no |
-| `GET` | `/v1/runtimes` | Drivers present and the capabilities they declare | — ⚠️ | always |
+| `GET` | `/v1/runtimes` | Drivers present (and enabled runtimes that are not usable, with why) and the capabilities they declare | — ⚠️ | always |
 | `GET` | `/v1/sessions` | List sessions, filtered | — ⚠️ | `scope` |
 | `GET` | `/v1/sessions/closed` | Sessions that ended within the retention window | — ⚠️ | `scope` |
 | `GET` | `/v1/sessions/watch` | Long-poll the event feed | — ⚠️ | `scope` |
@@ -187,9 +187,22 @@ absent key means an older build, never "not listed".
 
 ### `GET /v1/runtimes`
 
-`{items: [{machine, runtime, capabilities}], sources, complete}`. Consult this
-before relying on a capability — a driver that cannot do something says so here
-rather than failing at the call.
+`{items: [{machine, runtime, status, capabilities}], sources, complete}`. Consult
+this before relying on a capability — a driver that cannot do something says so
+here rather than failing at the call.
+
+A runtime the operator enabled is listed **even when it has no working driver**
+(#297). Its row has `status: "unavailable"`, a `cause` (`not-installed`,
+`not-executable`, `probe-timeout`, `probe-failed` or `start-failed` — an open
+set, so treat one you do not know as "unavailable, reason unstated") and a
+`reason` sentence; its `capabilities` are the unconfirmed floor
+(`source: "assumed"`) and describe nothing the runtime can do. A row with **no**
+`status` comes from a build that predates the field and is available.
+`probe-timeout` is retried in the background until the runtime answers, and the
+row then becomes `available` with no restart; every other cause waits for
+somebody to change something. A create naming such a runtime answers
+`reason: "runtime-unavailable"` — 504 and `retryable: true` while it is being
+retried, 501 otherwise — and not the 404 an id nobody enabled gets.
 
 `capabilities.deliveryModules` (#185) lists the optional external delivery
 modules this machine enabled — `name`, `status` (`starting`, `available`,
