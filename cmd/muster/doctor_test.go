@@ -96,8 +96,8 @@ func executable(t *testing.T, dir string) string {
 }
 
 // execBitRowsSkipOnWindows skips a case that asserts a row which judges a POSIX
-// execute bit. The row itself is a separate, known gap (see the issue filed for
-// #311); the skip says so in the gate's summary instead of hiding it.
+// execute bit. The row itself is a separate, known gap (#312); the skip says so
+// in the gate's summary instead of hiding it.
 func execBitRowsSkipOnWindows(t *testing.T) {
 	t.Helper()
 	skipOnWindows(t, "the row judges a POSIX execute bit, which Windows does not report")
