@@ -31,9 +31,14 @@
 //	                       to over HTTP. Additive, not a replacement for
 //	                       FLEET_RUNTIME — a machine may run both at once,
 //	                       which is the whole proof #55 exists to make.
-//	                       Absence of the opencode binary on this machine
-//	                       is logged and skipped, never fatal: this is an
-//	                       optional runtime, unlike FLEET_RUNTIME's tmux.
+//	                       A binary that is absent, or that does not answer
+//	                       its version check in time, never stops the
+//	                       service: this is an optional runtime, unlike
+//	                       FLEET_RUNTIME's tmux. The runtime is listed on
+//	                       GET /v1/runtimes as unavailable, with the reason
+//	                       (muster #297), and a version check that merely
+//	                       timed out is retried in the background until it
+//	                       answers.
 //	FLEET_OPENCODE_BIN     path to the opencode binary. Defaults to
 //	                       "opencode" on PATH.
 //	FLEET_OPENCODE_PATH    comma-separated absolute directories added to the
@@ -263,6 +268,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -276,6 +282,12 @@ import (
 	"github.com/futurelastic/muster/internal/sessionenv"
 	"github.com/futurelastic/muster/internal/state"
 )
+
+// retryProbeTimeout bounds the opencode version check on every retry after the
+// first (muster #297). The first try gates startup and keeps the driver's own
+// short default; a retry exists because that was too short for a busy machine,
+// and nothing waits on it.
+const retryProbeTimeout = 30 * time.Second
 
 func main() {
 	args := os.Args[1:]
@@ -609,34 +621,53 @@ func main() {
 	// opencode.Probe's own "absent install is a first-class answer, not a
 	// startup crash" contract, discharged at the one place that decides
 	// what to do about it.
-	var opencodeDriver *opencode.Driver
+	//
+	// "Skipped" no longer means "gone" (muster #297). A runtime the operator
+	// enabled is recorded as unavailable with the reason and listed on
+	// GET /v1/runtimes; and a probe that merely did not answer in time — the
+	// machine was busy — is retried in the background and registered when it
+	// does, instead of staying out until the next restart.
+	var opencodeDriver atomic.Pointer[opencode.Driver]
+	stopOpencode := func() {}
 	if getenv("FLEET_RUNTIME_OPENCODE", "") == "1" {
 		bin := os.Getenv("FLEET_OPENCODE_BIN")
-		// muster #280: opencode sessions run in a process of their own with a
-		// BUILT environment. The machine's sessionEnv reaches them too, and
-		// FLEET_OPENCODE_PATH (comma-separated, absolute, none under the
-		// service user's home) adds directories to the PATH they get, ahead of
-		// the system ones.
-		d, err := opencode.New(context.Background(), self,
-			opencode.WithBinary(bin),
-			opencode.WithSessionEnv(sessionEnvEntries),
-			// muster #282: with a state directory, opencode sessions survive a
-			// restart of this service; without one they are forgotten, as before.
-			opencode.WithStateDir(os.Getenv("FLEET_STATE_DIR")),
-			opencode.WithRuntimePath(splitList(os.Getenv("FLEET_OPENCODE_PATH"))),
-			opencode.WithSandboxReadPaths(splitList(os.Getenv("FLEET_OPENCODE_SANDBOX_READ"))),
-			// muster #293: which providers a session may use. Unset keeps the
-			// runtime's built-in hosted provider off.
-			opencode.WithProviders(splitList(os.Getenv("FLEET_OPENCODE_PROVIDERS"))))
-		if err != nil {
-			log.Printf("muster: opencode runtime not started, continuing without it: %v", err)
-		} else if err := svc.RegisterLocalDriver(opencode.DefaultRuntime, d); err != nil {
-			log.Printf("muster: registering opencode runtime: %v", err)
-			_ = d.Shutdown()
-		} else {
-			opencodeDriver = d
-			log.Printf("muster: opencode runtime registered (#55)")
-		}
+		stopOpencode = svc.StartOptionalRuntime(context.Background(), service.OptionalRuntime{
+			Runtime:    opencode.DefaultRuntime,
+			DeadlineMs: opencode.DefaultDeadlineMs,
+			Build: func(ctx context.Context, attempt int) (driver.Driver, error) {
+				opts := []opencode.Option{
+					opencode.WithBinary(bin),
+					// muster #280: opencode sessions run in a process of their own with a
+					// BUILT environment. The machine's sessionEnv reaches them too, and
+					// FLEET_OPENCODE_PATH (comma-separated, absolute, none under the
+					// service user's home) adds directories to the PATH they get, ahead of
+					// the system ones.
+					opencode.WithSessionEnv(sessionEnvEntries),
+					// muster #282: with a state directory, opencode sessions survive a
+					// restart of this service; without one they are forgotten, as before.
+					opencode.WithStateDir(os.Getenv("FLEET_STATE_DIR")),
+					opencode.WithRuntimePath(splitList(os.Getenv("FLEET_OPENCODE_PATH"))),
+					opencode.WithSandboxReadPaths(splitList(os.Getenv("FLEET_OPENCODE_SANDBOX_READ"))),
+					// muster #293: which providers a session may use. Unset keeps the
+					// runtime's built-in hosted provider off.
+					opencode.WithProviders(splitList(os.Getenv("FLEET_OPENCODE_PROVIDERS"))),
+				}
+				if attempt > 0 {
+					// The first try gates startup, so it is short. The retries
+					// gate nothing, and the reason they exist is a binary that
+					// was too slow: give it the time a loaded machine needs.
+					opts = append(opts, opencode.WithProbeTimeout(retryProbeTimeout))
+				}
+				d, err := opencode.New(ctx, self, opts...)
+				if err != nil {
+					return nil, err
+				}
+				// Held before it is registered, so the shutdown below can stop
+				// it however registration goes.
+				opencodeDriver.Store(d)
+				return d, nil
+			},
+		})
 	}
 
 	// The bare-id tiebreak once a second local driver is registered
@@ -887,8 +918,11 @@ func main() {
 
 	// This process spawned an opencode server for each live session (#280);
 	// nothing else will stop them.
-	if opencodeDriver != nil {
-		if err := opencodeDriver.Shutdown(); err != nil {
+	// Stop the background registration first: after it returns nothing more
+	// is registered, so the driver held below is the last one there will be.
+	stopOpencode()
+	if d := opencodeDriver.Load(); d != nil {
+		if err := d.Shutdown(); err != nil {
 			log.Printf("muster: stopping opencode server: %v", err)
 		}
 	}

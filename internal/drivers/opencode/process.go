@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -19,6 +20,11 @@ import (
 
 	fleet "github.com/futurelastic/muster"
 )
+
+// defaultProbeTimeout bounds `opencode --version`. It is the bound on a
+// STARTUP step, so it is short; a runtime that misses it is not dropped (muster
+// #297) — the service tries again, with a longer bound, in the background.
+const defaultProbeTimeout = 5 * time.Second
 
 // Availability is what a Probe-style check reports about the local
 // opencode install, established WITHOUT starting a server and WITHOUT
@@ -34,8 +40,40 @@ type Availability struct {
 	Path string
 	// Version is `opencode --version`'s trimmed output, best effort.
 	Version string
+	// Cause classifies Err (muster #297). Empty when Installed is true.
+	Cause fleet.UnavailableCause
 	// Err explains why Installed is false. Nil when Installed is true.
 	Err error
+}
+
+// Locate resolves bin (empty means the default, "opencode" on PATH) WITHOUT
+// running it, and classifies a failure: not found is "not installed", found
+// but not runnable is "not executable". It is the half of Probe that needs no
+// process, so a caller that must not execute anything — the doctor — asks the
+// same question Probe's first step asks and cannot disagree with it.
+func Locate(bin string) (path string, cause fleet.UnavailableCause, err error) {
+	if bin == "" {
+		bin = defaultBin
+	}
+	path, err = exec.LookPath(bin)
+	if err == nil {
+		return path, "", nil
+	}
+	return "", classifyStartError(err, fleet.CauseProbeFailed), fmt.Errorf("opencode: %q not found on PATH: %w", bin, err)
+}
+
+// classifyStartError reads why a binary could not be found or started. Not
+// found is "not installed"; present but refused by the operating system —
+// permissions, a file that is not an executable — is "not executable".
+// fallback is returned for anything else.
+func classifyStartError(err error, fallback fleet.UnavailableCause) fleet.UnavailableCause {
+	switch {
+	case errors.Is(err, exec.ErrNotFound), errors.Is(err, fs.ErrNotExist):
+		return fleet.CauseNotInstalled
+	case errors.Is(err, fs.ErrPermission), errors.Is(err, syscall.ENOEXEC):
+		return fleet.CauseNotExecutable
+	}
+	return fallback
 }
 
 // Probe reports whether opencode can be found and run on this machine.
@@ -43,18 +81,27 @@ type Availability struct {
 // default. It never starts a server and never touches a working
 // directory — the two things #55 flagged as not this check's business.
 func Probe(ctx context.Context, bin string) Availability {
-	if bin == "" {
-		bin = defaultBin
-	}
-	path, err := exec.LookPath(bin)
+	return probe(ctx, bin, defaultProbeTimeout)
+}
+
+// probe is Probe with the deadline on `--version` made explicit.
+func probe(ctx context.Context, bin string, within time.Duration) Availability {
+	path, cause, err := Locate(bin)
 	if err != nil {
-		return Availability{Err: fmt.Errorf("opencode: %q not found on PATH: %w", bin, err)}
+		return Availability{Cause: cause, Err: err}
 	}
-	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	cctx, cancel := context.WithTimeout(ctx, within)
 	defer cancel()
 	out, err := exec.CommandContext(cctx, path, "--version").Output()
 	if err != nil {
-		return Availability{Path: path, Err: fmt.Errorf("opencode: %q --version failed: %w", path, err)}
+		cause := classifyStartError(err, fleet.CauseProbeFailed)
+		// Our own deadline fired while the caller's context was still live:
+		// the binary did not answer in time, which is a fact about load and
+		// not about the install. Never mistake it for a broken binary.
+		if errors.Is(cctx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+			cause = fleet.CauseProbeTimeout
+		}
+		return Availability{Path: path, Cause: cause, Err: fmt.Errorf("opencode: %q --version failed: %w", path, err)}
 	}
 	return Availability{Installed: true, Path: path, Version: strings.TrimSpace(string(out))}
 }

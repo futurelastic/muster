@@ -587,3 +587,60 @@ func TestDoctorJSONShape(t *testing.T) {
 		t.Fatalf("counts sum to %d, rows are %d", total, len(doc.Rows))
 	}
 }
+
+// muster #297 (o): the runtime.opencode row names what the install can be
+// asked without running it, and never runs the binary.
+func TestDoctorOpencodeRuntimeRow(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "was-run")
+	// A binary that records being executed: the doctor must never do that —
+	// whether it answers in time is the running service's to report.
+	runnable := filepath.Join(dir, "opencode")
+	script := "#!/bin/sh\ntouch " + marker + "\n"
+	if err := os.WriteFile(runnable, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	notRunnable := filepath.Join(dir, "opencode-noexec")
+	if err := os.WriteFile(notRunnable, []byte("#!/bin/sh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tmuxBin := executable(t, dir)
+
+	cases := []struct {
+		name string
+		vars map[string]string
+		path string
+		want rowStatus
+	}{
+		{"not enabled", map[string]string{"FLEET_TMUX_BIN": tmuxBin}, "", statusSkip},
+		{"enabled, absolute path to an executable", map[string]string{
+			"FLEET_TMUX_BIN": tmuxBin, "FLEET_RUNTIME_OPENCODE": "1", "FLEET_OPENCODE_BIN": runnable}, "", statusPass},
+		{"enabled, absolute path that is missing", map[string]string{
+			"FLEET_TMUX_BIN": tmuxBin, "FLEET_RUNTIME_OPENCODE": "1", "FLEET_OPENCODE_BIN": filepath.Join(dir, "nope")}, "", statusFail},
+		{"enabled, a file that cannot be run", map[string]string{
+			"FLEET_TMUX_BIN": tmuxBin, "FLEET_RUNTIME_OPENCODE": "1", "FLEET_OPENCODE_BIN": notRunnable}, "", statusFail},
+		{"enabled, bare name found on this shell's PATH", map[string]string{
+			"FLEET_TMUX_BIN": tmuxBin, "FLEET_RUNTIME_OPENCODE": "1"}, dir, statusWarn},
+		{"enabled, bare name found nowhere", map[string]string{
+			"FLEET_TMUX_BIN": tmuxBin, "FLEET_RUNTIME_OPENCODE": "1"}, t.TempDir(), statusFail},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.path != "" {
+				t.Setenv("PATH", tc.path)
+			}
+			rows := runChecks(context.Background(), testDoctorEnv(tc.vars))
+			row := rowByID(t, rows, "runtime.opencode")
+			if row.Status != tc.want {
+				t.Fatalf("got %+v, want %s", row, tc.want)
+			}
+			// Paste-safe: a row names the variable, never the path.
+			if strings.Contains(row.Summary+row.Detail, dir) {
+				t.Errorf("row carries a filesystem path: %+v", row)
+			}
+		})
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("the doctor executed the opencode binary")
+	}
+}

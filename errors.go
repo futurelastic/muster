@@ -168,6 +168,17 @@ func quoteAll(in []string) []string {
 // the caller's fix is to mint a FRESH key, not to retry this one.
 const ReasonReplayOfEndedSession = "replay-of-ended-session"
 
+// ReasonRuntimeUnavailable marks the error a create returns when it names a
+// runtime the operator enabled and that has no working driver at this moment
+// (api-http.md §3.1, muster #297). The runtime exists; it is not usable.
+// "unknown runtime" (not_found) is for an id nobody enabled, and the two must
+// never read alike: one tells the caller the runtime was never configured,
+// the other that it was and is not up yet.
+//
+// A runtime still being retried answers unreachable (retryable); one that
+// needs somebody's hands answers unsupported (not retryable).
+const ReasonRuntimeUnavailable = "runtime-unavailable"
+
 func (e *Error) Error() string {
 	if e.Machine != "" {
 		return fmt.Sprintf("fleet: %s (%s, machine=%s)", e.Message, e.Kind, e.Machine)

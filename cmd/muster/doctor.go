@@ -18,6 +18,7 @@ import (
 	"time"
 
 	fleet "github.com/futurelastic/muster"
+	"github.com/futurelastic/muster/internal/drivers/opencode"
 	"github.com/futurelastic/muster/internal/inboxclient"
 	"github.com/futurelastic/muster/internal/service"
 	"github.com/futurelastic/muster/internal/sessionenv"
@@ -310,6 +311,7 @@ func runChecks(ctx context.Context, env doctorEnv) []doctorRow {
 		runtime = "tmux"
 	}
 	c.add(checkRuntime(runtime, getenv("FLEET_TMUX_BIN"), env.LookPath))
+	c.add(checkOpencodeRuntime(getenv("FLEET_RUNTIME_OPENCODE") == "1", getenv("FLEET_OPENCODE_BIN")))
 
 	// --- grants -------------------------------------------------------------
 	supervisorSet := supervisorGrants()
@@ -848,6 +850,53 @@ func checkRuntime(runtime, tmuxBin string, lookPath func(string) (string, error)
 	default:
 		row.Status = statusFail
 		row.Summary = fmt.Sprintf("unknown FLEET_RUNTIME %q (want tmux or stub) — the service refuses to start", runtime)
+	}
+	return row
+}
+
+// checkOpencodeRuntime is the runtime.opencode row (muster #297): an operator
+// who set FLEET_RUNTIME_OPENCODE=1 and whose runtime is not coming up should
+// not have to read the service log to find out why.
+//
+// It answers the half of the question that is a property of the install —
+// found, runnable — and uses the same resolver the service's own probe starts
+// with, so the two cannot disagree. It deliberately does NOT run the binary:
+// "did not answer in time" is a property of the machine's load at the moment,
+// and it is reported by the running service itself, per runtime, as `status`
+// and `cause` on GET /v1/runtimes. Like every row here it names the variable,
+// never the path.
+func checkOpencodeRuntime(enabled bool, bin string) doctorRow {
+	row := doctorRow{ID: "runtime.opencode"}
+	if !enabled {
+		row.Status = statusSkip
+		row.Summary = "FLEET_RUNTIME_OPENCODE is not 1 — the opencode runtime is not enabled"
+		return row
+	}
+	_, cause, err := opencode.Locate(bin)
+	switch {
+	case err == nil:
+		if bin == "" || !strings.ContainsRune(bin, filepath.Separator) {
+			row.Status = statusWarn
+			row.Summary = "opencode runtime enabled; its binary is a bare name, found on this shell's PATH"
+			row.Detail = "a service manager usually starts the service with a bare PATH that lacks it — set FLEET_OPENCODE_BIN to an absolute path in the unit. " +
+				"Whether the binary answers its version check in time is reported by the running service: GET /v1/runtimes, status and cause"
+			return row
+		}
+		row.Status = statusPass
+		row.Summary = "opencode runtime enabled; FLEET_OPENCODE_BIN names an executable"
+		row.Detail = "whether the binary answers its version check in time is reported by the running service: GET /v1/runtimes, status and cause"
+	case cause == fleet.CauseNotExecutable:
+		row.Status = statusFail
+		row.Summary = "opencode runtime enabled, but its binary cannot be run (not-executable)"
+		row.Detail = "the file exists and is not an executable the service user can run — check FLEET_OPENCODE_BIN and its mode"
+	case cause != fleet.CauseNotInstalled:
+		row.Status = statusFail
+		row.Summary = "opencode runtime enabled, but its binary could not be resolved"
+		row.Detail = "check FLEET_OPENCODE_BIN"
+	default:
+		row.Status = statusFail
+		row.Summary = "opencode runtime enabled, but its binary was not found (not-installed)"
+		row.Detail = "install opencode on the service's PATH or set FLEET_OPENCODE_BIN to its absolute path; the runtime is listed as unavailable on GET /v1/runtimes until then"
 	}
 	return row
 }
