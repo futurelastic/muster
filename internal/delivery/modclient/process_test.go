@@ -1,5 +1,3 @@
-//go:build unix
-
 package modclient_test
 
 import (
@@ -9,15 +7,16 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/futurelastic/muster/internal/delivery/modclient"
 	"github.com/futurelastic/muster/internal/delivery/modclient/modtest"
+	"github.com/futurelastic/muster/internal/procgroup"
 )
 
 // These tests run the REAL launcher against a real child process: the test
@@ -51,7 +50,7 @@ func (p *pids) all() []int {
 func (p *pids) count() int { return len(p.all()) }
 
 // gone reports whether no process has this id any more.
-func gone(pid int) bool { return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) }
+func gone(pid int) bool { return !procgroup.Alive(pid) }
 
 func installFake(t *testing.T, b modtest.Behaviour) string {
 	t.Helper()
@@ -144,6 +143,11 @@ func TestProcess_SpawnsServeWithMinimalEnv(t *testing.T) {
 	// Its environment is exactly what ChildEnv said, plus what the /bin/sh
 	// wrapper itself adds — and nothing inherited from this process.
 	shellAdds := map[string]bool{"PWD": true, "OLDPWD": true, "SHLVL": true, "_": true, "GORACE": true, modtest.EnvBehaviour: true}
+	if runtime.GOOS == "windows" {
+		// os/exec adds SYSTEMROOT to a minimal environment: without it a
+		// process cannot load most system libraries.
+		shellAdds["SYSTEMROOT"] = true
+	}
 	got := map[string]string{}
 	for _, kv := range d.Env {
 		name, val, _ := strings.Cut(kv, "=")
@@ -173,10 +177,7 @@ func TestProcess_SpawnsServeWithMinimalEnv(t *testing.T) {
 		t.Errorf("child cwd = %s, want %s", gotCwd, wantCwd)
 	}
 	// It leads its own process group, so a kill takes down whatever it spawned.
-	pid := ps.all()[0]
-	if pgid, err := syscall.Getpgid(pid); err != nil || pgid != pid {
-		t.Errorf("pgid of the child = %d (%v), want its own pid %d", pgid, err, pid)
-	}
+	assertLeadsItsOwnGroup(t, ps.all()[0])
 	// And it answers the protocol.
 	if _, err := c.Send(bg(), modclient.SendArgs{LaneKey: "k", Text: "over a real pipe"}); err != nil {
 		t.Errorf("send to a real process: %v", err)

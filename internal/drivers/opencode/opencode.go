@@ -168,6 +168,7 @@ import (
 
 	fleet "github.com/futurelastic/muster"
 	"github.com/futurelastic/muster/internal/driver"
+	"github.com/futurelastic/muster/internal/procgroup"
 	"github.com/futurelastic/muster/internal/sessionenv"
 )
 
@@ -456,7 +457,7 @@ func New(ctx context.Context, machine fleet.MachineId, opts ...Option) (*Driver,
 		return d, nil
 	}
 
-	if !groupsSupported {
+	if !procgroup.Supported() {
 		return nil, errors.New("opencode: this platform cannot signal a process group, so a session's tools " +
 			"could outlive its close; the driver refuses to start")
 	}

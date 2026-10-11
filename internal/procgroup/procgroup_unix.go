@@ -70,8 +70,12 @@ func Alive(pid int) bool {
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
+// ignoreGone treats a group with nothing left to signal as success. That is
+// ESRCH everywhere, and also EPERM on macOS, which answers a signal to a group
+// holding only exiting processes that way: we created the group, so a refusal
+// to signal it can only mean its members are already on their way out.
 func ignoreGone(err error) error {
-	if errors.Is(err, syscall.ESRCH) {
+	if errors.Is(err, syscall.ESRCH) || errors.Is(err, syscall.EPERM) {
 		return nil
 	}
 	return err

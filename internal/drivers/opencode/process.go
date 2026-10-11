@@ -19,6 +19,7 @@ import (
 	"time"
 
 	fleet "github.com/futurelastic/muster"
+	"github.com/futurelastic/muster/internal/procgroup"
 )
 
 // defaultProbeTimeout bounds `opencode --version`. It is the bound on a
@@ -109,6 +110,11 @@ func probe(ctx context.Context, bin string, within time.Duration) Availability {
 // process owns one spawned opencode server subprocess and its process group.
 type process struct {
 	cmd *exec.Cmd
+	// group is what stops the server's whole tree (internal/procgroup): a
+	// process group on Unix, a kill-on-close Job Object on Windows. Nil only in
+	// a test that builds a process by hand; stop then falls back to killing the
+	// server itself.
+	group *procgroup.Group
 	// done is closed when the single Wait on cmd returns, so "has it exited"
 	// is a channel read anywhere (readiness, State, stop) and Wait is called
 	// exactly once.
@@ -271,9 +277,10 @@ func buildServeCmd(bin, workdir string, port int, username, password string, env
 		"OPENCODE_SERVER_PASSWORD="+password,
 		"OPENCODE_SERVER_USERNAME="+username,
 	)
-	// Its own process group, so stop can take down everything the session's
-	// tools spawned and not just the server (muster #280).
-	configureGroup(cmd)
+	// Its own process group (a Job Object on Windows), so stop can take down
+	// everything the session's tools spawned and not just the server (muster
+	// #280).
+	procgroup.Prepare(cmd)
 	// Stdout is discarded: this driver's diagnostics come from the HTTP layer
 	// it talks to the server over. Stderr is nil here too and is replaced by
 	// startServer with a bounded in-memory capture (logcapture.go, muster #284)
@@ -320,7 +327,14 @@ func startServer(ctx context.Context, bin, workdir, username string, env []strin
 		if err := cmd.Start(); err != nil {
 			return nil, fmt.Errorf("opencode: starting server: %w", err)
 		}
-		p := &process{cmd: cmd, done: make(chan struct{})}
+		// Attach before anything else can fail or wait: where the platform
+		// creates the child suspended it only runs once it is under control, and
+		// a failed Attach has already ended and reaped it.
+		group, err := procgroup.Attach(cmd)
+		if err != nil {
+			return nil, fmt.Errorf("opencode: starting server: %w", err)
+		}
+		p := &process{cmd: cmd, group: group, done: make(chan struct{})}
 		go func() {
 			_ = cmd.Wait()
 			close(p.done)
@@ -391,23 +405,37 @@ func waitReady(ctx context.Context, baseURL, username, password string, exited <
 
 // stop terminates the child and everything in its process group. Idempotent.
 //
-// SIGTERM to the group first, a grace period, then SIGKILL to the group
-// ALWAYS — also when the leader exited on its own, because a tool the session
-// ran can outlive the server it ran under (muster #280: a `sleep` re-parented
-// to init after a timeout was measured on a first one-shot wrapper). ESRCH from
-// an already-empty group is ignored.
+// Where the platform has a graceful stop (SIGTERM to the group), that goes
+// first and is given a grace period; then the whole group is killed ALWAYS —
+// also when the leader exited on its own, because a tool the session ran can
+// outlive the server it ran under (muster #280: a `sleep` re-parented to init
+// after a timeout was measured on a first one-shot wrapper). A group that is
+// already empty is not an error. Where there is no graceful stop (Windows) it
+// goes straight to the kill: the job is terminated and waited until empty.
 func (p *process) stop() {
 	if p == nil || p.cmd == nil || p.cmd.Process == nil {
 		return
 	}
-	signalGroup(p.cmd, syscall.SIGTERM)
-	select {
-	case <-p.done:
-	case <-time.After(3 * time.Second):
+	g := p.group
+	if g == nil {
+		_ = p.cmd.Process.Kill()
+		select {
+		case <-p.done:
+		case <-time.After(5 * time.Second):
+		}
+		return
 	}
-	signalGroup(p.cmd, syscall.SIGKILL)
+	if g.Graceful() {
+		_ = g.Interrupt()
+		select {
+		case <-p.done:
+		case <-time.After(3 * time.Second):
+		}
+	}
+	_ = g.Kill()
 	select {
 	case <-p.done:
 	case <-time.After(5 * time.Second):
 	}
+	_ = g.Close()
 }

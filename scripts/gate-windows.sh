@@ -25,12 +25,16 @@ cd "$(dirname "$0")/.."
 
 ALLOW=(
 	./internal/procgroup
+	./internal/delivery/modclient
 )
 
 MUST_PASS=(
 	TestKillReachesAGrandchildSpawnedBeforeAttachReturned
 	TestCloseWithoutKillEndsTheJob
 	TestStructSizesMatchTheWin32Layout
+	TestProcess_SpawnsServeWithMinimalEnv
+	TestProcess_KillMidRunRestartsAndReady
+	TestProcess_ShutdownGrace
 )
 
 echo "== go build =="

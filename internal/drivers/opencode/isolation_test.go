@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -303,7 +302,7 @@ func TestState_ReportsDeadWhenTheSessionsProcessExited(t *testing.T) {
 	d, _ := newIsolatedDriver(t)
 	sess := mustCreate(t, d, "k1", fleet.SessionSpec{})
 	known, _ := d.wasSeen(sess.ID)
-	signalGroup(known.srv.proc.cmd, syscall.SIGKILL)
+	_ = known.srv.proc.group.Kill()
 	select {
 	case <-known.srv.proc.done:
 	case <-time.After(5 * time.Second):
