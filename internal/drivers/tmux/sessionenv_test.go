@@ -355,6 +355,62 @@ func TestAnEmptyScopeMatchesEverySession(t *testing.T) {
 	}
 }
 
+// --- appliesTo.runtimes: a credential that belongs to one runtime (#294) --
+
+// An entry scoped to this driver's runtime is provisioned for its sessions —
+// and it is the driver's own id that is matched, not the create's hint: the
+// spec here names no runtime, which is what a caller taking the default sends.
+func TestAppliesToRuntimesDeliversToTheScopedRuntimesSessions(t *testing.T) {
+	dir := t.TempDir()
+	credFile := filepath.Join(dir, "cred")
+	writeFile(t, credFile, "machine-identity")
+
+	d := New("testbox", WithSessionEnv([]SessionEnvEntry{
+		{
+			Name: "FLEET_IDENTITY", FromFile: credFile, Required: true,
+			AppliesTo: SessionEnvScope{Runtimes: []string{string(DefaultRuntime)}},
+		},
+	}))
+	got, err := d.provisionSessionEnv(fleet.SessionSpec{Cwd: "/work/x"})
+	if err != nil {
+		t.Fatalf("provisionSessionEnv: %v", err)
+	}
+	if got["FLEET_IDENTITY"] != "machine-identity" {
+		t.Errorf("FLEET_IDENTITY = %q, want it delivered to a session on the scoped runtime", got["FLEET_IDENTITY"])
+	}
+}
+
+// An entry scoped to another runtime is absent from this driver's sessions,
+// and — as with the other axes — a required entry outside its scope neither
+// refuses the create nor refuses a caller's own value for the name.
+func TestAppliesToRuntimesWithholdsFromAnotherRuntimesSessions(t *testing.T) {
+	dir := t.TempDir()
+	credFile := filepath.Join(dir, "cred")
+	writeFile(t, credFile, "machine-identity")
+
+	d := New("testbox", WithSessionEnv([]SessionEnvEntry{
+		{
+			Name: "FLEET_IDENTITY", FromFile: credFile, Required: true,
+			AppliesTo: SessionEnvScope{Runtimes: []string{"opencode"}},
+		},
+	}))
+	got, err := d.provisionSessionEnv(fleet.SessionSpec{Cwd: "/work/x"})
+	if err != nil {
+		t.Fatalf("a requirement scoped to another runtime refused this one's create: %v", err)
+	}
+	if _, ok := got["FLEET_IDENTITY"]; ok {
+		t.Error("an entry scoped to another runtime reached this runtime's session")
+	}
+	// A caller hint naming the other runtime does not pull the credential in.
+	got, err = d.provisionSessionEnv(fleet.SessionSpec{Cwd: "/work/x", Runtime: "opencode"})
+	if err != nil {
+		t.Fatalf("provisionSessionEnv: %v", err)
+	}
+	if _, ok := got["FLEET_IDENTITY"]; ok {
+		t.Error("a caller's runtime hint delivered a credential scoped to that runtime to another driver's session")
+	}
+}
+
 // --- the staging-format bound, attributed to the right party -------------
 
 // A configured value the staging format cannot carry is this machine's

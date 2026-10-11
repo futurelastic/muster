@@ -53,9 +53,9 @@ type (
 )
 
 // ValidateSessionEnv checks every entry's shape once, at startup. See
-// sessionenv.Validate.
-func ValidateSessionEnv(entries []SessionEnvEntry) error {
-	return sessionenv.Validate(entries)
+// sessionenv.Validate; knownRuntimes is its second argument.
+func ValidateSessionEnv(entries []SessionEnvEntry, knownRuntimes ...fleet.RuntimeId) error {
+	return sessionenv.Validate(entries, knownRuntimes)
 }
 
 // ValidateSessionEnvReserved refuses a configured sessionEnv entry naming a
@@ -90,7 +90,7 @@ func (d *Driver) provisionSessionEnv(spec fleet.SessionSpec) (map[string]string,
 		return spec.Env, nil
 	}
 	reservedPrefixes := d.ReservedEnvPrefixes()
-	return sessionenv.Provision(d.sessionEnv, spec, d.machine, func(name string) bool {
+	return sessionenv.Provision(d.sessionEnv, spec, d.machine, d.runtime, func(name string) bool {
 		if delivery.HasReservedPrefix(name, reservedPrefixes) {
 			d.counters.incr("module.session_env_dropped")
 			return true

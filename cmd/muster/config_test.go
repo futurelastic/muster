@@ -3,8 +3,11 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/futurelastic/muster/internal/sessionenv"
 )
 
 // #47: trustRoots is a plain, optional field on the same file principals and
@@ -151,7 +154,7 @@ func TestLoadConfigReadsSessionEnv(t *testing.T) {
 		"principals": [{"name": "op", "token": "tok", "grants": ["read"]}],
 		"sessionEnv": [
 			{"name": "FLEET_IDENTITY", "fromFile": "/etc/fleet/identity", "required": true,
-			 "appliesTo": {"agents": ["sid"], "markers": ["filing"]}},
+			 "appliesTo": {"runtimes": ["opencode"], "agents": ["sid"], "markers": ["filing"]}},
 			{"name": "FLEET_NICE_TO_HAVE", "fromFile": "/etc/fleet/optional"}
 		]
 	}`
@@ -175,6 +178,9 @@ func TestLoadConfigReadsSessionEnv(t *testing.T) {
 	if first.Name != "FLEET_IDENTITY" || first.FromFile != "/etc/fleet/identity" || !first.Required {
 		t.Errorf("first entry = %+v, want the required identity entry", first)
 	}
+	if len(first.AppliesTo.Runtimes) != 1 || first.AppliesTo.Runtimes[0] != "opencode" {
+		t.Errorf("first entry AppliesTo.Runtimes = %v, want [\"opencode\"]", first.AppliesTo.Runtimes)
+	}
 	if len(first.AppliesTo.Agents) != 1 || first.AppliesTo.Agents[0] != "sid" {
 		t.Errorf("first entry AppliesTo.Agents = %v, want [\"sid\"]", first.AppliesTo.Agents)
 	}
@@ -186,7 +192,7 @@ func TestLoadConfigReadsSessionEnv(t *testing.T) {
 	if second.Name != "FLEET_NICE_TO_HAVE" || second.Required {
 		t.Errorf("second entry = %+v, want a non-required entry with the default appliesTo (matches everything)", second)
 	}
-	if len(second.AppliesTo.Agents) != 0 || len(second.AppliesTo.Markers) != 0 {
+	if len(second.AppliesTo.Runtimes) != 0 || len(second.AppliesTo.Agents) != 0 || len(second.AppliesTo.Markers) != 0 {
 		t.Errorf("second entry AppliesTo = %+v, want the zero value — no appliesTo block was given", second.AppliesTo)
 	}
 }
@@ -353,5 +359,44 @@ func TestLoadConfigRejectsAPrincipalMissingATokenOrName(t *testing.T) {
 		if _, err := loadConfig(path); err == nil {
 			t.Errorf("body %s: a principal missing a name or token was accepted silently", body)
 		}
+	}
+}
+
+// #294: appliesTo.runtimes is checked at startup against the ids this build
+// can register — the same call main.go and `muster doctor` make — so a typo is
+// a message an operator reads once, and an optional runtime that is merely
+// switched off on this machine is not.
+func TestSessionEnvRuntimeIdsAreCheckedAgainstTheBuildsKnownSet(t *testing.T) {
+	load := func(runtimes string) []sessionenv.Entry {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.json")
+		body := `{"principals": [{"name": "op", "token": "tok", "grants": ["read"]}],
+			"sessionEnv": [{"name": "TOKEN", "fromFile": "/etc/fleet/token", "required": true,
+				"appliesTo": {"runtimes": ` + runtimes + `}}]}`
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := loadConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cfg.sessionEnv()
+	}
+
+	known := knownRuntimeIDs()
+	for _, id := range known {
+		if err := sessionenv.Validate(load(`["`+string(id)+`"]`), known); err != nil {
+			t.Errorf("registered runtime id %q refused: %v", id, err)
+		}
+	}
+	err := sessionenv.Validate(load(`["opencod"]`), known)
+	if err == nil {
+		t.Fatal("a misspelled runtime id was accepted at startup")
+	}
+	if !strings.Contains(err.Error(), `"opencod"`) {
+		t.Errorf("error = %v, want it to name the offending id", err)
+	}
+	if !strings.Contains(err.Error(), "opencode") {
+		t.Errorf("error = %v, want it to list the ids that would have been accepted", err)
 	}
 }

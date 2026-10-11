@@ -6,6 +6,8 @@ import (
 	"os"
 
 	fleet "github.com/futurelastic/muster"
+	"github.com/futurelastic/muster/internal/drivers/opencode"
+	"github.com/futurelastic/muster/internal/drivers/tmux"
 	"github.com/futurelastic/muster/internal/service"
 	"github.com/futurelastic/muster/internal/sessionenv"
 )
@@ -90,8 +92,9 @@ type fileConfig struct {
 		FromFile  string `json:"fromFile"`
 		Required  bool   `json:"required,omitempty"`
 		AppliesTo *struct {
-			Agents  []string `json:"agents,omitempty"`
-			Markers []string `json:"markers,omitempty"`
+			Runtimes []string `json:"runtimes,omitempty"`
+			Agents   []string `json:"agents,omitempty"`
+			Markers  []string `json:"markers,omitempty"`
 		} `json:"appliesTo,omitempty"`
 	} `json:"sessionEnv,omitempty"`
 
@@ -191,13 +194,27 @@ func (c *fileConfig) sessionEnv() []sessionenv.Entry {
 		entry := sessionenv.Entry{Name: e.Name, FromFile: e.FromFile, Required: e.Required}
 		if e.AppliesTo != nil {
 			entry.AppliesTo = sessionenv.Scope{
-				Agents:  e.AppliesTo.Agents,
-				Markers: e.AppliesTo.Markers,
+				Runtimes: e.AppliesTo.Runtimes,
+				Agents:   e.AppliesTo.Agents,
+				Markers:  e.AppliesTo.Markers,
 			}
 		}
 		out = append(out, entry)
 	}
 	return out
+}
+
+// knownRuntimeIDs is every runtime id this build can register on a machine —
+// the set a sessionEnv entry's appliesTo.runtimes is checked against at startup.
+//
+// It is the ids the build KNOWS, not the drivers that happen to be running:
+// the check runs before any driver exists, and one configuration file is
+// commonly shared by machines that do not all enable the optional runtime. A
+// typo is still caught; an id this machine merely has switched off is not a
+// startup failure. main.go and `muster doctor` both call it, so the two cannot
+// disagree about what a valid id is.
+func knownRuntimeIDs() []fleet.RuntimeId {
+	return []fleet.RuntimeId{tmux.DefaultRuntime, opencode.DefaultRuntime, "stub"}
 }
 
 func (c *fileConfig) peerFor(machine fleet.MachineId) (url, token string, ok bool) {

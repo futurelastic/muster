@@ -403,6 +403,36 @@ func TestIsolation_SessionEnvPrecedenceAndFreshRead(t *testing.T) {
 	}
 }
 
+// ---- Oracle: appliesTo.runtimes scopes a credential to one runtime (#294) -----
+
+func TestIsolation_SessionEnvIsScopedByRuntime(t *testing.T) {
+	secret := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(secret, []byte("v1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d, _ := newIsolatedDriver(t, WithSessionEnv([]sessionenv.Entry{
+		{Name: "FOR_THIS_RUNTIME", FromFile: secret, Required: true,
+			AppliesTo: sessionenv.Scope{Runtimes: []string{string(DefaultRuntime)}}},
+		// Required, and scoped to another runtime: it must neither reach this
+		// runtime's session nor refuse the create for a file it never reads.
+		{Name: "FOR_ANOTHER_RUNTIME", FromFile: filepath.Join(t.TempDir(), "absent"), Required: true,
+			AppliesTo: sessionenv.Scope{Runtimes: []string{"claude-code-tmux"}}},
+		{Name: "FOR_EVERY_RUNTIME", FromFile: secret},
+	}))
+
+	sess := mustCreate(t, d, "k1", fleet.SessionSpec{})
+	vars := inside(t, d, sess.ID).vars()
+	if vars["FOR_THIS_RUNTIME"] != "v1" {
+		t.Errorf("FOR_THIS_RUNTIME = %q, want it delivered to a session on the scoped runtime", vars["FOR_THIS_RUNTIME"])
+	}
+	if v, ok := vars["FOR_ANOTHER_RUNTIME"]; ok {
+		t.Errorf("FOR_ANOTHER_RUNTIME = %q reached a session on a different runtime", v)
+	}
+	if vars["FOR_EVERY_RUNTIME"] != "v1" {
+		t.Errorf("an unscoped entry = %q, want it on every runtime", vars["FOR_EVERY_RUNTIME"])
+	}
+}
+
 func TestNew_RefusesASessionEnvEntryNamingAVariableTheDriverOwns(t *testing.T) {
 	exe, _ := os.Executable()
 	_, err := New(context.Background(), "test-machine", WithBinary(exe),

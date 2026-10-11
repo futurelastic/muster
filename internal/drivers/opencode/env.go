@@ -175,7 +175,7 @@ func (d *Driver) sessionEnvFor(spec fleet.SessionSpec) (map[string]string, error
 	if err := checkOwnedEnv(spec.Env); err != nil {
 		return nil, invalid(err)
 	}
-	merged, err := sessionenv.Provision(d.sessionEnv, spec, d.machine, nil)
+	merged, err := sessionenv.Provision(d.sessionEnv, spec, d.machine, d.runtime, nil)
 	if err != nil {
 		if _, typed := err.(*fleet.Error); typed {
 			return nil, err
