@@ -98,26 +98,40 @@ func runDoctorTest(vars map[string]string, args ...string) (code int, stdout, st
 	return code, out.String(), errb.String()
 }
 
-// executable writes a stand-in for the tmux binary. On Windows it is a file
-// like any other: the doctor's tmux row judges a POSIX execute bit that Windows
-// does not report, so the tests that assert THAT row's pass skip there
-// themselves (execBitRowsSkipOnWindows) — the ones that only need some tmux
-// path to be configured keep running.
+// exeSuffix is what a stand-in binary's name needs for the doctor to judge it
+// executable on this platform: nothing on Unix (the mode bit does it), and an
+// extension from PATHEXT on Windows, which has no mode bit (#312).
+func exeSuffix() string {
+	if runtime.GOOS == "windows" {
+		return ".exe"
+	}
+	return ""
+}
+
+// executable writes a stand-in for the tmux binary: executable on Unix, and
+// named so on Windows, where the extension is the whole answer.
 func executable(t *testing.T, dir string) string {
 	t.Helper()
-	p := filepath.Join(dir, "fake-tmux")
+	p := filepath.Join(dir, "fake-tmux"+exeSuffix())
 	if err := os.WriteFile(p, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	return p
 }
 
-// execBitRowsSkipOnWindows skips a case that asserts a row which judges a POSIX
-// execute bit. The row itself is a separate, known gap (#312); the skip says so
-// in the gate's summary instead of hiding it.
-func execBitRowsSkipOnWindows(t *testing.T) {
+// notExecutable writes a file the doctor must judge not executable on this
+// platform: a 0o644 file on Unix, and on Windows — which has no mode to take
+// away — one whose extension is not in PATHEXT.
+func notExecutable(t *testing.T, dir, name string) string {
 	t.Helper()
-	skipOnWindows(t, "the row judges a POSIX execute bit, which Windows does not report")
+	if runtime.GOOS == "windows" {
+		name += ".txt"
+	}
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, []byte("#!/bin/sh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
 }
 
 // --- rows ---------------------------------------------------------------------
@@ -444,29 +458,29 @@ func TestDoctorBindAddr(t *testing.T) {
 }
 
 func TestDoctorRuntime(t *testing.T) {
-	bin := executable(t, t.TempDir())
+	dir := t.TempDir()
+	bin := executable(t, dir)
+	notExec := notExecutable(t, dir, "fake-tmux-noexec")
 	notFound := func(string) (string, error) { return "", os.ErrNotExist }
 	found := func(string) (string, error) { return "tmux", nil }
 	cases := []struct {
 		name, runtime, bin string
 		look               func(string) (string, error)
 		want               rowStatus
-		needsExecBit       bool
 	}{
-		{"stub", "stub", "", notFound, statusPass, false},
-		{"explicit binary", "tmux", bin, notFound, statusPass, true},
-		{"explicit binary missing", "tmux", bin + ".missing", found, statusFail, false},
-		{"only on shell PATH", "tmux", "", found, statusWarn, false},
-		{"bare name on PATH", "tmux", "tmux", found, statusWarn, false},
-		{"bare name nowhere", "tmux", "tmux", notFound, statusFail, false},
-		{"nowhere", "tmux", "", notFound, statusFail, false},
-		{"unknown runtime", "screen", "", found, statusFail, false},
+		{"stub", "stub", "", notFound, statusPass},
+		{"explicit binary", "tmux", bin, notFound, statusPass},
+		{"explicit binary missing", "tmux", bin + ".missing", found, statusFail},
+		{"explicit file that is not executable", "tmux", notExec, found, statusFail},
+		{"explicit path is a directory", "tmux", dir, found, statusFail},
+		{"only on shell PATH", "tmux", "", found, statusWarn},
+		{"bare name on PATH", "tmux", "tmux", found, statusWarn},
+		{"bare name nowhere", "tmux", "tmux", notFound, statusFail},
+		{"nowhere", "tmux", "", notFound, statusFail},
+		{"unknown runtime", "screen", "", found, statusFail},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.needsExecBit {
-				execBitRowsSkipOnWindows(t)
-			}
 			if row := checkRuntimeOn("linux", tc.runtime, tc.bin, tc.look); row.Status != tc.want {
 				t.Errorf("got %+v, want %s", row, tc.want)
 			}
@@ -675,41 +689,35 @@ func TestDoctorOpencodeRuntimeRow(t *testing.T) {
 	marker := filepath.Join(dir, "was-run")
 	// A binary that records being executed: the doctor must never do that —
 	// whether it answers in time is the running service's to report.
-	runnable := filepath.Join(dir, "opencode")
+	runnable := filepath.Join(dir, "opencode"+exeSuffix())
 	script := "#!/bin/sh\ntouch " + marker + "\n"
 	if err := os.WriteFile(runnable, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	notRunnable := filepath.Join(dir, "opencode-noexec")
-	if err := os.WriteFile(notRunnable, []byte("#!/bin/sh\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	notRunnable := notExecutable(t, dir, "opencode-noexec")
 	tmuxBin := executable(t, dir)
 
 	cases := []struct {
-		name         string
-		vars         map[string]string
-		path         string
-		want         rowStatus
-		needsExecBit bool
+		name    string
+		vars    map[string]string
+		path    string
+		want    rowStatus
+		summary string // a substring the row's summary must carry, when set
 	}{
-		{"not enabled", map[string]string{"FLEET_TMUX_BIN": tmuxBin}, "", statusSkip, false},
+		{"not enabled", map[string]string{"FLEET_TMUX_BIN": tmuxBin}, "", statusSkip, ""},
 		{"enabled, absolute path to an executable", map[string]string{
-			"FLEET_TMUX_BIN": tmuxBin, "FLEET_RUNTIME_OPENCODE": "1", "FLEET_OPENCODE_BIN": runnable}, "", statusPass, true},
+			"FLEET_TMUX_BIN": tmuxBin, "FLEET_RUNTIME_OPENCODE": "1", "FLEET_OPENCODE_BIN": runnable}, "", statusPass, ""},
 		{"enabled, absolute path that is missing", map[string]string{
-			"FLEET_TMUX_BIN": tmuxBin, "FLEET_RUNTIME_OPENCODE": "1", "FLEET_OPENCODE_BIN": filepath.Join(dir, "nope")}, "", statusFail, false},
+			"FLEET_TMUX_BIN": tmuxBin, "FLEET_RUNTIME_OPENCODE": "1", "FLEET_OPENCODE_BIN": filepath.Join(dir, "nope")}, "", statusFail, "not found"},
 		{"enabled, a file that cannot be run", map[string]string{
-			"FLEET_TMUX_BIN": tmuxBin, "FLEET_RUNTIME_OPENCODE": "1", "FLEET_OPENCODE_BIN": notRunnable}, "", statusFail, true},
+			"FLEET_TMUX_BIN": tmuxBin, "FLEET_RUNTIME_OPENCODE": "1", "FLEET_OPENCODE_BIN": notRunnable}, "", statusFail, "cannot be run"},
 		{"enabled, bare name found on this shell's PATH", map[string]string{
-			"FLEET_TMUX_BIN": tmuxBin, "FLEET_RUNTIME_OPENCODE": "1"}, dir, statusWarn, true},
+			"FLEET_TMUX_BIN": tmuxBin, "FLEET_RUNTIME_OPENCODE": "1"}, dir, statusWarn, "bare name"},
 		{"enabled, bare name found nowhere", map[string]string{
-			"FLEET_TMUX_BIN": tmuxBin, "FLEET_RUNTIME_OPENCODE": "1"}, t.TempDir(), statusFail, false},
+			"FLEET_TMUX_BIN": tmuxBin, "FLEET_RUNTIME_OPENCODE": "1"}, t.TempDir(), statusFail, "not found"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.needsExecBit {
-				execBitRowsSkipOnWindows(t)
-			}
 			if tc.path != "" {
 				t.Setenv("PATH", tc.path)
 			}
@@ -717,6 +725,9 @@ func TestDoctorOpencodeRuntimeRow(t *testing.T) {
 			row := rowByID(t, rows, "runtime.opencode")
 			if row.Status != tc.want {
 				t.Fatalf("got %+v, want %s", row, tc.want)
+			}
+			if !strings.Contains(row.Summary, tc.summary) {
+				t.Errorf("summary %q does not say %q", row.Summary, tc.summary)
 			}
 			// Paste-safe: a row names the variable, never the path.
 			if strings.Contains(row.Summary+row.Detail, dir) {

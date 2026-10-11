@@ -853,8 +853,7 @@ func checkRuntimeOn(goos, runtime, tmuxBin string, lookPath func(string) (string
 			return row
 		}
 		if tmuxBin != "" {
-			info, err := os.Stat(tmuxBin)
-			if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
+			if !isExecutableFile(tmuxBin) {
 				row.Status = statusFail
 				row.Summary = "FLEET_TMUX_BIN does not name an executable file"
 				return row
@@ -896,8 +895,17 @@ func checkOpencodeRuntime(enabled bool, bin string) doctorRow {
 		row.Summary = "FLEET_RUNTIME_OPENCODE is not 1 — the opencode runtime is not enabled"
 		return row
 	}
-	_, cause, err := opencode.Locate(bin)
+	path, cause, err := opencode.Locate(bin)
 	switch {
+	case cause == fleet.CauseNotExecutable, err == nil && !isExecutableFile(path):
+		// The second arm is Windows's: Locate resolves through PATHEXT but
+		// accepts any file that already has an extension, so a path to a
+		// document resolves. Judging the resolved path here keeps "executable"
+		// one question per platform (execbit_*.go, #312). On Unix Locate has
+		// already checked the mode bit and the arm never fires.
+		row.Status = statusFail
+		row.Summary = "opencode runtime enabled, but its binary cannot be run (not-executable)"
+		row.Detail = "the file exists and is not an executable the service user can run — check FLEET_OPENCODE_BIN, its mode, and on Windows that its extension is in PATHEXT"
 	case err == nil:
 		if bin == "" || !strings.ContainsRune(bin, filepath.Separator) {
 			row.Status = statusWarn
@@ -909,10 +917,6 @@ func checkOpencodeRuntime(enabled bool, bin string) doctorRow {
 		row.Status = statusPass
 		row.Summary = "opencode runtime enabled; FLEET_OPENCODE_BIN names an executable"
 		row.Detail = "whether the binary answers its version check in time is reported by the running service: GET /v1/runtimes, status and cause"
-	case cause == fleet.CauseNotExecutable:
-		row.Status = statusFail
-		row.Summary = "opencode runtime enabled, but its binary cannot be run (not-executable)"
-		row.Detail = "the file exists and is not an executable the service user can run — check FLEET_OPENCODE_BIN and its mode"
 	case cause != fleet.CauseNotInstalled:
 		row.Status = statusFail
 		row.Summary = "opencode runtime enabled, but its binary could not be resolved"
