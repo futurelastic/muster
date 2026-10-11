@@ -115,6 +115,9 @@ function Api([string]$method, [string]$path, $body = $null, [string]$key = $null
 }
 
 function FakeProcesses { return @(Get-Process -Name 'fake-opencode' -ErrorAction SilentlyContinue) }
+# A count, not an array: a function's output is unrolled, so a single process
+# would come back as the process itself, which has no Count under strict mode.
+function FakeCount { return @(Get-Process -Name 'fake-opencode' -ErrorAction SilentlyContinue).Count }
 
 function WaitFor([scriptblock]$cond, [int]$seconds) {
   $deadline = (Get-Date).AddSeconds($seconds)
@@ -324,7 +327,7 @@ try {
   Check ($create.Status -eq 201) "create answers 201 (got $($create.Status): $($create.Raw))"
   $id = [string]$create.Json.id
   Check ($id.Length -gt 0) "the session has an id ($id)"
-  Check ((FakeProcesses).Count -ge 1) 'the session has a runtime process (so "none left" below means something)'
+  Check ((FakeCount) -ge 1) 'the session has a runtime process (so "none left" below means something)'
 
   $get = Api 'GET' "/v1/machines/$machine/sessions/$id"
   Check ($get.Status -eq 200) "get answers 200 (got $($get.Status): $($get.Raw))"
@@ -332,20 +335,20 @@ try {
 
   $del = Api 'DELETE' "/v1/machines/$machine/sessions/$id"
   Check ($del.Status -ge 200 -and $del.Status -lt 300) "delete answers 2xx (got $($del.Status): $($del.Raw))"
-  $gone = WaitFor { (FakeProcesses).Count -eq 0 } 20
+  $gone = WaitFor { (FakeCount) -eq 0 } 20
   Check $gone 'no runtime process is left after the session is closed'
 
   # ---- 12. stop the service; nothing may outlive it --------------------------
   # A session is left OPEN across the stop on purpose: the job-object cleanup
   # is what is being proved, and a closed session leaves nothing to clean.
   $open = Api 'POST' "/v1/machines/$machine/sessions" @{ runtime = 'opencode'; cwd = $cwd; name = 'e2e-open' } ([guid]::NewGuid().ToString())
-  Check ($open.Status -eq 201 -and (FakeProcesses).Count -ge 1) 'a second session is open when the service stops'
+  Check ($open.Status -eq 201 -and (FakeCount) -ge 1) 'a second session is open when the service stops'
   Say 'stop the service'
   try { Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue } catch { }
   ServiceProcesses $muster | Stop-Process -Force
   $stopped = WaitFor { -not (ServiceUp) } 20
   Check $stopped 'the service has stopped answering'
-  $clean = WaitFor { (FakeProcesses).Count -eq 0 } 20
+  $clean = WaitFor { (FakeCount) -eq 0 } 20
   Check $clean 'no runtime process outlives the service'
 
   Write-Host ''
