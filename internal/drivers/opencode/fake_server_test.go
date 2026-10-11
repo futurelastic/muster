@@ -50,6 +50,26 @@ type fakeServer struct {
 	permissions      []wirePermissionAsk
 	permissionStatus int
 
+	// replies records every POST /permission/{id}/reply that reached the runtime,
+	// in order (muster #296). A reply to an ask the fake holds resolves it, as the
+	// runtime does: the ask leaves the list and the parked turn ends, so the
+	// session reads idle again. A reply to an id it does not hold is the
+	// runtime's own 404. replyStatus, when set, makes the endpoint answer that
+	// status instead; replyBody, when set, is served as the 200 body instead of
+	// `true`.
+	replies     []recordedReply
+	replyStatus int
+	replyBody   string
+	// onReply, when set, runs inside the reply handler before it resolves the
+	// ask, so a test can resolve or replace the ask between the driver's read and
+	// its reply.
+	onReply func(f *fakeServer, id string)
+
+	// questions are the structured questions GET /question lists (muster #296).
+	// nil with questionStatus 0 is an empty list.
+	questions      []wireQuestionAsk
+	questionStatus int
+
 	requests []recordedRequest
 
 	// bus is the GET /event side (muster #284): the open connections, so a
@@ -68,6 +88,12 @@ type busConn struct {
 
 type recordedRequest struct {
 	method, path string
+}
+
+// recordedReply is one permission reply the fake received: the ask it named and
+// the verdict it carried.
+type recordedReply struct {
+	id, reply string
 }
 
 func newFakeServer(t *testing.T) *fakeServer {
@@ -110,6 +136,10 @@ func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 		f.handleProviders(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/permission":
 		f.handlePermission(w, r)
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/permission/") && strings.HasSuffix(r.URL.Path, "/reply"):
+		f.handlePermissionReply(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/question":
+		f.handleQuestion(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/event":
 		f.handleEvent(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/session":
@@ -183,6 +213,74 @@ func (f *fakeServer) handleList(w http.ResponseWriter, r *http.Request) {
 	f.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
+}
+
+// handlePermissionReply serves POST /permission/{id}/reply the way the measured
+// runtime does: {"reply": once|always|reject} resolves the ask and answers
+// `true`; an id it does not hold (never raised, or already resolved) is a 404.
+func (f *fakeServer) handlePermissionReply(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/permission/"), "/reply")
+	var body struct {
+		Reply string `json:"reply"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+
+	f.mu.Lock()
+	hook := f.onReply
+	f.mu.Unlock()
+	if hook != nil {
+		hook(f, id)
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.replies = append(f.replies, recordedReply{id: id, reply: body.Reply})
+	if f.replyStatus != 0 {
+		http.Error(w, "forced", f.replyStatus)
+		return
+	}
+	switch body.Reply {
+	case "once", "always", "reject":
+	default:
+		http.Error(w, `{"_tag":"InvalidRequestError"}`, http.StatusBadRequest)
+		return
+	}
+	for i, ask := range f.permissions {
+		if ask.ID != id {
+			continue
+		}
+		f.permissions = append(f.permissions[:i:i], f.permissions[i+1:]...)
+		delete(f.statuses, ask.SessionID) // the parked turn ends: idle again
+		w.Header().Set("Content-Type", "application/json")
+		if f.replyBody != "" {
+			_, _ = w.Write([]byte(f.replyBody))
+			return
+		}
+		_, _ = w.Write([]byte("true"))
+		return
+	}
+	w.WriteHeader(http.StatusNotFound)
+	_, _ = w.Write([]byte(`{"_tag":"PermissionNotFoundError","requestID":"` + id + `"}`))
+}
+
+func (f *fakeServer) handleQuestion(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	status := f.questionStatus
+	qs := append([]wireQuestionAsk{}, f.questions...)
+	f.mu.Unlock()
+	if status != 0 {
+		http.Error(w, "no such route", status)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(qs)
+}
+
+// repliesSnapshot is the replies the fake has received, in order.
+func (f *fakeServer) repliesSnapshot() []recordedReply {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]recordedReply(nil), f.replies...)
 }
 
 func (f *fakeServer) handlePermission(w http.ResponseWriter, r *http.Request) {

@@ -208,8 +208,8 @@ func TestSubscribe_AParkedPermissionAskIsOneWaitingInputState(t *testing.T) {
 			p := statePayload(t, next(t, s))
 			st := p.State
 			if p.Ref.ID != ref.ID || st.Status != fleet.StatusWaitingInput || st.WaitingOn != fleet.WaitingPrompt ||
-				st.Prompt == nil || st.Prompt.Kind != fleet.PromptToolPermission || len(st.Prompt.Options) != 0 {
-				t.Fatalf("state = %+v, want waiting_input with a tool-permission prompt and no options", st)
+				st.Prompt == nil || st.Prompt.Kind != fleet.PromptToolPermission || len(st.Prompt.Options) != 3 {
+				t.Fatalf("state = %+v, want waiting_input with a tool-permission prompt carrying the three answers", st)
 			}
 			// What State says about the same session, the same moment.
 			if want := stateOf(t, d, ref.ID); want.Status != st.Status || want.Prompt.Question != st.Prompt.Question {

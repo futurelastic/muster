@@ -125,23 +125,24 @@
 //
 // # What this driver deliberately does not attempt
 //
-// Respond, Discard, Rename and Keys all return driver.ErrUnsupported.
-// opencode has no boot-time enumerated-menu prompt matching
-// fleet.SessionPrompt's shape — its blocking questions are tool-permission
-// approvals and, in a newer API, structured "question" replies, neither of
-// which is a safe fit for §2.3's model without real design work of its own
-// (a session-abstraction concept, not a wire mapping exercise). Inventing
-// one to make the method non-empty would be exactly the emulation §5.6
-// forbids.
+// Discard, Rename and Keys all return driver.ErrUnsupported. Respond answers a
+// tool-permission ask and nothing else: opencode's other blocking surface, a
+// structured "question" reply, is not a safe fit for §2.3's model without real
+// design work of its own (a session-abstraction concept, not a wire mapping
+// exercise), so a session parked on one is answered `unsupported` with the
+// reason. Inventing a mapping to make that case non-empty would be exactly the
+// emulation §5.6 forbids.
 //
-// # Permissions (muster #283)
+// # Permissions (muster #283, #296)
 //
-// A tool-permission ask is SEEN but not answered. A session the runtime has
-// stopped on one reads `waiting_input` with a `tool-permission` prompt that
-// carries no options, instead of `working`; `permissionMode: "bypass"` stops
-// asks from arising by configuring the session's own runtime to approve its
-// tools, and is honoured only inside a sandbox this driver enforces. See
-// permission.go.
+// A session the runtime has stopped on a tool-permission ask reads
+// `waiting_input` with a `tool-permission` prompt instead of `working`, whose
+// options are the three answers Respond takes (allow once, allow always,
+// reject) and whose nonce is the ask's own id; Respond answers it through the
+// runtime's permission-reply endpoint and refuses an answer meant for an ask that
+// has since been resolved. `permissionMode: "bypass"` stops asks from arising by
+// configuring the session's own runtime to approve its tools, and is honoured
+// only inside a sandbox this driver enforces. See permission.go.
 //
 // # Events
 //

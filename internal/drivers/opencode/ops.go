@@ -555,14 +555,25 @@ func (d *Driver) readState(ctx context.Context, ref fleet.SessionRef) (fleet.Ses
 	}
 }
 
-// Respond is not implemented. opencode's blocking-question surface —
-// tool-permission approvals, and a newer structured "question" reply API —
-// has no boot-time enumerated-menu equivalent of fleet.SessionPrompt, and
-// building one honestly (deciding what counts as a PromptKind, how Nonce
-// is derived, what corroboration means here) is real design work outside
-// what #55 asks for. ErrUnsupported rather than a guessed mapping (§5.6).
+// Respond answers the tool-permission ask a session is parked on (§3, muster
+// #296): once, always or reject, through the runtime's own permission-reply
+// endpoint. permission.go has the contract and what is refused.
+//
+// Only a tool-permission ask is answerable here. A runtime "question" is a
+// different surface with a different shape, and mapping it onto this one would be
+// the guessed mapping §5.6 forbids: such a session is answered `unsupported`,
+// with the reason, and the caller still has Interrupt.
 func (d *Driver) Respond(ctx context.Context, req fleet.Request, ref fleet.SessionRef, resp fleet.Response) (fleet.DeliveryReceipt, error) {
-	return fleet.DeliveryReceipt{}, driver.ErrUnsupported
+	known, ok := d.wasSeen(ref.ID)
+	if !ok {
+		return fleet.DeliveryReceipt{}, fmt.Errorf("%w: %q", fleet.ErrNoSuchSession, ref.ID)
+	}
+	if err := d.requireLive(known); err != nil {
+		return fleet.DeliveryReceipt{}, err
+	}
+	ctx, cancel := d.bounded(ctx)
+	defer cancel()
+	return d.answerAsk(ctx, known.srv, ref.ID, resp)
 }
 
 // Interrupt asks the runtime to abort a session's current turn (§3, 202

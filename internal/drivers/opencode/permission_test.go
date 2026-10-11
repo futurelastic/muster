@@ -3,6 +3,8 @@ package opencode
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -64,8 +66,11 @@ func TestState_ParkedPermissionAskReadsAsWaitingOnAPrompt(t *testing.T) {
 	if strings.Contains(p.Question, "rm -rf") {
 		t.Errorf("Question = %q carries another session's ask", p.Question)
 	}
-	if p.Options == nil || len(p.Options) != 0 {
-		t.Errorf("Options = %v, want an empty list: Respond is unsupported, so nothing can be picked", p.Options)
+	if got := strings.Join(p.Options, "|"); got != "Allow once|Allow always|Reject" {
+		t.Errorf("Options = %v, want the three answers Respond takes, in the order choice indexes them", p.Options)
+	}
+	if p.Selected != 0 {
+		t.Errorf("Selected = %d, want none: nothing is highlighted, so a bare answer has no default to accept", p.Selected)
 	}
 }
 
@@ -364,5 +369,343 @@ func TestBuildServeCmd_ExtraArgsFollowTheFixedOnes(t *testing.T) {
 	}
 	if cmd := buildServeCmd("/bin/true", "", 1234, "muster", "cred", nil, ""); contains(cmd.Args, "--pure") {
 		t.Errorf("argv = %v carries --pure without being asked", cmd.Args)
+	}
+}
+
+// ---- answering a parked ask (muster #296) ---------------------------------
+
+// parkOnAsk creates a session, parks its turn on one ask, and returns it with
+// the ask's id (the nonce a caller reads from state).
+func parkOnAsk(t *testing.T, f *fakeServer, d *Driver, askID string) fleet.SessionRef {
+	t.Helper()
+	ref := createOne(t, d, "/work/x", "key-"+askID)
+	f.setBusy(ref.ID)
+	f.mu.Lock()
+	f.permissions = append(f.permissions, wirePermissionAsk{
+		ID: askID, SessionID: ref.ID, Permission: "bash", Patterns: []string{"make test"},
+	})
+	f.mu.Unlock()
+	return ref
+}
+
+func respond(t *testing.T, d *Driver, id string, resp fleet.Response) (fleet.DeliveryReceipt, error) {
+	t.Helper()
+	return d.Respond(context.Background(), testReq, fleet.SessionRef{ID: id}, resp)
+}
+
+func mustRespond(t *testing.T, d *Driver, id string, resp fleet.Response) fleet.DeliveryReceipt {
+	t.Helper()
+	rc, err := respond(t, d, id, resp)
+	if err != nil {
+		t.Fatalf("Respond: %v", err)
+	}
+	return rc
+}
+
+// A caller answers from state alone: read the prompt, pick an option, send its
+// nonce. Allow once and Allow always send the verdicts the runtime names, and the
+// parked turn then ends.
+func TestRespond_ApprovalAnswersTheAskAndTheTurnCompletes(t *testing.T) {
+	for _, tc := range []struct {
+		choice int
+		reply  string
+		label  string
+	}{
+		{1, "once", "Allow once"},
+		{2, "always", "Allow always"},
+	} {
+		t.Run(tc.reply, func(t *testing.T) {
+			f := newFakeServer(t)
+			d := newTestDriver(t, f)
+			ref := parkOnAsk(t, f, d, "per_1")
+
+			st := stateOf(t, d, ref.ID)
+			if st.Status != fleet.StatusWaitingInput || st.Prompt == nil {
+				t.Fatalf("before: %+v, want waiting_input with a prompt", st)
+			}
+			rc := mustRespond(t, d, ref.ID, fleet.Response{Choice: tc.choice, Nonce: st.Prompt.Nonce})
+
+			if rc.Outcome != fleet.OutcomeSubmitted {
+				t.Fatalf("Outcome = %q (%s), want submitted", rc.Outcome, rc.Reason)
+			}
+			if !strings.Contains(rc.Reason, tc.label) {
+				t.Errorf("Reason = %q, want it to say which option was chosen", rc.Reason)
+			}
+			if got := f.repliesSnapshot(); len(got) != 1 || got[0] != (recordedReply{"per_1", tc.reply}) {
+				t.Errorf("replies = %+v, want exactly one %q for per_1", got, tc.reply)
+			}
+			after := stateOf(t, d, ref.ID)
+			if after.Status != fleet.StatusIdle || after.Prompt != nil {
+				t.Errorf("after: status %q prompt %+v, want the turn completed (idle, no prompt)", after.Status, after.Prompt)
+			}
+		})
+	}
+}
+
+func TestRespond_RejectAnswersTheAsk(t *testing.T) {
+	f := newFakeServer(t)
+	d := newTestDriver(t, f)
+	ref := parkOnAsk(t, f, d, "per_1")
+
+	rc := mustRespond(t, d, ref.ID, fleet.Response{Choice: 3, Nonce: "per_1"})
+
+	if rc.Outcome != fleet.OutcomeSubmitted {
+		t.Fatalf("Outcome = %q (%s), want submitted", rc.Outcome, rc.Reason)
+	}
+	if got := f.repliesSnapshot(); len(got) != 1 || got[0] != (recordedReply{"per_1", "reject"}) {
+		t.Errorf("replies = %+v, want exactly one reject for per_1", got)
+	}
+	if st := stateOf(t, d, ref.ID); st.Prompt != nil {
+		t.Errorf("Prompt = %+v after a reject, want none", st.Prompt)
+	}
+}
+
+// §5.6: an answer to an ask that has already been resolved is refused, never
+// applied to the NEXT ask — the harm a stale nonce exists to prevent, and the one
+// the tool-permission case makes worst: the next ask may be a different tool.
+func TestRespond_StaleNonceIsRefusedAndNeverAppliedToTheNextAsk(t *testing.T) {
+	f := newFakeServer(t)
+	d := newTestDriver(t, f)
+	ref := parkOnAsk(t, f, d, "per_1")
+	read := stateOf(t, d, ref.ID).Prompt.Nonce
+
+	// The first ask is resolved elsewhere and the turn raises another.
+	f.mu.Lock()
+	f.permissions = []wirePermissionAsk{{ID: "per_2", SessionID: ref.ID, Permission: "edit", Patterns: []string{"/etc/hosts"}}}
+	f.mu.Unlock()
+
+	rc := mustRespond(t, d, ref.ID, fleet.Response{Choice: 2, Nonce: read})
+
+	if rc.Outcome != fleet.OutcomeRefused {
+		t.Fatalf("Outcome = %q (%s), want refused", rc.Outcome, rc.Reason)
+	}
+	if got := f.repliesSnapshot(); len(got) != 0 {
+		t.Errorf("replies = %+v, want none: nothing may reach the runtime on a stale nonce", got)
+	}
+	if st := stateOf(t, d, ref.ID); st.Prompt == nil || st.Prompt.Nonce != "per_2" {
+		t.Errorf("the next ask was disturbed: %+v", st.Prompt)
+	}
+}
+
+// The ask this answer was meant for is gone and nothing else is pending: refused,
+// not queued for whatever is asked next.
+func TestRespond_NonceOfAnAskThatIsGoneIsRefused(t *testing.T) {
+	f := newFakeServer(t)
+	d := newTestDriver(t, f)
+	ref := createOne(t, d, "/work/x", "key-1")
+
+	rc := mustRespond(t, d, ref.ID, fleet.Response{Choice: 1, Nonce: "per_gone"})
+
+	if rc.Outcome != fleet.OutcomeRefused {
+		t.Fatalf("Outcome = %q, want refused", rc.Outcome)
+	}
+	if got := f.repliesSnapshot(); len(got) != 0 {
+		t.Errorf("replies = %+v, want none", got)
+	}
+}
+
+// The ask can also be resolved between this driver's read and its reply. The
+// runtime's 404 for that is the same refusal — not "no such session", which is a
+// different fact and would send the caller looking for a session that exists.
+func TestRespond_AskResolvedBetweenReadAndReplyIsRefusedNotMissingSession(t *testing.T) {
+	f := newFakeServer(t)
+	d := newTestDriver(t, f)
+	ref := parkOnAsk(t, f, d, "per_1")
+	f.onReply = func(f *fakeServer, id string) {
+		f.mu.Lock()
+		f.permissions = nil
+		f.mu.Unlock()
+	}
+
+	rc, err := respond(t, d, ref.ID, fleet.Response{Choice: 1, Nonce: "per_1"})
+
+	if err != nil {
+		t.Fatalf("Respond: %v, want a refusal receipt", err)
+	}
+	if rc.Outcome != fleet.OutcomeRefused {
+		t.Errorf("Outcome = %q (%s), want refused", rc.Outcome, rc.Reason)
+	}
+}
+
+// No choice is the answer a menu reads as "accept what is highlighted". Nothing
+// is highlighted here, and the one default available is to run a tool nobody
+// read, so every answer that does not name an option is refused with nothing sent.
+func TestRespond_AnAnswerThatNamesNoOptionIsRefusedAndSendsNothing(t *testing.T) {
+	blank := " "
+	empty := []int{}
+	for name, resp := range map[string]fleet.Response{
+		"no choice":      {Nonce: "per_1"},
+		"cancel":         {Cancel: true, Nonce: "per_1"},
+		"choices":        {Choices: []int{1}, Nonce: "per_1"},
+		"text":           {Text: &blank, Nonce: "per_1"},
+		"empty choices":  {Choices: empty, Nonce: "per_1"},
+		"past the end":   {Choice: 4, Nonce: "per_1"},
+		"choice + text":  {Choice: 1, Text: ptr("yes"), Nonce: "per_1"},
+		"choice + clear": {Choice: 1, Cancel: true, Nonce: "per_1"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFakeServer(t)
+			d := newTestDriver(t, f)
+			ref := parkOnAsk(t, f, d, "per_1")
+
+			rc := mustRespond(t, d, ref.ID, resp)
+
+			if rc.Outcome != fleet.OutcomeRefused {
+				t.Fatalf("Outcome = %q (%s), want refused", rc.Outcome, rc.Reason)
+			}
+			if got := f.repliesSnapshot(); len(got) != 0 {
+				t.Errorf("replies = %+v, want none", got)
+			}
+			if st := stateOf(t, d, ref.ID); st.Prompt == nil {
+				t.Error("the ask was disturbed by a refused answer")
+			}
+		})
+	}
+}
+
+func ptr(s string) *string { return &s }
+
+// A nonce is optional, and its absence is not free (§3): the answer still lands
+// on the ask that was read, and the receipt says nothing verified it.
+func TestRespond_WithoutANonceAnswersAndSaysItWasUnverified(t *testing.T) {
+	f := newFakeServer(t)
+	d := newTestDriver(t, f)
+	ref := parkOnAsk(t, f, d, "per_1")
+
+	rc := mustRespond(t, d, ref.ID, fleet.Response{Choice: 1})
+
+	if rc.Outcome != fleet.OutcomeSubmitted {
+		t.Fatalf("Outcome = %q (%s), want submitted", rc.Outcome, rc.Reason)
+	}
+	if !strings.Contains(rc.Reason, "without a nonce") {
+		t.Errorf("Reason = %q, want it to say the ask was not verified", rc.Reason)
+	}
+	if got := f.repliesSnapshot(); len(got) != 1 || got[0].id != "per_1" {
+		t.Errorf("replies = %+v, want one for per_1", got)
+	}
+}
+
+// The reply endpoint names an ask by id alone, so the session check is this
+// driver's: another session's ask is never answered through this one.
+func TestRespond_NeverAnswersAnotherSessionsAsk(t *testing.T) {
+	f := newFakeServer(t)
+	d := newTestDriver(t, f)
+	mine := createOne(t, d, "/work/x", "key-mine")
+	f.setBusy(mine.ID)
+	f.mu.Lock()
+	f.permissions = []wirePermissionAsk{{ID: "per_other", SessionID: "ses_somebody_else", Permission: "bash"}}
+	f.mu.Unlock()
+
+	for _, resp := range []fleet.Response{{Choice: 1}, {Choice: 1, Nonce: "per_other"}} {
+		rc := mustRespond(t, d, mine.ID, resp)
+		if rc.Outcome != fleet.OutcomeRefused {
+			t.Errorf("%+v: Outcome = %q, want refused", resp, rc.Outcome)
+		}
+	}
+	if got := f.repliesSnapshot(); len(got) != 0 {
+		t.Errorf("replies = %+v, want none: that ask is not this session's", got)
+	}
+}
+
+func TestRespond_SessionThatIsNotParkedIsRefused(t *testing.T) {
+	f := newFakeServer(t)
+	d := newTestDriver(t, f)
+	ref := createOne(t, d, "/work/x", "key-1") // idle
+
+	rc := mustRespond(t, d, ref.ID, fleet.Response{Choice: 1})
+
+	if rc.Outcome != fleet.OutcomeRefused {
+		t.Fatalf("Outcome = %q, want refused", rc.Outcome)
+	}
+	if got := f.repliesSnapshot(); len(got) != 0 {
+		t.Errorf("replies = %+v, want none", got)
+	}
+}
+
+// A runtime question is a different surface. It is never answered with a guessed
+// choice: the caller is told it is unsupported, and why.
+func TestRespond_AQuestionAskStaysUnsupportedWithAReason(t *testing.T) {
+	f := newFakeServer(t)
+	d := newTestDriver(t, f)
+	ref := createOne(t, d, "/work/x", "key-1")
+	f.setBusy(ref.ID)
+	f.mu.Lock()
+	f.questions = []wireQuestionAsk{{ID: "que_1", SessionID: ref.ID}}
+	f.mu.Unlock()
+
+	_, err := respond(t, d, ref.ID, fleet.Response{Choice: 1})
+
+	var fe *fleet.Error
+	if !errors.As(err, &fe) || fe.Kind != fleet.ErrorUnsupported {
+		t.Fatalf("err = %v, want an unsupported fleet.Error", err)
+	}
+	if !strings.Contains(fe.Message, "question") {
+		t.Errorf("Message = %q, want the reason to name the question", fe.Message)
+	}
+	if got := f.repliesSnapshot(); len(got) != 0 {
+		t.Errorf("replies = %+v, want none", got)
+	}
+}
+
+// A runtime without the question route (404) leaves the plain refusal: not
+// knowing whether a question is pending must never turn into a different answer.
+func TestRespond_UnreadableQuestionListFallsBackToThePlainRefusal(t *testing.T) {
+	f := newFakeServer(t)
+	d := newTestDriver(t, f)
+	ref := createOne(t, d, "/work/x", "key-1")
+	f.setBusy(ref.ID)
+	f.questionStatus = http.StatusNotFound
+
+	rc := mustRespond(t, d, ref.ID, fleet.Response{Choice: 1})
+
+	if rc.Outcome != fleet.OutcomeRefused {
+		t.Errorf("Outcome = %q, want refused", rc.Outcome)
+	}
+}
+
+// §5.7: a list that could not be read is not "nothing pending", so it is an
+// error — not a refusal that tells the caller the ask is gone.
+func TestRespond_UnreadablePermissionListIsAnErrorNotARefusal(t *testing.T) {
+	f := newFakeServer(t)
+	d := newTestDriver(t, f)
+	ref := parkOnAsk(t, f, d, "per_1")
+	f.mu.Lock()
+	f.permissionStatus = http.StatusInternalServerError
+	f.mu.Unlock()
+
+	if _, err := respond(t, d, ref.ID, fleet.Response{Choice: 1, Nonce: "per_1"}); err == nil {
+		t.Fatal("err = nil, want the read failure")
+	}
+	if got := f.repliesSnapshot(); len(got) != 0 {
+		t.Errorf("replies = %+v, want none", got)
+	}
+}
+
+// The runtime's own `false` is not an approval, and an empty 2xx is not a
+// refusal: each is reported as what was observed.
+func TestRespond_ReportsWhatTheRuntimeSaidAboutTheReply(t *testing.T) {
+	f := newFakeServer(t)
+	d := newTestDriver(t, f)
+	f.replyBody = "false"
+	ref := parkOnAsk(t, f, d, "per_1")
+	if rc := mustRespond(t, d, ref.ID, fleet.Response{Choice: 1, Nonce: "per_1"}); rc.Outcome != fleet.OutcomeUnknown {
+		t.Errorf("a `false` reply: Outcome = %q (%s), want unknown", rc.Outcome, rc.Reason)
+	}
+
+	f2 := newFakeServer(t)
+	d2 := newTestDriver(t, f2)
+	f2.replyBody = " "
+	ref2 := parkOnAsk(t, f2, d2, "per_1")
+	if rc := mustRespond(t, d2, ref2.ID, fleet.Response{Choice: 1, Nonce: "per_1"}); rc.Outcome != fleet.OutcomeSubmitted {
+		t.Errorf("an empty 2xx: Outcome = %q (%s), want submitted", rc.Outcome, rc.Reason)
+	}
+}
+
+func TestRespond_UnknownSessionIsNoSuchSession(t *testing.T) {
+	f := newFakeServer(t)
+	d := newTestDriver(t, f)
+	_, err := respond(t, d, "ses_never", fleet.Response{Choice: 1})
+	if !errors.Is(err, fleet.ErrNoSuchSession) {
+		t.Errorf("err = %v, want ErrNoSuchSession", err)
 	}
 }

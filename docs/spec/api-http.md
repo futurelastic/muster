@@ -699,8 +699,11 @@ than the approval is the boundary, and a weaker posture is never started under t
 posture is applied through that session's own runtime configuration and never a file another
 session would read, and `state.permissionMode` reads `bypass` for it, including after a service
 restart. A session that nevertheless stops on an ask the configuration did not cover reads
-`waiting_input` with a `tool-permission` prompt (no options: the driver cannot answer it), never
-`working`; a list of asks that could not be read leaves the status as it was and says so in
+`waiting_input` with a `tool-permission` prompt, never `working`; the prompt's options are the three
+answers `respond` takes (allow once, allow always, reject) and its nonce is the ask's own id, so
+`respond` answers it through the runtime's permission-reply endpoint and refuses an answer meant
+for an ask that has since been resolved (muster #296; a runtime "question" is not mapped and stays
+`unsupported` with the reason); a list of asks that could not be read leaves the status as it was and says so in
 `evidence`, because an unasked question is not the answer "none".
 
 **A driver whose runtime ships a hosted provider of its own may not let a session fall back to
