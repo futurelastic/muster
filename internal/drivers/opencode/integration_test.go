@@ -2,6 +2,7 @@ package opencode
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -281,5 +282,96 @@ func TestIntegration_NoCredentialIsRefusedByDefaultAndAllowedOnPurpose(t *testin
 	}
 	if _, err := allowed.Close(ctx, req, sess.SessionRef); err != nil {
 		t.Errorf("Close: %v", err)
+	}
+}
+
+// muster #298: the rules a bypass session's config carries are the ones the
+// real runtime resolves, in the order that makes the catch-all deny lose to the
+// allows after it. No provider and no model turn: `debug agent` prints the
+// permission ruleset the runtime built from the session's own configuration,
+// including its own defaults ahead of it, and the evaluation below is the
+// runtime's (last match wins), so a change in either the file's shape or the
+// runtime's reading of it fails here.
+func TestIntegration_ExternalDirectoryRulesAreWhatTheRuntimeResolves(t *testing.T) {
+	requireOpencodeIntegration(t)
+	bin, err := exec.LookPath("opencode")
+	if err != nil {
+		t.Skip("no opencode binary on PATH")
+	}
+
+	resolve := func(p string) string {
+		r, err := filepath.EvalSymlinks(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	sess, cwd, readDir := resolve(t.TempDir()), resolve(t.TempDir()), resolve(t.TempDir())
+	for _, sub := range []string{"home", "tmp", "xdg/config", "xdg/data", "xdg/state", "xdg/cache"} {
+		if err := os.MkdirAll(filepath.Join(sess, sub), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	plan := &sandboxPlan{read: dedupe([]string{"/usr", cwd, sess, readDir}), write: dedupe([]string{cwd, sess})}
+	// `debug agent` refuses to start with no provider, and this test is about
+	// permissions: name the runtime's own built-in one so there is a model to
+	// resolve an agent against. No turn is ever run against it.
+	providers, err := newProviderPolicy([]string{builtinProvider})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeSessionConfig(sess, true, plan, providers); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, "--pure", "debug", "agent", "build")
+	cmd.Dir = cwd
+	cmd.Env = []string{
+		"PATH=/usr/bin:/bin", "HOME=" + filepath.Join(sess, "home"), "TMPDIR=" + filepath.Join(sess, "tmp"),
+		"XDG_CONFIG_HOME=" + filepath.Join(sess, "xdg", "config"), "XDG_DATA_HOME=" + filepath.Join(sess, "xdg", "data"),
+		"XDG_STATE_HOME=" + filepath.Join(sess, "xdg", "state"), "XDG_CACHE_HOME=" + filepath.Join(sess, "xdg", "cache"),
+	}
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("opencode debug agent build: %v\n%s", err, stderr.String())
+	}
+	start := strings.Index(string(out), "{")
+	if start < 0 {
+		t.Fatalf("no JSON in the runtime's output:\n%s", out)
+	}
+	var agent struct {
+		Permission []struct {
+			Permission string `json:"permission"`
+			Pattern    string `json:"pattern"`
+			Action     string `json:"action"`
+		} `json:"permission"`
+	}
+	if err := json.NewDecoder(strings.NewReader(string(out)[start:])).Decode(&agent); err != nil {
+		t.Fatalf("the runtime's agent output is not JSON: %v", err)
+	}
+	var resolved []externalDirectoryRule
+	for _, r := range agent.Permission {
+		if r.Permission == "external_directory" {
+			resolved = append(resolved, externalDirectoryRule{pattern: r.Pattern, action: r.Action})
+		}
+	}
+	if len(resolved) == 0 {
+		t.Fatalf("the runtime resolved no external_directory rules from the session's config:\n%s", out)
+	}
+
+	for _, c := range []struct{ name, path, want string }{
+		{"a file in the working directory", filepath.Join(cwd, "a.go"), "allow"},
+		{"a readPaths entry", filepath.Join(readDir, "ref.txt"), "allow"},
+		{"the session's own tmp", filepath.Join(sess, "tmp", "scratch.bak"), "allow"},
+		{"a file outside every allowed path", "/etc/hosts", "deny"},
+		{"somebody's home", "/Users/someone/.ssh/id_ed25519", "deny"},
+	} {
+		if got := evaluate(resolved, askFor(c.path, false)); got != c.want {
+			t.Errorf("%s (%s): the runtime resolves %s, want %s", c.name, c.path, got, c.want)
+		}
 	}
 }
