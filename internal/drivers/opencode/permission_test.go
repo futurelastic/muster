@@ -273,8 +273,18 @@ func TestBypassDoesNotLeakIntoAnotherSession(t *testing.T) {
 	plain := mustCreate(t, d, "k-plain", fleet.SessionSpec{Cwd: fleet.AbsolutePath(t.TempDir())})
 
 	known, _ := d.wasSeen(plain.ID)
-	if _, err := os.Stat(filepath.Join(known.srv.dir, permissionConfigRel)); !os.IsNotExist(err) {
-		t.Errorf("a session that did not ask for bypass has a permission config: %v", err)
+	// It has a config (muster #293: every session carries the provider policy),
+	// but no tool posture in it.
+	var cfg map[string]any
+	raw, err := os.ReadFile(filepath.Join(known.srv.dir, permissionConfigRel))
+	if err != nil {
+		t.Fatalf("the plain session has no config at all, so no provider policy: %v", err)
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("config is not JSON: %v", err)
+	}
+	if _, has := cfg["permission"]; has {
+		t.Errorf("a session that did not ask for bypass has a permission posture: %s", raw)
 	}
 	if contains(inside(t, d, plain.ID).Args, "--pure") {
 		t.Error("a session that did not ask for bypass was started with --pure")

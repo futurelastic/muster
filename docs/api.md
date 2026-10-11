@@ -485,6 +485,13 @@ actually in force. Needs only `create`. Two things are yours: seed the repositor
 reference before the session starts, and treat the working directory as untrusted afterwards — run
 git on it only inside the same profile. See session-abstraction.md §2.1.
 
+**Providers an opencode session may use** (#293) are the operator's decision, not a field:
+`FLEET_OPENCODE_PROVIDERS` (comma-separated provider ids) is the whole allowed set, and when it
+is unset the runtime's built-in hosted provider is off — with no credential configured it is
+what would otherwise answer, silently. A create with no allowed provider usable on the runtime,
+or a `model` on a provider outside the set, is `unsupported` with the reason; a turn that still
+ran on one reads `state.lastTurn.outcome: "failed"` naming it.
+
 **`conversationId`** (#224) is a caller-chosen UUID that asks the runtime to
 start a NEW conversation under it, instead of the driver deriving one after
 the fact — so the `201` already carries `conversation` (`known: true`,

@@ -205,6 +205,12 @@ type Driver struct {
 	sessionRoot string
 	runtimePath []string
 
+	// providerIDs is the operator's allow-list (WithProviders), providers the
+	// policy built from it in New (muster #293). Empty means the default: the
+	// runtime's built-in hosted provider is off and everything else is usable.
+	providerIDs []string
+	providers   providerPolicy
+
 	// sandbox is what this driver can enforce on this host (nil: nothing) and
 	// sandboxWhy says why not, in words a refused create can quote (muster
 	// #281). sandboxRead is the operator's extra readable directories — an
@@ -314,6 +320,18 @@ func WithRuntimePath(dirs []string) Option { return func(d *Driver) { d.runtimeP
 // its own but can never widen the allow-lists the profile is built on.
 func WithSandboxReadPaths(dirs []string) Option { return func(d *Driver) { d.sandboxRead = dirs } }
 
+// WithProviders names the model providers a session may use, and no others
+// (muster #293). The list is written into each session's own configuration as
+// opencode's enabled_providers, a create whose model names another provider is
+// refused, and a create the runtime has no listed provider for is refused too.
+//
+// Empty (the default) is not "anything goes": the runtime's built-in hosted
+// provider is disabled and every other provider the session has a credential
+// for is usable. Name that provider here (it is "opencode") to ask for it, on
+// purpose, for sessions that have no credential of their own. Each id is a
+// provider id as the runtime spells it, with no "/".
+func WithProviders(ids []string) Option { return func(d *Driver) { d.providerIDs = ids } }
+
 // WithStateDir makes sessions survive a service restart (muster #282): one
 // record per session, and the sessions' scoped directories, live under dir. With
 // it SupportsResume is true; without it nothing is written and a restart forgets
@@ -396,6 +414,11 @@ func New(ctx context.Context, machine fleet.MachineId, opts ...Option) (*Driver,
 	for _, o := range opts {
 		o(d)
 	}
+	pol, err := newProviderPolicy(d.providerIDs)
+	if err != nil {
+		return nil, err
+	}
+	d.providers = pol
 
 	if d.baseURL != "" {
 		// Test/advanced seam: the caller already has a server (real or

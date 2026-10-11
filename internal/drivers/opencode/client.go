@@ -90,6 +90,12 @@ type wireMessageInfo struct {
 	} `json:"time"`
 	Error *wireAssistantError `json:"error"`
 
+	// ProviderID and ModelID are the provider and model an assistant message
+	// ran on, as the runtime resolved them (muster #293) — not what a create
+	// asked for, which the runtime may have replaced with a default.
+	ProviderID string `json:"providerID"`
+	ModelID    string `json:"modelID"`
+
 	// Cost and Tokens are the runtime's own account of what the message spent
 	// (muster #285). Pointers: absent on the wire is "the runtime said nothing",
 	// which usage.go keeps apart from a reported zero. For a message that took

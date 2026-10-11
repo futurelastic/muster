@@ -50,6 +50,17 @@
 //	                       service user's home and so is closed by default.
 //	                       Operator configuration only; a create cannot add to
 //	                       the allow-lists the profile is built on.
+//	FLEET_OPENCODE_PROVIDERS  comma-separated provider ids an opencode session
+//	                       may use, and no others (muster issue #293). Written
+//	                       into each session's own configuration as
+//	                       enabled_providers; a create naming a model on another
+//	                       provider, or one the runtime has no allowed provider
+//	                       for, is refused, and a turn that still ran on one is
+//	                       reported as failed. Unset is NOT "anything goes": the
+//	                       runtime's built-in hosted provider ("opencode") is
+//	                       disabled, because with no credential configured it is
+//	                       the one that would otherwise answer, silently. List
+//	                       "opencode" here to allow it on purpose.
 //	FLEET_PEERS            comma-separated name=url list, e.g.
 //	                       "other=https://other.example:PORT". Peers are
 //	                       statically configured; there is no discovery
@@ -613,7 +624,10 @@ func main() {
 			// restart of this service; without one they are forgotten, as before.
 			opencode.WithStateDir(os.Getenv("FLEET_STATE_DIR")),
 			opencode.WithRuntimePath(splitList(os.Getenv("FLEET_OPENCODE_PATH"))),
-			opencode.WithSandboxReadPaths(splitList(os.Getenv("FLEET_OPENCODE_SANDBOX_READ"))))
+			opencode.WithSandboxReadPaths(splitList(os.Getenv("FLEET_OPENCODE_SANDBOX_READ"))),
+			// muster #293: which providers a session may use. Unset keeps the
+			// runtime's built-in hosted provider off.
+			opencode.WithProviders(splitList(os.Getenv("FLEET_OPENCODE_PROVIDERS"))))
 		if err != nil {
 			log.Printf("muster: opencode runtime not started, continuing without it: %v", err)
 		} else if err := svc.RegisterLocalDriver(opencode.DefaultRuntime, d); err != nil {

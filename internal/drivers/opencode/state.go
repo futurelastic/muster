@@ -95,7 +95,23 @@ func (d *Driver) lastTurnFailure(ctx context.Context, srv *server, id string) *f
 		return nil
 	}
 	info := msgs[0].Info
-	if info.Role != "assistant" || info.Error == nil {
+	if info.Role != "assistant" {
+		return nil
+	}
+	// muster #293: a turn that ran on a provider outside the operator's set
+	// is not an unremarkable idle, whatever its own outcome was. The runtime's
+	// words about an error on that turn, if it has one, ride along.
+	if info.ProviderID != "" && !d.providers.permits(info.ProviderID) {
+		reason := fmt.Sprintf("the turn ran on provider %q (model %q), which this machine does not allow (allowed: %s)",
+			info.ProviderID, info.ModelID, d.providers.describe())
+		if info.Error != nil {
+			if te := d.turnFailure(ctx, srv, info.Error, time.Now(), false); te != nil {
+				reason += "; the runtime also reported: " + te.Reason
+			}
+		}
+		return &fleet.TurnEnd{Outcome: "failed", Reason: reason}
+	}
+	if info.Error == nil {
 		return nil
 	}
 
