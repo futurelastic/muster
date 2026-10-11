@@ -455,6 +455,11 @@ func main() {
 		} else if home, err := os.UserHomeDir(); err == nil {
 			opts = append(opts, tmux.WithProcessSessionsRoot(filepath.Join(home, ".claude", "sessions")))
 		}
+		// muster #301: report each session's agent from its runtime process's
+		// own command line, so Session.agent and the `agent` list filter hold
+		// for a session this service did not create and for one older than the
+		// create record. One process-table query per listing.
+		opts = append(opts, tmux.WithProcessAgent())
 		// Where the runtime keeps its own local credential material —
 		// stat'ed, never read, to answer #12 (SessionState.CredentialGeneration,
 		// EventMachineAccount). Same off-by-default reasoning as

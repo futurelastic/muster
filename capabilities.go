@@ -141,6 +141,19 @@ type DriverCapabilities struct {
 	// machine can never report a bare false and become permanently incapable in
 	// a caller's cache (§4.3, D3).
 	ReportsUsage bool `json:"reportsUsage"`
+	// ReportsAgent reports whether the driver can read the agent a session's
+	// runtime was started with (Session.Agent, muster #301), for any session
+	// it lists — not only one it created itself.
+	//
+	// It exists so an absent Session.Agent is answerable: on a driver
+	// declaring this it means the runtime was started without one (or, when
+	// the listing's source is degraded, that the read failed); on one that
+	// does not it means the driver never says, and an `agent` list filter will
+	// match nothing there however many sessions run that agent. Like every
+	// flag here it inherits `source: assumed` from an unreached peer, so a
+	// temporarily unreachable machine can never report a bare false and
+	// become permanently incapable in a caller's cache (§4.3, D3).
+	ReportsAgent bool `json:"reportsAgent"`
 	// ReportsRuntimeSurface reports whether this driver can say anything
 	// about a session's runtime-operated surface (Session.RuntimeSurface,
 	// muster #85).

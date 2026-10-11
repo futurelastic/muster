@@ -412,6 +412,19 @@ question" is a different fact from "has no such session" (§5.7). The fleet
 answer is therefore `complete: false` whenever any machine could not apply the
 filter, exactly as when it could not be reached.
 
+**`agent=name` keeps only sessions whose `agent` is that value** (muster
+#301). `agent` on a session is the persona its runtime was started with, read
+back from the runtime's own process — so it holds for a session this service did
+not create and for one far older than its create record, and the filter matches
+the same value. A session whose runtime was started without an agent omits the
+field (it is never an empty string) and matches no `agent=` filter. Whether a
+machine can report it at all is `reportsAgent` in `/v1/runtimes`; on a machine
+that cannot, `agent=` matches nothing however many sessions run that persona,
+and an unreached peer reports the flag `assumed`. When a machine that can report
+it fails to read it for one listing, that source is `degraded` and the fleet
+answer `complete: false` — an empty `agent=` result then means "could not say",
+never "none".
+
 **The envelope may also carry `feed`, and that is how a snapshot becomes a
 mirror:**
 

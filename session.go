@@ -479,6 +479,11 @@ type Session struct {
 	// REQUESTED, and whether it was honoured, is Pins — the two must not be
 	// collapsed: a caller that read a request back here would be reading a
 	// fabricated success, exactly the failure #84 measured.
+	//
+	// A driver that can read it reports Agent for every live session it
+	// lists, not only one it created (muster #301); the tmux driver reads it
+	// from the runtime's own command line. DriverCapabilities.ReportsAgent
+	// makes an absent Agent answerable.
 	Agent AgentId `json:"agent,omitempty"`
 	Model string  `json:"model,omitempty"`
 

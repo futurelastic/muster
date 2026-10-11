@@ -523,6 +523,13 @@ type Driver struct {
 	psBin string
 	psRun execFunc
 
+	// agentFromProcess is muster #301: report Session.Agent from the
+	// command line of the session's own runtime process (agentprocess.go).
+	// Off by default, the same contract as processSessionsRoot and every
+	// seam beside it: a driver built for a test never queries the real
+	// process table merely because it was constructed. See WithProcessAgent.
+	agentFromProcess bool
+
 	// inboxResolver and inboxDial are muster #119's own seam. Nil
 	// means unconfigured — the same off-by-default contract as
 	// credentialPath and trustSeed: a driver built for a test never
@@ -806,6 +813,20 @@ func WithPSBinary(path string) Option {
 	}
 }
 
+// WithProcessAgent makes List report Session.Agent for every live session
+// whose runtime was started with `--agent <name>`, read from that process's
+// own command line (muster #301, agentprocess.go) — whoever created the
+// session and however long ago, with no dependence on the 30-minute create
+// record. The `agent` list filter works on the same value, and
+// Capabilities().ReportsAgent turns true so an absent agent is answerable.
+//
+// Off by default, the same contract as WithProcessSessionsRoot: it costs one
+// process-table query per listing, and a driver built for a test must not
+// read the machine's real process table. The composition root supplies it.
+func WithProcessAgent() Option {
+	return func(d *Driver) { d.agentFromProcess = true }
+}
+
 // withPSExec injects a fake process-table query. Unexported: tests only —
 // the same shape as withExec, and deliberately not the same field (see
 // Driver.psRun's own doc comment).
@@ -964,6 +985,9 @@ func (d *Driver) Capabilities() fleet.DriverCapabilities {
 		// nobody looked.
 		ObservesPermissionMode: true,
 		ReportsUsage:           true, // muster #285: from the runtime's own record
+		// muster #301: true only once WithProcessAgent is wired, so an absent
+		// Session.Agent is answerable per machine rather than assumed.
+		ReportsAgent: d.agentFromProcess,
 		// #85: this driver latches Session.RuntimeSurface off the same
 		// footer label ObservesControlChannel already reads, once
 		// corroborated — see surface.go's runtimeSurfaceFor.
@@ -1721,6 +1745,11 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 	// two different generations into one snapshot if the file changes
 	// mid-loop (#12).
 	gen := d.credentialGeneration()
+	// muster #301: the agent each live runtime was started with, read once
+	// for the whole listing from the process table and outside the lock (it
+	// is an OS query). Nil when the option is off; agentsOK false when the
+	// read itself failed, which the source status below reports.
+	agents, agentsOK := d.processAgents(ctx, rows)
 	d.mu.Lock()
 	for _, r := range rows {
 		c, captured := captures[r.paneID]
@@ -1770,6 +1799,11 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 		// external module is enabled here. Nil for a session with no lane
 		// record — absent is "not stated", never "terminal".
 		s.Delivery = d.mods.laneView(r.session)
+		// muster #301: the APPLIED agent, observed from the runtime's own
+		// command line. Never the create record's request — that stays in
+		// Pins, labelled as a request.
+		observedAgent := agents[r.session]
+		s.Agent = fleet.AgentId(observedAgent)
 		// #84/#85/#86: this session's own create record, if one is still on
 		// file — see createrecord.go. Absent means either nothing was
 		// requested that this record would carry, or the record already
@@ -1777,7 +1811,7 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 		// those apart from their own carried/requested flags, never the
 		// presence of the record itself.
 		if cr, ok := d.createRecordForLocked(r.session, r.cwd); ok {
-			s.Pins = pinOutcomeFor(cr)
+			s.Pins = pinOutcomeObserving(cr, observedAgent)
 			s.PromptDelivery = promptDeliveryFor(cr)
 			// #85: the runtime's own footer, already classified into st a
 			// few lines up, is the corroboration a dictated identifier
@@ -2099,6 +2133,20 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 				"invocation otherwise failed for it); each reports its own "+
 				"state as unknown rather than a guess",
 			missed, len(rows))
+	}
+	if !agentsOK {
+		// muster #301: the process table could not be read, so no session in
+		// this answer could state its agent. Absent agent is then NOT "none",
+		// and a caller filtering by agent must see an incomplete read rather
+		// than an empty one (§5.7).
+		msg := "the process table could not be read this call, so no session " +
+			"reports the agent its runtime was started with (absent here means unknown, not none)"
+		if src.Error != "" {
+			src.Error += "; " + msg
+		} else {
+			src.Error = msg
+		}
+		src.Status = fleet.SourceDegraded
 	}
 	return fleet.NewCollection(sessions, []fleet.SourceStatus{src})
 }
