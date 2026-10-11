@@ -168,6 +168,7 @@ import (
 
 	fleet "github.com/futurelastic/muster"
 	"github.com/futurelastic/muster/internal/driver"
+	"github.com/futurelastic/muster/internal/privfs"
 	"github.com/futurelastic/muster/internal/procgroup"
 	"github.com/futurelastic/muster/internal/sessionenv"
 )
@@ -496,7 +497,7 @@ func New(ctx context.Context, machine fleet.MachineId, opts ...Option) (*Driver,
 			d.sessionRoot = filepath.Join(base, "dirs")
 		}
 		for _, dir := range []string{d.store.dir, d.sessionRoot} {
-			if err := os.MkdirAll(dir, 0o700); err != nil {
+			if err := privfs.MkdirAll(dir); err != nil {
 				return nil, fmt.Errorf("opencode: creating the state directory: %w", err)
 			}
 		}

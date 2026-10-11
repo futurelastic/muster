@@ -45,6 +45,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/futurelastic/muster/internal/privfs"
 )
 
 // Store is a directory of small JSON documents.
@@ -62,10 +64,11 @@ func Open(dir string) (*Store, error) {
 	if dir == "" {
 		return nil, nil
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := privfs.MkdirAll(dir); err != nil {
 		return nil, fmt.Errorf("state: %w", err)
 	}
-	// 0700 because this directory holds idempotency keys that name working
+	// Owner-only (mode 0700; a protected list for the current user on Windows)
+	// because this directory holds idempotency keys that name working
 	// directories, and session records that describe what is running on this
 	// machine. Not secrets, but not everyone's business either.
 	return &Store{dir: dir}, nil
@@ -120,7 +123,7 @@ func (s *Store) Save(name string, v any) error {
 	}
 	raw = append(raw, '\n')
 
-	tmp, err := os.CreateTemp(s.dir, "."+name+".tmp*")
+	tmp, err := privfs.CreateTemp(s.dir, "."+name+".tmp*")
 	if err != nil {
 		return fmt.Errorf("state: %w", err)
 	}

@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	fleet "github.com/futurelastic/muster"
+	"github.com/futurelastic/muster/internal/privfs"
 )
 
 // The per-session record (muster #282).
@@ -117,10 +118,10 @@ func (s *recordStore) write(r *sessionRecord) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(s.dir, 0o700); err != nil {
+	if err := privfs.MkdirAll(s.dir); err != nil {
 		return fmt.Errorf("opencode: creating the record directory: %w", err)
 	}
-	tmp, err := os.CreateTemp(s.dir, ".rec-*")
+	tmp, err := privfs.CreateTemp(s.dir, ".rec-*")
 	if err != nil {
 		return fmt.Errorf("opencode: writing the session record: %w", err)
 	}

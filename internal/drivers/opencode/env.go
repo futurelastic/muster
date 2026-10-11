@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	fleet "github.com/futurelastic/muster"
+	"github.com/futurelastic/muster/internal/privfs"
 	"github.com/futurelastic/muster/internal/sessionenv"
 )
 
@@ -178,12 +179,12 @@ func foldEntryNames(entries []sessionenv.Entry) []sessionenv.Entry {
 
 // sessionDirs creates the session-scoped directory tree under root.
 func sessionDirs(root string) (dir string, err error) {
-	dir, err = os.MkdirTemp(root, "muster-opencode-")
+	dir, err = privfs.MkdirTemp(root, "muster-opencode-")
 	if err != nil {
 		return "", fmt.Errorf("opencode: creating the session directory: %w", err)
 	}
 	for _, sub := range sessionSubdirs() {
-		if err := os.MkdirAll(filepath.Join(dir, sub), 0o700); err != nil {
+		if err := privfs.MkdirAll(filepath.Join(dir, sub)); err != nil {
 			_ = os.RemoveAll(dir)
 			return "", fmt.Errorf("opencode: creating the session directory: %w", err)
 		}

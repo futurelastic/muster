@@ -7,12 +7,12 @@ import (
 	"fmt"
 	"io"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 
 	fleet "github.com/futurelastic/muster"
+	"github.com/futurelastic/muster/internal/privfs"
 )
 
 // Tool permissions (muster #283).
@@ -199,7 +199,7 @@ func externalDirectoryFor(plan *sandboxPlan) externalDirectoryRules {
 // `permission` entry at all.
 func writeSessionConfig(dir string, bypass bool, plan *sandboxPlan, providers providerPolicy) error {
 	path := filepath.Join(dir, permissionConfigRel)
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := privfs.MkdirAll(filepath.Dir(path)); err != nil {
 		return fmt.Errorf("opencode: creating the session's config directory: %w", err)
 	}
 	cfg := map[string]any{"$schema": "https://opencode.ai/config.json"}
@@ -224,7 +224,7 @@ func writeSessionConfig(dir string, bypass bool, plan *sandboxPlan, providers pr
 	if err != nil {
 		return fmt.Errorf("opencode: encoding the session's config: %w", err)
 	}
-	if err := os.WriteFile(path, append(raw, '\n'), 0o600); err != nil {
+	if err := privfs.WriteFile(path, append(raw, '\n')); err != nil {
 		return fmt.Errorf("opencode: writing the session's config: %w", err)
 	}
 	return nil

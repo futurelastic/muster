@@ -27,6 +27,8 @@ ALLOW=(
 	./internal/procgroup
 	./internal/delivery/modclient
 	./internal/drivers/opencode
+	./internal/privfs
+	./internal/state
 )
 
 MUST_PASS=(
@@ -45,6 +47,7 @@ MUST_PASS=(
 	TestIsolation_SessionEnvIsScopedByRuntime
 	TestIsolation_RuntimePathReachesTheSession
 	TestSandboxRefusedOnAHostWithoutTheMechanism
+	TestCreatedFileHasOwnerOnlyProtectedDACL
 )
 
 echo "== go build =="
