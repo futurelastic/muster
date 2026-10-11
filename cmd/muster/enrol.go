@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/futurelastic/muster/internal/privfs"
 	"github.com/futurelastic/muster/internal/service"
 )
 
@@ -197,7 +198,7 @@ func addPrincipal(cfgPath, name, grantList, tokenFile string) error {
 	// The token file first: a config naming a principal whose token nobody has
 	// is worse than a token file with no principal, because the first looks
 	// finished.
-	if err := os.WriteFile(tokenFile, []byte(token+"\n"), 0o600); err != nil {
+	if err := privfs.WriteFile(tokenFile, []byte(token+"\n")); err != nil {
 		return fmt.Errorf("writing %s: %w", tokenFile, err)
 	}
 	if err := writeJSONAtomic(cfgPath, doc); err != nil {
@@ -205,7 +206,7 @@ func addPrincipal(cfgPath, name, grantList, tokenFile string) error {
 	}
 
 	fmt.Printf("added principal %q with grants %s\n", name, strings.Join(grants, ","))
-	fmt.Printf("token written to %s (0600)\n", tokenFile)
+	fmt.Printf("token written to %s (%s)\n", tokenFile, privfs.Label)
 	fmt.Printf("the running service still has the OLD table; reload it when ready\n")
 	return nil
 }
@@ -234,7 +235,7 @@ func writeJSONAtomic(path string, doc any) error {
 		return err
 	}
 	out = append(out, '\n')
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".config.*.tmp")
+	tmp, err := privfs.CreateTemp(filepath.Dir(path), ".config.*.tmp")
 	if err != nil {
 		return err
 	}

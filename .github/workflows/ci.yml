@@ -112,3 +112,25 @@ jobs:
       # reached trunk gofmt-dirty while build/vet/test all passed.
       - name: gate (scripts/gate.sh)
         run: ./scripts/gate.sh
+
+  # The platform layer on Windows (#303, #306). The Linux job above already
+  # cross-compiles and cross-vets for Windows on every push; this one RUNS the
+  # packages that have a Windows implementation, because a Job Object that
+  # compiles and does not contain its tree is the failure this exists to catch.
+  # scripts/gate-windows.sh owns the allowlist, the SKIP summary and the
+  # must-pass list, as scripts/gate.sh does for the Linux job.
+  windows:
+    name: Windows platform layer
+    runs-on: windows-latest
+    steps:
+      # Before checkout, so the tree is not rewritten to CRLF: a shell script
+      # with CRLF endings does not run under bash.
+      - name: Keep line endings as committed
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gate (scripts/gate-windows.sh)
+        shell: bash
+        run: ./scripts/gate-windows.sh

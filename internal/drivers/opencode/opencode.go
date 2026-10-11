@@ -168,6 +168,8 @@ import (
 
 	fleet "github.com/futurelastic/muster"
 	"github.com/futurelastic/muster/internal/driver"
+	"github.com/futurelastic/muster/internal/privfs"
+	"github.com/futurelastic/muster/internal/procgroup"
 	"github.com/futurelastic/muster/internal/sessionenv"
 )
 
@@ -456,7 +458,7 @@ func New(ctx context.Context, machine fleet.MachineId, opts ...Option) (*Driver,
 		return d, nil
 	}
 
-	if !groupsSupported {
+	if !procgroup.Supported() {
 		return nil, errors.New("opencode: this platform cannot signal a process group, so a session's tools " +
 			"could outlive its close; the driver refuses to start")
 	}
@@ -470,6 +472,9 @@ func New(ctx context.Context, machine fleet.MachineId, opts ...Option) (*Driver,
 	if err := checkSessionEnvEntries(d.sessionEnv); err != nil {
 		return nil, err
 	}
+	// Folded once, on a copy, so a create's names (folded the same way) meet a
+	// configured entry exactly. A no-op where names are case-sensitive.
+	d.sessionEnv = foldEntryNames(d.sessionEnv)
 	if d.stateDir != "" && !filepath.IsAbs(d.stateDir) {
 		return nil, fmt.Errorf("opencode: the state directory %q must be an absolute path", d.stateDir)
 	}
@@ -492,7 +497,7 @@ func New(ctx context.Context, machine fleet.MachineId, opts ...Option) (*Driver,
 			d.sessionRoot = filepath.Join(base, "dirs")
 		}
 		for _, dir := range []string{d.store.dir, d.sessionRoot} {
-			if err := os.MkdirAll(dir, 0o700); err != nil {
+			if err := privfs.MkdirAll(dir); err != nil {
 				return nil, fmt.Errorf("opencode: creating the state directory: %w", err)
 			}
 		}

@@ -2,7 +2,7 @@ package opencode
 
 import (
 	"context"
-	"os/exec"
+	"os"
 	"strings"
 	"testing"
 )
@@ -132,18 +132,15 @@ func TestStartProcess_CredentialNeverReachesArgv(t *testing.T) {
 }
 
 // stubBinary returns a path this test can pass to exec.Command without
-// needing the real opencode binary — /bin/echo (or similar) stands in
-// well enough since this test never calls Start.
+// needing the real opencode binary — the test binary itself, which exists on
+// every platform. This test never calls Start.
 func stubBinary(t *testing.T) string {
 	t.Helper()
-	path, err := exec.LookPath("true")
+	exe, err := os.Executable()
 	if err != nil {
-		path, err = exec.LookPath("echo")
+		t.Skip("cannot resolve the test executable")
 	}
-	if err != nil {
-		t.Skip("no stand-in binary (true/echo) found on PATH")
-	}
-	return path
+	return exe
 }
 
 // muster #288: the sandboxed command is built from the same serve slice, so it

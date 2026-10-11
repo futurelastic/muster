@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/futurelastic/muster/internal/privfs"
 	"github.com/futurelastic/muster/internal/service"
 )
 
@@ -227,7 +228,7 @@ func applyGrantEdit(e grantEdit, out io.Writer) error {
 		return err
 	}
 	encoded = append(encoded, '\n')
-	tmp, err := os.CreateTemp(filepath.Dir(e.cfgPath), ".config.*.tmp")
+	tmp, err := privfs.CreateTemp(filepath.Dir(e.cfgPath), ".config.*.tmp")
 	if err != nil {
 		return err
 	}
@@ -321,7 +322,7 @@ func writeBackup(cfgPath string, now time.Time, raw []byte) (string, error) {
 		if i > 0 {
 			name = fmt.Sprintf("%s.%d", base, i)
 		}
-		f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		f, err := privfs.OpenExcl(name)
 		if errors.Is(err, os.ErrExist) {
 			continue
 		}

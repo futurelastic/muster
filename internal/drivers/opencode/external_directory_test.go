@@ -85,6 +85,7 @@ func askFor(path string, isDir bool) string {
 }
 
 func TestExternalDirectoryRules_DenyFirstThenAllowTheSandboxsPaths(t *testing.T) {
+	skipOnWindows(t, "the rules are built from POSIX paths for a sandbox that is macOS-only")
 	plan := &sandboxPlan{
 		read:  []string{"/usr", "/work/repo", "/data/ref"},
 		write: []string{"/work/repo", "/sessions/s1"},
@@ -164,6 +165,7 @@ func TestExternalDirectoryRules_AreWrittenInOrder(t *testing.T) {
 // allow that results is wider than the sandbox. Leaving it out is a readable
 // deny, which is the safe direction.
 func TestExternalDirectoryRules_OmitARootThatWouldMatchMoreThanItNames(t *testing.T) {
+	skipOnWindows(t, "the rules are built from POSIX paths for a sandbox that is macOS-only")
 	plan := &sandboxPlan{read: []string{"/ok/dir", "/srv/data*", "/srv/a?b", "/"}}
 	rules := externalDirectoryFor(plan)
 	for _, r := range rules[1:] {

@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"sync"
 	"time"
+
+	"github.com/futurelastic/muster/internal/procgroup"
 )
 
 // Proc is a running module process as the client sees it. It is an interface so
@@ -47,9 +49,9 @@ const readGrace = time.Second
 //     EMPTY environment, not the parent's (os/exec would otherwise inherit).
 //   - The working directory is os.TempDir(): a module never runs "inside" the
 //     daemon's own directory or any session's.
-//   - The child leads its own process group (where the platform has them), so
-//     Kill takes down anything it spawned and a terminal signal aimed at the
-//     daemon does not reach it.
+//   - The child leads its own process group — a kill-on-close Job Object on
+//     Windows (internal/procgroup) — so Kill takes down anything it spawned and
+//     a terminal signal aimed at the daemon does not reach it.
 //   - The pipes are created here, not by os/exec, so Wait does not close them
 //     under a reader that has not finished (the documented os/exec trap).
 //
@@ -80,16 +82,24 @@ func ExecLauncher(ctx context.Context, path string, args []string, env []string)
 	cmd := exec.Command(path, args...)
 	cmd.Env = env
 	cmd.Dir = os.TempDir()
-	cmd.SysProcAttr = childSysProcAttr()
+	procgroup.Prepare(cmd)
 	cmd.WaitDelay = 2 * time.Second
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = inR, outW, errW
 	if err := cmd.Start(); err != nil {
 		closeAll(inR, inW, outR, outW, errR, errW)
 		return nil, err
 	}
+	// Under control before anything else: where the child is created suspended
+	// it runs only once it is in its group, and a failed Attach has already
+	// ended and reaped it.
+	group, err := procgroup.Attach(cmd)
+	if err != nil {
+		closeAll(inR, inW, outR, outW, errR, errW)
+		return nil, err
+	}
 	// The child holds its own copies now.
 	closeAll(inR, outW, errW)
-	return &execProc{cmd: cmd, stdin: inW, stdout: outR, stderr: errR}, nil
+	return &execProc{cmd: cmd, group: group, stdin: inW, stdout: outR, stderr: errR}, nil
 }
 
 func closeAll(fs ...*os.File) {
@@ -100,6 +110,7 @@ func closeAll(fs ...*os.File) {
 
 type execProc struct {
 	cmd            *exec.Cmd
+	group          *procgroup.Group
 	stdin          *os.File
 	stdout, stderr *os.File
 
@@ -117,6 +128,9 @@ func (p *execProc) Wait() error {
 	p.mu.Lock()
 	p.waited = true
 	p.mu.Unlock()
+	// Where the group is a Job Object, closing it ends whatever the module left
+	// running; on Unix there is nothing to release.
+	_ = p.group.Close()
 	// Give readers a moment to drain what is already in the pipes, then close
 	// our read ends so a lingering descendant cannot hold a goroutine forever.
 	time.AfterFunc(readGrace, func() {
@@ -126,7 +140,7 @@ func (p *execProc) Wait() error {
 	return err
 }
 
-// Kill signals the process group. After Wait has returned the process is gone
+// Kill ends the process group. After Wait has returned the process is gone
 // and its id may be reused, so it does nothing then: a stale id must never be
 // signalled. (A window of a few instructions between the kernel reaping the
 // child and Wait returning remains; it is accepted.)
@@ -136,5 +150,8 @@ func (p *execProc) Kill() {
 	if p.waited {
 		return
 	}
-	killGroup(p.cmd)
+	// The group first, then the process itself in case it is not (yet) a group
+	// leader.
+	_ = p.group.Kill()
+	_ = p.cmd.Process.Kill()
 }

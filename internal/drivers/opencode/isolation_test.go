@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -65,6 +64,9 @@ func (v insideView) vars() map[string]string {
 	m := map[string]string{}
 	for _, kv := range v.Env {
 		k, val, _ := strings.Cut(kv, "=")
+		if k == "" {
+			continue // Windows lists per-drive "=C:=..." entries
+		}
 		m[k] = val
 	}
 	return m
@@ -137,6 +139,9 @@ func TestIsolation_ServiceEnvDoesNotReachSession(t *testing.T) {
 		"OPENCODE_DISABLE_CLAUDE_CODE": true, "OPENCODE_SERVER_USERNAME": true, "OPENCODE_SERVER_PASSWORD": true,
 		"LANE_KEY": true,
 	}
+	for _, name := range platformSessionEnv {
+		allowed[name] = true
+	}
 	for name := range vars {
 		if !allowed[name] {
 			t.Errorf("unexpected variable %s in the session's environment", name)
@@ -159,8 +164,8 @@ func TestIsolation_ServiceEnvDoesNotReachSession(t *testing.T) {
 		t.Errorf("session directory %q is not under the session root %q", known.srv.dir, root)
 	}
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		for _, p := range strings.Split(vars["PATH"], ":") {
-			if p == home || strings.HasPrefix(p, home+"/") {
+		for _, p := range strings.Split(vars["PATH"], string(os.PathListSeparator)) {
+			if p == home || strings.HasPrefix(p, home+string(filepath.Separator)) {
 				t.Errorf("PATH entry %q is under the service user's home", p)
 			}
 		}
@@ -303,7 +308,7 @@ func TestState_ReportsDeadWhenTheSessionsProcessExited(t *testing.T) {
 	d, _ := newIsolatedDriver(t)
 	sess := mustCreate(t, d, "k1", fleet.SessionSpec{})
 	known, _ := d.wasSeen(sess.ID)
-	signalGroup(known.srv.proc.cmd, syscall.SIGKILL)
+	_ = known.srv.proc.group.Kill()
 	select {
 	case <-known.srv.proc.done:
 	case <-time.After(5 * time.Second):
@@ -450,16 +455,16 @@ func TestNew_RefusesARuntimePathUnderTheHomeOrRelative(t *testing.T) {
 			t.Error("a runtime path under the home directory was accepted")
 		}
 	}
-	if _, err := New(context.Background(), "m", WithBinary(exe), WithRuntimePath([]string{"/opt/tools/bin"})); err != nil {
+	if _, err := New(context.Background(), "m", WithBinary(exe), WithRuntimePath([]string{absToolsDir()})); err != nil {
 		t.Errorf("a system runtime path was refused: %v", err)
 	}
 }
 
 func TestIsolation_RuntimePathReachesTheSession(t *testing.T) {
-	d, _ := newIsolatedDriver(t, WithRuntimePath([]string{"/opt/tools/bin"}))
+	d, _ := newIsolatedDriver(t, WithRuntimePath([]string{absToolsDir()}))
 	sess := mustCreate(t, d, "k1", fleet.SessionSpec{})
 	path := inside(t, d, sess.ID).vars()["PATH"]
-	if !strings.HasPrefix(path, "/opt/tools/bin:") {
+	if !strings.HasPrefix(path, absToolsDir()+string(os.PathListSeparator)) {
 		t.Errorf("PATH = %q, want the allow-listed directory first", path)
 	}
 }

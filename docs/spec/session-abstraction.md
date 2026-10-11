@@ -1987,10 +1987,28 @@ service's. A create that carries `isolateEnvironment: true` against a `false` dr
 - this machine's `sessionEnv` entries that apply, then the create's `env`;
 - the session's own server credential, which reaches only that session's process.
 
+On Windows the same environment is built with these differences, and the contract does not change:
+
+- variable names are case-insensitive there, so every name is folded to upper case before it is
+  compared or merged. Two spellings of one name in a create's `env` are refused `invalid` (`os/exec`
+  would otherwise keep only the last of them, and a differently-cased copy could shadow an owned
+  name), and a name this driver owns is refused whatever its case;
+- `PATH`: the system directories under the Windows directory (`System32`, the Windows directory
+  itself, `System32\Wbem`, `System32\WindowsPowerShell\v1.0`), after any allow-listed directories;
+- the session's own directory also scopes `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `TEMP` and
+  `TMP`, which are owned names there as `HOME` and `TMPDIR` are elsewhere;
+- `SYSTEMROOT`, `WINDIR`, `SYSTEMDRIVE`, `COMSPEC` and `PATHEXT` are copied from the service: they
+  name system locations, never a user's, and a Windows process cannot start usefully without them.
+
 Close and shutdown kill the session's whole process group, not just the server, so nothing the
 session's tools started outlives it. A descendant that detaches into a new session of its own
 escapes a group kill; confining the filesystem and process tree is the sandbox's job, not this
-flag's.
+flag's. On Windows the server is created suspended, put in a Job Object created with kill-on-close
+and no breakaway, and only then resumed, so nothing it starts can leave the job; there is no
+graceful stop to try first (no console is shared), so close goes straight to terminating the job and
+waiting for it to be empty. The job belongs to the service process: a service that dies for any
+reason takes its servers with it, which is why nothing is left running for the next start to
+reclaim there.
 
 **What isolation does not do, stated plainly.** (1) The model-provider key a session needs is *in
 its environment*, and the runtime exposes that environment to its tool shell (`env` lists it).

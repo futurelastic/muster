@@ -171,6 +171,7 @@ func TestProfileQuotesPathsAndRefusesWhatCannotBeQuoted(t *testing.T) {
 }
 
 func TestInstallRootsNeverOpenTheHome(t *testing.T) {
+	skipOnWindows(t, "the sandbox profile is macOS-only and built from POSIX paths")
 	home := "/Users/someone"
 	got := installRoots(home+"/bin/opencode", home)
 	for _, r := range got {
@@ -187,6 +188,7 @@ func TestInstallRootsNeverOpenTheHome(t *testing.T) {
 // ---- planning --------------------------------------------------------------
 
 func TestPlanRefusesGrantsThatWouldPutTheHomeBack(t *testing.T) {
+	skipOnWindows(t, "the sandbox profile is macOS-only and built from POSIX paths")
 	d, _ := newIsolatedDriver(t)
 	home, err := os.UserHomeDir()
 	if err != nil {
