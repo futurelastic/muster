@@ -49,7 +49,7 @@ import (
 //
 // Everything else the bus publishes — message and part updates, file and LSP
 // events, session.updated (a title change; rename is unsupported here),
-// question prompts (Respond is unsupported here), heartbeats — is DROPPED, and
+// question prompts (Respond does not answer them), heartbeats — is DROPPED, and
 // none of it is invented into an existing kind. Events about a session this
 // driver did not create (a child session the runtime started for itself) are
 // dropped too: they are not in this driver's session universe.

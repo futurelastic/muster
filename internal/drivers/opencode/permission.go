@@ -3,9 +3,13 @@ package opencode
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	fleet "github.com/futurelastic/muster"
@@ -43,11 +47,42 @@ import (
 // never will. GET /permission lists what the runtime is waiting to be told;
 // readState consults it whenever the status is busy and, finding an ask for this
 // session, reports `waiting_input` with a `tool-permission` prompt. The prompt
-// carries no options, because Respond stays unsupported here: this is a way to
-// SEE the block, not to answer it.
+// carries the three answers Respond takes (below), and the ask's own id as its
+// nonce.
 //
 // A failed read of that list is not "nothing pending" (§5.7): the state stays
 // `working` and its evidence says the question could not be asked.
+//
+// # Answering an ask (muster #296)
+//
+// Respond answers the ask a session is parked on through the runtime's own
+// permission-reply endpoint, with one of three replies the prompt's options name
+// in order: 1 "Allow once", 2 "Allow always", 3 "Reject". "Always" is the
+// runtime's own meaning of it — the patterns the ask offers are approved for the
+// rest of that session — and is never narrowed or widened here.
+//
+// What is refused, and why each is a refusal and not a guess:
+//
+//   - No choice (0). On a menu that is "accept whatever is highlighted"; this
+//     prompt highlights nothing, and the one default a driver could pick is to run
+//     a tool nobody read. An unattended caller must name its answer.
+//   - Cancel. Dismissing the ask is rejecting it, and rejecting is a decision the
+//     caller makes by naming option 3, not one inferred from a dismissal.
+//   - Choices and Text. The ask is single-choice with no free-text row.
+//   - A nonce that is not the ask now pending. The nonce is the ask's id, which
+//     the runtime never reuses, so an answer meant for an ask that has since been
+//     resolved can never be applied to the next one. Nothing is sent.
+//   - Nothing pending. Answering a session that is not parked is refused, not
+//     queued: the runtime has no ask to attach it to.
+//
+// The reply names the ask by id, so even an answer sent without a nonce lands on
+// the ask that was read a moment ago and on no other; what the missing nonce
+// loses is the caller's check that it is the one they SHOWED somebody, and the
+// receipt says so (the tmux driver's wording, §5.6).
+//
+// A runtime "question" (its structured ask-the-user surface, a different list
+// from permissions) is not mapped onto this shape. A session parked on one is
+// answered `unsupported` with the reason, never a guessed choice.
 
 // permissionConfigRel is where the runtime reads the session's own configuration,
 // relative to the session directory.
@@ -128,6 +163,13 @@ func (d *Driver) checkBypass(spec fleet.SessionSpec) error {
 	return nil
 }
 
+// Answers an ask takes (muster #296): the prompt's options, in the order a
+// caller's 1-based choice indexes them, and the reply each one sends.
+var (
+	askOptions = []string{"Allow once", "Allow always", "Reject"}
+	askReplies = []string{"once", "always", "reject"}
+)
+
 // wirePermissionAsk is one entry of GET /permission: a tool the runtime is
 // waiting to be told it may run. Only what a supervisor needs is decoded.
 type wirePermissionAsk struct {
@@ -170,9 +212,9 @@ func blockedOnAsk(ask *wirePermissionAsk) fleet.SessionState {
 	st.WaitingOn = fleet.WaitingPrompt
 	st.Prompt = &fleet.SessionPrompt{
 		Question: q,
-		// No options: Respond is unsupported by this driver, so there is nothing
-		// a caller could pick. The prompt exists so the block is SEEN.
-		Options: []string{},
+		// What Respond takes, in order (muster #296). No Selected: nothing is
+		// highlighted, so there is no default for a bare answer to accept.
+		Options: append([]string(nil), askOptions...),
 		Kind:    fleet.PromptToolPermission,
 		Nonce:   ask.ID,
 	}
@@ -197,4 +239,101 @@ func (d *Driver) withPermission(ctx context.Context, srv *server, id string, st 
 	blocked := blockedOnAsk(ask)
 	blocked.Since, blocked.LastTurn = st.Since, st.LastTurn
 	return blocked
+}
+
+// wireQuestionAsk is one entry of GET /question: a structured question the
+// runtime is waiting on. Only the owner is decoded — this driver never answers
+// one, it only needs to know that one is the reason a session is parked.
+type wireQuestionAsk struct {
+	ID        string `json:"id"`
+	SessionID string `json:"sessionID"`
+}
+
+// pendingQuestion reports whether the runtime holds a question for session id. A
+// failed read is "do not know", which the caller treats as no question: the only
+// use of the answer is to word a refusal more precisely.
+func (d *Driver) pendingQuestion(ctx context.Context, srv *server, id string) bool {
+	var qs []wireQuestionAsk
+	if err := d.do(ctx, srv, "GET", "/question", nil, &qs); err != nil {
+		return false
+	}
+	for i := range qs {
+		if qs[i].SessionID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// answerAsk applies resp to the ask the runtime is holding for session id.
+// Everything that can be decided from the request alone is decided first, so a
+// malformed answer costs no round trip and never reaches the runtime.
+func (d *Driver) answerAsk(ctx context.Context, srv *server, id string, resp fleet.Response) (fleet.DeliveryReceipt, error) {
+	refuse := func(reason string) (fleet.DeliveryReceipt, error) {
+		return fleet.DeliveryReceipt{Outcome: fleet.OutcomeRefused, Reason: reason}, nil
+	}
+	if err := resp.Validate(); err != nil {
+		return refuse(err.Error())
+	}
+	switch {
+	case resp.Cancel:
+		return refuse("cancel is not accepted on a tool-permission ask: dismissing it is rejecting it, " +
+			"and that is a decision to name. Answer with choice 3 (Reject) if that is what is meant")
+	case len(resp.Choices) > 0 || resp.Text != nil:
+		return refuse("a tool-permission ask is a single choice with no free-text row: answer it with " +
+			"choice (1 Allow once, 2 Allow always, 3 Reject), not choices or text")
+	case resp.Choice < 1:
+		return refuse("a tool-permission ask highlights nothing, so there is no default to accept: " +
+			"answer with choice 1 (Allow once), 2 (Allow always) or 3 (Reject)")
+	case resp.Choice > len(askOptions):
+		return refuse("no such option on this prompt")
+	}
+
+	ask, err := d.pendingAsk(ctx, srv, id)
+	if err != nil {
+		return fleet.DeliveryReceipt{}, err // an unreadable list is not "nothing pending" (§5.7)
+	}
+	if ask == nil {
+		if d.pendingQuestion(ctx, srv, id) {
+			return fleet.DeliveryReceipt{}, &fleet.Error{
+				Kind: fleet.ErrorUnsupported,
+				Message: "respond: the runtime is holding a structured question for this session, not a " +
+					"tool-permission ask. This driver answers tool-permission asks only: a question is never " +
+					"mapped onto a guessed choice (§5.6). Interrupt the session to abandon the turn",
+				Machine: d.machine,
+			}
+		}
+		return refuse("session is not waiting on a tool-permission ask; nothing was sent")
+	}
+	if resp.Nonce != "" && resp.Nonce != ask.ID {
+		return refuse("the ask changed since it was read; answering now would answer a different " +
+			"tool request. Nothing was sent")
+	}
+
+	reply := askReplies[resp.Choice-1]
+	var applied *bool
+	path := "/permission/" + url.PathEscape(ask.ID) + "/reply"
+	switch err := d.do(ctx, srv, "POST", path, map[string]string{"reply": reply}, &applied); {
+	case err == nil, errors.Is(err, io.EOF):
+		// io.EOF: an empty body on a 2xx is the runtime accepting without a verdict.
+	case isNotFound(err):
+		// Resolved between the read and the reply — by a human at the runtime, by
+		// another client, or by the turn being aborted. Refused, not a missing session.
+		return refuse("the ask was resolved before this answer arrived; nothing was applied")
+	default:
+		return fleet.DeliveryReceipt{}, err
+	}
+
+	answered := "chose option " + strconv.Itoa(resp.Choice) + " (" + askOptions[resp.Choice-1] + ")"
+	if resp.Nonce == "" {
+		answered += "; answered without a nonce, so nothing verified the ask had not changed " +
+			"since it was read"
+	}
+	if applied != nil && !*applied {
+		return fleet.DeliveryReceipt{
+			Outcome: fleet.OutcomeUnknown,
+			Reason:  answered + "; the runtime reported that it did not process the reply",
+		}, nil
+	}
+	return fleet.DeliveryReceipt{Outcome: fleet.OutcomeSubmitted, Reason: answered}, nil
 }

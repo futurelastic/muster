@@ -152,7 +152,7 @@ func TestSubscribe_WhatHasNoHonestMappingIsDroppedNotInvented(t *testing.T) {
 	f.emit("message.updated", map[string]any{"info": map[string]any{"id": ref.ID, "sessionID": ref.ID}})
 	f.emit("message.part.updated", map[string]any{"part": map[string]any{"sessionID": ref.ID}})
 	f.emit("session.updated", map[string]any{"info": map[string]any{"id": ref.ID, "title": "renamed by the runtime"}})
-	// A question prompt is not a permission ask: Respond is unsupported, and
+	// A question prompt is not a permission ask: Respond does not answer it, and
 	// nothing here claims to see it (muster #289 maps permission.* only).
 	f.emit("question.asked", map[string]any{"sessionID": ref.ID})
 	f.emit("file.edited", map[string]any{"file": "/x"})
@@ -208,8 +208,8 @@ func TestSubscribe_AParkedPermissionAskIsOneWaitingInputState(t *testing.T) {
 			p := statePayload(t, next(t, s))
 			st := p.State
 			if p.Ref.ID != ref.ID || st.Status != fleet.StatusWaitingInput || st.WaitingOn != fleet.WaitingPrompt ||
-				st.Prompt == nil || st.Prompt.Kind != fleet.PromptToolPermission || len(st.Prompt.Options) != 0 {
-				t.Fatalf("state = %+v, want waiting_input with a tool-permission prompt and no options", st)
+				st.Prompt == nil || st.Prompt.Kind != fleet.PromptToolPermission || len(st.Prompt.Options) != 3 {
+				t.Fatalf("state = %+v, want waiting_input with a tool-permission prompt carrying the three answers", st)
 			}
 			// What State says about the same session, the same moment.
 			if want := stateOf(t, d, ref.ID); want.Status != st.Status || want.Prompt.Question != st.Prompt.Question {

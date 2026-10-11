@@ -851,6 +851,40 @@ Rules that follow from how the row behaves on the one runtime measured:
 safety property, and it is why raw keys are a separate endpoint rather than a
 flag here.
 
+**A tool-permission ask on an opencode session** (#296). A session parked on one
+reads `waiting_input` with `prompt.kind: "tool-permission"`, and answering it is
+the same call, sent to the runtime's own permission-reply endpoint:
+
+```json
+"prompt": { "question": "the runtime is asking permission to use bash: make test",
+            "options": ["Allow once", "Allow always", "Reject"],
+            "kind": "tool-permission", "nonce": "per_…" }
+```
+
+```json
+{ "choice": 1, "nonce": "per_…" }
+```
+
+- **`choice` names the answer**: `1` allow once, `2` allow always (the runtime's
+  own meaning: the patterns the ask offers are approved for the rest of that
+  session), `3` reject. `submitted` means the runtime processed the reply and the
+  turn moves on; a reject ends the turn the way the runtime ends it.
+- **Nothing is answered by default.** `choice: 0` is refused — nothing is
+  highlighted, and the one default available is to run a tool nobody read — as
+  are `cancel` (to dismiss is to reject, which you say with `choice: 3`),
+  `choices` and `text`. A refusal sends nothing.
+- **The nonce is the ask's own id**, which the runtime does not reuse. An answer
+  carrying the nonce of an ask that has since been resolved is refused, never
+  applied to the next ask; so is one that crossed a resolution in flight. Send it
+  always: without it the answer lands on the ask pending at that moment, and the
+  receipt says nothing verified it.
+- **Only this session's ask is ever answered**, and a session with nothing
+  pending is refused rather than queued.
+- **A runtime "question" is not mapped.** A session parked on a structured
+  question answers `respond` with `unsupported` and says why; `interrupt` is how
+  to leave it. A list of asks that could not be read is an error, not a refusal:
+  an unasked question is not the answer "none".
+
 ### `POST …/{id}/keys` — one raw key
 
 ```json
