@@ -1564,6 +1564,12 @@ the service stops dialling it, and reads report it `unreachable` immediately —
 with the time it began failing in `sources[].error` — until a background probe
 hears it answer. A `scope=local` read never waits on a peer at all.
 
+A short `Fleet-Deadline-Ms` (or a short client timeout) does not keep a dark
+machine from being remembered: when your call misses a deadline you chose, the
+service checks the machine itself, within its own budget, and counts that
+check. A machine that does answer is never marked down because of your
+timeout.
+
 When your service relays the call to a peer, it announces a slightly shorter
 deadline than yours, so a peer that is up but slow can still get its own
 report back to you. The peer's source then carries the peer's own status and

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -23,6 +24,11 @@ type gatedPeer struct {
 	srv  *httptest.Server
 	up   atomic.Bool
 	hits atomic.Int64
+	// healthy makes /v1/health answer at once whatever up says: a peer that is
+	// alive and merely slow on the routes a caller is waiting for (#302).
+	healthy atomic.Bool
+	// health counts /v1/health requests, concurrent and peak concurrent.
+	health, healthNow, healthPeak atomic.Int64
 }
 
 func newGatedPeer(t *testing.T) *gatedPeer {
@@ -36,6 +42,21 @@ func newGatedPeer(t *testing.T) *gatedPeer {
 		if !strings.HasPrefix(r.URL.Path, "/v1/sessions") && r.URL.Path != "/v1/health" {
 			http.NotFound(w, r)
 			return
+		}
+		if r.URL.Path == "/v1/health" {
+			g.health.Add(1)
+			now := g.healthNow.Add(1)
+			defer g.healthNow.Add(-1)
+			for {
+				peak := g.healthPeak.Load()
+				if now <= peak || g.healthPeak.CompareAndSwap(peak, now) {
+					break
+				}
+			}
+			if g.healthy.Load() {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
 		}
 		if !g.up.Load() {
 			<-r.Context().Done()
@@ -174,9 +195,12 @@ func TestASuccessResetsTheFailureStreak(t *testing.T) {
 
 // A deadline the CALLER chose, shorter than this driver's own bound, is no
 // evidence about the peer (#174): one impatient client must not mark a
-// healthy, slow peer down for everyone.
+// healthy, slow peer down for everyone. The peer here is alive — it answers
+// /v1/health at once — and only the route the callers wait on is slow, so the
+// driver's own check (#302) finds it up and the streak never starts.
 func TestACallerShortenedDeadlineNeverMarksAPeerDown(t *testing.T) {
 	g := newGatedPeer(t)
+	g.healthy.Store(true)
 	d := newSleepy(t, g, 2, time.Hour, time.Hour, WithDeadline(2*time.Second))
 
 	for i := 0; i < 5; i++ {
@@ -187,6 +211,10 @@ func TestACallerShortenedDeadlineNeverMarksAPeerDown(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	waitChecksIdle(t, d)
+	if g.health.Load() == 0 {
+		t.Fatal("caller-shortened misses never made the driver ask the peer itself")
+	}
 	if down, _, f := d.PeerDown(); down || f != 0 {
 		t.Fatalf("caller-shortened misses counted: down=%v failures=%d", down, f)
 	}
@@ -195,13 +223,139 @@ func TestACallerShortenedDeadlineNeverMarksAPeerDown(t *testing.T) {
 // A caller that hangs up is not a peer miss either.
 func TestACallerThatHangsUpNeverMarksAPeerDown(t *testing.T) {
 	g := newGatedPeer(t)
+	g.healthy.Store(true)
 	d := newSleepy(t, g, 1, time.Hour, time.Hour, WithDeadline(2*time.Second))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { time.Sleep(30 * time.Millisecond); cancel() }()
 	_, _ = d.List(ctx, caller, driver.ListFilter{})
+	waitChecksIdle(t, d)
 	if down, _, _ := d.PeerDown(); down {
 		t.Fatal("a cancelled call marked the peer down")
+	}
+}
+
+// waitChecksIdle waits for any miss-triggered check to finish, so an
+// assertion about the final state does not race the check it provoked.
+func waitChecksIdle(t *testing.T, d *Driver) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		d.down.mu.Lock()
+		busy := d.down.checking
+		d.down.mu.Unlock()
+		if !busy {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("a miss-triggered check never finished")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// The defect in #302: a peer that drops every packet, and callers that each
+// give up long before this driver's bound. None of those misses counts by
+// itself, yet the peer must still be marked down — by the driver's own checks
+// — and within a few check intervals, not never.
+func TestShortTimeoutCallersAloneMarkADarkPeerDown(t *testing.T) {
+	g := newGatedPeer(t) // hangs everything, /v1/health included
+	d := newSleepy(t, g, 3, time.Hour, time.Hour, WithDeadline(200*time.Millisecond))
+
+	started := time.Now()
+	deadline := started.Add(5 * time.Second)
+	for {
+		if down, _, _ := d.PeerDown(); down {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("peer never marked down by short-timeout callers alone (failures=%d)", func() int { _, _, f := d.PeerDown(); return f }())
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		_, _ = d.List(ctx, caller, driver.ListFilter{})
+		cancel()
+	}
+	// Three checks of 200ms each, with slack: the oracle's "a few probe
+	// intervals", not the K full bounds this used to take.
+	if took := time.Since(started); took > 3*time.Second {
+		t.Errorf("took %s to mark the peer down", took)
+	}
+	// Once down, the next read fails at once.
+	if _, took := listOnce(t, d); took > 50*time.Millisecond {
+		t.Errorf("a read after mark-down took %s", took)
+	}
+}
+
+// Hang-ups are as good a reason to ask as shortened deadlines are.
+func TestCallersThatHangUpAloneMarkADarkPeerDown(t *testing.T) {
+	g := newGatedPeer(t)
+	d := newSleepy(t, g, 2, time.Hour, time.Hour, WithDeadline(150*time.Millisecond))
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if down, _, _ := d.PeerDown(); down {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("hang-ups alone never marked a dark peer down")
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() { time.Sleep(10 * time.Millisecond); cancel() }()
+		_, _ = d.List(ctx, caller, driver.ListFilter{})
+	}
+}
+
+// One check in flight per peer, however many callers miss at once.
+func TestMissTriggeredChecksAreSingleFlight(t *testing.T) {
+	g := newGatedPeer(t)
+	d := newSleepy(t, g, 100, time.Hour, time.Hour, WithDeadline(300*time.Millisecond))
+
+	var wg sync.WaitGroup
+	for i := 0; i < 30; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+			defer cancel()
+			_, _ = d.List(ctx, caller, driver.ListFilter{})
+		}()
+	}
+	wg.Wait()
+	waitChecksIdle(t, d)
+	if peak := g.healthPeak.Load(); peak != 1 {
+		t.Errorf("peak concurrent health checks = %d, want exactly 1", peak)
+	}
+}
+
+// A peer slow enough to miss every impatient caller but not slow enough to
+// miss the driver's own budget must never be marked down: the check answers,
+// and an answer resets the streak.
+func TestASlowPeerThatAnswersTheCheckIsNeverMarkedDown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(80 * time.Millisecond): // slower than the callers, inside the check budget
+		case <-r.Context().Done():
+			return
+		}
+		if r.URL.Path == "/v1/health" {
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"items":[],"sources":[{"machine":"sleepy","status":"ok","observedAt":"2026-09-30T00:00:00Z"}],"complete":true}`))
+	}))
+	t.Cleanup(srv.Close)
+	g := &gatedPeer{srv: srv}
+	d := newSleepy(t, g, 2, time.Hour, time.Hour, WithDeadline(time.Second))
+
+	for i := 0; i < 8; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		_, _ = d.List(ctx, caller, driver.ListFilter{})
+		cancel()
+		time.Sleep(100 * time.Millisecond) // let each check finish and answer
+	}
+	waitChecksIdle(t, d)
+	if down, _, f := d.PeerDown(); down || f != 0 {
+		t.Fatalf("slow-but-answering peer: down=%v failures=%d", down, f)
 	}
 }
 

@@ -1464,6 +1464,8 @@ func (d *Driver) transportFailure(ctx context.Context, req fleet.Request, method
 		Retryable: true,
 	}
 	if errors.Is(err, context.Canceled) && errors.Is(ctx.Err(), context.Canceled) {
+		// Not evidence about the peer, but a reason to ask it ourselves (#302).
+		d.probeAfterMiss(req)
 		return ferr
 	}
 	budget := "none"
@@ -1479,6 +1481,11 @@ func (d *Driver) transportFailure(ctx context.Context, req fleet.Request, method
 	// Evidence about the peer, not about this caller's patience (#237).
 	if d.countsAsPeerFailure(kind == "deadline", budgetDur) {
 		d.noteFailure(req, started)
+	} else {
+		// A caller-shortened miss proves nothing alone (#174); the driver asks
+		// the peer itself, on its own budget, so callers that never wait the
+		// full bound still get a dark peer marked down (#302).
+		d.probeAfterMiss(req)
 	}
 	// The route, never the query: label filters carry caller-supplied values.
 	// The transport's own error repeats the whole URL, query included, so

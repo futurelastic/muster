@@ -47,6 +47,22 @@ import (
 //     impatient client mark a healthy, slow peer down for everyone.
 //   - Any HTTP response, whatever its status, is an answer: the peer is up.
 //
+// # Callers that never wait the full bound (#302)
+//
+// Those two exclusions are each right and, together, left a hole: a peer that
+// went dark was marked down only after K callers each waited out the whole
+// bound, so a fleet whose callers all time out sooner (a watch script, a CLI
+// at 15s, a dashboard at 3s) never marked it down and every read stayed slow
+// for as long as the peer stayed dark.
+//
+// A miss that is not evidence — a hang-up, or a caller-shortened deadline —
+// therefore starts the driver's OWN check: one GET /v1/health under
+// downProbeTimeout, at most one in flight per peer, and ITS outcome counts as
+// a genuine failure (or as an answer, which clears the streak). The verdict
+// rests on a budget this driver chose, not on the impatient caller's, so the
+// #174 guarantee holds: a slow peer that answers inside downProbeTimeout is
+// never marked down, whoever is timing out against it.
+
 // # What it costs, said plainly
 //
 // While a peer is marked down, calls to it — mutations included — fail fast
@@ -83,8 +99,14 @@ type downState struct {
 	down      bool
 	nextProbe time.Time
 	probing   bool
-	stop      chan struct{}
-	stopOnce  sync.Once
+	// checking is set while a miss-triggered check (probeAfterMiss) is in
+	// flight: the single-flight guard, separate from probing, which belongs to
+	// the loop that runs only once the peer is already down.
+	checking bool
+	// closed is set by Shutdown so no new check starts after it.
+	closed   bool
+	stop     chan struct{}
+	stopOnce sync.Once
 }
 
 // downPolicy is the tunable side of the state, so a test can shrink the clock
@@ -138,6 +160,7 @@ var _ driver.PeerDownReporter = (*Driver)(nil)
 func (d *Driver) Shutdown() {
 	d.down.stopOnce.Do(func() {
 		d.down.mu.Lock()
+		d.down.closed = true
 		if d.down.stop == nil {
 			d.down.stop = make(chan struct{})
 		}
@@ -292,9 +315,22 @@ func (d *Driver) endProbe(force bool) bool {
 // a different problem from a peer that is not there. Marks the peer reachable
 // on any answer.
 func (d *Driver) probeOnce(req fleet.Request) bool {
+	answered, _ := d.askHealth(req)
+	if answered {
+		d.noteReached()
+	}
+	return answered
+}
+
+// askHealth is the one place a probe talks to the peer: GET /v1/health under
+// this driver's own budget, never a caller's. answered reports whether any
+// HTTP response came back; asked is false when no request could be made at
+// all (no credential to present), which says nothing about the peer either
+// way and must not be counted as a miss.
+func (d *Driver) askHealth(req fleet.Request) (answered, asked bool) {
 	token, behalf, ok := d.bearerFor(req)
 	if !ok {
-		return false
+		return false, false
 	}
 	timeout := downProbeTimeout
 	if d.deadline > 0 && d.deadline < timeout {
@@ -304,7 +340,7 @@ func (d *Driver) probeOnce(req fleet.Request) bool {
 	defer cancel()
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, d.base+"/v1/health", nil)
 	if err != nil {
-		return false
+		return false, false
 	}
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	if behalf != "" {
@@ -312,9 +348,49 @@ func (d *Driver) probeOnce(req fleet.Request) bool {
 	}
 	resp, err := d.client.Do(httpReq)
 	if err != nil {
-		return false
+		return false, true
 	}
 	_ = resp.Body.Close()
-	d.noteReached()
-	return true
+	return true, true
+}
+
+// probeAfterMiss is called for a failed call that is NOT evidence about the
+// peer — a caller that hung up, or one that shortened its own deadline and
+// missed it. Such a miss cannot count itself (#174), but it is a reason to
+// ask: it starts one check on the driver's own budget and counts that
+// outcome. At most one check is in flight per peer, so a burst of impatient
+// callers costs the peer one small request at a time, not one per caller.
+//
+// It does nothing for a peer already marked down (the background probe is
+// already asking) or after Shutdown.
+func (d *Driver) probeAfterMiss(req fleet.Request) {
+	d.down.mu.Lock()
+	if d.down.down || d.down.checking || d.down.closed {
+		d.down.mu.Unlock()
+		return
+	}
+	d.down.checking = true
+	d.down.mu.Unlock()
+	go d.checkPeer(req)
+}
+
+// checkPeer runs one miss-triggered check and records its outcome: an answer
+// of any kind clears the streak, a miss is one genuine failure of the K.
+func (d *Driver) checkPeer(req fleet.Request) {
+	started := d.now()
+	answered, asked := d.askHealth(req)
+	d.down.mu.Lock()
+	closed := d.down.closed
+	d.down.mu.Unlock()
+	switch {
+	case !asked || closed:
+		// Nothing was asked, or the driver is shutting down: no evidence.
+	case answered:
+		d.noteReached()
+	default:
+		d.noteFailure(req, started)
+	}
+	d.down.mu.Lock()
+	d.down.checking = false
+	d.down.mu.Unlock()
 }
