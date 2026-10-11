@@ -1,22 +1,35 @@
 name: CI
 
-# Triggers: a push to trunk, and pull requests. A push to any other branch is
-# deliberately NOT a trigger (#199, ruled). This repository is public, so a
-# value is exposed the moment a branch is pushed; a scan after the push finds
-# nothing sooner than the pre-commit hook and trunk's own run do, and cannot
-# un-publish anything. It would also make a branch's CI class say more than
-# was checked: a secret-scan-only run reads `green` with no test run behind it,
-# and running the whole workflow makes every ship wait on the -race suite,
-# where a flake can block it. With no run on a branch the class stays `none`,
-# which is what is true.
+# Triggers: a push to trunk, a push to a session branch, and pull requests.
 #
-# The gitleaks step already copes with a branch push (scope origin/<trunk>..HEAD),
-# so revisiting this is a trigger edit plus a choice about the `go` job's `if`.
+# A session-branch push IS a trigger (#299). It reverses the first ruling of
+# #199, which kept trunk and pull requests only. That ruling had three
+# concerns, and each is answered:
+#   - exposure: a branch push has already published the branch; a trigger adds
+#     none. The gitleaks step scopes a branch push as origin/<trunk>..HEAD.
+#   - a misleading class: a scan-only run reading `green` with no test behind
+#     it. It cannot happen, because the WHOLE workflow runs on a branch, so the
+#     `go` job (scripts/gate.sh, -race) runs too and `green` means tests ran.
+#   - flakes: a -race flake on a branch now blocks that branch's ship. That is
+#     the accepted cost of `gate.authoritative: ci` in project.yml: the full
+#     suite runs here, on a hosted runner, and never on a developer machine.
+# The globs are the branch types in CLAUDE.md plus `design/`.
+#
 # Reasoning, and the convention for key-shaped test fixtures:
 # docs/internals.md, "Secret scanning, and fixtures that look like secrets".
 on:
   push:
-    branches: [main, master]
+    branches:
+      - main
+      - master
+      - "feat/**"
+      - "fix/**"
+      - "docs/**"
+      - "chore/**"
+      - "refactor/**"
+      - "test/**"
+      - "perf/**"
+      - "design/**"
   pull_request:
 
 jobs:
