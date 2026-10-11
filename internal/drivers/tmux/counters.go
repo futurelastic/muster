@@ -420,6 +420,11 @@ const (
 	counterForegroundShell      = "foreground.refused_shell"
 	counterForegroundUnanswered = "foreground.refused_unanswered"
 
+	// counterAgentUnread (#301): a listing's one process-table read failed, so
+	// no session in it could report the agent its runtime was started with.
+	// The listing's source is marked degraded for the same read.
+	counterAgentUnread = "agent.process_table_unread"
+
 	// counterProcessSessionRecordRejected (#180 L5): a runtime per-process
 	// record whose session id is not UUID-shaped, refused before it could
 	// become part of a path.

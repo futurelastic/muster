@@ -1468,6 +1468,24 @@ follows — never an echo of what was requested. What was requested lives in
 `pins.*.requested` instead, correctly labelled as a request rather than a
 fact.
 
+**Where the local driver reads `agent` from (muster #301).** Not from the
+create request — that memory lasts thirty minutes and exists only for a session
+this service created. The runtime is started with `--agent <name>` on its own
+command line, and a process's command line does not change, so the driver reads
+it from the process table: for every live session, whoever created it, however
+old, across a service restart. It looks at the processes in the session's
+terminal foreground group that are not an interactive shell, shallowest first;
+two different values at the same depth are a disagreement and are reported as
+absence rather than a pick. `agent` is absent — omitted, never empty — when the
+runtime was started without one. When the process table cannot be read for a
+listing, the field is absent for every session in it and that listing's source
+is `degraded`: absent then means *unknown*, not *none*. Where a create's
+request is still on file and the process shows a value, `pins.agent` resolves:
+`applied` is what the process shows, `honoured` says whether it equals the
+request, `source` is `observed`. A driver that cannot read it declares
+`reportsAgent: false` (§4.3), and an `agent` list filter then matches nothing
+there.
+
 ### 2.13 RuntimeSurfaceRef
 
 ```
@@ -1876,6 +1894,7 @@ DriverCapabilities {
   observesControlChannel: boolean // can report `controlChannel` (§2.3); absent state is answerable only against this
   observesPermissionMode: boolean // can report `permissionMode` (§2.3); absent state is answerable only against this. A driver may report it from a posture it configured itself (the local opencode driver reports `bypass`, muster #283) and leave it absent for a session it set nothing on; and a driver may honour `permissionMode: "bypass"` only together with an enforced `sandbox` (§2.1), refusing `unsupported` otherwise
   reportsUsage    : boolean   // can read `usage` (§2.3, muster #285) from its runtime; absent usage is answerable only against this: true = "not yet known", false = never
+  reportsAgent    : boolean   // can read `agent` (§2.1/§2.12, muster #301) for any live session it lists, not only one it created; absent agent is answerable only against this: true = the runtime was started without one, false = never reported (and an `agent` list filter matches nothing)
   reportsRuntimeSurface: boolean // can say anything about `runtimeSurface` (§2.13); absent state is answerable only against this
   isolatesEnvironment: boolean // starts a session's process with a BUILT environment, nothing inherited from the service (§2.1 `isolateEnvironment`, muster #280)
   sandbox?        : SandboxSupport  // can wrap a session in an OS sandbox (§2.1 `sandbox`, muster #281): { mechanism, denies[], network[], packageCache[] }; absent = cannot, and a create asking for one is refused `unsupported`

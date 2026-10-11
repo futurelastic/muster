@@ -313,9 +313,30 @@ var pinUnresolvedEvidence = map[string]string{
 // at creation instead (Create's own guard, before this record is even
 // written), so every pin reaching this record did reach the argv intact.
 func pinOutcomeFor(rec createRecord) *fleet.PinOutcome {
+	return pinOutcomeObserving(rec, "")
+}
+
+// pinAgentObservedEvidence says where a resolved agent pin's answer came
+// from: the runtime's own command line, read back from the process table.
+const pinAgentObservedEvidence = "read from the running process's own command line " +
+	"(--agent), not from the create request"
+
+// pinOutcomeObserving is pinOutcomeFor for a caller that has also read the
+// agent off the session's runtime process (muster #301). An observed value
+// resolves the agent pin — honoured when it equals what was requested,
+// not honoured when it does not, with the runtime's value as Applied and
+// source `observed`. Without an observation (the option is off, the table
+// was unreadable, or the runtime shows none) the pin stays unresolved: a
+// missing reading is never read as "dropped".
+func pinOutcomeObserving(rec createRecord, observedAgent string) *fleet.PinOutcome {
 	out := &fleet.PinOutcome{}
 	if rec.Agent != "" {
-		out.Agent = fleet.PinUnresolved(rec.Agent, pinUnresolvedEvidence["agent"])
+		if observedAgent != "" {
+			out.Agent = fleet.PinResolved(rec.Agent, observedAgent, observedAgent == rec.Agent,
+				fleet.PinObserved, pinAgentObservedEvidence)
+		} else {
+			out.Agent = fleet.PinUnresolved(rec.Agent, pinUnresolvedEvidence["agent"])
+		}
 	}
 	if rec.Model != "" {
 		out.Model = fleet.PinUnresolved(rec.Model, pinUnresolvedEvidence["model"])
