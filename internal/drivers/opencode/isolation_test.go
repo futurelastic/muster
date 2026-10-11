@@ -91,8 +91,6 @@ func inside(t *testing.T, d *Driver, id string) insideView {
 	return v
 }
 
-func alive(pid int) bool { return syscall.Kill(pid, 0) == nil }
-
 func waitGone(t *testing.T, what string, pid int) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)

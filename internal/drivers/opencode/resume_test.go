@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 
 	fleet "github.com/futurelastic/muster"
@@ -262,7 +261,7 @@ func TestResume_ACrashedServicesServerIsReapedBeforeRelaunch(t *testing.T) {
 	if got := listed(t, d2)[sess.ID].State.Status; got != fleet.StatusIdle {
 		t.Errorf("status = %q; want idle", got)
 	}
-	_ = syscall.Kill(-oldPid, syscall.SIGKILL)
+	killGroupOf(oldPid)
 }
 
 func TestResume_ASessionThatCannotBeFoundIsStillListedWithTheReason(t *testing.T) {

@@ -13,6 +13,7 @@
 #   2. go build ./...      the whole module: catches a broken caller in a
 #                          package nobody touched
 #   3. go vet ./...        same reason
+#      GOOS=windows go vet / go build  the Windows cross-compile (#303)
 #   4. go test <packages>  ONLY the packages with a changed .go file, plus
 #                          everything if go.mod / go.sum changed. No -race:
 #                          that is the full gate's job, on a runner.
@@ -40,6 +41,14 @@ go build ./...
 
 echo "== go vet =="
 go vet ./...
+
+# Windows must keep compiling (#303): same two cross-compile steps as the full
+# gate. Cheap, and it is the check a developer's own machine can actually run.
+echo "== go vet (windows/amd64) =="
+GOOS=windows GOARCH=amd64 go vet ./...
+
+echo "== go build (windows/arm64) =="
+GOOS=windows GOARCH=arm64 go build ./...
 
 trunk="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
 [ -n "$trunk" ] || trunk="origin/main"

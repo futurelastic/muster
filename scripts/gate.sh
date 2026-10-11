@@ -19,8 +19,9 @@
 #
 # Order matches CI's `go` job exactly: gofmt first (cheapest, and it is the
 # step that actually reached trunk broken), then build, then vet, then the
-# -race test suite (slowest, so it fails last, and the same order every
-# session's own gate run trains muscle memory for).
+# Windows cross-compile (#303), then the -race test suite (slowest, so it
+# fails last, and the same order every session's own gate run trains muscle
+# memory for).
 set -eu
 
 cd "$(dirname "$0")/.."
@@ -39,6 +40,17 @@ go build ./...
 echo "== go vet =="
 go vet ./...
 
+# Windows must keep compiling (#303). The port is staged, and a Windows runner
+# is not in this job: cross-compiling is. `go vet` type-checks the test files
+# too, so a new `syscall.Kill` in a test fails here, in seconds, on any machine,
+# rather than on the first Windows run. amd64 vets; arm64 builds, because the
+# platform-specific code does not differ by architecture.
+echo "== go vet (windows/amd64) =="
+GOOS=windows GOARCH=amd64 go vet ./...
+
+echo "== go build (windows/arm64) =="
+GOOS=windows GOARCH=arm64 go build ./...
+
 # -race because this codebase runs control-mode clients, pumps and an event
 # engine concurrently; a data race there would surface as an event stream
 # that is subtly wrong rather than one that crashes.
@@ -50,4 +62,4 @@ go vet ./...
 echo "== go test -race =="
 go test -race ./...
 
-echo "PASS: gofmt clean, build/vet/test -race all green."
+echo "PASS: gofmt clean, build/vet/windows-cross/test -race all green."

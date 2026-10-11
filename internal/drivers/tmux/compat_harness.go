@@ -600,7 +600,7 @@ func (h *compatHarness) reapStragglers(ctx context.Context, w *compatWorld, ids 
 		if w.d.VerifyProcessIdentity(ctx, id) != nil {
 			continue // gone, or no longer the same process
 		}
-		if err := syscall.Kill(id.PID, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+		if err := killPID(id.PID); err != nil && err != syscall.ESRCH {
 			fail("straggler", fmt.Errorf("pid %d: %w", id.PID, err))
 		}
 	}

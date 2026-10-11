@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 
 	fleet "github.com/futurelastic/muster"
@@ -99,7 +98,7 @@ func TestSubscribe_Process_AProcessThatDiesIsReportedClosedOnce(t *testing.T) {
 	next(t, s)
 
 	known, _ := d.wasSeen(sess.ID)
-	if err := syscall.Kill(known.srv.proc.cmd.Process.Pid, syscall.SIGKILL); err != nil {
+	if err := killProc(known.srv.proc.cmd.Process.Pid); err != nil {
 		t.Fatal(err)
 	}
 	ev := next(t, s)
