@@ -1,7 +1,6 @@
 package modclient
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,12 +113,8 @@ func checkExecutable(dir, name string) string {
 		return "not readable"
 	case !st.Mode().IsRegular():
 		return "not a regular file (symbolic links are not followed)"
-	case st.Mode().Perm()&0o100 == 0:
-		return "not executable by its owner"
-	case st.Mode().Perm()&0o022 != 0:
-		return fmt.Sprintf("group- or world-writable (mode %04o)", st.Mode().Perm())
 	}
-	return ""
+	return modeProblem(st.Mode())
 }
 
 // baseEnv are the only names taken from the daemon's own environment, plus the

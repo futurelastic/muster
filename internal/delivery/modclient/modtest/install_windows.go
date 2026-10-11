@@ -28,8 +28,11 @@ func sidecarBehaviour() string {
 	return string(b)
 }
 
-// Install makes dir/name.exe a copy of (or a hard link to) the running test
-// binary and writes behaviour b beside it, and returns its path. There is no
+// Install makes dir/name.exe a copy of the running test binary and writes
+// behaviour b beside it, and returns its path. It is a copy and never a hard
+// link: the test process itself is running from that file, and Windows refuses
+// to delete ANY name of a file that has a running image, so a link would make
+// the test's temporary directory impossible to remove. There is no
 // /bin/sh to wrap it in on Windows, and the launcher gives the child a minimal
 // environment, so the behaviour rides in a file the binary finds by its own
 // name: MaybeServe, called first in TestMain, reads it and serves the protocol.
@@ -44,10 +47,8 @@ func Install(t testing.TB, dir, name string, b Behaviour) string {
 		exe = os.Args[0]
 	}
 	path := filepath.Join(dir, name+".exe")
-	if err := os.Link(exe, path); err != nil {
-		if err := copyFile(exe, path); err != nil {
-			t.Fatal(err)
-		}
+	if err := copyFile(exe, path); err != nil {
+		t.Fatal(err)
 	}
 	if err := os.WriteFile(path+sidecarSuffix, blob, 0o600); err != nil {
 		t.Fatal(err)

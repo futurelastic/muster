@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -82,6 +83,9 @@ func TestDiscover_AbsentOrEmptyDirectory(t *testing.T) {
 }
 
 func TestDiscover_RefusesGroupWritable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a file's writability by others is an ACL question there, not mode bits (windows, #303)")
+	}
 	dir := t.TempDir()
 	writeModule(t, dir, "groupw", 0o775)
 	writeModule(t, dir, "worldw", 0o757)
@@ -101,7 +105,10 @@ func TestDiscover_RefusesGroupWritable(t *testing.T) {
 
 func TestDiscover_RefusesWhatIsNotAnExecutableFile(t *testing.T) {
 	dir := t.TempDir()
-	writeModule(t, dir, "noexec", 0o644)
+	if runtime.GOOS != "windows" {
+		// There is no execute bit to be missing on Windows.
+		writeModule(t, dir, "noexec", 0o644)
+	}
 	writeModule(t, dir, "target", 0o755)
 	if err := os.Symlink(filepath.Join(dir, "target"), filepath.Join(dir, "link")); err != nil {
 		t.Skip("symlinks unavailable:", err)
@@ -110,11 +117,16 @@ func TestDiscover_RefusesWhatIsNotAnExecutableFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	found, problems := modclient.Discover(dir, []string{"noexec", "link", "subdir"})
+	names := []string{"link", "subdir"}
+	want := map[string]string{"link": "not a regular file", "subdir": "not a regular file"}
+	if runtime.GOOS != "windows" {
+		names = []string{"noexec", "link", "subdir"}
+		want["noexec"] = "not executable"
+	}
+	found, problems := modclient.Discover(dir, names)
 	if len(found) != 0 {
 		t.Fatalf("found = %+v, want nothing usable", found)
 	}
-	want := map[string]string{"noexec": "not executable", "link": "not a regular file", "subdir": "not a regular file"}
 	for name, frag := range want {
 		p, ok := problemFor(problems, name)
 		if !ok || !strings.Contains(p.Reason, frag) {

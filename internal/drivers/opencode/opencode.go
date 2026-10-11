@@ -471,6 +471,9 @@ func New(ctx context.Context, machine fleet.MachineId, opts ...Option) (*Driver,
 	if err := checkSessionEnvEntries(d.sessionEnv); err != nil {
 		return nil, err
 	}
+	// Folded once, on a copy, so a create's names (folded the same way) meet a
+	// configured entry exactly. A no-op where names are case-sensitive.
+	d.sessionEnv = foldEntryNames(d.sessionEnv)
 	if d.stateDir != "" && !filepath.IsAbs(d.stateDir) {
 		return nil, fmt.Errorf("opencode: the state directory %q must be an absolute path", d.stateDir)
 	}

@@ -26,6 +26,7 @@ cd "$(dirname "$0")/.."
 ALLOW=(
 	./internal/procgroup
 	./internal/delivery/modclient
+	./internal/drivers/opencode
 )
 
 MUST_PASS=(
@@ -35,6 +36,15 @@ MUST_PASS=(
 	TestProcess_SpawnsServeWithMinimalEnv
 	TestProcess_KillMidRunRestartsAndReady
 	TestProcess_ShutdownGrace
+	TestClose_KillsTheSessionsProcessGroup
+	TestShutdown_StopsEverySessionAndLeavesNoDescendant
+	TestCreate_FailedSpawnLeavesNothingBehind
+	TestIsolation_ServiceEnvDoesNotReachSession
+	TestIsolation_ConcurrentSessionsSeeOnlyTheirOwnEnv
+	TestIsolation_SessionEnvPrecedenceAndFreshRead
+	TestIsolation_SessionEnvIsScopedByRuntime
+	TestIsolation_RuntimePathReachesTheSession
+	TestSandboxRefusedOnAHostWithoutTheMechanism
 )
 
 echo "== go build =="
