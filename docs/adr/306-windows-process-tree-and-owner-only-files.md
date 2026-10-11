@@ -83,8 +83,10 @@ list — never a pass it did not earn.
   privfs, the subprocess driver, modclient, state, and `cmd/muster` since #311),
   prints every skip, and fails if a named must-run test did not PASS. Widening
   it further is a follow-up. In `cmd/muster` the tests that cover a Unix tool
-  (the shell installer scripts, the git hook row, the POSIX execute bit the tmux
-  row reads) skip with a message ending `(windows, #303)`; the state-directory
+  (the shell installer scripts, the git hook row, the inbox route the tmux
+  runtime owns) skip with a message ending `(windows, #303)`; the runtime rows
+  judge "executable" per platform (a mode bit on Unix, a `PATHEXT` extension on
+  Windows, `cmd/muster/execbit_*.go`, #312) and run there; the state-directory
   row, the grant-edit backup and principal enrolment run there and assert
   through `privfs.Check`.
 - The sandbox remains macOS-only; the opencode tests that cover its profile
