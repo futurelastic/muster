@@ -234,6 +234,8 @@ try {
   Set-UserVar 'FLEET_RUNTIME_OPENCODE' '1'
   Set-UserVar 'FLEET_OPENCODE_BIN' $fake
   Set-UserVar 'FLEET_LOG_FILE' $script:logFile
+  # The task is registered under a name of this script's own, not the default.
+  Set-UserVar 'FLEET_TASK_NAME' $taskName
   # FLEET_RUNTIME is deliberately NOT set: on Windows the default is "none", and
   # that default is part of what is being proved.
 
