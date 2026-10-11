@@ -167,9 +167,12 @@ try {
   # ---- 2. install from the packed tarballs --------------------------------
   Say 'npm pack + npm install -g'
   Run 'npm' @('pack', (Join-Path $pkgs 'muster-win32-x64'), (Join-Path $pkgs 'muster'), '--pack-destination', $tgz) | Write-Host
-  $platformTgz = (Get-ChildItem $tgz -Filter 'futurelastic-muster-win32-x64-*.tgz').FullName
-  $launcherTgz = (Get-ChildItem $tgz -Filter 'futurelastic-muster-[0-9]*.tgz').FullName
-  Check ($platformTgz -and $launcherTgz) 'both tarballs were packed'
+  # Named from the version, not globbed: a Windows filename filter has no
+  # character classes, and the launcher's name is a prefix of the platform's.
+  $ver = $Tag.TrimStart('v')
+  $platformTgz = Join-Path $tgz "futurelastic-muster-win32-x64-$ver.tgz"
+  $launcherTgz = Join-Path $tgz "futurelastic-muster-$ver.tgz"
+  Check ((Test-Path $platformTgz) -and (Test-Path $launcherTgz)) 'both tarballs were packed'
   # The launcher lists every platform as an optional dependency at this exact
   # version, and none of them is on the registry (it is a synthetic tag): npm
   # skips an optional dependency it cannot find, but the first attempt fails
@@ -218,8 +221,8 @@ try {
   Check (-not ([IO.File]::ReadAllBytes($tokenFile)[0] -eq 0xEF)) 'the token file has no byte-order mark'
 
   # ---- 6. the service environment -----------------------------------------
-  Get-ChildItem Env: | Where-Object { $_.Name -like 'FLEET_*' } | ForEach-Object {
-    [Environment]::SetEnvironmentVariable($_.Name, $null, 'Process')
+  foreach ($e in @(Get-ChildItem Env: | Where-Object { $_.Name -like 'FLEET_*' })) {
+    [Environment]::SetEnvironmentVariable($e.Name, $null, 'Process')
   }
   $l = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
   $l.Start(); $port = $l.LocalEndpoint.Port; $l.Stop()
