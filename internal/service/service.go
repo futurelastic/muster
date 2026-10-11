@@ -571,6 +571,7 @@ func (s *Service) ListSessions(ctx context.Context, req fleet.Request, scope Sco
 	for rt, d := range s.local {
 		local[rt] = d
 	}
+	pending := s.retryingRuntimesLocked()
 	s.mu.RUnlock()
 	for rt, d := range local {
 		listedAt := time.Now()
@@ -600,6 +601,13 @@ func (s *Service) ListSessions(ctx context.Context, req fleet.Request, scope Sco
 		items = append(items, its...)
 		sources = append(sources, srcs...)
 	}
+
+	// An enabled runtime still being retried has no driver, so nothing above
+	// asked it — and whatever sessions it keeps are not in `items`. Saying so
+	// is this service's job: a driver cannot report on a runtime that has not
+	// registered, and without a source here the envelope reads as a complete
+	// answer from a machine with nothing more to say (muster #300).
+	sources = append(sources, pendingRuntimeSources(s.self, pending, time.Now())...)
 
 	if scope == ScopeFleet {
 		for machine, d := range s.peerDrivers() {
@@ -890,18 +898,36 @@ func (s *Service) ListRuntimes(ctx context.Context) (fleet.Collection[fleet.Runt
 	return fleet.NewCollection(items, sources)
 }
 
+// driverSummary is one row of GET /v1/health's `drivers`: an enabled runtime
+// on this machine. Status, Cause and Reason mean what they mean on a
+// GET /v1/runtimes row (muster #297, #300): an enabled runtime with no working
+// driver is listed too, with its cause, rather than being absent — absence on
+// this surface reads as "never enabled".
 type driverSummary struct {
 	Machine      fleet.MachineId          `json:"machine"`
 	Runtime      fleet.RuntimeId          `json:"runtime"`
 	Capabilities fleet.DriverCapabilities `json:"capabilities"`
+	Status       fleet.RuntimeStatus      `json:"status,omitempty"`
+	Cause        fleet.UnavailableCause   `json:"cause,omitempty"`
+	Reason       string                   `json:"reason,omitempty"`
 }
 
+// driverSummaries lists registered drivers first, then enabled runtimes with
+// no driver, each group in runtime-id order — the order GET /v1/runtimes uses,
+// so a reader that takes the first row never takes an unavailable one.
 func (s *Service) driverSummaries() []driverSummary {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := make([]driverSummary, 0, len(s.local))
+	out := make([]driverSummary, 0, len(s.local)+len(s.unavailable))
 	for rt, d := range s.local {
-		out = append(out, driverSummary{Machine: s.self, Runtime: rt, Capabilities: d.Capabilities()})
+		out = append(out, driverSummary{Machine: s.self, Runtime: rt, Capabilities: d.Capabilities(), Status: fleet.RuntimeAvailable})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Runtime < out[j].Runtime })
+	for _, row := range s.unavailableRowsLocked() {
+		out = append(out, driverSummary{
+			Machine: row.Machine, Runtime: row.Runtime, Capabilities: row.Capabilities,
+			Status: row.Status, Cause: row.Cause, Reason: row.Reason,
+		})
 	}
 	return out
 }

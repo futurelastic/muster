@@ -477,3 +477,175 @@ func TestListRuntimes_ConcurrentWithLateRegistration(t *testing.T) {
 		t.Errorf("%d snapshots listed rt-late other than exactly once", bad.Load())
 	}
 }
+
+// getJSON GETs path with the test token and decodes the body into v.
+func getJSON(t *testing.T, srv *httptest.Server, path string, v any) {
+	t.Helper()
+	resp, err := http.DefaultClient.Do(authedRequest(t, http.MethodGet, srv.URL+path, nil))
+	if err != nil {
+		t.Fatalf("GET %s: %v", path, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s: status %d", path, resp.StatusCode)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(v); err != nil {
+		t.Fatalf("GET %s: decode: %v", path, err)
+	}
+}
+
+// listingDriver is a stub whose List answers an empty, ok listing — the stub's
+// own List is "unsupported", which reads degraded and would hide what these
+// tests are looking for.
+type listingDriver struct{ stub.Driver }
+
+func (d *listingDriver) List(ctx context.Context, req fleet.Request, filter driver.ListFilter) (fleet.Collection[fleet.Session], error) {
+	return fleet.NewCollection[fleet.Session](nil, []fleet.SourceStatus{{Machine: "test-machine", Status: fleet.SourceOK, ObservedAt: time.Now()}})
+}
+
+// sessionsEnvelope is the part of GET /v1/sessions these tests read.
+type sessionsEnvelope struct {
+	Sources  []fleet.SourceStatus `json:"sources"`
+	Complete bool                 `json:"complete"`
+}
+
+func degradedSources(env sessionsEnvelope) []fleet.SourceStatus {
+	var out []fleet.SourceStatus
+	for _, s := range env.Sources {
+		if s.Status == fleet.SourceDegraded {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// (k) muster #300: an enabled runtime that is still being retried keeps its
+// sessions out of the list, and the list says so — a degraded source naming the
+// runtime, and complete=false — instead of a local source that reads ok. Only a
+// runtime being retried is reported: one that is not installed has nothing
+// waiting to arrive. When the runtime registers, the source goes with it.
+func TestListSessions_APendingRuntimeMakesTheLocalSourceDegraded(t *testing.T) {
+	svc := New("test-machine")
+	if err := svc.RegisterLocalDriver("rt-a", &listingDriver{Driver: stub.Driver{DeadlineMs: 200}}); err != nil {
+		t.Fatal(err)
+	}
+	slow := &lateBuild{}
+	slow.set(nil, timedOut())
+	so := optional(slow)
+	so.Runtime = "rt-slow"
+	defer svc.StartOptionalRuntime(context.Background(), so)()
+	gone := &lateBuild{}
+	gone.set(nil, &driver.UnavailableError{Cause: fleet.CauseNotInstalled, Err: errors.New("missing")})
+	g := optional(gone)
+	g.Runtime = "rt-gone"
+	defer svc.StartOptionalRuntime(context.Background(), g)()
+	srv := newServer(svc, t)
+
+	var env sessionsEnvelope
+	getJSON(t, srv, "/v1/sessions?scope=local", &env)
+	if env.Complete {
+		t.Error("complete = true with a runtime still being retried; the list is missing whatever that runtime holds")
+	}
+	deg := degradedSources(env)
+	if len(deg) != 1 {
+		t.Fatalf("degraded sources = %+v, want exactly the retrying runtime", deg)
+	}
+	if deg[0].Machine != "test-machine" {
+		t.Errorf("source machine = %q, want the machine the runtime is on", deg[0].Machine)
+	}
+	for _, want := range []string{"rt-slow", string(fleet.CauseProbeTimeout)} {
+		if !strings.Contains(deg[0].Error, want) {
+			t.Errorf("source error = %q, want it to name %q", deg[0].Error, want)
+		}
+	}
+	if strings.Contains(deg[0].Error, "rt-gone") {
+		t.Errorf("source error = %q, a runtime that needs somebody's hands is not pending", deg[0].Error)
+	}
+	if len(env.Sources) != 2 {
+		t.Errorf("sources = %+v, want the registered driver's source and the pending runtime's", env.Sources)
+	}
+
+	// It answers: the runtime registers, and the list stops saying it is late.
+	slow.set(&listingDriver{Driver: stub.Driver{DeadlineMs: 200}}, nil)
+	eventually(t, "the runtime to register", func() bool {
+		r, _ := findRow(runtimeRows(t, svc), "rt-slow")
+		return r.Status == fleet.RuntimeAvailable
+	})
+	getJSON(t, srv, "/v1/sessions?scope=local", &env)
+	if !env.Complete || len(degradedSources(env)) != 0 {
+		t.Errorf("after registering: complete=%v degraded=%+v, want a complete, all-ok list", env.Complete, degradedSources(env))
+	}
+}
+
+// (l) With no registered driver the service used to synthesize one ok source
+// for itself — "nothing here". That must not be said while a runtime is on its
+// way: the only source is the degraded one.
+func TestListSessions_OnlyAPendingRuntimeIsNotAnEmptyOK(t *testing.T) {
+	svc := New("test-machine")
+	slow := &lateBuild{}
+	slow.set(nil, timedOut())
+	defer svc.StartOptionalRuntime(context.Background(), optional(slow))()
+	srv := newServer(svc, t)
+
+	var env sessionsEnvelope
+	getJSON(t, srv, "/v1/sessions?scope=local", &env)
+	if len(env.Sources) != 1 || env.Sources[0].Status != fleet.SourceDegraded {
+		t.Fatalf("sources = %+v, want the one degraded source for rt-late", env.Sources)
+	}
+	if env.Complete {
+		t.Error("complete = true, want false")
+	}
+}
+
+// (m) /v1/health `drivers` is a roster of enabled runtimes: an enabled runtime
+// with no driver is a row with its status, cause and reason, after the
+// registered ones — the order and the vocabulary GET /v1/runtimes uses.
+func TestHealth_DriversListsAnEnabledRuntimeWithNoDriver(t *testing.T) {
+	svc := New("test-machine")
+	if err := svc.RegisterLocalDriver("rt-a", &idDriver{Driver: stub.Driver{DeadlineMs: 200}}); err != nil {
+		t.Fatal(err)
+	}
+	slow := &lateBuild{}
+	slow.set(nil, timedOut())
+	so := optional(slow)
+	so.Runtime = "rt-slow"
+	defer svc.StartOptionalRuntime(context.Background(), so)()
+	gone := &lateBuild{}
+	gone.set(nil, &driver.UnavailableError{Cause: fleet.CauseNotInstalled, Err: errors.New(`"/some/path/x" not found`)})
+	g := optional(gone)
+	g.Runtime = "rt-gone"
+	defer svc.StartOptionalRuntime(context.Background(), g)()
+	srv := newServer(svc, t)
+
+	var body struct {
+		Drivers []struct {
+			Runtime      fleet.RuntimeId          `json:"runtime"`
+			Status       fleet.RuntimeStatus      `json:"status"`
+			Cause        fleet.UnavailableCause   `json:"cause"`
+			Reason       string                   `json:"reason"`
+			Capabilities fleet.DriverCapabilities `json:"capabilities"`
+		} `json:"drivers"`
+	}
+	getJSON(t, srv, "/v1/health", &body)
+	if len(body.Drivers) != 3 {
+		t.Fatalf("drivers = %+v, want the registered runtime and both enabled ones", body.Drivers)
+	}
+	d := body.Drivers
+	if d[0].Runtime != "rt-a" || d[0].Status != fleet.RuntimeAvailable || d[0].Cause != "" || d[0].Reason != "" {
+		t.Errorf("first = %+v, want the registered runtime, available, no cause", d[0])
+	}
+	if d[1].Runtime != "rt-gone" || d[1].Status != fleet.RuntimeUnavailable || d[1].Cause != fleet.CauseNotInstalled {
+		t.Errorf("second = %+v, want rt-gone unavailable / not-installed", d[1])
+	}
+	if d[2].Runtime != "rt-slow" || d[2].Status != fleet.RuntimeUnavailable || d[2].Cause != fleet.CauseProbeTimeout {
+		t.Errorf("third = %+v, want rt-slow unavailable / probe-timeout", d[2])
+	}
+	for _, row := range d[1:] {
+		if row.Reason == "" || strings.Contains(row.Reason, "/some/path") {
+			t.Errorf("%s reason = %q, want a sentence that never carries the binary's path", row.Runtime, row.Reason)
+		}
+		if row.Capabilities.Source != fleet.CapabilitiesAssumed {
+			t.Errorf("%s capabilities = %+v, want the assumed floor", row.Runtime, row.Capabilities)
+		}
+	}
+}
