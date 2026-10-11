@@ -113,6 +113,10 @@ func checkPreCommitHook(ctx context.Context, env doctorEnv) doctorRow {
 		return row
 	}
 
+	// The mode bit is the question git asks on Unix. Deliberately NOT routed
+	// through isExecutableFile (#312): whether git runs a hook with no execute
+	// bit on Windows is a property of the git build there, this row has not been
+	// reviewed on Windows, and its test is skipped there.
 	if effective.Mode()&0o111 == 0 {
 		row.Status = statusWarn
 		row.Summary = "this repository's pre-commit hook is selected but is not executable, so git skips it"
