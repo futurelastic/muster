@@ -158,6 +158,48 @@ type Usage struct {
 	// in one session.state event. Absent until a turn has completed, and whenever
 	// the driver cannot tell where a turn begins.
 	LastTurn *TurnUsage `json:"lastTurn,omitempty"`
+
+	// Context is how large the context the session is carrying was at its most
+	// recent request (muster #313). The cumulative figures and LastTurn are
+	// sums over many requests, so neither is that size and a client cannot
+	// derive it from them. Absent means not yet known — no request has been
+	// read, the runtime does not record per-request figures, or the read
+	// failed — never a zero size; DriverCapabilities.ReportsContext says
+	// whether it can ever arrive.
+	Context *ContextSize `json:"context,omitempty"`
+}
+
+// ContextSize is the size of the context the newest single request carried, as
+// the runtime recorded it (muster #313).
+//
+// # One request, not a sum
+//
+// Tokens is what that ONE request read: its uncached input plus what it read
+// from the cache plus what it wrote to the cache. A turn of twenty requests
+// sums to roughly twenty times this, which is why Usage.LastTurn cannot stand
+// in for it. A runtime that writes one message as several record entries
+// repeats the message's usage on each; a driver counts a message once.
+//
+// # Only what the runtime states
+//
+// Window is the model's context window only when the runtime's own record
+// states it, and null otherwise. This service keeps no table of model windows:
+// it would go stale, and it would not be the runtime's account of itself
+// (§5.8). A client that wants a ratio brings its own window.
+//
+// No threshold and no "full" judgement lives here; that is a client's policy.
+// Nothing here is content — a count, a model name and a timestamp.
+type ContextSize struct {
+	// Tokens is input + cache read + cache write of the newest distinct request.
+	Tokens int64 `json:"tokens"`
+	// Window is the model's context window in tokens when the runtime's record
+	// states it, and an explicit null when it does not. Never a guess.
+	Window *int64 `json:"window"`
+	// Model is the model that request ran on, as the runtime recorded it.
+	// Absent when the entry named none.
+	Model string `json:"model,omitempty"`
+	// At is that entry's own timestamp, not the time this service read it.
+	At Timestamp `json:"at"`
 }
 
 // TurnUsage is the usage of one completed turn: every request between the
@@ -219,7 +261,20 @@ func sameUsage(a, b *Usage) bool {
 		!sameFigures(a.LastTurn.Figures(), b.LastTurn.Figures())) {
 		return false
 	}
-	return true
+	return sameContext(a.Context, b.Context)
+}
+
+// sameContext compares the context size on two usage blocks. At alone moving is
+// not a change, for the reason AsOf alone is not: a request that left the size
+// exactly where it was still moved the cumulative figures, which fire.
+func sameContext(a, b *ContextSize) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if a.Tokens != b.Tokens || a.Model != b.Model {
+		return false
+	}
+	return (a.Window == nil) == (b.Window == nil) && (a.Window == nil || *a.Window == *b.Window)
 }
 
 func sameFigures(a, b UsageFigures) bool {

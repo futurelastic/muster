@@ -186,6 +186,12 @@ func TestDriverState_CarriesUsageFromTheSessionsRecord(t *testing.T) {
 	if st.Usage == nil || st.Usage.Input != 11 || st.Usage.Output != 22 || st.Usage.LastTurn == nil || st.Usage.LastTurn.CacheWrite != 44 {
 		t.Fatalf("State().Usage = %+v", st.Usage)
 	}
+	if !d.Capabilities().ReportsContext {
+		t.Error("the tmux driver reads the newest request's figures; it must say so")
+	}
+	if c := st.Usage.Context; c == nil || c.Tokens != 1+3+4 || c.Window != nil || c.Model != "model-x" {
+		t.Errorf("State().Usage.Context = %+v, want m2's 8 tokens and a null window", c)
+	}
 
 	col, err := d.List(t.Context(), fleet.Request{}, driver.ListFilter{})
 	if err != nil {
@@ -204,6 +210,110 @@ func TestDriverState_CarriesUsageFromTheSessionsRecord(t *testing.T) {
 	}
 	if !seen {
 		t.Fatal("session not listed")
+	}
+}
+
+// #313: the context size is what the NEWEST distinct request read — its
+// uncached input plus cache read plus cache write — not any sum. The oracle is
+// a multi-step turn whose newest request differs from every sum, and a message
+// written as several entries that counts once.
+func TestUsage_ContextIsTheNewestRequestNotASum(t *testing.T) {
+	p := writeTurnsRecord(t,
+		usageEntry_(t, 1, "m1", 10, 100, 1000, 50),  // 1060
+		usageEntry_(t, 2, "m1", 10, 100, 1000, 50),  // the SAME request, second block
+		usageEntry_(t, 3, "m2", 20, 200, 90000, 0),  // 90020
+		usageEntry_(t, 4, "m3", 1, 5, 142000, 1999), // 144000: the newest
+		usageEntry_(t, 4, "m3", 1, 9, 142000, 1999), // same message again; counts once
+		turnMarker(t, 5),
+	)
+	var r usageReader
+	u := r.read(p)
+	if u == nil || u.Context == nil {
+		t.Fatalf("usage = %+v, want a context block", u)
+	}
+	c := u.Context
+	if c.Tokens != 144000 {
+		t.Errorf("tokens = %d, want 144000 (input+cacheRead+cacheWrite of m3 once)", c.Tokens)
+	}
+	if c.Model != "model-x" {
+		t.Errorf("model = %q, want the model the request ran on", c.Model)
+	}
+	if !c.At.Equal(mustTime(tsAt(4))) {
+		t.Errorf("at = %v, want the entry's own timestamp %s", c.At, tsAt(4))
+	}
+	if c.Window != nil {
+		t.Errorf("window = %v: the record states no window, so it must be null", *c.Window)
+	}
+	if sum := u.Input + u.CacheRead + u.CacheWrite; c.Tokens == sum {
+		t.Errorf("context equals the cumulative sum %d: it must be the newest request's figure", sum)
+	}
+}
+
+// A multi-entry message whose later entry carries the larger input is still one
+// request, and a later message replaces it.
+func TestUsage_ContextFollowsTheTailIncrementally(t *testing.T) {
+	p := writeTurnsRecord(t, usageEntry_(t, 1, "m1", 10, 5, 100, 0))
+	var r usageReader
+	if u := r.read(p); u == nil || u.Context == nil || u.Context.Tokens != 110 {
+		t.Fatalf("first read: %+v", u)
+	}
+	appendLine(t, p, usageEntry_(t, 2, "m2", 5, 5, 400, 100))
+	u := r.read(p)
+	if u == nil || u.Context == nil || u.Context.Tokens != 505 || !u.Context.At.Equal(mustTime(tsAt(2))) {
+		t.Fatalf("after append: %+v", u.Context)
+	}
+	// The newest request can be SMALLER than an earlier one (the runtime
+	// compacted): the figure follows the newest, never a running maximum.
+	appendLine(t, p, usageEntry_(t, 3, "m3", 7, 5, 50, 0))
+	if u := r.read(p); u.Context == nil || u.Context.Tokens != 57 {
+		t.Fatalf("after a compaction-sized request: %+v", u.Context)
+	}
+}
+
+// Absent is not zero (#313): nothing read, nothing carrying figures, and a
+// request with no input at all each leave the context off rather than at 0.
+func TestUsage_ContextAbsentIsNotZero(t *testing.T) {
+	var r usageReader
+	if u := r.read("/nonexistent/conv.jsonl"); u != nil {
+		t.Errorf("missing record: %+v", u)
+	}
+	if u := r.read(writeTurnsRecord(t, assistantNoUsage(t))); u != nil {
+		t.Errorf("record with no usage entries: %+v", u)
+	}
+	// Output-only usage is spend, but it is no context size.
+	p := writeTurnsRecord(t, usageEntry_(t, 1, "m1", 0, 9, 0, 0))
+	u := r.read(p)
+	if u == nil || u.Output != 9 {
+		t.Fatalf("usage = %+v, want the output counted", u)
+	}
+	if u.Context != nil {
+		t.Errorf("context = %+v for a request that read nothing, want absent", u.Context)
+	}
+	// An all-zero entry after a real one does not erase it.
+	p2 := writeTurnsRecord(t, usageEntry_(t, 1, "m1", 10, 5, 100, 0), usageEntry_(t, 2, "m2", 0, 0, 0, 0))
+	if u := r.read(p2); u == nil || u.Context == nil || u.Context.Tokens != 110 {
+		t.Errorf("a zero-figure entry replaced the context: %+v", u)
+	}
+}
+
+// A delegated agent's own request is spend of the session but not the size of
+// the context the session carries.
+func TestUsage_ContextIgnoresSidechainRequests(t *testing.T) {
+	side := jsonLine(t, map[string]any{
+		"type": "assistant", "timestamp": tsAt(3), "isSidechain": true,
+		"message": map[string]any{
+			"id": "side", "role": "assistant", "model": "model-y",
+			"usage": map[string]any{"input_tokens": 999999, "output_tokens": 1},
+		},
+	})
+	p := writeTurnsRecord(t, usageEntry_(t, 1, "m1", 10, 5, 100, 0), side)
+	var r usageReader
+	u := r.read(p)
+	if u == nil || u.Context == nil || u.Context.Tokens != 110 || u.Context.Model != "model-x" {
+		t.Fatalf("context = %+v, want the main thread's request", u.Context)
+	}
+	if u.Input != 10+999999 {
+		t.Errorf("the sidechain's spend must still be counted: input = %d", u.Input)
 	}
 }
 

@@ -985,6 +985,7 @@ func (d *Driver) Capabilities() fleet.DriverCapabilities {
 		// nobody looked.
 		ObservesPermissionMode: true,
 		ReportsUsage:           true, // muster #285: from the runtime's own record
+		ReportsContext:         true, // muster #313: the newest request's figures, same record
 		// muster #301: true only once WithProcessAgent is wired, so an absent
 		// Session.Agent is answerable per machine rather than assumed.
 		ReportsAgent: d.agentFromProcess,

@@ -254,6 +254,13 @@ var compatStaticMarkers = map[string][]string{
 		"couldn't send feedback", "turn off claude-drafted feedback?", " more queued",
 		"feedback drafts",
 	},
+	// usageEntry (#285, #313): the record keys the usage reader decodes — the four
+	// token counts every usage-bearing assistant entry carries, and the marking
+	// that keeps a delegated agent's requests out of the session's context size.
+	// Each was measured present in the runtime binary the reader was built
+	// against. The record is written by a live turn, which a check never has, so
+	// this is wording only.
+	"F-USAGE": {"input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "issidechain"},
 	// acceptanceScreen: two options, one containing `accept`, one `exit` or `no,`.
 	// F-BYPASS reads these only when the screen itself cannot be produced.
 	"F-BYPASS": {"yes, i accept", "no, exit"},
@@ -355,7 +362,7 @@ func (h *compatHarness) addStatic(s *compat.Suite) {
 			return nil
 		},
 	})
-	for _, id := range []string{"F-LIMIT", "F-APIERR", "H-RC", "H-RCREC", "F-FEEDBACK"} {
+	for _, id := range []string{"F-LIMIT", "F-APIERR", "H-RC", "H-RCREC", "F-FEEDBACK", "F-USAGE"} {
 		id := id
 		s.Checks = append(s.Checks, compat.Check{
 			ID: id, Probes: []string{probe},

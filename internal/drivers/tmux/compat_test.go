@@ -42,6 +42,17 @@ func fakeCandidate(t *testing.T, version, body string) string {
 	return real
 }
 
+// recordKeyReads feeds the usage reader a one-line record carrying only the
+// given usage key and reports whether ok accepts what it read.
+func recordKeyReads(kv string, ok func(*fleet.Usage) bool) func() bool {
+	return func() bool {
+		var m usageMemo
+		m.feed([]byte(`{"type":"assistant","timestamp":"2026-10-10T00:00:00Z","message":{"id":"a","model":"m","usage":{` + kv + `}}}`))
+		u := m.snapshot()
+		return u != nil && ok(u)
+	}
+}
+
 func allMarkersText() string {
 	return strings.Join(staticMarkerList(), " ")
 }
@@ -75,6 +86,19 @@ func TestStaticMarkersAreTiedToTheClassifier(t *testing.T) {
 		"temporary": func() bool {
 			te, ok := lastTurnFailed(newScreen("API Error: temporary failure\n"))
 			return ok && te.Retryable
+		},
+		// usageEntry (#285, #313): each marker is a record key the usage reader
+		// decodes, fed through the reader as a one-line record.
+		"input_tokens":                recordKeyReads(`"input_tokens":7`, func(u *fleet.Usage) bool { return u.Input == 7 }),
+		"output_tokens":               recordKeyReads(`"output_tokens":7`, func(u *fleet.Usage) bool { return u.Output == 7 }),
+		"cache_read_input_tokens":     recordKeyReads(`"cache_read_input_tokens":7`, func(u *fleet.Usage) bool { return u.CacheRead == 7 }),
+		"cache_creation_input_tokens": recordKeyReads(`"cache_creation_input_tokens":7`, func(u *fleet.Usage) bool { return u.CacheWrite == 7 }),
+		"issidechain": func() bool {
+			// A sidechain request is spend but never the context size.
+			var m usageMemo
+			m.feed([]byte(`{"type":"assistant","isSidechain":true,"timestamp":"2026-10-10T00:00:00Z","message":{"id":"a","model":"m","usage":{"input_tokens":9}}}`))
+			s := m.snapshot()
+			return s != nil && s.Input == 9 && s.Context == nil
 		},
 		// acceptanceScreen: the two option labels the classifier recognises.
 		"yes, i accept": func() bool {
@@ -375,7 +399,7 @@ func TestRunCompatStaticChecks(t *testing.T) {
 // suite. Live checks belong behind FLEET_TMUX_INTEGRATION.
 func TestStaticCheckSetNeedsNoMultiplexer(t *testing.T) {
 	suite := newCompatSuite(&compatHarness{})
-	static := map[string]bool{"F-LIMIT": true, "F-APIERR": true, "H-RC": true, "H-RCREC": true}
+	static := map[string]bool{"F-LIMIT": true, "F-APIERR": true, "H-RC": true, "H-RCREC": true, "F-USAGE": true}
 	probesOf := map[string][]string{}
 	for _, c := range suite.Checks {
 		probesOf[c.ID] = c.Probes

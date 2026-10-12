@@ -141,6 +141,17 @@ type DriverCapabilities struct {
 	// machine can never report a bare false and become permanently incapable in
 	// a caller's cache (§4.3, D3).
 	ReportsUsage bool `json:"reportsUsage"`
+	// ReportsContext reports whether the driver can read the size of the
+	// context a session's newest request carried (Usage.Context, muster #313).
+	//
+	// It is separate from ReportsUsage because the two are different facts: a
+	// runtime can report what a session spent, summed, without recording each
+	// request's own figures, and then an absent Usage.Context would read as
+	// "not yet known" when it will never arrive. On a driver declaring this an
+	// absent context means not yet known; on one that does not, never. Like
+	// every flag here it inherits `source: assumed` from an unreached peer
+	// (§4.3, D3).
+	ReportsContext bool `json:"reportsContext"`
 	// ReportsAgent reports whether the driver can read the agent a session's
 	// runtime was started with (Session.Agent, muster #301), for any session
 	// it lists — not only one it created itself.

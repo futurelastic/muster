@@ -1123,7 +1123,13 @@ not in the response.
     "quota": { "since": "…", "resetHint": "…" },
     "lastTurn": { "outcome": "failed", "reason": "…", "retryable": true },
     "controlChannel": { "state": "active", "bridgeId": "…" },
-    "permissionMode": "acceptEdits"
+    "permissionMode": "acceptEdits",
+    "usage": {
+      "input": 311, "output": 42, "cacheRead": 3013, "cacheWrite": 60,
+      "source": "inferred", "asOf": "…",
+      "lastTurn": { "at": "…", "input": 311, "output": 42, "cacheRead": 3013, "cacheWrite": 60 },
+      "context": { "tokens": 142000, "window": null, "model": "…", "at": "…" }
+    }
   }
 }
 ```
@@ -1167,6 +1173,23 @@ nothing was read** — this driver does not look (`observesPermissionMode` in
 mode indicator was read and named no mode this build recognises** — stop, do not
 guess. It is what lets a client press `BTab` until it sees the mode it wants
 (see `POST …/keys` below). It carries no screen text.
+
+**`usage`** (#285, #313) — what the session has spent, as its runtime reports it.
+The figures at its top level are the **sum over every request**, and `lastTurn` is
+the same figures for the most recent completed turn. **`usage.context`** is the
+one figure that is not a sum: the size of the context the *newest single request*
+carried — its input, cache-read and cache-write tokens. A turn of twenty requests
+sums to roughly twenty times that, so a client drawing "how full is this session"
+reads it here and cannot derive it from the rest. `window` is the model's context
+window **only when the runtime's own record states it**, and `null` otherwise —
+this service keeps no table of windows, so bring your own to turn `tokens` into a
+ratio. `model` is the model that request ran on and `at` is the runtime's own
+timestamp on it. **Absent means not yet known, never zero** (no request read yet,
+a runtime that does not record per-request figures, a read that failed):
+`reportsUsage` and `reportsContext` in `/v1/runtimes` say whether each can ever
+arrive. Whether the context is "full" is the client's policy; nothing here judges
+it. Only counts, a model name and a timestamp leave the runtime's record — no
+content. A change fires `session.state`.
 
 **`waitingOn`** — `prompt` (a dialog is attached) or `unsent-input` (the
 composer holds text nobody submitted; do not send to it).

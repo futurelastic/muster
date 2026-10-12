@@ -573,7 +573,8 @@ type SessionState struct {
 	// #285): the SUM over every request, with the same figures for the most
 	// recent completed turn on Usage.LastTurn. Absent means not yet known —
 	// never zero (see Usage) — and, on a driver that does not declare
-	// DriverCapabilities.ReportsUsage, never will be.
+	// DriverCapabilities.ReportsUsage, never will be. Usage.Context is the size
+	// of the context the newest request carried (#313), which no sum can give.
 	//
 	// It lives on the state so a turn ending reaches a subscriber as a
 	// session.state event carrying the figures, and a poller reads the same
