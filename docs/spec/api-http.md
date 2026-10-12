@@ -1778,6 +1778,21 @@ arrive (an unreached peer reports it `assumed`). A peer built before the field
 sends no key, and a relay passes the block through untouched. A change in any
 figure fires `session.state` (§4); it never changes `status`.
 
+`state.usage.context` — when present — is how large the context was at the
+session's most recent request (muster #313):
+`{"tokens":142000,"window":null,"model":"…","at":"…"}`. It is **not** a sum:
+`tokens` is the input, cache-read and cache-write tokens of the newest single
+request, where the cumulative figures and `lastTurn` add up every request of the
+session or turn — a turn of twenty requests sums to roughly twenty times the
+context. `window` is the model's context window **only when the runtime's own
+record states it**, and an explicit `null` otherwise; this service keeps no table
+of model windows, so a client that wants a fill ratio supplies its own. `at` is
+the runtime's own timestamp on that request, not the time of the read. **Absent
+means not yet known, never `tokens: 0`**: `reportsContext` in `/v1/runtimes` says
+whether it can ever arrive, and is separate from `reportsUsage` (an unreached peer
+reports it `assumed`). No threshold or "full" judgement is made here. A change in
+`tokens`, `model` or `window` fires `session.state` (§4); `at` alone does not.
+
 `state.prompt.kind` — when present — names what is being asked
 (`resume-chooser`, `folder-trust`, `external-imports`, `settings-trust`,
 `tool-permission`, `feedback-review`). `bypass-permissions` is deliberately absent from what CLASSIFICATION can produce:

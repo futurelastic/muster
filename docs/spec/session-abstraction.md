@@ -326,6 +326,14 @@ Usage {
   source     : "observed" | "inferred"   // from a structured API / inferred from a record the runtime writes
   asOf       : Timestamp    // the runtime's own newest entry counted in these figures, not the time of the read
   lastTurn?  : TurnUsage    // the same figures for the most recent COMPLETED turn
+  context?   : ContextSize  // the size of the context the NEWEST request carried (#313) — one request, not a sum; absent = not yet known, never zero
+}
+
+ContextSize {
+  tokens : integer      // that request's input + cacheRead + cacheWrite
+  window : integer|null // the model's context window, only when the runtime's own record states it; otherwise an explicit null — this service keeps no table of windows
+  model? : string       // the model that request ran on, as recorded; absent when the entry named none
+  at     : Timestamp    // that entry's own timestamp, not the time of the read
 }
 
 TurnUsage {
@@ -495,6 +503,28 @@ TurnEnd {
 > makes. `asOf` is the runtime's own timestamp on the newest entry counted, so a
 > consumer seeing figures that stopped moving can tell a session that stopped
 > spending from a reader that stopped reading.
+>
+> **`context` is the one figure here that is NOT a sum (#313).** The cumulative
+> figures and `lastTurn` add up every request; the context a session is carrying
+> is what the *most recent single request* read — its uncached input plus its
+> cache read plus its cache write — and a turn of twenty requests sums to roughly
+> twenty times that, so no consumer can derive it from the sums. A message the
+> runtime wrote as several entries counts once, as for the sums. It is the newest
+> distinct request on the session's own thread: a delegated agent's requests
+> (the runtime marks them) are spend, counted above, but are not the size of this
+> session's context. It follows the newest request and is not a running maximum,
+> so it falls when the runtime compacts. **`window` is the model's context window
+> only when the runtime's own record states it, and `null` otherwise** — this
+> service keeps no table of model windows (it would go stale, and it is not the
+> runtime's account of itself, §5.8), so a client wanting a ratio brings its own.
+> Absent follows the rule above and is never `tokens: 0`: no request read yet, a
+> runtime that does not record per-request figures, a read that failed, or a
+> request that read nothing. `reportsContext` (§4.3) says whether it can ever
+> arrive, separately from `reportsUsage`, because a runtime can report what a
+> session spent without recording each request's own figures. Only these numbers
+> leave the record — no content. No threshold and no "full" judgement is made
+> here; that is a client's policy. It moves on the same `session.state` events as
+> the rest of `usage`.
 >
 > **Per-turn figures ride on the state, not on a separate event.** No turn-end
 > event exists; a turn ending is a `session.state` carrying `usage.lastTurn`
@@ -1894,6 +1924,7 @@ DriverCapabilities {
   observesControlChannel: boolean // can report `controlChannel` (§2.3); absent state is answerable only against this
   observesPermissionMode: boolean // can report `permissionMode` (§2.3); absent state is answerable only against this. A driver may report it from a posture it configured itself (the local opencode driver reports `bypass`, muster #283) and leave it absent for a session it set nothing on; and a driver may honour `permissionMode: "bypass"` only together with an enforced `sandbox` (§2.1), refusing `unsupported` otherwise
   reportsUsage    : boolean   // can read `usage` (§2.3, muster #285) from its runtime; absent usage is answerable only against this: true = "not yet known", false = never
+  reportsContext  : boolean   // can read `usage.context` (§2.3, muster #313), the size of the context the newest request carried, from its runtime; separate from `reportsUsage` because a runtime can report summed spend without per-request figures; absent context is answerable only against this: true = "not yet known", false = never
   reportsAgent    : boolean   // can read `agent` (§2.1/§2.12, muster #301) for any live session it lists, not only one it created; absent agent is answerable only against this: true = the runtime was started without one, false = never reported (and an `agent` list filter matches nothing)
   reportsRuntimeSurface: boolean // can say anything about `runtimeSurface` (§2.13); absent state is answerable only against this
   isolatesEnvironment: boolean // starts a session's process with a BUILT environment, nothing inherited from the service (§2.1 `isolateEnvironment`, muster #280)

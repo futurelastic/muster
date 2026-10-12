@@ -52,6 +52,12 @@ var catalogue = []Spec{
 		ReliedOn: []string{"internal/drivers/tmux/feedbackcard.go#parseFeedbackStatus"},
 	},
 	{
+		ID:       "F-USAGE",
+		Gate:     GateWarn,
+		Asserts:  "The candidate still contains the names of the per-request usage fields the driver reads from the runtime's record — the input, output, cache-read and cache-write token counts — and the marking that sets a delegated agent's own requests apart from the session's. Static text only: the record is written by a live turn and a check never has one, and the names being present does not prove where the runtime writes them.",
+		ReliedOn: []string{"internal/drivers/tmux/usagerecord.go#usageEntry"},
+	},
+	{
 		ID:       "F-MODE",
 		Gate:     GateWarn,
 		Asserts:  "The driver reads the permission mode a live session shows: a session started in the default mode reads as default and one started in bypass-permissions mode reads as bypass, and the candidate still contains the wording of the accept-edits, plan and auto indicator rows. The other three modes cannot be entered without pressing keys in a session other checks share, so their wording is checked statically.",

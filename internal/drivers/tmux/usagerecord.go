@@ -27,10 +27,20 @@ import (
 //     assistant entries for 82 distinct message ids, up to 13 entries for one.
 //     Summing entries would overstate a session several-fold, so the sum is
 //     over message ids, and a repeated id contributes only what it adds.
+//
 //   - The usage is per request, and a turn is many requests. The session's
 //     spend is the sum, never the last entry (the trial that found 63 thousand
 //     logged against 1.19 million true).
+//
 //   - It carries no cost. Cost stays absent: this service does not price tokens.
+//
+//   - The context a session is carrying is NOT any of those sums. It is what the
+//     newest single request read: its uncached input plus its cache read plus
+//     its cache write (muster #313). A turn of twenty requests sums to roughly
+//     twenty times that. The reader keeps the newest distinct request's figures
+//     beside the sums, from the same entries and with no further read. The
+//     entry names a model but not that model's context window, so the window is
+//     reported as null: this service keeps no table of windows (§5.8).
 //
 // A turn is the span between two `system/turn_duration` markers — the same
 // marker `turns` counts (docs/adr/111) — so LastTurn is the usage accumulated
@@ -55,6 +65,7 @@ type usageEntry struct {
 	Subtype           string `json:"subtype"`
 	Timestamp         string `json:"timestamp"`
 	IsAPIErrorMessage bool   `json:"isApiErrorMessage"`
+	IsSidechain       bool   `json:"isSidechain"`
 	Message           struct {
 		ID    string `json:"id"`
 		Model string `json:"model"`
@@ -83,6 +94,48 @@ type usageMemo struct {
 
 	recent map[string]fleet.UsageFigures
 	order  []string
+
+	// ctx is the newest distinct request's context size (#313); hasCtx is false
+	// until a request carrying a non-zero figure has been read.
+	ctx    usageContext
+	hasCtx bool
+}
+
+// usageContext is the size of the context one request carried.
+type usageContext struct {
+	id     string // the message id; "" for an entry that names none
+	tokens int64
+	model  string
+	at     time.Time
+}
+
+// noteContext folds one usage-bearing entry into the newest-request figure.
+//
+// Entries of one message are adjacent and repeat its usage, so an entry with
+// the id already held refines it (the larger figure wins, the same rule `add`
+// applies to a repeated id) and any other id replaces it: the newest distinct
+// request is the last one the append-only record shows. An entry that carries
+// no input at all is not a context size and leaves the figure as it was —
+// absent, never zero.
+func (m *usageMemo) noteContext(id string, f fleet.UsageFigures, model string, at time.Time) {
+	tokens := f.Input + f.CacheRead + f.CacheWrite
+	if tokens <= 0 {
+		return
+	}
+	if m.hasCtx && id != "" && id == m.ctx.id {
+		if tokens > m.ctx.tokens {
+			m.ctx.tokens = tokens
+		}
+		if model != "" {
+			m.ctx.model = model
+		}
+		if at.After(m.ctx.at) {
+			m.ctx.at = at
+		}
+		return
+	}
+	m.ctx = usageContext{id: id, tokens: tokens, model: model, at: at}
+	m.hasCtx = true
 }
 
 func (m *usageMemo) add(id string, f fleet.UsageFigures, at time.Time) {
@@ -150,9 +203,16 @@ func (m *usageMemo) feed(line []byte) {
 		m.turn = fleet.UsageFigures{}
 	case e.Type == "assistant" && e.Message.Usage != nil && !e.IsAPIErrorMessage && e.Message.Model != "<synthetic>":
 		u := e.Message.Usage
-		m.add(e.Message.ID, fleet.UsageFigures{
+		f := fleet.UsageFigures{
 			Input: u.Input, Output: u.Output, CacheRead: u.CacheRead, CacheWrite: u.CacheWrite,
-		}, at)
+		}
+		m.add(e.Message.ID, f, at)
+		// A sidechain entry is a delegated agent's own request, with its own
+		// context: it is spend of this session (counted above) but not the
+		// size of the context this session carries.
+		if !e.IsSidechain {
+			m.noteContext(e.Message.ID, f, e.Message.Model, at)
+		}
 	}
 }
 
@@ -195,7 +255,12 @@ func (m *usageMemo) snapshot() *fleet.Usage {
 		c := *m.last
 		last = &c
 	}
-	return fleet.NewUsage(m.total, fleet.ConfidenceInferred, m.asOf.UTC(), last)
+	u := fleet.NewUsage(m.total, fleet.ConfidenceInferred, m.asOf.UTC(), last)
+	if m.hasCtx {
+		// Window stays nil: the record names the model, not its window.
+		u.Context = &fleet.ContextSize{Tokens: m.ctx.tokens, Model: m.ctx.model, At: m.ctx.at.UTC()}
+	}
+	return u
 }
 
 // usageReader holds the memos for every record this driver has read usage from.
