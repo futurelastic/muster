@@ -477,3 +477,133 @@ func TestReleaseWorkflowsKeepTheManualPathDryRunOnly(t *testing.T) {
 		t.Error("release-npm.yml header still invites switching the trusted publisher")
 	}
 }
+
+// buildReleaseFixture makes a one-commit git repo holding a tiny module at the
+// real module path, and returns its directory. files maps a path to its
+// contents, on top of a main package that compiles everywhere.
+func buildReleaseFixture(t *testing.T, files map[string]string) string {
+	t.Helper()
+	for _, tool := range []string{"git", "go", "sh"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skip(tool + " not available")
+		}
+	}
+	src := filepath.Join(t.TempDir(), "src")
+	gitIn(t, filepath.Dir(src), "init", "-b", "main", src)
+	all := map[string]string{
+		"go.mod":             "module github.com/futurelastic/muster\n\ngo 1.21\n",
+		"cmd/muster/main.go": "package main\n\nfunc main() {}\n",
+	}
+	for p, c := range files {
+		all[p] = c
+	}
+	for p, c := range all {
+		full := filepath.Join(src, p)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(c), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitIn(t, src, "add", ".")
+	gitIn(t, src, "commit", "-m", "fixture")
+	return src
+}
+
+func runBuildRelease(t *testing.T, src string) (out string, code int, dist string) {
+	t.Helper()
+	script, err := filepath.Abs("scripts/build-release.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dist = filepath.Join(t.TempDir(), "dist")
+	cmd := exec.Command("sh", script, dist, "v0.5.0")
+	cmd.Dir = src
+	cmd.Env = append(os.Environ(), "GOTOOLCHAIN=local", "GOFLAGS=-mod=mod")
+	b, err := cmd.CombinedOutput()
+	if ee, ok := err.(*exec.ExitError); ok {
+		code = ee.ExitCode()
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	return string(b), code, dist
+}
+
+func builtNames(t *testing.T, dist string) []string {
+	t.Helper()
+	ents, err := os.ReadDir(dist)
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, e := range ents {
+		if strings.HasPrefix(e.Name(), "muster-") {
+			names = append(names, e.Name())
+		}
+	}
+	return names
+}
+
+// A tag cut before a platform was supported must still release (#316): the
+// tooling's script is run against that tag's source, and trunk's target list
+// used to be assumed to match it.
+func TestBuildReleaseSkipsAWindowsTargetTheSourceCannotBuild(t *testing.T) {
+	src := buildReleaseFixture(t, map[string]string{
+		"cmd/muster/kill.go": "package main\n\nimport \"syscall\"\n\nvar _ = syscall.Kill\n", // unix only, as the pre-windows tags were
+	})
+	out, code, dist := runBuildRelease(t, src)
+	if code != 0 {
+		t.Fatalf("a source that predates windows must still release; exit %d\n%s", code, out)
+	}
+	names := builtNames(t, dist)
+	if len(names) != 4 {
+		t.Fatalf("want the 4 unix binaries, got %v\n%s", names, out)
+	}
+	for _, n := range names {
+		if strings.Contains(n, "windows") {
+			t.Errorf("a windows binary was written for a source that cannot build one: %s", n)
+		}
+	}
+	sums, err := os.ReadFile(filepath.Join(dist, "SHA256SUMS"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(sums), "windows") || strings.Count(string(sums), "\n") != 4 {
+		t.Errorf("SHA256SUMS must list exactly the 4 built binaries:\n%s", sums)
+	}
+	for _, want := range []string{"skipping it", "not built: windows/amd64 windows/arm64"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the skip must be said out loud; missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestBuildReleaseBuildsEveryTargetWhenTheSourceSupportsThem(t *testing.T) {
+	out, code, dist := runBuildRelease(t, buildReleaseFixture(t, nil))
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	names := builtNames(t, dist)
+	if len(names) != 6 {
+		t.Fatalf("want all 6 binaries, got %v\n%s", names, out)
+	}
+	if strings.Contains(out, "not built") {
+		t.Errorf("nothing was skipped, and the output must not claim it:\n%s", out)
+	}
+}
+
+// The skip is for windows only: a unix target that does not build is a broken
+// release, not an older one.
+func TestBuildReleaseStillFailsWhenARequiredTargetCannotBuild(t *testing.T) {
+	src := buildReleaseFixture(t, map[string]string{
+		"cmd/muster/broken.go": "//go:build linux && arm64\n\npackage main\n\nvar _ int = \"not an int\"\n",
+	})
+	out, code, _ := runBuildRelease(t, src)
+	if code == 0 {
+		t.Fatalf("a required target failing to build must fail the release\n%s", out)
+	}
+	if !strings.Contains(out, "linux/arm64 is a required target and did not build") {
+		t.Errorf("the failure must name the target:\n%s", out)
+	}
+}
