@@ -137,6 +137,15 @@ type Reconciliation struct {
 	Vanished []fleet.Session
 	// Live is everything found, whatever its classification.
 	Live fleet.Collection[fleet.Session]
+	// Unjudged counts live sessions whose start time this pass could not
+	// read, so identity was NOT judged for them: a remembered one stays
+	// remembered (it is in Adopted), an unremembered one is in Orphaned as
+	// usual. Zero in the ordinary case. muster #321.
+	Unjudged int
+	// ReadErr is why the start-time read failed, empty when it did not. It is
+	// carried on the result because this driver has no logger of its own; the
+	// startup line that prints the result is what surfaces it.
+	ReadErr string
 }
 
 // Reconcile performs §12's startup reconciliation.
@@ -155,13 +164,41 @@ func (d *Driver) Reconcile(ctx context.Context) (Reconciliation, error) {
 	if err != nil {
 		return Reconciliation{}, err
 	}
+	// A listing that could not be read is not an empty one (§5.7). List
+	// reports that in the source envelope and returns no error, so without
+	// this check an unreachable multiplexer would read as "nothing is
+	// running" and every remembered session would be classified vanished —
+	// the same whole-set flip a failed start-time read caused (muster #321),
+	// one read earlier. Nothing was classified and nothing is persisted: the
+	// remembered set stands until a read can actually be made.
+	for _, src := range live.Sources() {
+		if src.Status == fleet.SourceUnreachable {
+			return Reconciliation{}, fmt.Errorf(
+				"reconcile: the session listing could not be read (%s); "+
+					"no session was classified and the remembered set was left as it was", src.Error)
+		}
+	}
 	out := Reconciliation{Live: live}
 	now := d.now()
 	seen := make(map[string]sessionRecord, len(live.Items()))
 
-	ctxB, cancel := d.bounded(ctx)
-	rows, _, rowErr := d.enumerate(ctxB)
-	cancel()
+	// The start times are a second read, separate from the listing above, and
+	// they are the whole of the identity test below. A failure of it is
+	// retried once, then carried — never swallowed (muster #321: it used to
+	// be dropped on the floor, and every session then compared a zero time
+	// against its record).
+	var (
+		rows   []paneRow
+		rowErr error
+	)
+	for attempt := 0; attempt < 2; attempt++ {
+		ctxB, cancel := d.bounded(ctx)
+		rows, _, rowErr = d.enumerate(ctxB)
+		cancel()
+		if rowErr == nil || ctx.Err() != nil {
+			break
+		}
+	}
 	created := map[string]time.Time{}
 	cwds := map[string]string{}
 	if rowErr == nil {
@@ -169,11 +206,38 @@ func (d *Driver) Reconcile(ctx context.Context) (Reconciliation, error) {
 			created[r.session] = r.created
 			cwds[r.session] = r.cwd
 		}
+	} else {
+		out.ReadErr = rowErr.Error()
 	}
 
 	for _, s := range live.Items() {
 		rec, had := prior[s.ID]
 		start, cwd := created[s.ID], cwds[s.ID]
+
+		// An absent start time is not a different start time. Identity is
+		// judged only on a time that was actually read; without one the
+		// session is neither the remembered run nor a recycled id, and
+		// saying either would be an invention. A remembered record stands —
+		// the next pass that can read the time makes the judgement — and a
+		// session with no record is an orphan as it always was, held with a
+		// zero start that noteSessionSet fills in at the next read. This is
+		// also what stops one bad read closing every delivery lane on a
+		// machine: only a session positively shown to be a different run
+		// can reach Vanished through this branch. muster #321.
+		if start.IsZero() {
+			out.Unjudged++
+			if had {
+				rec.LastSeen = now
+				seen[s.ID] = rec
+				out.Adopted = append(out.Adopted, s)
+			} else {
+				s.State = fleet.InferredState(s.State.Status,
+					s.State.Evidence+"; no prior record — this service did not start it", nil)
+				out.Orphaned = append(out.Orphaned, s)
+				seen[s.ID] = sessionRecord{Cwd: cwd, FirstSeen: now, LastSeen: now}
+			}
+			continue
+		}
 
 		switch {
 		case had && rec.Created.Equal(start):
@@ -682,6 +746,13 @@ func (d *Driver) noteStatuses(obs map[string]observation) {
 
 // String renders a reconciliation for a startup log line.
 func (r Reconciliation) String() string {
-	return fmt.Sprintf("adopted=%d orphaned=%d vanished=%d",
+	out := fmt.Sprintf("adopted=%d orphaned=%d vanished=%d",
 		len(r.Adopted), len(r.Orphaned), len(r.Vanished))
+	if r.Unjudged > 0 {
+		out += fmt.Sprintf(" unjudged=%d", r.Unjudged)
+	}
+	if r.ReadErr != "" {
+		out += fmt.Sprintf(" (start-time read failed, identity not judged: %s)", r.ReadErr)
+	}
+	return out
 }

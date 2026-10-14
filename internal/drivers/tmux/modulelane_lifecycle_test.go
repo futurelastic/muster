@@ -3,8 +3,10 @@ package tmux
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -130,6 +132,61 @@ func TestModuleLifecycle_ReconcileAttachesAdoptedClosesVanished(t *testing.T) {
 	// The adopted session sends over its lane again.
 	if got := second.send(kept.ID, "welcome back", driver.SendOptions{}); got.RouteOf() != fleet.RouteModule {
 		t.Errorf("receipt = %+v", got)
+	}
+}
+
+// muster #321: the whole path, with the real Reconcile in front of the lanes.
+// A restart whose start-time read fails must not close a single lane for a
+// session that is live. Only the session that is actually gone is closed.
+func TestModuleLifecycle_FailedStartTimeReadClosesNoLiveLane(t *testing.T) {
+	first := newModRig(t, rigOptions{})
+	kept := first.create("kept1", nil)
+	gone := first.create("gone1", nil)
+	first.waitLive(kept.ID)
+	first.waitLive(gone.ID)
+	keptRec, _ := first.record(kept.ID)
+	first.d.StopDeliveryModules()
+
+	var second *modRig
+	var reads atomic.Int32
+	flaky := func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "list-panes" && reads.Add(1) >= 2 {
+			return nil, errors.New("multiplexer read timed out")
+		}
+		return second.mux.exec(ctx, name, args...)
+	}
+	second = newModRig(t, rigOptions{storeDir: first.dir, noStart: true, driverOpts: []Option{withExec(flaky)}})
+	second.mux.addSession(fakeSession{name: kept.ID, paneID: "%77", cwd: "/work/kept1", pid: keptRec.PID, created: 1785600002, title: "2_1_220"}, idleFixtureFor("kept1"))
+
+	rec, err := second.d.Reconcile(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.ReadErr == "" {
+		t.Fatalf("setup: the start-time read did not fail: %s", rec)
+	}
+	for _, v := range rec.Vanished {
+		if v.ID == kept.ID {
+			t.Fatalf("%s — a live, unchanged session was reported vanished", rec)
+		}
+	}
+	second.d.ReconcileLanes(rec)
+	second.d.StartDeliveryModules()
+	second.waitUsable()
+
+	second.waitLive(kept.ID)
+	waitFor(t, "the gone session's lane to be closed", func() bool { return second.fake.CountOp("close") == 1 })
+	for _, q := range second.fake.Requests() {
+		if q.Op == "close" {
+			var c modclient.CloseArgs
+			mustUnmarshal(t, q.Args, &c)
+			if c.LaneKey == keptRec.LaneKey {
+				t.Errorf("the live session's lane %q was closed by a failed read", c.LaneKey)
+			}
+		}
+	}
+	if _, ok := second.record(kept.ID); !ok {
+		t.Error("the live session's lane record was dropped")
 	}
 }
 

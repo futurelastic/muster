@@ -2829,6 +2829,16 @@ new one is present under its name. Reporting only "adopted" attributes one
 session's history to another — §5.4's recyclability, arriving in a third
 operation.
 
+**An unread start time is not a different start time.** Identity is judged only
+on a start time that was actually read. If the listing cannot be read at all,
+reconciliation classifies nothing and reports the failure. If the listing was
+read but a session's start time was not, that session is not judged: a
+remembered record stands (it resumes as adopted, the judgement left to the next
+pass that can read the time) and an unremembered one is an orphan as usual. A
+single bad read must never be able to move every remembered session to vanished
+at once — that would close every delivery lane on the machine on one failure —
+so the failure is reported alongside the counts rather than swallowed.
+
 **Records are written when the set changes, not on every read.** A read happens
 on every event trigger; persisting each would turn a cheap enumeration into a
 write amplifier for no benefit, since what reconciliation needs — which sessions
