@@ -1373,8 +1373,34 @@ func handleSendInput(svc *Service) http.HandlerFunc {
 			// same discipline this service already applies to a malformed body.
 			Route string `json:"route,omitempty"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			writeError(w, &fleet.Error{Kind: fleet.ErrorInvalid, Message: "malformed JSON body", Machine: machine})
+		// #320: strict decoding. A field this endpoint does not define is a
+		// caller error, refused with the field named and the one field a
+		// message goes in — never ignored. Before this, {"prompt": "..."} (the
+		// name create uses) decoded to an empty text and was reported "queued":
+		// the sender believed a message was delivered that carried nothing.
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&body); err != nil {
+			msg := "malformed JSON body"
+			// encoding/json has no typed error for this case; its message is
+			// `json: unknown field "name"`, stable since DisallowUnknownFields
+			// was added.
+			if field, ok := strings.CutPrefix(err.Error(), "json: unknown field "); ok {
+				msg = fmt.Sprintf("unknown field %s: a send's message goes in \"text\", and the "+
+					"only other fields are submit, resumeIfStranded, replaceIfStranded, expect, "+
+					"from and route", field)
+			}
+			writeError(w, &fleet.Error{Kind: fleet.ErrorInvalid, Message: msg, Machine: machine})
+			return
+		}
+		// #320: an empty message is refused up front, as the request's own
+		// shape — before any driver is resolved and whatever session or
+		// runtime it targets. A resumeIfStranded retry repeats the same text
+		// (api-http.md), so it never needs an empty one.
+		if body.Text == "" {
+			writeError(w, &fleet.Error{Kind: fleet.ErrorInvalid,
+				Message: "text is required and must not be empty: nothing was delivered",
+				Machine: machine})
 			return
 		}
 		from := svc.stampSender(r, body.From)

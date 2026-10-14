@@ -543,6 +543,15 @@ DELETE /v1/machines/{machine}/sessions/{id}?startedAt=<from the read>
 POST   /v1/machines/{machine}/sessions                  (create; see below)
 ```
 
+**The message goes in `text`, and only `text` — a body that gets this wrong is
+a `400` and nothing is delivered.** `input` does not take `prompt`, the field
+`create` uses. A body with no `text`, an empty or `null` `text`, or any field
+the endpoint does not define (`prompt`, a misspelt `submit`) is refused with
+`400 invalid`, and the message names the offending field and the expected
+`text`. Before muster #320 such a body was accepted: the session received an
+empty turn and the receipt said `queued`. Read the status code, not only the
+receipt — a `400` here is a bug in the caller, never a transient condition.
+
 **`input` can legitimately refuse.** If a human has typed something into the
 composer and not sent it, delivering more text would corrupt their line, so the
 service refuses and tells you. That refusal is a feature; do not retry through

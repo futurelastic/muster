@@ -180,11 +180,17 @@ func TestSendInput_ExplicitTerminalStaysTerminalAndAgentAutoIsLabelled(t *testin
 	if got := d.last(t); got.Route != fleet.RouteAuto || got.HumanRelay || got.From == nil {
 		t.Errorf("an agent's auto reached the driver as %+v", got)
 	}
-	// LiveLaneOnly is the service's, never a caller's: a body naming it changes nothing.
-	mustOK(t, postInput(t, srv, "agent-token", nil,
-		map[string]any{"text": "x", "submit": true, "route": "inbox", "liveLaneOnly": false}))
-	if got := d.last(t); !got.LiveLaneOnly {
-		t.Errorf("a caller cleared LiveLaneOnly through the body: %+v", got)
+	// LiveLaneOnly is the service's, never a caller's. Since #320 a body
+	// naming it is refused as an unknown field (it used to be ignored): either
+	// way a caller cannot clear it, and now nothing is delivered either.
+	before := d.sends()
+	resp := postInput(t, srv, "agent-token", nil,
+		map[string]any{"text": "x", "submit": true, "route": "inbox", "liveLaneOnly": false})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("a body naming liveLaneOnly: status = %d, want 400", resp.StatusCode)
+	}
+	if d.sends() != before {
+		t.Errorf("a refused body reached the driver")
 	}
 }
 

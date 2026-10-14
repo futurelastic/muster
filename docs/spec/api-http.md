@@ -1046,6 +1046,16 @@ POST /v1/machines/{machine}/sessions/{id}/input
   "route": "auto" | "terminal" | "inbox" | "<module>" }
 ```
 
+**The body's shape is checked before any driver is resolved (muster #320).**
+`text` is required and must not be empty (a missing or `null` `text` reads as
+empty): the refusal is `invalid` (400), its message says `text` is required,
+and nothing is delivered. A field the request does not define is `invalid`
+(400) too, with the field named and `text` named as the field a message goes
+in — it is never ignored, so `{"prompt": "..."}` (the name `create` uses) cannot
+be read as an empty send. The defined fields are exactly those in the shape
+above. A `resumeIfStranded` retry repeats the same text and so needs no
+exception.
+
 **`submit` (muster #257) defaults to `true`.** An absent (or `null`) `submit`
 means the text is submitted; only an explicit `false` stages it in the
 composer without submitting. Before #257 an absent `submit` read as `false`.
