@@ -106,83 +106,21 @@ and merges branches, say — is that the dependency runs one way:
 ## The parts that are unusual
 
 Most tools in this space manage sessions on one laptop, for one vendor's agent,
-behind a TUI. The properties below are the ones that turned out to be rare, and
-they are all consequences of taking failure seriously rather than features that
-were designed for their own sake. ["Rare" is measured, not asserted —
-`docs/positioning.md`](docs/positioning.md) is the survey behind this claim,
-including the combination nothing else in it had.
+behind a TUI. These are the properties that turned out to be rare — all of them
+consequences of taking failure seriously. Each is worked through, with its state
+and delivery diagrams, in [`docs/unusual-parts.md`](docs/unusual-parts.md); the
+survey behind "rare" is [`docs/positioning.md`](docs/positioning.md).
 
-### A session has a state, not a pulse
-
-```mermaid
-stateDiagram-v2
-    [*] --> idle
-    idle --> working: send prompt
-    working --> idle: turn completes
-    working --> waiting_input: permission dialog
-    waiting_input --> working: respond
-    working --> quota_blocked: quota exhausted
-    quota_blocked --> idle: quota window resets
-
-    note right of waiting_input
-        Dead end. Only a respond call moves it:
-        answer by index, checked against a nonce.
-        This is the state that strands work.
-    end note
-
-    note right of quota_blocked
-        Not idle. On screen both are a quiet
-        terminal with an empty composer.
-        The API keeps them apart.
-    end note
-```
-
-On screen, an agent that finished, an agent out of quota, an agent whose turn
-died on a transient error, and an agent holding text nobody submitted all look
-identical: a quiet terminal with an empty composer. Collapsing them is how
-abandoned work goes unnoticed for a day.
-
-So they are different states, each carrying its evidence, and every state says
-whether it was `observed` from a structured read or `inferred` from a screen.
-
-### Sending a prompt is not fire-and-forget
-
-```mermaid
-flowchart TB
-    A(["POST input — send a prompt"]) --> R{result}
-    R -->|submitted| S["delivered — the agent has it"]
-    R -->|queued| Q["accepted — submit registered"]
-    R -->|unknown| U["NOT sent — text stranded<br/>in the composer"]
-    U -. "retry: send resumes its own<br/>unconfirmed delivery, never a human's text" .-> A
-
-    classDef bad stroke-width:2px,stroke-dasharray:6 4
-    class U bad
-```
-
-`unknown` means the text is sitting in the composer and was **not** submitted. A
-system that reports success here loses instructions silently, and you find out
-hours later when nothing happened. Retrying resubmits only text the service
-itself placed there — never text a human typed.
-
-There is a fourth outcome, `refused`, for when the driver actively protects the
-session from input that would corrupt it. A refusal is information to act on,
-not a fault to retry, so it arrives as an ordinary `200`.
-
-### A session blocked on a dialog can be answered remotely
-
-The dialog is read with every option enumerated, and you answer by index —
-carrying a nonce, so your answer cannot land on a question that changed while
-you were deciding. A session lost to a question nobody can reach is the most
-expensive failure in a fleet, and an ordinary `send` cannot fix it: the property
-that makes `send` safe for messages makes it useless for control.
-
-### Every route is authenticated, and exposure is never accidental
-
-There is no unauthenticated mode — not on loopback, not in development. A
-service with no token refuses to start. The default bind is loopback on an
-ephemeral port, and binding all interfaces logs a warning that names the risk.
-Callers are named principals with per-verb grants; every mutation is audited
-with an actor, not an address.
+- **A session has a state, not a pulse.** Finished, out of quota, died on an
+  error and holding unsent text all look like a quiet terminal; here they are
+  different states, each saying whether it was `observed` or `inferred`.
+- **Sending a prompt is not fire-and-forget.** `submitted`, `queued`, `unknown`
+  and `refused` are distinct outcomes; `unknown` means the text is stranded, not
+  sent, and a retry never resubmits a human's text.
+- **A session blocked on a dialog can be answered remotely** — by option index,
+  carrying a nonce so the answer cannot land on a question that changed.
+- **Every route is authenticated.** No unauthenticated mode, loopback bind by
+  default, named principals with per-verb grants, every mutation audited.
 
 ---
 
@@ -197,18 +135,12 @@ npm i -g @futurelastic/muster         # or install the `muster` command
 muster --version                      # muster <version> (...)
 ```
 
-`@futurelastic/muster` is a small launcher. npm installs exactly one of the
-platform packages beside it (`@futurelastic/muster-darwin-arm64`, `-darwin-x64`,
-`-linux-x64`, `-linux-arm64`) and the launcher runs that binary. Nothing is
-downloaded at install time, so `--ignore-scripts` and an offline mirror both
-work. Every release is published with npm provenance, and the launcher refuses
-a platform package whose version differs from its own. Release candidates
-publish under the `next` dist-tag (`npx @futurelastic/muster@next`); `latest`
-only ever moves to a final release.
-
-Windows is built and tested by every release but not published to npm yet, and
-has no interactive-terminal driver; see
-[`docs/install.md`](docs/install.md#windows).
+`@futurelastic/muster` is a small launcher: npm installs exactly one platform
+package beside it and runs that binary. Nothing is downloaded at install time,
+and every release carries npm provenance. Release candidates publish under the
+`next` dist-tag; `latest` only moves to a final release. Windows is built and
+tested by every release but not published to npm yet and has no
+interactive-terminal driver — see [`docs/install.md`](docs/install.md#windows).
 
 Configure it with the `FLEET_*` environment the [Quickstart](#quickstart) shows
 and start it with `muster serve`. A service that survives a reboot is
@@ -228,7 +160,7 @@ go build ./... && go test ./...
 export FLEET_MACHINE=machine-a
 export FLEET_TOKEN="$(openssl rand -hex 32)"
 export FLEET_ADDR=127.0.0.1:9000
-go run ./cmd/muster
+go run ./cmd/muster serve
 ```
 
 ```sh
@@ -239,185 +171,44 @@ There is no default port — pick one and keep it. The default bind is loopback 
 an ephemeral port, so a service you have not deliberately configured is
 reachable only from its own machine.
 
-### Two machines, over a LAN or a VPN
+### Two machines
 
-Four steps. Do **machine-b first** — machine-a needs an address to point at.
-
-**1. Give each machine its own credential.** Not one shared token: the whole
-point of the next three steps is that the two machines have distinct identities.
-
-```sh
-mkdir -p ~/.config/muster
-openssl rand -hex 32 > ~/.config/muster/machine-a.token
-chmod 600 ~/.config/muster/machine-a.token
-```
-
-**2. On machine-b — the one that owns the sessions.** Bind the interface the
-peer will actually reach: **a specific address, never `0.0.0.0`**. On a VPN that
-is the VPN address; on a trusted LAN it is the LAN address. Loopback is added
-alongside it automatically, so the service never becomes undiagnosable from its
-own machine.
-
-```sh
-export FLEET_MACHINE=machine-b
-export FLEET_TOKEN="$(cat ~/.config/muster/machine-b.token)"
-export FLEET_ADDR=10.8.0.12:9000        # this machine's VPN or LAN address
-export FLEET_ALLOW_MUTATIONS=1          # permit writes to its own sessions
-muster
-```
-
-**3. On machine-a — the one that will call it.** A peer is statically
-configured; there is no discovery. The address is one **you** have confirmed
-reachable from this machine, never the peer's own idea of its name — that is how
-a fleet ends up pointing at a hostname which resolves on only one side.
-
-```sh
-export FLEET_MACHINE=machine-a
-export FLEET_TOKEN="$(cat ~/.config/muster/machine-a.token)"
-export FLEET_PEERS="machine-b=http://10.8.0.12:9000"
-export FLEET_ALLOW_RELAY=1              # permit forwarding writes to a peer
-muster
-```
-
-**4. Verify, from machine-a.**
-
-```sh
-curl -s -H "Authorization: Bearer $(cat ~/.config/muster/machine-a.token)" \
-  http://127.0.0.1:9000/v1/machines
-```
-
-```json
-{ "items": [ { "machine": "machine-a", "self": true,  "status": "ok" },
-             { "machine": "machine-b", "self": false, "status": "ok" } ],
-  "complete": true }
-```
-
-Both reading `ok` is the entire handshake. If machine-b reads `unreachable`,
-the bind address or the network path is wrong — **not** the token: a bad
-credential is a `401`, not a silence.
-
-> **The two credentials are not symmetric.** The token machine-a presents for a
-> peer is *machine-a's identity on machine-b*, not machine-b's identity here.
-> They are different secrets, and conflating them is how a fleet quietly ends up
-> back on one shared token.
-
-You now have one API over both machines. What to do with it is below.
+Federating two instances is four steps — a credential per machine, the owner's
+bind address, the caller's peer list, and one `GET /v1/machines` to verify. The
+full walk-through is [`docs/multi-machine.md`](docs/multi-machine.md); what a
+caller can then do (one fleet-wide session list, input and dialog answers sent
+across the hop) is [`docs/driving-a-machine.md`](docs/driving-a-machine.md).
 
 > **This is a demo, not an install.** Every process above ends with its shell.
 > A service that survives a reboot — a principal table, a state directory, a
 > service unit, and a `muster doctor` run that checks all of it — is
 > [`docs/install.md`](docs/install.md).
 
+## Who it serves
 
-## One machine drives another
+Clients, not end users. Three kinds are in mind, and the API treats them alike:
 
-What the two-machine setup above actually buys you, end to end. Every call is
-made against the **local** service; that it crosses a LAN or a VPN to reach the
-other machine is the service's problem, not the caller's.
+- **Session dashboards** — a view over every session on every machine, with the
+  state each one is in and a way to answer the one that is stuck.
+- **Coordinators** — programs that decide what work should happen and need a
+  session to run it on; they hold the work vocabulary, this service holds the
+  session.
+- **Desktop and command-line apps** — a launcher or picker that lists sessions
+  and attaches to one.
 
-```mermaid
-sequenceDiagram
-    autonumber
-    actor C as client
-    box transparent machine-a
-        participant A as muster (a)
-    end
-    box transparent machine-b
-        participant B as muster (b)
-        participant T as tmux driver
-        participant X as agent CLI
-    end
+Which of these you are building decides where to start in
+[`docs/client-guide.md`](docs/client-guide.md).
 
-    C->>A: GET /v1/machines/machine-b/sessions/s42
-    Note over A,B: one hop · LAN / VPN<br/>HTTP + bearer token
-    A->>B: proxy — same API, service's own credential
-    B->>T: read session
-    T->>X: capture + classify screen
-    X-->>T: screen
-    T-->>B: state: waiting_input
-    B-->>A: session s42
-    A-->>C: session s42
-    Note over C,A: the caller never learns the session was remote.<br/>Fan-out stops here — peers never recurse.
-```
+## Layout
 
-### Drive it
-
-```sh
-FLEET=http://127.0.0.1:9000
-AUTH="Authorization: Bearer $(cat ~/.config/muster/machine-a.token)"
-```
-
-**Every session on both machines, as one list:**
-
-```sh
-curl -s -H "$AUTH" "$FLEET/v1/sessions?scope=fleet"
-```
-
-```json
-{
-  "items": [
-    { "machine": "machine-a", "id": "s17", "state": { "status": "working",       "confidence": "inferred" } },
-    { "machine": "machine-b", "id": "s42", "state": { "status": "waiting_input", "confidence": "inferred",
-        "waitingOn": "prompt",
-        "prompt": { "question": "Allow running tests?", "options": ["No", "Yes", "Yes, always"],
-                    "selected": 1, "kind": "tool-permission", "nonce": "a3f1" } } }
-  ],
-  "sources": [ { "machine": "machine-a", "status": "ok" }, { "machine": "machine-b", "status": "ok" } ],
-  "complete": true
-}
-```
-
-Read `complete` before you trust that list. If the VPN was down, `machine-b`
-would report unreachable, `complete` would be `false`, and the response would
-still be a `200` — because "the machine did not answer" and "the session does
-not exist" are different facts and must never look the same.
-
-**Send an instruction to a session on the other machine:**
-
-```sh
-curl -s -X POST -H "$AUTH" -H 'Content-Type: application/json' \
-  -d '{"text":"run the test suite","submit":true}' \
-  "$FLEET/v1/machines/machine-b/sessions/s42/input"
-```
-
-```json
-{ "outcome": "submitted" }
-```
-
-If that comes back `"unknown"`, the text is stranded in the composer on the
-other machine and was not sent. Retry the identical call with
-`"resumeIfStranded": true`.
-
-**Answer the dialog it is blocked on** — quoting the nonce from the read above:
-
-```sh
-curl -s -X POST -H "$AUTH" -H 'Content-Type: application/json' \
-  -d '{"choice":2,"nonce":"a3f1"}' \
-  "$FLEET/v1/machines/machine-b/sessions/s42/respond"
-```
-
-`choice` is 1-based against `prompt.options`, so this answers **"Yes"**. If the
-prompt changed while you were deciding, the nonce no longer matches and the
-answer is refused rather than applied to a different question.
-
-### What has to be true for that to work
-
-| | machine-a (calls) | machine-b (owns the session) |
-|---|---|---|
-| Reachable address | — | `FLEET_ADDR` on the LAN/VPN interface |
-| Peer configured | `FLEET_PEERS` | — |
-| Write to own sessions | — | `FLEET_ALLOW_MUTATIONS=1` |
-| Forward writes to a peer | `FLEET_ALLOW_RELAY=1` | — |
-
-With a principal table those two booleans become per-identity grants: the caller
-needs `relay` on machine-a, and the verb grant (`send`) is checked on machine-b.
-They are separate refusals and you meet them one at a time. Both default to
-denied, on a fresh deployment as much as an established one.
-
-> **Exposing this is a decision, not a default.** The service reads paths and,
-> when mutations are enabled, starts processes. Put it on a VPN or a trusted
-> LAN segment, bind a specific interface, and give each caller its own
-> credential with only the grants it needs.
+| Path | What lives there |
+|---|---|
+| `cmd/muster/` | The `muster` binary: `serve`, `doctor`, `compat`, `principal` |
+| `internal/` | The service: HTTP API, state store, session drivers, delivery, peer federation |
+| `clients/` | Reference shell clients — [`clients/README.md`](clients/README.md) |
+| `scripts/` | Gate, smoke, build and release scripts |
+| `npm/` | The launcher and platform packages published to npm |
+| `docs/` | API reference, specs, install and deploy procedures, ADRs — see [Documentation](#documentation) |
 
 ---
 
@@ -432,6 +223,7 @@ denied, on a fresh deployment as much as an established one.
 | Adopt this in an existing system | [`docs/adoption.md`](docs/adoption.md) — staged so each step is reversible; §2 is the precondition that surprised us |
 | Work on the service | [`docs/internals.md`](docs/internals.md) — measurements, decided questions, known gaps |
 | Check a runtime build before the fleet takes it | [`docs/compat.md`](docs/compat.md) — `muster compat`: a versioned report of whether a candidate build still behaves as this service assumes |
+| Set up two machines | [`docs/multi-machine.md`](docs/multi-machine.md) — credentials, bind address, peer list, verify; then [`docs/driving-a-machine.md`](docs/driving-a-machine.md) for what a caller can do across the hop |
 | Install it on a new machine | [`docs/install.md`](docs/install.md) — from nothing to a running service, ending with `muster doctor` |
 | Deploy it | [`docs/deploy.md`](docs/deploy.md) — from a merged commit to a service that already runs |
 | Declare a machine-wide session identity | [`docs/session-identity.md`](docs/session-identity.md) — `sessionEnv`, precedence against a caller, verification |
@@ -457,34 +249,33 @@ implemented it:
 - ✅ **A first working driver** — a terminal multiplexer running an interactive
   agent CLI. It amended four sections of the spec and found one defect the spec
   cannot fix on its own.
-- ✅ **Event subscription** — over the substrate's own push channel, served as
-  SSE with cursors, epoch, retention and announced resync. No polling anywhere.
-- ✅ **A second driver: a remote peer** — federation, proven. A caller asks a
-  service holding no local drivers, which proxies into a second service and
-  back with real sessions in ~30 ms. Neither service needed a special case.
+- ✅ **Event subscription** — served as SSE with cursors, epoch, retention and
+  announced resync. No polling anywhere.
+- ✅ **A second driver: a remote peer** — federation, proven; neither service
+  needed a special case.
 - ✅ **Answering, not just observing** — enumerated options, a nonce, and
   verification that the prompt actually cleared.
 - ✅ **A second *local* driver** — a third-party agent spawned as a subprocess,
-  the first able to declare `observesState: true`. Two runtimes on one machine
-  at once, which is the proof the interface was worth having.
+  the first able to declare `observesState: true`.
 - ✅ **State that survives a restart** — idempotency keys, event epoch and
-  cursor, and driver session records persisted atomically, so reconciliation
-  can tell adopted from orphaned rather than calling everything orphaned.
+  cursor, and driver session records persisted atomically.
+- ✅ **A supervisor as a client** — a supervisor now talks to this service
+  instead of to the terminal multiplexer. The plan that got there, including the
+  precondition that could not be discharged from inside this repository, is
+  [`docs/adoption.md`](docs/adoption.md).
+- ✅ **A release path** — one npm install surface, release candidates and
+  finals, and a Windows build that is tested on every release.
 
-Next, and this is where the value actually lands:
+Next:
 
-- ⬜ **A supervisor as a client**, replacing direct terminal-multiplexer access.
-  Until that happens this is a second implementation of session management
-  rather than a replacement for one. Planned in
-  [`docs/adoption.md`](docs/adoption.md) — including the one precondition that
-  cannot be discharged from inside this repository: nothing here prevents two
-  machines editing one working tree, because repository state is a non-goal.
 - ⬜ **Credential lifecycle.** Grants are per principal and per verb, and
   enrolment is a command. Nothing expires, a compromised token is revoked by
   editing a file, and changing a principal's grants means removing and
   re-adding it.
 - ⬜ **Metrics.** Subprocess spawn cost is known to degrade with host load —
   8× on a machine under heavy load — and nothing measures it in production.
+- ⬜ **Windows publication and an interactive-terminal driver there.** Built and
+  tested today; not yet on npm, and the multiplexer driver is not available.
 
 The honest list of what is missing is in
 [`docs/internals.md`](docs/internals.md), kept current on purpose.

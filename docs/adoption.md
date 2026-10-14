@@ -1,7 +1,8 @@
 # Adoption — turning a supervisor into a client
 
-This document is about the last item on the README's roadmap, the one that
-decides whether any of the rest was worth building:
+This document is about the item the README's roadmap once ended on, the one
+that decided whether any of the rest was worth building (it is now done; the
+plan below is how it was approached):
 
 > **A supervisor as a client**, replacing direct terminal-multiplexer access.
 > Until it happens, this is a second implementation of session management rather
