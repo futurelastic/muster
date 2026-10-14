@@ -2,9 +2,11 @@ package tmux
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -322,5 +324,105 @@ func TestCarriedAgeStaysMarkedOnLaterReads(t *testing.T) {
 				t.Fatalf("read %d lost the provenance: %q", read, s.State.Evidence)
 			}
 		}
+	}
+}
+
+// flakyListPanes wraps a fake multiplexer so that its Nth list-panes call and
+// every one after it fails, while everything else answers normally. Reconcile
+// reads the multiplexer in two separate steps — the listing, then the start
+// times — so failing from the second read on is exactly "the listing worked
+// and the start-time read did not" (muster #321).
+func flakyListPanes(f *fakeMux, failFrom int32) (execFunc, *atomic.Int32) {
+	var n atomic.Int32
+	return func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "list-panes" {
+			if n.Add(1) >= failFrom {
+				return nil, errors.New("multiplexer read timed out")
+			}
+		}
+		return f.exec(ctx, name, args...)
+	}, &n
+}
+
+// muster #321: a failed start-time read must not be read as "every session
+// changed identity". Before the fix, the failure was dropped, every start
+// compared as the zero time, and every remembered session was reported as a
+// recycled id — vanished and re-listed as an orphan, in one pass.
+func TestReconcileFailedStartTimeReadJudgesNothing(t *testing.T) {
+	dir := t.TempDir()
+	f := twoSessions()
+
+	// A first, healthy run remembers both sessions.
+	if _, err := stateDriver(t, f, dir).Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	st, err := state.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := (&Driver{store: st}).loadRecords()
+	if len(before) != 2 {
+		t.Fatalf("setup: %d records remembered, want 2", len(before))
+	}
+
+	exec, reads := flakyListPanes(f, 2)
+	d := New("testbox", withExec(exec),
+		withNonce(func() string { return testNonce }),
+		withClock(func() time.Time { return time.Unix(1785760000, 0) }),
+		WithState(st))
+	got, err := d.Reconcile(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reads.Load() < 3 {
+		t.Fatalf("list-panes ran %d times; the failed read should have been retried once", reads.Load())
+	}
+	if len(got.Vanished) != 0 || len(got.Orphaned) != 0 {
+		t.Fatalf("%s — a read that failed must not turn remembered sessions into vanished/orphaned", got)
+	}
+	if len(got.Adopted) != 2 || got.Unjudged != 2 {
+		t.Fatalf("%s — both sessions stay remembered and are reported as not judged", got)
+	}
+	if got.ReadErr == "" || !strings.Contains(got.String(), "not judged") {
+		t.Errorf("the failure was swallowed: ReadErr=%q String=%q", got.ReadErr, got.String())
+	}
+
+	// The records themselves are untouched, so the next pass judges against
+	// what was really remembered rather than against a failure.
+	after := (&Driver{store: st}).loadRecords()
+	for id, rec := range before {
+		if !after[id].Created.Equal(rec.Created) || after[id].FirstSeen != rec.FirstSeen {
+			t.Errorf("record %q changed across a failed read: %+v -> %+v", id, rec, after[id])
+		}
+	}
+}
+
+// The listing itself failing is the same hazard one read earlier: List reports
+// an unreachable source and returns no error, an empty list, and everything
+// remembered would be "absent now".
+func TestReconcileUnreachableListingJudgesNothing(t *testing.T) {
+	dir := t.TempDir()
+	f := twoSessions()
+	if _, err := stateDriver(t, f, dir).Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	st, err := state.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := (&Driver{store: st}).loadRecords()
+
+	exec, _ := flakyListPanes(f, 1)
+	d := New("testbox", withExec(exec), withNonce(func() string { return testNonce }), WithState(st))
+	got, err := d.Reconcile(context.Background())
+	if err == nil {
+		t.Fatalf("%s — an unreadable listing must be an error, not an empty fleet", got)
+	}
+	if len(got.Vanished) != 0 {
+		t.Errorf("an unreadable listing vanished %d sessions", len(got.Vanished))
+	}
+	after := (&Driver{store: st}).loadRecords()
+	if len(after) != len(before) {
+		t.Errorf("remembered set went from %d to %d records on a failed read", len(before), len(after))
 	}
 }
