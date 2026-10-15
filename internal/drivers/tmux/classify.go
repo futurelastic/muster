@@ -78,6 +78,12 @@ const (
 	// with. Matching a run of them, rather than an exact width, keeps this
 	// independent of terminal width.
 	ruleRune = '─'
+	// dividerRune is the dashed row a tool-permission dialog draws between the
+	// call being approved and the question about it (muster#323). It is NOT a
+	// rule: isRule fences composers and bounds usage-limit and turn-failure
+	// notices, and a dashed row in a diff or a table in the transcript must never
+	// become one. It is read only inside a menu (isDialogDivider).
+	dividerRune = '╌'
 	// promptScanDepth is how far up from the bottom a prompt may reach. A
 	// numbered list further up is transcript, not a question.
 	promptScanDepth = 24
@@ -100,6 +106,10 @@ const (
 	// and quoted in refusals. A longer question keeps the rows nearest the
 	// options, where its ask sits.
 	maxQuestionRows = 32
+	// maxOptionDescriptionRunes bounds one option's description for the same
+	// reason maxQuestionRows bounds a question: the rows are written by an agent,
+	// and the text is reported to every reader of the session's state.
+	maxOptionDescriptionRunes = 1024
 
 	// Menu footers. There is more than one, which cost a real incident: the
 	// detector knew only "Enter to select", so a folder-trust prompt and a
@@ -319,6 +329,22 @@ func afterMarker(raw string) string {
 		return raw[i+len(composerRuneMarker):]
 	}
 	return raw
+}
+
+// isDialogDivider reports whether a line is the dashed divider inside a dialog:
+// nothing but a run of dividerRune, with no label. It is deliberately stricter
+// than isRule, which tolerates a centred label — a divider has none, and the
+// predicate is only ever asked about rows already inside a menu.
+func isDialogDivider(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	n := 0
+	for _, r := range trimmed {
+		if r != dividerRune {
+			return false
+		}
+		n++
+	}
+	return n >= 4
 }
 
 // isRule reports whether a line is one of the TUI's horizontal rules. The
@@ -842,6 +868,20 @@ func parseMenuShape(s screen) (p *fleet.SessionPrompt, shape menuShape) {
 	// menu, and `since` is then the new menu's question.
 	lastNumber := 0
 	var since []string
+	// A tool-permission dialog puts the call it asks about above a dashed divider
+	// and the question under it (muster#323). bodyStart is where, in question,
+	// the rows under the last solid rule begin; it is only believed once a
+	// divider was read as well, so a menu without one reads exactly as before.
+	//
+	// A window widened to the dialog's opening rule (dialogTop) starts on the row
+	// under it, so that rule is known without having been read.
+	bodyStart, dividerSeen := 0, false
+	// descs[i] is the description read under option i+1, labelCol the screen
+	// column its label starts at, and gap whether a blank row has stood between
+	// the last option or description row and the row being read (muster#324).
+	var descs []string
+	labelCol, gap := 0, false
+	ruleSeen := from > 0 && isRule(s.lines[from-1])
 
 	// Review fix (#180 review): mask OUT the active composer's own
 	// fenced rows before scanning for a menu. numberedOption/selected below
@@ -896,8 +936,11 @@ func parseMenuShape(s screen) (p *fleet.SessionPrompt, shape menuShape) {
 			}
 		}
 		if line == "" {
+			gap = true
 			continue
 		}
+		wasGap := gap
+		gap = false
 		wasRule := afterRule
 		afterRule = isRule(line)
 		selected := strings.HasPrefix(line, composerRuneMarker)
@@ -914,9 +957,11 @@ func parseMenuShape(s screen) (p *fleet.SessionPrompt, shape menuShape) {
 				// header and its question are not the live menu's. The rows read
 				// since its last option are the new menu's question.
 				p.Options, p.Selected = nil, 0
+				descs = nil
 				footer, tabBar = false, false
 				header, headerRow = "", -1
 				question = since
+				bodyStart, dividerSeen, ruleSeen = 0, false, false
 			}
 			lastNumber, since = n, nil
 			if n > maxPromptOptions {
@@ -943,6 +988,9 @@ func parseMenuShape(s screen) (p *fleet.SessionPrompt, shape menuShape) {
 			if selected {
 				p.Selected = n
 			}
+			if !hasPane {
+				labelCol = labelColumn(raw, text)
+			}
 			continue
 		}
 		if strings.Contains(line, selectFooter) || strings.Contains(line, confirmFooter) ||
@@ -960,6 +1008,36 @@ func parseMenuShape(s screen) (p *fleet.SessionPrompt, shape menuShape) {
 			tabBar = tabBar || isDialogTabBar(line)
 			header, headerRow = line, idx
 			question = nil
+			bodyStart, dividerSeen, ruleSeen = 0, false, false
+			continue
+		}
+		if len(p.Options) > 0 && !hasPane && !wasGap && !isRule(line) && !isDialogDivider(line) &&
+			rowIndent(raw) >= labelCol && labelCol > 0 && p.Options[len(p.Options)-1] != "" {
+			// An unnumbered row indented to its label is the option's description
+			// (muster#324). It is still offered to since below: until the next
+			// option shows, it cannot be told from the question of a following
+			// menu, and a following menu is what resets it.
+			i := len(p.Options) - 1
+			for len(descs) <= i {
+				descs = append(descs, "")
+			}
+			if row := questionRow(line); row != "" {
+				if descs[i] != "" {
+					descs[i] += " "
+				}
+				descs[i] = clipRunes(descs[i]+row, maxOptionDescriptionRunes)
+			}
+		}
+		if len(p.Options) == 0 && !dividerSeen {
+			if isRule(line) {
+				// The dialog's opening rule is the last solid rule above its
+				// divider; what stands between them is the call being asked about.
+				bodyStart, ruleSeen = len(question), true
+			} else if isDialogDivider(line) {
+				dividerSeen = true
+				continue
+			}
+		} else if isDialogDivider(line) {
 			continue
 		}
 		if !isRule(line) {
@@ -1025,6 +1103,12 @@ func parseMenuShape(s screen) (p *fleet.SessionPrompt, shape menuShape) {
 	keep := unanchoredQuestionRows
 	if headerRow >= 0 {
 		keep = maxQuestionRows
+	} else if dividerSeen && ruleSeen {
+		// A tool-permission dialog: its opening rule is known, so the rows under
+		// it — the tool's title, the command, its description, then the ask — are
+		// all the question, and a bound of three cut the command off (muster#323).
+		question = question[min(bodyStart, len(question)):]
+		keep = maxQuestionRows
 	}
 	if n := len(question); n > keep {
 		question = question[n-keep:]
@@ -1051,7 +1135,60 @@ func parseMenuShape(s screen) (p *fleet.SessionPrompt, shape menuShape) {
 	}
 	p.MultiSelect = tabBar && multiSelectBoxes(p) > 0
 	p.FreeText = freeTextOffered(p, shape)
+	preview := ""
+	if hasPane {
+		preview = panePreview(s.lines, pane)
+	}
+	p.OptionDetails = optionDetails(p.Options, descs, preview, p.Selected)
 	return p, shape
+}
+
+// labelColumn is the screen column an option's label starts at on its row, in
+// runes, or 0 when the row does not end in the label as read.
+func labelColumn(raw, label string) int {
+	row := strings.TrimRight(raw, " \t\r")
+	if label == "" || !strings.HasSuffix(row, label) {
+		return 0
+	}
+	return utf8.RuneCountInString(row[:len(row)-len(label)])
+}
+
+// rowIndent is how many columns of blank a row starts with.
+func rowIndent(raw string) int {
+	row := strings.TrimRight(raw, " \t\r")
+	return utf8.RuneCountInString(row) - utf8.RuneCountInString(strings.TrimLeft(row, " \t"))
+}
+
+// clipRunes keeps the first max runes of s.
+func clipRunes(s string, max int) string {
+	if utf8.RuneCountInString(s) <= max {
+		return s
+	}
+	return string([]rune(s)[:max])
+}
+
+// optionDetails assembles SessionPrompt.OptionDetails from the descriptions
+// read under each option and the preview pane's text, which belongs to the
+// highlighted option. It returns nil when there is nothing to report, so the
+// field is absent rather than a list of empty entries.
+func optionDetails(options, descs []string, preview string, selected int) []fleet.PromptOptionDetail {
+	any := false
+	out := make([]fleet.PromptOptionDetail, len(options))
+	for i, label := range options {
+		out[i].Label = label
+		if i < len(descs) && descs[i] != "" {
+			out[i].Description = descs[i]
+			any = true
+		}
+		if preview != "" && i == selected-1 {
+			out[i].Preview = preview
+			any = true
+		}
+	}
+	if !any {
+		return nil
+	}
+	return out
 }
 
 // questionRail is the rule the runtime draws down the left edge of a question
@@ -1772,6 +1909,10 @@ func classifyPromptKind(p *fleet.SessionPrompt) fleet.PromptKind {
 		// agent's checkbox option reading "allow this" could be labelled a
 		// tool permission.
 		label, _, _ := checkboxLabel(o)
+		// The runtime prints a typographic apostrophe ("don’t") in this row on
+		// current builds and an ASCII one on older ones; both are the same text
+		// to a needle written once (muster#323).
+		label = strings.ReplaceAll(label, "’", "'")
 		lower = append(lower, strings.ToLower(label))
 	}
 	// Agent-authored question → not a runtime dialog, whatever it resembles.

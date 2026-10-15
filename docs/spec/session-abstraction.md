@@ -894,6 +894,14 @@ SessionPrompt {
   freeText?    : boolean   // one option is the free-text row; answer in your own words with Response.text
   tabs?        : PromptTab[]  // a tabbed dialog's question tabs in bar order, Submit excluded; fails to absent
   tab?         : number    // 0-based index of the current tab; absent on the review screen
+  optionDetails? : PromptOptionDetail[]  // parallel to options; description under each option and the
+                                         // highlighted option's preview; fails to absent; not in nonce
+}
+
+PromptOptionDetail {
+  label        : string    // the option's text
+  description? : string    // the row(s) painted under the option, wrapped rows joined by a space
+  preview?     : string    // the preview pane's text, highlighted option only
 }
 
 PromptTab {
