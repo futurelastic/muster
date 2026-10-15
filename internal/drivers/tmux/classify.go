@@ -836,6 +836,12 @@ func parseMenuShape(s screen) (p *fleet.SessionPrompt, shape menuShape) {
 	// a lone chip, which is only believed directly under the dialog's opening
 	// rule — a checklist item in the agent's own prose looks the same.
 	afterRule := false
+	// lastNumber is the number of the numbered row read last, and since is the
+	// rows read after it that were not options. Together they find where the
+	// LIVE menu starts (muster#322): a number that does not rise starts a new
+	// menu, and `since` is then the new menu's question.
+	lastNumber := 0
+	var since []string
 
 	// Review fix (#180 review): mask OUT the active composer's own
 	// fenced rows before scanning for a menu. numberedOption/selected below
@@ -897,6 +903,22 @@ func parseMenuShape(s screen) (p *fleet.SessionPrompt, shape menuShape) {
 		selected := strings.HasPrefix(line, composerRuneMarker)
 		body := strings.TrimSpace(strings.TrimPrefix(line, composerRuneMarker))
 		if n, text, ok := numberedOption(body); ok {
+			if n <= lastNumber && len(p.Options) > 0 {
+				// A menu's numbers only rise. A row that does not is the start
+				// of another menu, and the screen is read as the LAST one
+				// (muster#322): a numbered list above the dialog — the agent's
+				// own prose, an answered dialog still in the history margin —
+				// used to supply the question and the leading options, and the
+				// live menu only overwrote them by index. Nothing of the earlier
+				// run survives: its options, its highlight, its footer, its
+				// header and its question are not the live menu's. The rows read
+				// since its last option are the new menu's question.
+				p.Options, p.Selected = nil, 0
+				footer, tabBar = false, false
+				header, headerRow = "", -1
+				question = since
+			}
+			lastNumber, since = n, nil
 			if n > maxPromptOptions {
 				// Bounded on purpose. This parses a pane whose contents are
 				// written by an agent that can print anything, and padding
@@ -940,9 +962,13 @@ func parseMenuShape(s screen) (p *fleet.SessionPrompt, shape menuShape) {
 			question = nil
 			continue
 		}
-		if len(p.Options) == 0 && !isRule(line) {
+		if !isRule(line) {
 			if row := questionRow(line); row != "" {
-				question = append(question, row)
+				if len(p.Options) == 0 {
+					question = append(question, row)
+				} else {
+					since = append(since, row)
+				}
 			}
 		}
 	}
