@@ -438,3 +438,34 @@ type menuShape struct {
 	// number.
 	shortcuts []string
 }
+
+// panePreview is the text a preview pane shows, one row per pane row: the cells
+// between its side edges, trimmed, with its borders and its "lines hidden"
+// divider left out. Rows are joined with a newline and blank rows at either end
+// dropped (muster#324). It is the preview of the HIGHLIGHTED option — the runtime
+// draws one pane, for whichever option the highlight is on.
+func panePreview(lines []string, pane previewPane) string {
+	var rows []string
+	for i := pane.top; i <= pane.bottom && i < len(lines); i++ {
+		_, frag, ok := splitPaneRow(lines[i])
+		if !ok {
+			continue
+		}
+		cells := []rune(frag)
+		if len(cells) < 2 || cells[0] != '│' || cells[len(cells)-1] != '│' {
+			continue
+		}
+		rows = append(rows, strings.TrimSpace(string(cells[1:len(cells)-1])))
+	}
+	for len(rows) > 0 && rows[0] == "" {
+		rows = rows[1:]
+	}
+	for len(rows) > 0 && rows[len(rows)-1] == "" {
+		rows = rows[:len(rows)-1]
+	}
+	return clipRunes(strings.Join(rows, "\n"), maxPanePreviewRunes)
+}
+
+// maxPanePreviewRunes bounds a preview for the reason maxQuestionRows bounds a
+// question: the pane is as tall as the agent wrote it, up to the runtime's clamp.
+const maxPanePreviewRunes = 4096

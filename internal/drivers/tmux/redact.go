@@ -542,7 +542,7 @@ func redactOption(n int, text string) string {
 			return strconv.Itoa(n) + ". " + exact
 		}
 	}
-	lower := strings.ToLower(strings.TrimSpace(text))
+	lower := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(text)), "’", "'")
 	for _, phrase := range knownOptionPhrases {
 		if strings.HasPrefix(lower, phrase) {
 			return strconv.Itoa(n) + ". " + strings.TrimSpace(text)

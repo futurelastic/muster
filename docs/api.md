@@ -794,6 +794,27 @@ they existed — so check for `tabs` before drawing progress. On the review scre
 (the highlight on `Submit`) `tabs` is present and `tab` is not. Answering is
 unchanged: `respond` answers the current tab, with the nonce the same read gave.
 
+**What a prompt shows beyond its option labels.** Two fields, both additive:
+
+- **A tool-permission dialog reports the call** (#323). `question` holds the tool's
+  title and the command being approved, then the ask — for example `Bash command
+  touch … && echo done This command requires approval Do you want to proceed?` —
+  and `kind` is `tool-permission`. Show it; do not parse it. Two calls that share a
+  leading word have different nonces.
+- **`optionDetails`** (#324) is one `{label, description?, preview?}` per entry of
+  `options`, same order: the description the agent wrote under each option, and
+  the preview pane's text on the highlighted option only.
+
+```json
+"options": ["Path A", "Path B"],
+"optionDetails": [ {"label": "Path A", "description": "Full rewrite, slower but clean"},
+                   {"label": "Path B", "description": "Small patch, ships today"} ]
+```
+
+It fails to absent — check for it, and fall back to `options`. It is not part of
+`nonce`, and while the question is open it is the only place the descriptions
+exist: the transcript does not carry the question until it is answered.
+
 **Multi-select questions** report `prompt.multiSelect: true`; their leading
 options are checkboxes, painted `[ ] Label` / `[✔] Label`. Answer them with a set
 instead of `choice`:

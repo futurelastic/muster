@@ -239,6 +239,23 @@ type PromptTab struct {
 	State  PromptTabState `json:"state"`
 }
 
+// PromptOptionDetail is what the runtime draws with one option besides its
+// label: the description the agent wrote under it and, for the highlighted
+// option of a dialog with a preview pane, the pane's text.
+type PromptOptionDetail struct {
+	// Label repeats the option's text, so an entry reads on its own.
+	Label string `json:"label"`
+	// Description is the row or rows painted under the option. Rows a wrapped
+	// description spans are joined with a single space. Empty when the option
+	// has none.
+	Description string `json:"description,omitempty"`
+	// Preview is the preview pane's text, rows joined with a newline. It is
+	// reported on the highlighted option only — the runtime draws one pane, for
+	// whichever option is highlighted — so a client must not read its absence on
+	// another option as "that option has no preview".
+	Preview string `json:"preview,omitempty"`
+}
+
 type SessionPrompt struct {
 	// Question is the text above the options, best effort. It may be empty
 	// when the prompt is terse; the options are the load-bearing part. It is
@@ -252,6 +269,21 @@ type SessionPrompt struct {
 	// Selected is the 1-based index of the highlighted option — what a bare
 	// confirmation would accept. Never assume it is the safe one.
 	Selected int `json:"selected,omitempty"`
+
+	// OptionDetails carries what each option is drawn with besides its label
+	// (muster#324): the description under it and the highlighted option's
+	// preview. It is parallel to Options — the same length and order when
+	// present — and Options is unchanged, so a client that has never heard of
+	// it reads exactly what it always did.
+	//
+	// It matters because a question's own prose is not in the transcript until
+	// it has been answered: while it is open, the screen is the only source.
+	//
+	// It fails to absent: omitted when no option has a description or a preview,
+	// and on a peer built before it existed. It is NOT part of Nonce — a preview
+	// follows the highlight, and a nonce that moved with it would refuse an
+	// answer to a question that had not changed.
+	OptionDetails []PromptOptionDetail `json:"optionDetails,omitempty"`
 
 	// MultiSelect reports that this is a multi-select question: its first
 	// options are checkboxes, painted with their tick state in the option

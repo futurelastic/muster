@@ -1934,6 +1934,34 @@ zero — and is absent while the highlight is on `Submit` (the review screen), w
 `tabs` is present and none of them is current. Walking the tabs to read every
 question is not offered: it would move the dialog's focus.
 
+A tool-permission dialog reports what is being approved (muster issue #323). The
+runtime draws the tool's title and the call — the command, and its description —
+above a dashed divider, and the question about it below. `state.prompt.question`
+carries all of those rows, from the dialog's opening rule down to the ask, so a
+client rendering an "approve this?" card can show what it is approving; the
+divider itself is not part of the text. Its `kind` is `tool-permission` whether
+the runtime prints the option's apostrophe as ASCII or typographic. The text is
+the screen's, as every other `question` is: it is for showing to a person, and
+nothing here is a reason to match on it. `nonce` digests it, so two calls that
+share a leading word no longer share a nonce. A dialog with no divider reads as
+before. `GET …/turns` still carries no `pending` for this dialog; `question` is
+the only place the call is reported.
+
+`state.prompt.optionDetails` carries what an option is drawn with besides its
+label (muster issue #324): one `{label, description?, preview?}` per entry of
+`options`, in the same order, so a client can show "Path A — Full rewrite, slower
+but clean". `description` is the row or rows painted under the option (a wrapped
+one is a single string, rows joined by a space); `preview` is the preview pane's
+text, rows joined by a newline, and is reported on the **highlighted** option
+only, because the runtime draws one pane for whichever option is highlighted.
+`options` itself is unchanged. The field is additive and fails to absent (§5.7):
+it is omitted when no option has a description or a preview, and on a peer that
+predates it, so a client checks for it rather than assuming it. It is not part of
+`nonce` — a preview follows the highlight, and an answer to a question that did
+not change must not be refused. The question's own prose is not in `turns` until
+it is answered, so while a question is open this is the only source of what its
+options mean.
+
 A question whose options carry a preview is drawn with the option list and a
 box side by side, and `state.prompt` reads the LIST only (muster issue
 #204): `options` are the labels — a label that wraps across rows is one string —
