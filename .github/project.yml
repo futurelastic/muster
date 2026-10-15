@@ -30,19 +30,20 @@ gate:
 # CI calls, so a hand-run and CI answer the same question (#233).
 
 release:
-  # (2026-10-02, #250) public-tool: every green trunk head gets a candidate (rc -> npm `next`),
-  # and the newest clean candidate finalizes automatically after 3 days (-> npm `latest`).
+  # (2026-10-02, #250) public-tool: every green trunk head gets a candidate (rc -> npm `next`).
+  # (2026-10-15, #325) The final is a human act: `final: human` with `test-period: 0d` (0d is valid
+  # only with `final: human`), so the maintainer finalizes a candidate when ready (-> npm `latest`).
   # The npm publish is NOT the template's single-package `npm:` job: muster ships five packages,
   # so .github/workflows/release-auto.yml calls release-npm.yml with the tag instead.
   route: public-tool
   candidates: auto
-  test-period: 3d
-  final: auto
+  test-period: 0d
+  final: human
   # No manifest carries a version (npm/**/package.json hold 0.0.0): the tag is the version and
   # scripts/assemble-npm.mjs stamps it at publish time.
   version-source: tag
-  # Route choice (#251): `public-tool`, not `rapid-app`. Their policy is identical today
-  # (automatic candidate per green trunk head, 3d test period, automatic final), but the
+  # Route choice (#251): `public-tool`, not `rapid-app`. Their policy was identical when this
+  # was chosen (automatic candidate per green trunk head, 3d test period, automatic final), but the
   # handbook permits the npm publish on `public-tool` alone, and npm is how this repo ships.
   # `deploy: none` stays: a merge reaches the fleet machines through the fleet updater
   # following trunk (not a tag), and no workflow, script or LaunchAgent acts on an `-rc` tag.
