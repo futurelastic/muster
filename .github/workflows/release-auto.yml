@@ -5,7 +5,7 @@ name: Release (auto)
 #
 #   CI finished green on main        colab release cut --auto       -> vX.Y.Z-rc.N
 #   the daily schedule               colab release cut --auto       (a head held back by a window)
-#                                    colab release finalize --auto  -> vX.Y.Z when `final: auto` (no-op under `final: human`)
+#                                    colab release finalize --auto  -> vX.Y.Z (only where `final: auto`)
 #   workflow_dispatch                both, in that order
 #   workflow_dispatch + publish-tag  neither: publish a tag that already exists (#263)
 #   the daily schedule, last         publish the newest final tag npm does not have (#263)
