@@ -4863,7 +4863,7 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 	if err := delivery.CheckReservedEnvPrefixes(spec.Env, d.ReservedEnvPrefixes()); err != nil {
 		return fleet.Session{}, fmt.Errorf("create: %w", err)
 	}
-	mergedEnv, err := d.provisionSessionEnv(spec)
+	mergedEnv, err := d.provisionSessionEnv(spec, name)
 	if err != nil {
 		return fleet.Session{}, err
 	}

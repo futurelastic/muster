@@ -88,10 +88,13 @@ type fileConfig struct {
 	// declaration — needs the same restart TrustRoots and DefaultRuntime
 	// do; rotating the file an existing entry points at needs nothing.
 	SessionEnv []struct {
-		Name      string `json:"name"`
-		FromFile  string `json:"fromFile"`
-		Required  bool   `json:"required,omitempty"`
-		AppliesTo *struct {
+		Name     string `json:"name"`
+		FromFile string `json:"fromFile,omitempty"`
+		// FromSession is the other source (#326): "ref" or "id" — the
+		// session's own identity. Exactly one of FromFile and FromSession.
+		FromSession string `json:"fromSession,omitempty"`
+		Required    bool   `json:"required,omitempty"`
+		AppliesTo   *struct {
 			Runtimes []string `json:"runtimes,omitempty"`
 			Agents   []string `json:"agents,omitempty"`
 			Markers  []string `json:"markers,omitempty"`
@@ -191,7 +194,7 @@ func (c *fileConfig) sessionEnv() []sessionenv.Entry {
 	}
 	out := make([]sessionenv.Entry, 0, len(c.SessionEnv))
 	for _, e := range c.SessionEnv {
-		entry := sessionenv.Entry{Name: e.Name, FromFile: e.FromFile, Required: e.Required}
+		entry := sessionenv.Entry{Name: e.Name, FromFile: e.FromFile, FromSession: e.FromSession, Required: e.Required}
 		if e.AppliesTo != nil {
 			entry.AppliesTo = sessionenv.Scope{
 				Runtimes: e.AppliesTo.Runtimes,

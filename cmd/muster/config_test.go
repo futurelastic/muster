@@ -400,3 +400,39 @@ func TestSessionEnvRuntimeIdsAreCheckedAgainstTheBuildsKnownSet(t *testing.T) {
 		t.Errorf("error = %v, want it to list the ids that would have been accepted", err)
 	}
 }
+
+// #326: the wire shape carries fromSession through to the entry, and the shared
+// validator names the entry when the one-source rule is broken.
+func TestSessionEnvFromSessionIsLoadedAndOneSourceIsEnforced(t *testing.T) {
+	load := func(entry string) []sessionenv.Entry {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.json")
+		body := `{"principals": [{"name": "op", "token": "tok", "grants": ["read"]}], "sessionEnv": [` + entry + `]}`
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := loadConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cfg.sessionEnv()
+	}
+	known := knownRuntimeIDs()
+
+	good := load(`{"name": "SESSION_REF", "fromSession": "ref", "required": true}`)
+	if len(good) != 1 || good[0].FromSession != "ref" || good[0].FromFile != "" {
+		t.Fatalf("entry = %+v, want FromSession ref and no FromFile", good)
+	}
+	if err := sessionenv.Validate(good, known); err != nil {
+		t.Errorf("a fromSession entry was refused: %v", err)
+	}
+	for name, entry := range map[string]string{
+		"both":    `{"name": "X", "fromSession": "id", "fromFile": "/etc/x"}`,
+		"neither": `{"name": "X"}`,
+	} {
+		err := sessionenv.Validate(load(entry), known)
+		if err == nil || !strings.Contains(err.Error(), `"X"`) {
+			t.Errorf("%s: err = %v, want a startup refusal naming the entry", name, err)
+		}
+	}
+}

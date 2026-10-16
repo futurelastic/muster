@@ -75,7 +75,7 @@ func TestRequiredEntrySilentCallerGetsTheConfiguredValue(t *testing.T) {
 	d := New("testbox", WithSessionEnv([]SessionEnvEntry{
 		{Name: "FLEET_IDENTITY", FromFile: credFile, Required: true},
 	}))
-	got, err := d.provisionSessionEnv(fleet.SessionSpec{Cwd: "/work/x"})
+	got, err := d.provisionSessionEnv(fleet.SessionSpec{Cwd: "/work/x"}, "")
 	if err != nil {
 		t.Fatalf("provisionSessionEnv: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestRequiredEntryEvenTheCorrectCallerValueIsRefused(t *testing.T) {
 	}))
 	_, err := d.provisionSessionEnv(fleet.SessionSpec{
 		Cwd: "/work/x", Env: map[string]string{"FLEET_IDENTITY": "the-identity"},
-	})
+	}, "")
 	if err == nil {
 		t.Fatal("a caller supplying the CORRECT value for a required entry was accepted; " +
 			"this is the equality oracle the create endpoint must not offer — see the issue thread")
@@ -139,7 +139,7 @@ func TestRequiredEntryConflictingCallerValueIsRefused(t *testing.T) {
 	}))
 	_, err := d.provisionSessionEnv(fleet.SessionSpec{
 		Cwd: "/work/x", Env: map[string]string{"FLEET_IDENTITY": "something-else"},
-	})
+	}, "")
 	if err == nil {
 		t.Fatal("a caller-supplied value for a required entry was accepted")
 	}
@@ -165,7 +165,7 @@ func TestRequiredEntryRefusesACallerValueBeforeReadingTheFile(t *testing.T) {
 	}))
 	_, err := d.provisionSessionEnv(fleet.SessionSpec{
 		Cwd: "/work/x", Env: map[string]string{"FLEET_IDENTITY": "anything"},
-	})
+	}, "")
 	if err == nil {
 		t.Fatal("a caller-supplied value for a required entry was accepted")
 	}
@@ -184,7 +184,7 @@ func TestRequiredEntryWithMissingFileRefusesAsUnsupportedNotInvalid(t *testing.T
 	d := New("testbox", WithSessionEnv([]SessionEnvEntry{
 		{Name: "FLEET_IDENTITY", FromFile: "/no/such/credential/file", Required: true},
 	}))
-	_, err := d.provisionSessionEnv(fleet.SessionSpec{Cwd: "/work/x"})
+	_, err := d.provisionSessionEnv(fleet.SessionSpec{Cwd: "/work/x"}, "")
 	if err == nil {
 		t.Fatal("a required entry with no backing file was accepted")
 	}
@@ -209,7 +209,7 @@ func TestRequiredEntryWithEmptyFileIsRefused(t *testing.T) {
 	d := New("testbox", WithSessionEnv([]SessionEnvEntry{
 		{Name: "FLEET_IDENTITY", FromFile: credFile, Required: true},
 	}))
-	_, err := d.provisionSessionEnv(fleet.SessionSpec{Cwd: "/work/x"})
+	_, err := d.provisionSessionEnv(fleet.SessionSpec{Cwd: "/work/x"}, "")
 	if err == nil {
 		t.Fatal("an empty required credential file was accepted as though it held a value")
 	}
@@ -222,7 +222,7 @@ func TestNonRequiredEntryWithMissingFileIsSilentlyOmitted(t *testing.T) {
 	d := New("testbox", WithSessionEnv([]SessionEnvEntry{
 		{Name: "FLEET_NICE_TO_HAVE", FromFile: "/no/such/file", Required: false},
 	}))
-	got, err := d.provisionSessionEnv(fleet.SessionSpec{Cwd: "/work/x"})
+	got, err := d.provisionSessionEnv(fleet.SessionSpec{Cwd: "/work/x"}, "")
 	if err != nil {
 		t.Fatalf("a non-required entry's missing file caused a refusal: %v", err)
 	}
@@ -243,7 +243,7 @@ func TestNonRequiredEntryCallerValueWins(t *testing.T) {
 	}))
 	got, err := d.provisionSessionEnv(fleet.SessionSpec{
 		Cwd: "/work/x", Env: map[string]string{"FLEET_NICE_TO_HAVE": "caller-value"},
-	})
+	}, "")
 	if err != nil {
 		t.Fatalf("provisionSessionEnv: %v", err)
 	}
@@ -259,7 +259,7 @@ func TestNonRequiredEntryCallerValueWins(t *testing.T) {
 func TestUnconfiguredSessionEnvLeavesCallerEnvUntouched(t *testing.T) {
 	d := New("testbox")
 	in := map[string]string{"A": "b"}
-	got, err := d.provisionSessionEnv(fleet.SessionSpec{Cwd: "/work/x", Env: in})
+	got, err := d.provisionSessionEnv(fleet.SessionSpec{Cwd: "/work/x", Env: in}, "")
 	if err != nil {
 		t.Fatalf("provisionSessionEnv: %v", err)
 	}
@@ -285,7 +285,7 @@ func TestAppliesToExcludesASessionOutsideItsScope(t *testing.T) {
 	// entry must not apply, and — the point of the escape hatch — a
 	// required entry outside its own scope must not refuse the create
 	// either.
-	got, err := d.provisionSessionEnv(fleet.SessionSpec{Cwd: "/work/x", Agent: "alex"})
+	got, err := d.provisionSessionEnv(fleet.SessionSpec{Cwd: "/work/x", Agent: "alex"}, "")
 	if err != nil {
 		t.Fatalf("an out-of-scope session was refused for a requirement that does not apply to it: %v", err)
 	}
@@ -305,7 +305,7 @@ func TestAppliesToIncludesASessionMatchingItsScope(t *testing.T) {
 			AppliesTo: SessionEnvScope{Agents: []string{"sid"}},
 		},
 	}))
-	got, err := d.provisionSessionEnv(fleet.SessionSpec{Cwd: "/work/x", Agent: "sid"})
+	got, err := d.provisionSessionEnv(fleet.SessionSpec{Cwd: "/work/x", Agent: "sid"}, "")
 	if err != nil {
 		t.Fatalf("provisionSessionEnv: %v", err)
 	}
@@ -327,7 +327,7 @@ func TestAppliesToMatchesOnMarkerToo(t *testing.T) {
 			AppliesTo: SessionEnvScope{Markers: []string{"filing"}},
 		},
 	}))
-	got, err := d.provisionSessionEnv(fleet.SessionSpec{Cwd: "/work/x", Marker: "filing"})
+	got, err := d.provisionSessionEnv(fleet.SessionSpec{Cwd: "/work/x", Marker: "filing"}, "")
 	if err != nil {
 		t.Fatalf("provisionSessionEnv: %v", err)
 	}
@@ -346,7 +346,7 @@ func TestAnEmptyScopeMatchesEverySession(t *testing.T) {
 	d := New("testbox", WithSessionEnv([]SessionEnvEntry{
 		{Name: "FLEET_IDENTITY", FromFile: credFile, Required: true},
 	}))
-	got, err := d.provisionSessionEnv(fleet.SessionSpec{Cwd: "/work/x", Agent: "anything-at-all"})
+	got, err := d.provisionSessionEnv(fleet.SessionSpec{Cwd: "/work/x", Agent: "anything-at-all"}, "")
 	if err != nil {
 		t.Fatalf("provisionSessionEnv: %v", err)
 	}
@@ -371,7 +371,7 @@ func TestAppliesToRuntimesDeliversToTheScopedRuntimesSessions(t *testing.T) {
 			AppliesTo: SessionEnvScope{Runtimes: []string{string(DefaultRuntime)}},
 		},
 	}))
-	got, err := d.provisionSessionEnv(fleet.SessionSpec{Cwd: "/work/x"})
+	got, err := d.provisionSessionEnv(fleet.SessionSpec{Cwd: "/work/x"}, "")
 	if err != nil {
 		t.Fatalf("provisionSessionEnv: %v", err)
 	}
@@ -394,7 +394,7 @@ func TestAppliesToRuntimesWithholdsFromAnotherRuntimesSessions(t *testing.T) {
 			AppliesTo: SessionEnvScope{Runtimes: []string{"opencode"}},
 		},
 	}))
-	got, err := d.provisionSessionEnv(fleet.SessionSpec{Cwd: "/work/x"})
+	got, err := d.provisionSessionEnv(fleet.SessionSpec{Cwd: "/work/x"}, "")
 	if err != nil {
 		t.Fatalf("a requirement scoped to another runtime refused this one's create: %v", err)
 	}
@@ -402,7 +402,7 @@ func TestAppliesToRuntimesWithholdsFromAnotherRuntimesSessions(t *testing.T) {
 		t.Error("an entry scoped to another runtime reached this runtime's session")
 	}
 	// A caller hint naming the other runtime does not pull the credential in.
-	got, err = d.provisionSessionEnv(fleet.SessionSpec{Cwd: "/work/x", Runtime: "opencode"})
+	got, err = d.provisionSessionEnv(fleet.SessionSpec{Cwd: "/work/x", Runtime: "opencode"}, "")
 	if err != nil {
 		t.Fatalf("provisionSessionEnv: %v", err)
 	}
@@ -425,7 +425,7 @@ func TestConfiguredValueViolatingTheStagingBoundIsRefused(t *testing.T) {
 	d := New("testbox", WithSessionEnv([]SessionEnvEntry{
 		{Name: "FLEET_IDENTITY", FromFile: credFile, Required: true},
 	}))
-	_, err := d.provisionSessionEnv(fleet.SessionSpec{Cwd: "/work/x"})
+	_, err := d.provisionSessionEnv(fleet.SessionSpec{Cwd: "/work/x"}, "")
 	if err == nil {
 		t.Fatal("a configured value containing a newline was accepted; the staging " +
 			"format would have turned it into a second, fabricated variable")
@@ -443,7 +443,7 @@ func TestATrailingNewlineInTheCredentialFileIsTrimmed(t *testing.T) {
 	d := New("testbox", WithSessionEnv([]SessionEnvEntry{
 		{Name: "FLEET_IDENTITY", FromFile: credFile, Required: true},
 	}))
-	got, err := d.provisionSessionEnv(fleet.SessionSpec{Cwd: "/work/x"})
+	got, err := d.provisionSessionEnv(fleet.SessionSpec{Cwd: "/work/x"}, "")
 	if err != nil {
 		t.Fatalf("provisionSessionEnv: %v", err)
 	}
@@ -495,7 +495,7 @@ func TestASessionEnvProvisionedValueReachesTheProcessThroughTheRealWrapper(t *te
 		{Name: "FLEET_TEST_IDENTITY", FromFile: credFile, Required: true},
 	}))
 
-	merged, err := d.provisionSessionEnv(fleet.SessionSpec{Cwd: "/work/x"})
+	merged, err := d.provisionSessionEnv(fleet.SessionSpec{Cwd: "/work/x"}, "")
 	if err != nil {
 		t.Fatalf("provisionSessionEnv: %v", err)
 	}
@@ -523,5 +523,50 @@ func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// #326: an entry may export the created session's own identity. Driven through
+// the real wrapper like the file-sourced test above, so "byte for byte" covers
+// the staging format too — the id carries a non-ASCII marker.
+func TestASessionEnvSessionIdentityReachesTheProcessThroughTheRealWrapper(t *testing.T) {
+	sh := shellForTest(t)
+	dir := t.TempDir()
+	const id = "review-work\U0001F4AC"
+
+	d := New("testbox", WithSessionEnv([]SessionEnvEntry{
+		{Name: "FLEET_TEST_REF", FromSession: "ref", Required: true},
+		{Name: "FLEET_TEST_ID", FromSession: "id"},
+	}))
+	merged, err := d.provisionSessionEnv(fleet.SessionSpec{Cwd: "/work/x"}, id)
+	if err != nil {
+		t.Fatalf("provisionSessionEnv: %v", err)
+	}
+	envPath, err := d.stageEnv(merged)
+	if err != nil {
+		t.Fatalf("stageEnv: %v", err)
+	}
+	record := filepath.Join(dir, "rec")
+	out, err := exec.Command(sh, "-c", envRecordScript, "muster", record, envPath, "",
+		"/bin/sh", "-c", `printf '%s|%s' "$FLEET_TEST_REF" "$FLEET_TEST_ID"`).CombinedOutput()
+	if err != nil {
+		t.Fatalf("wrapper failed: %v (%s)", err, out)
+	}
+	if want := "testbox/" + id + "|" + id; string(out) != want {
+		t.Errorf("the process received %q, want %q", out, want)
+	}
+}
+
+// A required entry exporting the session's identity refuses a caller-supplied
+// value exactly like a file-sourced one: the caller cannot name the session.
+func TestSessionIdentityEntryRefusesACallerValueWhenRequired(t *testing.T) {
+	d := New("testbox", WithSessionEnv([]SessionEnvEntry{
+		{Name: "FLEET_TEST_REF", FromSession: "ref", Required: true},
+	}))
+	_, err := d.provisionSessionEnv(fleet.SessionSpec{
+		Cwd: "/work/x", Env: map[string]string{"FLEET_TEST_REF": "forged"},
+	}, "s1")
+	if err == nil {
+		t.Fatal("a caller-supplied value for a required session-identity entry was accepted")
 	}
 }

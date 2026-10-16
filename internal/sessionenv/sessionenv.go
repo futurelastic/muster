@@ -105,8 +105,18 @@ func (s Scope) Matches(runtime fleet.RuntimeId, spec fleet.SessionSpec) bool {
 	return false
 }
 
+// The values an Entry's FromSession may take (muster issue #326).
+const (
+	// SessionRef exports the session's own ref in the form the /v1 paths and
+	// peers use: "<machine>/<id>".
+	SessionRef = "ref"
+	// SessionID exports the bare session id.
+	SessionID = "id"
+)
+
 // Entry is one operator-declared variable this machine's sessions should
-// carry, read from FromFile at create time rather than at daemon start.
+// carry: read from FromFile at create time rather than at daemon start, or
+// taken from the session's own identity (FromSession). Exactly one source.
 type Entry struct {
 	// Name is the variable name a session process will see. Validated at
 	// startup by Validate, not on every create, so a typo is a message an
@@ -115,6 +125,18 @@ type Entry struct {
 	// FromFile is an absolute path read fresh on every Provision. Never
 	// staged, logged, or placed in an argv.
 	FromFile string
+	// FromSession is the other source (muster issue #326): the created
+	// session's own identity, SessionRef or SessionID. A tool running inside a
+	// session often has to name that session to a third party that will later
+	// answer back through this API, and the id is known only to the service
+	// that mints it — the create's env cannot carry it, because the caller
+	// learns the id only from the create's answer.
+	//
+	// The value is delivered like every other: staged, never on a command line,
+	// and the scope and precedence rules apply unchanged. It is always
+	// available where the driver knows the id before the process starts, so
+	// Required here only decides whether a caller-supplied value is refused.
+	FromSession string
 	// Required makes a missing, unreadable or empty FromFile refuse the
 	// create rather than silently omit the variable. Per entry rather than a
 	// machine-wide switch, because both answers are legitimate for different
@@ -143,10 +165,18 @@ func Validate(entries []Entry, knownRuntimes []fleet.RuntimeId) error {
 			return fmt.Errorf("sessionEnv: %q is not a usable variable name "+
 				"(letters, digits and underscore, not starting with a digit)", e.Name)
 		}
-		if e.FromFile == "" {
-			return fmt.Errorf("sessionEnv: %q has no fromFile", e.Name)
-		}
-		if !strings.HasPrefix(e.FromFile, "/") {
+		switch {
+		case e.FromFile != "" && e.FromSession != "":
+			return fmt.Errorf("sessionEnv: %q declares both fromFile and fromSession; "+
+				"an entry has exactly one source", e.Name)
+		case e.FromFile == "" && e.FromSession == "":
+			return fmt.Errorf("sessionEnv: %q has no source; declare fromFile or fromSession", e.Name)
+		case e.FromSession != "":
+			if e.FromSession != SessionRef && e.FromSession != SessionID {
+				return fmt.Errorf("sessionEnv: %q's fromSession %q must be %q or %q",
+					e.Name, e.FromSession, SessionRef, SessionID)
+			}
+		case !strings.HasPrefix(e.FromFile, "/"):
 			return fmt.Errorf("sessionEnv: %q's fromFile %q must be an absolute path", e.Name, e.FromFile)
 		}
 		// Two entries for the same name would leave "which one wins"
@@ -225,6 +255,13 @@ func ValidName(name string) bool {
 // session is being created on. It is what AppliesTo.Runtimes is matched
 // against; see Scope.Matches for why it is not read from spec.
 //
+// sessionID is the id the session being created will have, for the entries that
+// export it (FromSession). A driver that cannot know it before the process
+// starts passes "" and must refuse such entries at construction
+// (CheckSessionSource); a "" that reaches here anyway makes a required entry an
+// unsupported-on-this-machine refusal and leaves an optional one unset, never a
+// value that names no session.
+//
 // skip, when non-nil, is asked about each in-scope entry name and drops the
 // entry entirely (neither read nor required) when it returns true — a driver
 // whose delivery module owns a variable's namespace says so here.
@@ -250,7 +287,7 @@ func ValidName(name string) bool {
 //     unreadable, or empty. No correction to the request fixes it, so it is a
 //     typed *fleet.Error with Kind ErrorUnsupported (501), and the message
 //     addresses the operator, not the caller.
-func Provision(entries []Entry, spec fleet.SessionSpec, machine fleet.MachineId, runtime fleet.RuntimeId, skip func(name string) bool) (map[string]string, error) {
+func Provision(entries []Entry, spec fleet.SessionSpec, machine fleet.MachineId, runtime fleet.RuntimeId, sessionID string, skip func(name string) bool) (map[string]string, error) {
 	if len(entries) == 0 {
 		return spec.Env, nil
 	}
@@ -275,7 +312,15 @@ func Provision(entries []Entry, spec fleet.SessionSpec, machine fleet.MachineId,
 				entry.Name)
 		}
 
-		value, err := readFile(entry.FromFile)
+		var value string
+		var err error
+		source := entry.FromFile
+		if entry.FromSession != "" {
+			source = "the session's own " + entry.FromSession
+			value, err = sessionValue(entry.FromSession, machine, sessionID)
+		} else {
+			value, err = readFile(entry.FromFile)
+		}
 		if err != nil {
 			if !entry.Required {
 				continue // legitimate: not required, silently absent (§94)
@@ -284,9 +329,9 @@ func Provision(entries []Entry, spec fleet.SessionSpec, machine fleet.MachineId,
 				Kind: fleet.ErrorUnsupported,
 				Message: fmt.Sprintf(
 					"create: sessionEnv %q is required on this machine but could not be "+
-						"provisioned from %s: %v — an operator must repair that file; "+
+						"provisioned from %s: %v — an operator must repair that; "+
 						"retrying this create will not help until they do",
-					entry.Name, entry.FromFile, err),
+					entry.Name, source, err),
 				Machine: machine,
 			}
 		}
@@ -310,6 +355,44 @@ func Provision(entries []Entry, spec fleet.SessionSpec, machine fleet.MachineId,
 		return spec.Env, nil
 	}
 	return merged, nil
+}
+
+// sessionValue is a FromSession entry's value. Validated shape-wise at startup,
+// so the only runtime failure is an id the driver did not have.
+func sessionValue(kind string, machine fleet.MachineId, sessionID string) (string, error) {
+	if sessionID == "" {
+		return "", errors.New("this driver does not know the session's id before it starts")
+	}
+	if kind == SessionID {
+		return sessionID, nil
+	}
+	return string(machine) + "/" + sessionID, nil
+}
+
+// CheckSessionSource refuses, for a driver that only learns a session's id
+// after its process has started, any entry that exports the session's own
+// identity and could reach that driver's sessions — the variable could not be
+// set, and a silently missing identity is the failure this configuration exists
+// to prevent. runtime is the driver's own runtime id; an entry scoped to other
+// runtimes does not reach it and is accepted.
+func CheckSessionSource(entries []Entry, runtime fleet.RuntimeId) error {
+	for _, e := range entries {
+		if e.FromSession == "" {
+			continue
+		}
+		reaches := len(e.AppliesTo.Runtimes) == 0
+		for _, r := range e.AppliesTo.Runtimes {
+			if r == string(runtime) {
+				reaches = true
+			}
+		}
+		if reaches {
+			return fmt.Errorf("sessionEnv %q exports the session's own %s, which the %s runtime "+
+				"cannot do (it learns the id only after the process starts); scope the entry with "+
+				"appliesTo.runtimes to the runtimes that can", e.Name, e.FromSession, runtime)
+		}
+	}
+	return nil
 }
 
 // CheckEnv rejects what a line-oriented staging format cannot carry
