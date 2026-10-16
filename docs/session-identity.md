@@ -45,13 +45,15 @@ A list under `sessionEnv` in the same JSON file `principals`, `peers`,
 |---|---|
 | `name` | The variable a session's process will see. Same shape rule every env name in this project follows: letters, digits, underscore, not starting with a digit. |
 | `fromFile` | An absolute path this machine reads **fresh on every create** — see "Restart enables it; rotation needs nothing" below. |
+| `fromSession` | The other source: the created session's own identity, `"ref"` (`<machine>/<id>`) or `"id"` (the bare id). Exactly one of `fromFile` / `fromSession` per entry — see "Exporting the session's own identity" below. |
 | `required` | Fail closed (`true`) or silently omit (`false`) when the file cannot be read. Per entry, not machine-wide — see "Fail-closed, per entry". |
 | `appliesTo` | Optional. `runtimes`, `agents` and/or `markers`: `runtimes` is matched against the runtime the session is created on, `agents` / `markers` against `SessionSpec.Agent` / `SessionSpec.Marker`. Absent or all-empty matches every session on every runtime the machine registers — see "Scoping: `appliesTo`". |
 
 Nothing here is optional to *validate*: every entry is checked once, at daemon
 start, against the same rule set a Go test exercises directly
-(`ValidateSessionEnv` in `internal/drivers/tmux`) — an empty `fromFile`, a
-relative path, a bad variable name, or the same `name` declared twice all fail
+(`ValidateSessionEnv` in `internal/drivers/tmux`) — an entry with neither or
+both of `fromFile` / `fromSession`, a relative path, a `fromSession` other than
+`ref` / `id`, a bad variable name, or the same `name` declared twice all fail
 startup with a message naming the entry, rather than becoming a create-time
 refusal every later caller meets.
 
@@ -226,6 +228,38 @@ this build can register — a misspelled id is a startup message, not an entry
 that silently never applies. The check is against what the build *knows*, not
 what is running, so one configuration file can be shared by machines that do
 not all enable the optional runtime.
+
+## Exporting the session's own identity
+
+A tool running inside a session often has to name that session to a third
+party — a service that must later deliver an answer back into the session
+through this API. The session's ref is known only to this service, at create
+time: the create's `env` cannot carry it (the caller learns the id from the
+create's answer), and a `required` entry refuses a caller-supplied value anyway.
+So an entry may take the identity itself instead of a file:
+
+```json
+{"name": "FLEET_SESSION_REF", "fromSession": "ref",
+ "appliesTo": {"runtimes": ["claude-code-tmux"]}}
+```
+
+`"ref"` is `<machine>/<id>` — the form `/v1` paths and peers use — and `"id"` is
+the bare id. The variable name is the operator's; this service names no tool
+that consumes it. Everything else is unchanged: the value is staged like every
+other (never on a command line; a non-ASCII marker in the id survives byte for
+byte), `appliesTo` scopes it, and the precedence table above applies — a
+`fromSession` entry is always available, so `required` only decides whether a
+caller-supplied value for that name is refused.
+
+The value is the id the session has when it is created. A rename changes the
+id afterwards and does not change what the process already holds.
+
+**Only runtimes that know the id before the process starts can honour it.** The
+terminal-multiplexer runtime names the session itself, so it does. The opencode
+runtime is handed its id by the runtime after the server is up, when the
+environment is already fixed — a `fromSession` entry that could reach it is
+refused at startup, with a message pointing at `appliesTo.runtimes`, rather than
+left to produce sessions that silently lack the variable.
 
 ## Two different refusals, and why they answer differently on the wire
 

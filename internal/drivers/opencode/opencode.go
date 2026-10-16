@@ -469,7 +469,7 @@ func New(ctx context.Context, machine fleet.MachineId, opts ...Option) (*Driver,
 	if err := checkRuntimePath(d.runtimePath); err != nil {
 		return nil, err
 	}
-	if err := checkSessionEnvEntries(d.sessionEnv); err != nil {
+	if err := checkSessionEnvEntries(d.sessionEnv, d.runtime); err != nil {
 		return nil, err
 	}
 	// Folded once, on a copy, so a create's names (folded the same way) meet a

@@ -154,11 +154,17 @@ func checkRuntimePath(dirs []string) error {
 // variable this driver owns. Done once at construction, like the tmux
 // driver's equivalent, so an operator reads it at start rather than every
 // caller meeting it on every create.
-func checkSessionEnvEntries(entries []sessionenv.Entry) error {
+func checkSessionEnvEntries(entries []sessionenv.Entry, runtime fleet.RuntimeId) error {
 	for _, e := range entries {
 		if ownedName(e.Name) {
 			return fmt.Errorf("opencode: sessionEnv %q names a variable this driver sets for every session", e.Name)
 		}
+	}
+	// #326: the runtime assigns a session's id only once its server is up, and
+	// the environment is fixed when the process starts — so an entry exporting
+	// the session's own identity cannot be honoured here.
+	if err := sessionenv.CheckSessionSource(entries, runtime); err != nil {
+		return fmt.Errorf("opencode: %w", err)
 	}
 	return nil
 }
@@ -232,7 +238,7 @@ func (d *Driver) sessionEnvFor(spec fleet.SessionSpec) (map[string]string, error
 	if err := checkOwnedEnv(spec.Env); err != nil {
 		return nil, invalid(err)
 	}
-	merged, err := sessionenv.Provision(d.sessionEnv, spec, d.machine, d.runtime, nil)
+	merged, err := sessionenv.Provision(d.sessionEnv, spec, d.machine, d.runtime, "", nil)
 	if err != nil {
 		if _, typed := err.(*fleet.Error); typed {
 			return nil, err

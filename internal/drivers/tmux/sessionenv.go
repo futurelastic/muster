@@ -85,12 +85,16 @@ func (d *Driver) ValidateSessionEnvReserved() error {
 // is the module's to set, so a configured entry naming one is dropped here —
 // the prefixes are only known once a module has declared them, so this cannot
 // be refused at startup the way an exact name is.
-func (d *Driver) provisionSessionEnv(spec fleet.SessionSpec) (map[string]string, error) {
+//
+// sessionID is the id this session will have — the resolved multiplexer session
+// name, known before the process starts, which is what lets an entry export it
+// (#326).
+func (d *Driver) provisionSessionEnv(spec fleet.SessionSpec, sessionID string) (map[string]string, error) {
 	if len(d.sessionEnv) == 0 {
 		return spec.Env, nil
 	}
 	reservedPrefixes := d.ReservedEnvPrefixes()
-	return sessionenv.Provision(d.sessionEnv, spec, d.machine, d.runtime, func(name string) bool {
+	return sessionenv.Provision(d.sessionEnv, spec, d.machine, d.runtime, sessionID, func(name string) bool {
 		if delivery.HasReservedPrefix(name, reservedPrefixes) {
 			d.counters.incr("module.session_env_dropped")
 			return true

@@ -445,6 +445,23 @@ func TestNew_RefusesASessionEnvEntryNamingAVariableTheDriverOwns(t *testing.T) {
 	}
 }
 
+// #326: this runtime learns a session's id only after its server is up, so an
+// entry exporting the session's own identity cannot be honoured — refused at
+// construction unless scoped away from this runtime.
+func TestNew_RefusesASessionIdentityEntryThatReachesThisRuntime(t *testing.T) {
+	exe, _ := os.Executable()
+	_, err := New(context.Background(), "test-machine", WithBinary(exe),
+		WithSessionEnv([]sessionenv.Entry{{Name: "SESSION_REF", FromSession: "ref"}}))
+	if err == nil {
+		t.Fatal("New accepted an unscoped session-identity entry it cannot honour")
+	}
+	if _, err := New(context.Background(), "test-machine", WithBinary(exe),
+		WithSessionEnv([]sessionenv.Entry{{Name: "SESSION_REF", FromSession: "ref",
+			AppliesTo: sessionenv.Scope{Runtimes: []string{"other-runtime"}}}})); err != nil {
+		t.Errorf("an entry scoped to another runtime was refused: %v", err)
+	}
+}
+
 func TestNew_RefusesARuntimePathUnderTheHomeOrRelative(t *testing.T) {
 	exe, _ := os.Executable()
 	if _, err := New(context.Background(), "m", WithBinary(exe), WithRuntimePath([]string{"relative/bin"})); err == nil {
