@@ -193,7 +193,7 @@ func TestAnyOtherPermissionModeIsRefused(t *testing.T) {
 	d, _ := newIsolatedDriver(t)
 	for _, mode := range []string{"acceptEdits", "plan", "auto"} {
 		_, err := d.Create(context.Background(), testReq, "k-other-"+mode, fleet.SessionSpec{
-			Cwd: fleet.AbsolutePath(t.TempDir()), PermissionMode: mode, Sandbox: &fleet.SandboxSpec{},
+			Cwd: fleet.AbsolutePath(t.TempDir()), PermissionMode: mode,
 		})
 		assertRefusedUnsupported(t, err, "default")
 	}
