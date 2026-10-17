@@ -111,7 +111,7 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 	// muster #283: bypass is honoured inside an enforced sandbox only. Checked
 	// after the sandbox refusal above so a host that cannot confine says so in
 	// the capability's own words.
-	if err := d.checkBypass(spec); err != nil {
+	if err := d.checkPermissionMode(spec); err != nil {
 		return fleet.Session{}, err
 	}
 	for name, set := range refused {

@@ -787,11 +787,21 @@ driver that honours it reports the id back as `conversation` on the `201`
 itself, `source: "captured"` — see the create endpoint's own note above for
 why that is the whole point of the field.
 
-**`permissionMode` requests a non-default permission posture.** One value:
-`bypass`. It requires the **`send` grant** too — a session in that mode acts
-without asking, and between "may start a session" and "may start a session that
-needs no permission for anything", the second is plainly the larger authority.
-An unrecognised value is refused rather than passed through.
+**`permissionMode` requests the permission posture the session starts in** (muster #329).
+The create set is `default`, `acceptEdits`, `plan`, `auto` and `bypass` — the five modes
+`state.permissionMode` reports back, so a created session reads as what it was created as. A
+runtime accepts the subset it lists in `createPermissionModes` (`/v1/runtimes`; absent means the
+runtime did not say, never "none") and refuses the rest `unsupported`; a value outside the set is a
+`400` whatever the runtime, rather than being passed through. `default` named explicitly starts the
+runtime in its ordinary mode even where its own configuration names another; omitting the field
+asks for nothing.
+
+The **`send` grant** is required, on top of `create`, for the modes that let the agent do more
+unattended than a plain create does: `acceptEdits`, `auto` and `bypass`. `default` and `plan`
+narrow or keep the ordinary posture and need only `create`. The line is escalation, not
+"anything but the default": a principal permitted only to start sessions could not otherwise
+reach `acceptEdits` or `auto` (reaching them on a live session takes the `keys` grant, ADR 188),
+and the grant must not be quietly wider at create than it is afterwards.
 
 **A driver may honour `bypass` only inside a boundary of its own** (muster #283). The local
 opencode driver pre-approves every tool *only when the same create asks for a `sandbox` it

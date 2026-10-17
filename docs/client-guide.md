@@ -749,7 +749,7 @@ Idempotency-Key: 4f1c9e2a-…          ← REQUIRED
   "sandbox": {"network": "open"},    ← optional REQUIREMENT: an OS sandbox (files, unix sockets, system services denied outside the grants); `unsupported` where the runtime cannot (api.md)
   "resume": "<conversation id>",     ← optional, continue a prior conversation
   "conversationId": "<caller uuid>", ← optional, START a new one under this id; mutually exclusive with resume
-  "permissionMode": "bypass",        ← optional, needs the send grant
+  "permissionMode": "plan",          ← optional: default|acceptEdits|plan|auto|bypass (see createPermissionModes); acceptEdits/auto/bypass need the send grant
   "contextRef": "/abs/path" }        ← optional, a PATH — never inline content
 ```
 
@@ -1020,13 +1020,16 @@ of its own. If a later read ever disagrees with the id you asked for, that
 shows up as a fresh, named mismatch on `conversation` — never a quiet
 overwrite.
 
-**`permissionMode`** takes `bypass`, or `default` for the runtime's ordinary
-mode. `bypass` needs the `send` grant like a consent does: a session in that mode
-acts without asking, which is a larger authority than starting one. An
-unrecognised value is refused, not passed through to the runtime. When you
-`resume` a conversation and send neither, the service launches the new session in
-the mode the old one last ran in — `bypass` included — and says so in the
-response's `carried`; send `default` to opt out. See `docs/api.md`, *Resume
+**`permissionMode`** takes `default`, `acceptEdits`, `plan`, `auto` or `bypass`;
+read `createPermissionModes` from `/v1/runtimes` to see which a runtime accepts
+and grey out the rest. `acceptEdits`, `auto` and `bypass` need the `send` grant
+like a consent does: a session in those modes acts with less asking than a plain
+create, which is a larger authority than starting one; `default` and `plan` need
+`create` alone. An unrecognised value is refused, not passed through to the
+runtime. When you `resume` a conversation and send neither, the service launches
+the new session in the mode the old one last ran in — `bypass`, `acceptEdits`,
+`plan` or `auto`, whichever the runtime accepts — and says so in the response's
+`carried`; send `default` to opt out. See `docs/api.md`, *Resume
 carries the launch posture* (#256).
 
 **`mcpConfig`** is a list of absolute PATHS to tool-server configuration files,

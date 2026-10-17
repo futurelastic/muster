@@ -132,3 +132,20 @@ func TestNonBypassSettingsNeedAPeerThatListsTheKey(t *testing.T) {
 		t.Fatalf("bypass create against a #247 peer: %v", err)
 	}
 }
+
+// muster #329: a non-bypass permission mode is forwarded verbatim. The owning
+// peer is the authority on what it accepts (an older one refuses a mode it does
+// not know, loudly), so the relaying side neither rewrites nor drops it.
+func TestCreateForwardsAPermissionModeVerbatim(t *testing.T) {
+	for _, mode := range []string{"default", "acceptEdits", "plan", "auto"} {
+		srv, creates, last := launchSettingsPeer(t, true)
+		d := New("peerbox", srv.URL)
+		if _, err := d.Create(context.Background(), caller, "k-"+mode, fleet.SessionSpec{Cwd: "/work", PermissionMode: mode}); err != nil {
+			t.Fatalf("%s: %v", mode, err)
+		}
+		body, _ := last.Load().(string)
+		if creates.Load() != 1 || !strings.Contains(body, `"permissionMode":"`+mode+`"`) {
+			t.Errorf("%s: creates=%d body %s", mode, creates.Load(), body)
+		}
+	}
+}

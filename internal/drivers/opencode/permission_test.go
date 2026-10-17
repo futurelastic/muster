@@ -191,10 +191,22 @@ func TestBypassInSharedModeIsRefused(t *testing.T) {
 
 func TestAnyOtherPermissionModeIsRefused(t *testing.T) {
 	d, _ := newIsolatedDriver(t)
-	_, err := d.Create(context.Background(), testReq, "k-other", fleet.SessionSpec{
-		Cwd: fleet.AbsolutePath(t.TempDir()), PermissionMode: "acceptEdits", Sandbox: &fleet.SandboxSpec{},
-	})
-	assertRefusedUnsupported(t, err, "")
+	for _, mode := range []string{"acceptEdits", "plan", "auto"} {
+		_, err := d.Create(context.Background(), testReq, "k-other-"+mode, fleet.SessionSpec{
+			Cwd: fleet.AbsolutePath(t.TempDir()), PermissionMode: mode,
+		})
+		assertRefusedUnsupported(t, err, "default")
+	}
+}
+
+// muster #329: the ordinary mode named explicitly is what an absent one already
+// is, and the capabilities say what this driver takes.
+func TestExplicitDefaultPermissionModeIsAccepted(t *testing.T) {
+	d, _ := newIsolatedDriver(t)
+	mustCreate(t, d, "k-default", fleet.SessionSpec{Cwd: fleet.AbsolutePath(t.TempDir()), PermissionMode: "default"})
+	if got := strings.Join(d.Capabilities().CreatePermissionModes, ","); got != "default,bypass" {
+		t.Errorf("CreatePermissionModes = %q, want default,bypass", got)
+	}
 }
 
 func assertRefusedUnsupported(t *testing.T, err error, mention string) {

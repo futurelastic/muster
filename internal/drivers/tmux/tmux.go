@@ -984,8 +984,11 @@ func (d *Driver) Capabilities() fleet.DriverCapabilities {
 		// was readable at that moment (a dialog owns the screen), not that
 		// nobody looked.
 		ObservesPermissionMode: true,
-		ReportsUsage:           true, // muster #285: from the runtime's own record
-		ReportsContext:         true, // muster #313: the newest request's figures, same record
+		// muster #329: every mode the CLI's --permission-mode takes, plus
+		// bypass (launched as --dangerously-skip-permissions).
+		CreatePermissionModes: fleet.CreatePermissionModes(),
+		ReportsUsage:          true, // muster #285: from the runtime's own record
+		ReportsContext:        true, // muster #313: the newest request's figures, same record
 		// muster #301: true only once WithProcessAgent is wired, so an absent
 		// Session.Agent is answerable per machine rather than assumed.
 		ReportsAgent: d.agentFromProcess,
@@ -4883,10 +4886,16 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 			"create: this driver is configured without the login-shell wrap, so it has " +
 				"no out-of-band channel for env; refusing rather than starting a session without it")
 	}
-	if spec.PermissionMode != "" && spec.PermissionMode != fleet.PermissionModeBypass {
-		return fleet.Session{}, fmt.Errorf(
-			"create: unknown permissionMode %q (this runtime has one: %q)",
-			spec.PermissionMode, fleet.PermissionModeBypass)
+	// muster #329: every mode the runtime's CLI understands is accepted; the
+	// set is the one Capabilities advertises, so a caller that read it never
+	// meets a refusal here.
+	if spec.PermissionMode != "" && !fleet.ValidCreatePermissionMode(spec.PermissionMode) {
+		return fleet.Session{}, &fleet.Error{
+			Kind: fleet.ErrorInvalid,
+			Message: fmt.Sprintf("create: unknown permissionMode %q (this runtime accepts %s)",
+				spec.PermissionMode, strings.Join(fleet.CreatePermissionModes(), ", ")),
+			Machine: d.machine,
+		}
 	}
 	if err := validateMcpConfig(spec.McpConfig); err != nil {
 		return fleet.Session{}, fmt.Errorf("create: %w", err)
@@ -5240,6 +5249,12 @@ func claudeCodeCommand(spec fleet.SessionSpec, contextFile string) []string {
 	}
 	if spec.PermissionMode == fleet.PermissionModeBypass {
 		argv = append(argv, "--dangerously-skip-permissions")
+	} else if fleet.ValidCreatePermissionMode(spec.PermissionMode) {
+		// muster #329: the other four are the CLI's own --permission-mode
+		// values, spelled the same way the runtime's indicator is read back
+		// (permissionmode.go). The value is one of four fixed literals, so it
+		// needs no safeArgvValue check.
+		argv = append(argv, "--permission-mode", spec.PermissionMode)
 	}
 	// muster #247/#254: launch-time settings, for any mode. The pairing of mode
 	// and keys ValidateLaunchSettings enforces at Create is repeated here, so

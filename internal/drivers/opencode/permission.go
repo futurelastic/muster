@@ -207,7 +207,7 @@ func writeSessionConfig(dir string, bypass bool, plan *sandboxPlan, providers pr
 		cfg[k] = v
 	}
 	if bypass {
-		// checkBypass refuses a bypass create with no sandbox, so a nil plan here
+		// checkPermissionMode refuses a bypass create with no sandbox, so a nil plan here
 		// is a caller bug. Writing the tool posture without the directory rules
 		// would leave a pre-approved session with no boundary at all.
 		if plan == nil {
@@ -230,10 +230,11 @@ func writeSessionConfig(dir string, bypass bool, plan *sandboxPlan, providers pr
 	return nil
 }
 
-// checkBypass decides whether a create asking for permissionMode may proceed.
-// Nil when it did not ask. A non-nil error is the refusal to return as-is.
-func (d *Driver) checkBypass(spec fleet.SessionSpec) error {
-	if spec.PermissionMode == "" {
+// checkPermissionMode decides whether a create asking for permissionMode may
+// proceed. Nil when it did not ask, or asked for the ordinary mode (#329: that
+// is what an absent value already is, so nothing changes). A non-nil error is the refusal to return as-is.
+func (d *Driver) checkPermissionMode(spec fleet.SessionSpec) error {
+	if spec.PermissionMode == "" || spec.PermissionMode == string(fleet.PermissionModeDefault) {
 		return nil
 	}
 	refuse := func(why string) error {
@@ -244,7 +245,7 @@ func (d *Driver) checkBypass(spec fleet.SessionSpec) error {
 		}
 	}
 	if spec.PermissionMode != fleet.PermissionModeBypass {
-		return refuse("this driver knows only \"bypass\"")
+		return refuse("this driver accepts only \"default\" and \"bypass\"")
 	}
 	if d.shared != nil {
 		return refuse("shared mode runs one runtime for every session, so a permission posture cannot be given to one of them")

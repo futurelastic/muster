@@ -599,6 +599,9 @@ func (d *Driver) Capabilities() fleet.DriverCapabilities {
 		// configuration itself and reports it back; shared mode has no posture
 		// of its own to report.
 		ObservesPermissionMode: d.shared == nil,
+		// muster #329: this runtime has no per-session permission-mode flag; it
+		// is given a posture (bypass, inside a sandbox) or none.
+		CreatePermissionModes: []string{string(fleet.PermissionModeDefault), fleet.PermissionModeBypass},
 		// muster #285: tokens and cost are read from the runtime's own message
 		// record, summed over every step.
 		ReportsUsage: true,

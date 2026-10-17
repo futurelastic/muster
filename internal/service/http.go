@@ -928,8 +928,12 @@ func createNeedsSend(body createSessionBody) string {
 		return "trustCwd"
 	case len(body.Consents) > 0:
 		return "consents"
-	case body.PermissionMode != "" && body.PermissionMode != permissionModeDefaultRequest:
-		// The explicit ordinary mode (#256) asks for nothing beyond a create.
+	case fleet.PermissionModeNeedsSend(body.PermissionMode):
+		// The explicit ordinary mode (#256) and plan (#329) ask for nothing
+		// beyond a create; acceptEdits, auto and bypass let the agent act
+		// without asking more than a plain create would, and so do any value
+		// this fleet does not recognise (it fails closed, and is then refused
+		// at the boundary).
 		return "permissionMode"
 	case len(body.McpConfig) > 0:
 		// A tool-server configuration names processes the session will LAUNCH.
@@ -1040,6 +1044,15 @@ func handleCreateSession(svc *Service) http.HandlerFunc {
 			writeError(w, &fleet.Error{Kind: fleet.ErrorInvalid, Message: err.Error() + " (#247)", Machine: machine})
 			return
 		}
+		// muster #329: a value outside the create set is refused here whatever
+		// the runtime. Which of the members a runtime accepts is its own answer
+		// (DriverCapabilities.CreatePermissionModes), given by the driver.
+		if body.PermissionMode != "" && !fleet.ValidCreatePermissionMode(body.PermissionMode) {
+			writeError(w, &fleet.Error{Kind: fleet.ErrorInvalid, Message: fmt.Sprintf(
+				"unknown permissionMode %q (accepted values: %s) (#329)",
+				body.PermissionMode, strings.Join(fleet.CreatePermissionModes(), ", ")), Machine: machine})
+			return
+		}
 		// muster #224: checked here, before any driver is resolved —
 		// same placement as rejectOverLength and ValidateLabels above, and
 		// for the same reason stated on rejectOverLength: a relayed create is
@@ -1143,16 +1156,16 @@ func handleCreateSession(svc *Service) http.HandlerFunc {
 		var launch resumeLaunch
 		if via != resolvedPeer {
 			var cerr *fleet.Error
-			launch, cerr = svc.carryResumeLaunch(r, machine, resolvedRuntime, &body)
+			launch, cerr = svc.carryResumeLaunch(r, machine, resolvedRuntime, d.Capabilities().CreatePermissionModes, &body)
 			if cerr != nil {
 				writeError(w, cerr)
 				return
 			}
-			// The explicit ordinary mode is spelled "default" on the wire and
-			// empty everywhere below the handler: no driver learns a new value.
-			if body.PermissionMode == permissionModeDefaultRequest {
-				body.PermissionMode = ""
-			}
+			// The explicit ordinary mode ("default") reaches the driver as
+			// itself (#329): a runtime that is told nothing starts in whatever
+			// mode its own configuration names, which need not be the ordinary
+			// one. The launch record below still stores it as the absence of a
+			// mode, which is what it is.
 		}
 
 		spec := fleet.SessionSpec{

@@ -13,14 +13,63 @@ import (
 // comparing raw Timestamps across machines is not safe.
 type Timestamp = time.Time
 
-// PermissionModeBypass is the one non-default permission posture this fleet's
-// runtime has: the agent stops asking before it acts.
+// PermissionModeBypass is the permission posture in which the agent stops
+// asking before it acts. It is one member of the create-time set: the values a
+// create may name are CreatePermissionModes (default, acceptEdits, plan, auto,
+// bypass), and a given runtime accepts the subset its capabilities list in
+// DriverCapabilities.CreatePermissionModes.
 //
-// A closed set of one, named rather than left as a free string, so an
-// unrecognised mode is refused at the boundary instead of being handed to a CLI
-// that may or may not understand it — §2.3's rule for statuses, applied to an
-// input a caller controls.
+// A closed set, named rather than left as a free string, so an unrecognised
+// mode is refused at the boundary instead of being handed to a CLI that may or
+// may not understand it — §2.3's rule for statuses, applied to an input a
+// caller controls.
 const PermissionModeBypass = "bypass"
+
+// CreatePermissionModes is every value a create's permissionMode may carry,
+// across all runtimes (muster #329): the five modes PermissionModeState
+// reports. A runtime accepts the subset its DriverCapabilities list; a value
+// outside this set is refused at the boundary whatever the runtime.
+func CreatePermissionModes() []string {
+	return []string{
+		string(PermissionModeDefault),
+		string(PermissionModeAcceptEdits),
+		string(PermissionModePlan),
+		string(PermissionModeAuto),
+		PermissionModeBypass,
+	}
+}
+
+// ValidCreatePermissionMode reports whether mode is a member of the create
+// set. The empty string (no mode asked for) is not a member.
+func ValidCreatePermissionMode(mode string) bool {
+	for _, m := range CreatePermissionModes() {
+		if m == mode {
+			return true
+		}
+	}
+	return false
+}
+
+// PermissionModeNeedsSend reports whether asking for mode at create requires
+// the `send` grant on top of `create` (muster #329).
+//
+// The line is escalation against a plain create, which starts in the ordinary
+// mode: a mode that lets the agent do MORE unattended than that (acceptEdits,
+// auto, bypass) is a step up from "may start a session", and docs/adr/188
+// already names acceptEdits and auto as escalations. The ordinary mode and
+// plan (which may read and plan and may not act) are not.
+//
+// It fails closed: any value this function does not recognise needs the grant,
+// so a mode added to the set later is gated until someone rules otherwise. The
+// empty string asks for nothing and needs nothing.
+func PermissionModeNeedsSend(mode string) bool {
+	switch mode {
+	case "", string(PermissionModeDefault), string(PermissionModePlan):
+		return false
+	default:
+		return true
+	}
+}
 
 // SessionSpec is what a caller supplies to start a session (§2.1).
 //
@@ -201,19 +250,24 @@ type SessionSpec struct {
 	// runtime wrote can be read.
 	ConversationId string `json:"conversationId,omitempty"`
 
-	// PermissionMode requests a runtime permission posture other than the
-	// default. The only value this fleet's runtime has is "bypass" — the mode
-	// in which the agent stops asking before acting.
+	// PermissionMode requests the runtime permission posture the session starts
+	// in: one of CreatePermissionModes (default, acceptEdits, plan, auto,
+	// bypass). Empty asks for nothing and the runtime starts as it always does.
+	// A runtime accepts the subset its DriverCapabilities.CreatePermissionModes
+	// lists and refuses the rest; a value outside the set is refused whatever
+	// the runtime.
 	//
-	// It is deliberately not a bool. A boolean field named for today's single
-	// dangerous mode ages into a lie the moment a second mode exists, and the
-	// closed set makes an unrecognised value a refusal rather than a silent
-	// default — §2.3's discipline applied to an input.
+	// It is deliberately not a bool. A boolean field named for one dangerous
+	// mode ages into a lie the moment a second mode exists, and the closed set
+	// makes an unrecognised value a refusal rather than a silent default —
+	// §2.3's discipline applied to an input.
 	//
-	// The service requires the `send` grant for this on top of `create`: a
-	// session in this mode acts without asking, and the mode also raises an
+	// The service requires the `send` grant for the modes that let the agent do
+	// more unattended than a plain create does (PermissionModeNeedsSend:
+	// acceptEdits, auto, bypass), on top of `create`. Bypass also raises an
 	// acceptance screen that has to be answered. A principal permitted only to
-	// start sessions must not be able to start THAT one.
+	// start sessions must not be able to start THOSE; default and plan narrow
+	// or keep the ordinary posture and need only `create`.
 	PermissionMode string `json:"permissionMode,omitempty"`
 
 	// McpConfig names tool-server configuration files the session should be
