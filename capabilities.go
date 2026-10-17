@@ -131,6 +131,16 @@ type DriverCapabilities struct {
 	// so a temporarily unreachable machine can never report a bare false and
 	// become permanently incapable in a caller's cache (§4.3, D3).
 	ObservesPermissionMode bool `json:"observesPermissionMode"`
+	// CreatePermissionModes lists the values of SessionSpec.PermissionMode this
+	// driver accepts at create (muster #329), a subset of
+	// fleet.CreatePermissionModes. A caller offering its users a choice of mode
+	// greys out what is not listed instead of failing the create.
+	//
+	// Absent (omitted) means the driver did not say — a peer on a build that
+	// predates the field, or one not reached — which is "unknown" (§5.7), never
+	// "none". A driver that says anything lists at least "default", which every
+	// service has accepted since #256, so a present list is never empty.
+	CreatePermissionModes []string `json:"createPermissionModes,omitempty"`
 	// ReportsUsage reports whether the driver can read a session's token usage
 	// from its runtime (SessionState.Usage, muster #285).
 	//

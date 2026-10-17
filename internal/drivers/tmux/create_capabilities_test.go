@@ -323,6 +323,58 @@ func TestUnknownPermissionModeIsRefused(t *testing.T) {
 	if err == nil {
 		t.Fatal("an unrecognised permission mode was accepted and handed to the CLI")
 	}
+	var ferr *fleet.Error
+	if !errors.As(err, &ferr) || ferr.Kind != fleet.ErrorInvalid {
+		t.Fatalf("error = %v, want a *fleet.Error of kind %q", err, fleet.ErrorInvalid)
+	}
+	if !strings.Contains(ferr.Message, "acceptEdits") {
+		t.Errorf("the refusal should name the accepted set: %s", ferr.Message)
+	}
+	if newSessionArgv(f) != nil {
+		t.Error("the session was started anyway; the refusal must happen before the spawn")
+	}
+}
+
+// muster #329: every mode the CLI's --permission-mode takes reaches the agent
+// argv as that flag, and only bypass uses the skip flag. Capabilities
+// advertises exactly the set the create accepts.
+func TestEveryCreatePermissionModeReachesTheAgentArgv(t *testing.T) {
+	for _, mode := range []string{"default", "acceptEdits", "plan", "auto"} {
+		t.Run(mode, func(t *testing.T) {
+			f := twoSessions()
+			_, argv := createWith(t, f, fleet.SessionSpec{Name: "m", Cwd: "/work/x", PermissionMode: mode})
+			agent := agentArgv(argv)
+			if got, ok := flagValue(agent, "--permission-mode"); !ok || got != mode {
+				t.Errorf("--permission-mode = %q (present=%v), want %q; argv %v", got, ok, mode, agent)
+			}
+			for _, a := range agent {
+				if a == "--dangerously-skip-permissions" {
+					t.Errorf("mode %q must not raise the bypass flag", mode)
+				}
+			}
+		})
+	}
+	// bypass is unchanged: the skip flag, and no --permission-mode beside it.
+	f := twoSessions()
+	_, argv := createWith(t, f, fleet.SessionSpec{Name: "b", Cwd: "/work/x", PermissionMode: fleet.PermissionModeBypass})
+	agent := agentArgv(argv)
+	if _, ok := flagValue(agent, "--permission-mode"); ok {
+		t.Errorf("bypass must keep its own flag, not --permission-mode: %v", agent)
+	}
+	// And no mode at all passes neither.
+	f = twoSessions()
+	_, argv = createWith(t, f, fleet.SessionSpec{Name: "n", Cwd: "/work/x"})
+	if _, ok := flagValue(agentArgv(argv), "--permission-mode"); ok {
+		t.Error("a create naming no mode must pass no --permission-mode")
+	}
+}
+
+func TestCapabilitiesAdvertisesTheCreatePermissionModes(t *testing.T) {
+	d := newTestDriver(twoSessions())
+	got := d.Capabilities().CreatePermissionModes
+	if strings.Join(got, ",") != strings.Join(fleet.CreatePermissionModes(), ",") {
+		t.Errorf("CreatePermissionModes = %v, want %v", got, fleet.CreatePermissionModes())
+	}
 }
 
 // --- consents ---------------------------------------------------------------

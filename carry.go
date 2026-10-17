@@ -21,11 +21,14 @@ import (
 //
 // # What is carried, and what never is
 //
-// PermissionMode is carried only when the conversation's previous session last
-// reported `bypass` — the one non-ordinary mode a create can ask for. Any other
-// mode (the ordinary one, accept-edits, plan, auto) is not a launch request,
-// so nothing is carried and the new session starts as an absent permissionMode
-// always starts. Settings are the launch-time settings the previous session was
+// PermissionMode is carried when the conversation's previous session last
+// reported a mode other than the ordinary one and the runtime this create
+// resolves to accepts it (DriverCapabilities.CreatePermissionModes, #329) — so
+// accept-edits, plan, auto and bypass all travel; the ordinary mode is what an
+// absent permissionMode already means, so nothing is carried for it. A mode
+// that lets the agent do more unattended than a plain create still needs the
+// `send` grant to carry: without it bypass is refused (never downgraded) and
+// accept-edits and auto are simply not carried. Settings are the launch-time settings the previous session was
 // created with (#247/#254); outside bypass only the allow-listed keys travel.
 // Consents are never carried: a consent answers one boot question on one
 // session, and a standing one would be exactly the permission it refuses to be.

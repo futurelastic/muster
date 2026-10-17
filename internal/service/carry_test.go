@@ -27,6 +27,18 @@ type carryDriverImpl struct {
 	mu    sync.Mutex
 	specs []fleet.SessionSpec
 	n     int
+	// modes is what Capabilities advertises for create (#329); nil means every
+	// member of the create set, which is what the terminal driver says.
+	modes []string
+}
+
+func (d *carryDriverImpl) Capabilities() fleet.DriverCapabilities {
+	c := d.Driver.Capabilities()
+	c.CreatePermissionModes = d.modes
+	if c.CreatePermissionModes == nil {
+		c.CreatePermissionModes = fleet.CreatePermissionModes()
+	}
+	return c
 }
 
 func (d *carryDriverImpl) Create(_ context.Context, _ fleet.Request, _ string, spec fleet.SessionSpec) (fleet.Session, error) {
@@ -40,8 +52,9 @@ func (d *carryDriverImpl) Create(_ context.Context, _ fleet.Request, _ string, s
 	}
 	st := fleet.ObservedState(fleet.StatusIdle, "carryDriver", nil)
 	st.PermissionMode = fleet.PermissionModeAuto
-	if spec.PermissionMode == fleet.PermissionModeBypass {
-		st.PermissionMode = fleet.PermissionModeBypass
+	if spec.PermissionMode != "" {
+		// A runtime started with a mode reads back in it (#329).
+		st.PermissionMode = fleet.PermissionModeState(spec.PermissionMode)
 	}
 	sess := fleet.Session{
 		SessionRef: fleet.SessionRef{Machine: spec.Machine, ID: fmt.Sprintf("created-%d", d.n)},
@@ -155,10 +168,13 @@ func TestResumeCarriesBypassAndSettings(t *testing.T) {
 	}
 }
 
-// A conversation that ran in the runtime's ordinary mode stays there: nothing
-// is carried and the driver is handed no mode.
-func TestResumeOfAutoCarriesNothing(t *testing.T) {
+// A conversation whose last session read a mode the resolved runtime does not
+// accept at create is not carried: it would be refused at launch, and a resume
+// failing for a mode nobody asked for this time is worse than one that starts
+// ordinary. Nothing is handed to the driver.
+func TestResumeOfAModeTheRuntimeDoesNotListCarriesNothing(t *testing.T) {
 	_, d, srv := carryServer(t, nil)
+	d.modes = []string{"default", "bypass"}
 	if code, _, raw := carryCreate(t, srv, testToken, "k1", fmt.Sprintf(`{"runtime":"stub","cwd":"/w","conversationId":%q}`, convAuto)); code != 201 {
 		t.Fatalf("first create = %d %s", code, raw)
 	}
@@ -167,16 +183,62 @@ func TestResumeOfAutoCarriesNothing(t *testing.T) {
 		t.Fatalf("resume = %d %s", code, raw)
 	}
 	if d.last().PermissionMode != "" {
-		t.Errorf("driver got permissionMode %q for a conversation that ran in auto", d.last().PermissionMode)
+		t.Errorf("driver got permissionMode %q for a conversation that ran in auto on a runtime that does not list it", d.last().PermissionMode)
 	}
 	if sess.Carried != nil {
 		t.Errorf("carried = %+v, want nothing", sess.Carried)
 	}
-	if sess.State.PermissionMode != fleet.PermissionModeAuto {
-		t.Errorf("the resumed session reads %q, want auto", sess.State.PermissionMode)
-	}
 	if strings.Contains(raw, `"carried"`) {
 		t.Errorf("an empty carry must not be on the wire: %s", raw)
+	}
+}
+
+// muster #329: a non-bypass mode the runtime accepts is carried and launched as
+// that mode, not dropped; the response says so.
+func TestResumeCarriesANonBypassMode(t *testing.T) {
+	for _, mode := range []string{"acceptEdits", "plan", "auto"} {
+		t.Run(mode, func(t *testing.T) {
+			_, d, srv := carryServer(t, nil)
+			if code, _, raw := carryCreate(t, srv, testToken, "k1", fmt.Sprintf(
+				`{"runtime":"stub","cwd":"/w","conversationId":%q,"permissionMode":%q}`, convAuto, mode)); code != 201 {
+				t.Fatalf("first create = %d %s", code, raw)
+			}
+			code, sess, raw := carryCreate(t, srv, testToken, "k2", resumeBody(convAuto, ""))
+			if code != 201 {
+				t.Fatalf("resume = %d %s", code, raw)
+			}
+			if d.last().PermissionMode != mode {
+				t.Errorf("driver got permissionMode %q, want %q", d.last().PermissionMode, mode)
+			}
+			if sess.Carried == nil || sess.Carried.PermissionMode != mode {
+				t.Errorf("carried = %+v, want %q", sess.Carried, mode)
+			}
+			if string(sess.State.PermissionMode) != mode {
+				t.Errorf("the resumed session reads %q, want %q", sess.State.PermissionMode, mode)
+			}
+		})
+	}
+}
+
+// The grant on a carried mode follows the create's: plan needs none, and
+// acceptEdits without it is not carried (the resume starts as it always did)
+// rather than refused.
+func TestResumeCarryOfNonBypassModesAndTheGrant(t *testing.T) {
+	spawner := Principal{Name: "spawner", Token: "tok-spawn", Grants: []Grant{GrantRead, GrantCreate}}
+	_, d, srv := carryServer(t, []Principal{spawner})
+	// plan is a create-only mode, so the original launch needs no grant either.
+	if code, _, raw := carryCreate(t, srv, "tok-spawn", "k1", fmt.Sprintf(
+		`{"runtime":"stub","cwd":"/w","conversationId":%q,"permissionMode":"plan"}`, convAuto)); code != 201 {
+		t.Fatalf("create plan with create only = %d %s", code, raw)
+	}
+	if code, sess, raw := carryCreate(t, srv, "tok-spawn", "k2", resumeBody(convAuto, "")); code != 201 ||
+		d.last().PermissionMode != "plan" || sess.Carried == nil {
+		t.Errorf("resume of plan with create only = %d %s spec %q, want plan carried", code, raw, d.last().PermissionMode)
+	}
+	// acceptEdits is not: a create-only principal cannot start one...
+	if code, _, raw := carryCreate(t, srv, "tok-spawn", "k3", fmt.Sprintf(
+		`{"runtime":"stub","cwd":"/w","conversationId":%q,"permissionMode":"acceptEdits"}`, convOuter)); code != http.StatusUnauthorized {
+		t.Errorf("create acceptEdits with create only = %d %s, want 401", code, raw)
 	}
 }
 
@@ -193,8 +255,8 @@ func TestExplicitModeOverridesWhatWouldBeCarried(t *testing.T) {
 		t.Fatalf("resume with default = %d %s", code, raw)
 	}
 	spec := d.last()
-	if spec.PermissionMode != "" {
-		t.Errorf("driver got permissionMode %q; the explicit ordinary mode must reach it as none", spec.PermissionMode)
+	if spec.PermissionMode != "default" {
+		t.Errorf("driver got permissionMode %q; the explicit ordinary mode must reach it as itself (#329)", spec.PermissionMode)
 	}
 	// The bypass-only key stops travelling with the mode; the allow-listed one stays.
 	if string(spec.Settings) != `{"crossSessionInbound":"accept"}` {
@@ -203,8 +265,8 @@ func TestExplicitModeOverridesWhatWouldBeCarried(t *testing.T) {
 	if sess.Carried == nil || sess.Carried.PermissionMode != "" || string(sess.Carried.Settings) != `{"crossSessionInbound":"accept"}` {
 		t.Errorf("carried = %+v, want settings only", sess.Carried)
 	}
-	if sess.State.PermissionMode != fleet.PermissionModeAuto {
-		t.Errorf("the session reads %q, want auto", sess.State.PermissionMode)
+	if sess.State.PermissionMode != fleet.PermissionModeDefault {
+		t.Errorf("the session reads %q, want default", sess.State.PermissionMode)
 	}
 
 	code, sess, raw = carryCreate(t, srv, testToken, "k4", resumeBody(convAuto, `,"permissionMode":"bypass"`))
@@ -231,18 +293,19 @@ func TestExplicitModeOverridesWhatWouldBeCarried(t *testing.T) {
 }
 
 // What a session LAST reported beats what it was launched with: a launch in
-// bypass whose session was later read back as auto is not carried as bypass.
+// bypass whose session was later read back in the ordinary mode is not carried
+// as bypass.
 func TestResumeCarriesWhatTheSessionLastReported(t *testing.T) {
 	svc, d, srv := carryServer(t, nil)
 	carryCreate(t, srv, testToken, "k1", fmt.Sprintf(`{"runtime":"stub","cwd":"/w","conversationId":%q,"permissionMode":"bypass"}`, convBypass))
-	observeMode(svc, "created-1", convBypass, fleet.PermissionModeAuto)
+	observeMode(svc, "created-1", convBypass, fleet.PermissionModeDefault)
 
 	code, sess, raw := carryCreate(t, srv, testToken, "k2", resumeBody(convBypass, ""))
 	if code != 201 {
 		t.Fatalf("resume = %d %s", code, raw)
 	}
 	if d.last().PermissionMode != "" || sess.Carried != nil {
-		t.Errorf("spec %q carried %+v, want nothing: the last report was auto", d.last().PermissionMode, sess.Carried)
+		t.Errorf("spec %q carried %+v, want nothing: the last report was default", d.last().PermissionMode, sess.Carried)
 	}
 
 	// An unreadable mode is silence, not a report: it must not erase the launch's.
@@ -357,5 +420,50 @@ func TestLaunchRecordSurvivesRestartAndTheSession(t *testing.T) {
 	time.Sleep(5 * time.Millisecond)
 	if _, ok := svc2.history.launchFor("stub", convBypass); ok {
 		t.Error("a launch record outlived the retention period")
+	}
+}
+
+// muster #329: which create bodies need the `send` grant, by mode.
+func TestCreateNeedsSendByPermissionMode(t *testing.T) {
+	for mode, want := range map[string]string{
+		"":            "",
+		"default":     "",
+		"plan":        "",
+		"acceptEdits": "permissionMode",
+		"auto":        "permissionMode",
+		"bypass":      "permissionMode",
+		"yolo":        "permissionMode",
+	} {
+		if got := createNeedsSend(createSessionBody{PermissionMode: mode}); got != want {
+			t.Errorf("createNeedsSend(%q) = %q, want %q", mode, got, want)
+		}
+	}
+}
+
+// An unknown mode is a 400 naming the accepted set, before any driver is
+// involved and whatever the caller's grants.
+func TestCreateRefusesAnUnknownPermissionMode(t *testing.T) {
+	_, d, srv := carryServer(t, nil)
+	code, _, raw := carryCreate(t, srv, testToken, "k-unknown", `{"runtime":"stub","cwd":"/w","permissionMode":"yolo"}`)
+	if code != http.StatusBadRequest || !strings.Contains(raw, "acceptEdits") {
+		t.Errorf("unknown mode = %d %s, want 400 naming the accepted set", code, raw)
+	}
+	if len(d.specs) != 0 {
+		t.Errorf("a driver saw the create: %+v", d.specs)
+	}
+}
+
+// Each accepted mode reaches the driver as itself, and the session reads back
+// as it.
+func TestCreateAcceptsEveryPermissionMode(t *testing.T) {
+	_, d, srv := carryServer(t, nil)
+	for i, mode := range fleet.CreatePermissionModes() {
+		code, sess, raw := carryCreate(t, srv, testToken, fmt.Sprintf("k-%d", i), fmt.Sprintf(`{"runtime":"stub","cwd":"/w","permissionMode":%q}`, mode))
+		if code != 201 {
+			t.Fatalf("%s: create = %d %s", mode, code, raw)
+		}
+		if d.last().PermissionMode != mode || string(sess.State.PermissionMode) != mode {
+			t.Errorf("%s: driver got %q, session reads %q", mode, d.last().PermissionMode, sess.State.PermissionMode)
+		}
 	}
 }

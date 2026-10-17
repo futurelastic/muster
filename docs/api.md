@@ -403,6 +403,13 @@ carries `Cache-Control: no-store`.
 }
 ```
 
+`permissionMode` takes `default`, `acceptEdits`, `plan`, `auto` or `bypass`
+(#329); which of them a runtime accepts is its `createPermissionModes` in
+`/v1/runtimes`, so a client can grey out what a runtime cannot do. An
+unrecognised value is a `400`; one the runtime does not list is refused
+`unsupported`. Only `acceptEdits`, `auto` and `bypass` need `send` — `default`
+and `plan` need `create` alone.
+
 `201` with the session. Five fields — `trustCwd`, `consents`, `permissionMode`,
 `mcpConfig`, `settings` — additionally require the `send` grant on top of `create`, because
 each one hands the new session authority its creator would otherwise have to
@@ -451,24 +458,27 @@ launches with the settings that session was created with. The service holds that
 record itself, so a restart tool does not have to remember to resend it, and it
 outlives the session: it is kept for the closed-session retention period.
 
-- **Only `bypass` is carried.** It is the one non-ordinary mode a create can ask
-  for. A conversation whose last session read back as any other mode (the ordinary
-  one, `acceptEdits`, `plan`, `auto`) carries nothing: the new session starts the
-  way an absent `permissionMode` always starts. A mode the driver could not read
+- **Every non-ordinary mode the runtime accepts is carried** (#329): `bypass`,
+  `acceptEdits`, `plan` and `auto`, launched as that mode. A conversation whose last
+  session read back in the ordinary mode carries nothing: the new session starts the
+  way an absent `permissionMode` always starts, and so does one whose last mode this
+  runtime does not list in `createPermissionModes`. A mode the driver could not read
   (`unknown`, or absent) is silence, not a report — the launch's own mode stands.
 - **Settings outside bypass keep only the allow-listed keys.** A bypass launch's
   other keys stop travelling with the mode.
 - **An explicit value wins.** `permissionMode: "bypass"` over a conversation that
   ran in the ordinary mode launches in bypass; **`permissionMode: "default"`** asks
   for the ordinary mode over one that ran in bypass. `default` is only that
-  request — it needs no `send`, and no driver is ever handed it. Explicit
+  request — it needs no `send`, and the driver is handed it as itself (#329). Explicit
   `settings` replace the carried ones.
 - **The response says what was carried:** `"carried": {"permissionMode": "bypass",
   "settings": {…}}`, each key present only when it was carried and not named by the
   request. The field is absent when nothing was.
-- **`send` still gates the widening.** Carrying bypass or settings forward is
-  allowed when the caller holds `send`, or when the original launch was made
-  through this service by a principal that did. A bypass session this service did
+- **`send` still gates the widening.** Carrying `bypass`, `acceptEdits`, `auto` or
+  settings forward is allowed when the caller holds `send`, or when the original
+  launch was made through this service by a principal that did. `plan` needs none.
+  Without it `acceptEdits` and `auto` are simply not carried (a resume that
+  worked before keeps working); `bypass` is refused as below. A bypass session this service did
   not launch has no such record, so a caller without `send` resuming it is `401`
   naming the grant and `permissionMode: "default"` as the way to proceed — never a
   silently ordinary session.

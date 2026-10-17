@@ -88,7 +88,7 @@ SessionSpec {
   sandbox?   : SandboxSpec        // an OS sandbox around the session's process: files, unix sockets and system services denied outside what is granted; a driver that cannot enforce it refuses `unsupported` (§4.3)
   resume?    : string             // a prior conversation this session continues
   conversationId?: string         // a caller-chosen UUID this session starts a NEW conversation under; mutually exclusive with resume
-  permissionMode?: string         // a non-default permission posture; "bypass" is the only value
+  permissionMode?: string         // the permission posture the session starts in: "default" | "acceptEdits" | "plan" | "auto" | "bypass"; a runtime accepts the subset in its capabilities' createPermissionModes (§4.3) and refuses the rest
   mcpConfig? : AbsolutePath[]     // tool-server configuration, by path, never inline (§5.3)
   settings?  : JSON object        // launch-time runtime settings for the agent CLI; bypass-only, never secrets (api-http.md §3.3)
   consents?  : PromptKind[]       // boot questions the caller pre-answers (§2.7)
@@ -1930,6 +1930,7 @@ DriverCapabilities {
   observesState   : boolean   // can report status without inference
   deliversRawKeys : boolean   // can deliver a raw key event to a screen (§3 `keys`) and populate `screenDigest` (§2.3)
   observesControlChannel: boolean // can report `controlChannel` (§2.3); absent state is answerable only against this
+  createPermissionModes?: string[] // the `permissionMode` values a create accepts on this driver (§2.1), a subset of default|acceptEdits|plan|auto|bypass; absent = the driver did not say (an older peer, or one not reached), which is unknown, never "none"
   observesPermissionMode: boolean // can report `permissionMode` (§2.3); absent state is answerable only against this. A driver may report it from a posture it configured itself (the local opencode driver reports `bypass`, muster #283) and leave it absent for a session it set nothing on; and a driver may honour `permissionMode: "bypass"` only together with an enforced `sandbox` (§2.1), refusing `unsupported` otherwise
   reportsUsage    : boolean   // can read `usage` (§2.3, muster #285) from its runtime; absent usage is answerable only against this: true = "not yet known", false = never
   reportsContext  : boolean   // can read `usage.context` (§2.3, muster #313), the size of the context the newest request carried, from its runtime; separate from `reportsUsage` because a runtime can report summed spend without per-request figures; absent context is answerable only against this: true = "not yet known", false = never

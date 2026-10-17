@@ -15,8 +15,8 @@ import (
 // means "whatever the conversation last ran in", and a caller that wants the
 // ordinary mode for a conversation that last ran in bypass needs a way to say
 // so that is not silence. It asks for nothing beyond starting a session, so it
-// does not need the `send` grant, and the handler turns it back into the empty
-// mode before any local driver sees it — a driver's closed set is unchanged.
+// does not need the `send` grant. It reaches a driver as itself (#329), and a
+// launch record stores it as the absence of a mode, which is what it is.
 const permissionModeDefaultRequest = string(fleet.PermissionModeDefault)
 
 // resumeLaunch is what handleCreateSession records about a create it carried
@@ -40,9 +40,14 @@ type resumeLaunch struct {
 //
 // # The authority
 //
-// Carrying a mode that acts without asking, or a settings object, is the same
-// widening a create asks for explicitly, and it needs the same `send` grant
-// (createNeedsSend). The grant is read from two places: the caller, or the
+// Carrying a mode that lets the agent do more unattended than a plain create
+// (acceptEdits, auto, bypass), or a settings object, is the same widening a
+// create asks for explicitly, and it needs the same `send` grant
+// (createNeedsSend). A carried plan needs none, as a create naming it needs
+// none. A recorded mode the resolved runtime does not accept at create is not
+// carried (carriesMode), and neither is acceptEdits or auto for a caller
+// without the grant: that resume starts as it always did instead of being
+// refused (only bypass is refused, below). The grant is read from two places: the caller, or the
 // original launch — recorded when it was made, only if it was made by a
 // principal holding `send`. A bypass session this service did not launch has no
 // such record, so only a caller holding `send` may carry it forward.
@@ -50,7 +55,7 @@ type resumeLaunch struct {
 // A caller that may not is REFUSED, not silently downgraded: a resume that came
 // back in the ordinary mode is the failure this exists to end, and a refusal
 // names the way out (`permissionMode: "default"`).
-func (s *Service) carryResumeLaunch(r *http.Request, machine fleet.MachineId, rt fleet.RuntimeId, body *createSessionBody) (resumeLaunch, *fleet.Error) {
+func (s *Service) carryResumeLaunch(r *http.Request, machine fleet.MachineId, rt fleet.RuntimeId, createModes []string, body *createSessionBody) (resumeLaunch, *fleet.Error) {
 	callerSend := true
 	if p, ok := principalOf(r); ok {
 		callerSend = p.Allows(GrantSend)
@@ -66,12 +71,23 @@ func (s *Service) carryResumeLaunch(r *http.Request, machine fleet.MachineId, rt
 	sendAuth := callerSend
 	if found {
 		sendAuth = callerSend || rec.SendAuth
-		if body.PermissionMode == "" && rec.Mode == fleet.PermissionModeBypass {
-			if !sendAuth {
-				return resumeLaunch{}, carryRefusal(machine, "permissionMode \""+fleet.PermissionModeBypass+"\"")
+		if body.PermissionMode == "" && carriesMode(rec.Mode, createModes) {
+			switch {
+			case !fleet.PermissionModeNeedsSend(rec.Mode) || sendAuth:
+				body.PermissionMode = rec.Mode
+				carried.PermissionMode = rec.Mode
+			case rec.Mode == fleet.PermissionModeBypass:
+				// Bypass is the mode #256 exists for: a resume that came back
+				// asking is the failure, so it is refused, never downgraded.
+				return resumeLaunch{}, carryRefusal(machine, "permissionMode \""+rec.Mode+"\"")
+			default:
+				// acceptEdits and auto are also what a bare launch can land in
+				// on a runtime configured that way, and a conversation's
+				// recorded mode is what it last READ, not what anyone asked
+				// for. A caller without the grant resumes as it always did —
+				// nothing carried — rather than being refused a resume that
+				// worked before (#329).
 			}
-			body.PermissionMode = fleet.PermissionModeBypass
-			carried.PermissionMode = fleet.PermissionModeBypass
 		}
 		if !hasSettings(body) && len(rec.Settings) > 0 {
 			st := rec.Settings
@@ -101,11 +117,29 @@ func (s *Service) carryResumeLaunch(r *http.Request, machine fleet.MachineId, rt
 	launch := &launchFacts{
 		Mode:         mode,
 		Settings:     compactSettings(body),
-		SendAuth:     (mode == fleet.PermissionModeBypass || hasSettings(body)) && sendAuth,
+		SendAuth:     (fleet.PermissionModeNeedsSend(mode) || hasSettings(body)) && sendAuth,
 		Conversation: firstNonEmpty(body.Resume, body.ConversationId),
 	}
 	out.facts = launch
 	return out, nil
+}
+
+// carriesMode reports whether a conversation's recorded mode is launched again
+// on a resume that names none: any mode other than the ordinary one (which is
+// what an absent value already means) that the resolved runtime accepts at
+// create. A mode the runtime does not list is not carried — it would be refused
+// at launch, and a resume that failed for a mode nobody asked for this time is
+// worse than one that starts ordinary (muster #329).
+func carriesMode(mode string, createModes []string) bool {
+	if mode == "" || mode == permissionModeDefaultRequest {
+		return false
+	}
+	for _, m := range createModes {
+		if m == mode {
+			return true
+		}
+	}
+	return false
 }
 
 func carryRefusal(machine fleet.MachineId, what string) *fleet.Error {
