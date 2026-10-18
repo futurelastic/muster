@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -241,6 +242,41 @@ func TestPasteBracketedRefusesWhenFlagIsOff(t *testing.T) {
 	snap := d.counters.Snapshot()
 	if snap[counterBracketPasteFlagOff] != 1 {
 		t.Errorf("counterBracketPasteFlagOff = %d, want 1", snap[counterBracketPasteFlagOff])
+	}
+}
+
+// #333: a tmux older than 3.7 prints an empty line for a format variable it does
+// not know. That is not the "0" of a pane that declined bracketed paste, and the
+// refusal must say which multiplexer is at fault instead of claiming the flag
+// reads 0.
+func TestPasteBracketedNamesAnUnsupportedFlagApartFromAnOffOne(t *testing.T) {
+	f := twoSessions()
+	f.mu.Lock()
+	f.bracketPasteUnsupported = true
+	f.mu.Unlock()
+	d := newTestDriver(f)
+
+	err := d.pasteBracketed(context.Background(), "%1", "hello")
+	if err == nil {
+		t.Fatal("pasteBracketed delivered through a tmux that cannot report the flag")
+	}
+	if !errors.Is(err, errBracketPasteUnavailable) {
+		t.Errorf("error %v does not wrap errBracketPasteUnavailable, so Send cannot classify it", err)
+	}
+	for _, want := range []string{"tmux 3.4", "reads empty", "3.7", "FLEET_TMUX_BIN"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to contain %q", err.Error(), want)
+		}
+	}
+	if strings.Contains(err.Error(), "reads 0") {
+		t.Errorf("error = %q still blames a pane that reads 0", err.Error())
+	}
+	snap := d.counters.Snapshot()
+	if snap[counterBracketPasteFlagUnsupported] != 1 || snap[counterBracketPasteFlagOff] != 0 {
+		t.Errorf("counters unsupported=%d off=%d, want 1 and 0", snap[counterBracketPasteFlagUnsupported], snap[counterBracketPasteFlagOff])
+	}
+	if f.pasted["%1"] != "" {
+		t.Errorf("a paste reached the pane despite the refusal")
 	}
 }
 

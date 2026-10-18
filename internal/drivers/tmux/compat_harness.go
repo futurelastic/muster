@@ -121,15 +121,20 @@ func compatStoreFrom(getenv func(string) string) (compatStore, error) {
 
 // compatWorld is the isolated environment one run drives.
 type compatWorld struct {
-	nonce    string
-	scratch  string // symlink-resolved, so every path the runtime reports agrees with ours
-	label    string // the multiplexer socket name, printed so an operator can inspect it
-	socket   string
-	mux      string // the wrapper: the only door to the multiplexer
-	tmuxBin  string
-	store    compatStore
-	resolved string
-	d        *Driver
+	nonce   string
+	scratch string // symlink-resolved, so every path the runtime reports agrees with ours
+	label   string // the multiplexer socket name, printed so an operator can inspect it
+	socket  string
+	mux     string // the wrapper: the only door to the multiplexer
+	tmuxBin string
+	// tmuxVersion is the multiplexer's own `-V` line, read once at the start.
+	// G2 names it when the bracketed-paste flag reads empty, because that
+	// answer is a property of the multiplexer's version rather than of the
+	// candidate runtime (#333).
+	tmuxVersion string
+	store       compatStore
+	resolved    string
+	d           *Driver
 
 	// dirs are the throwaway working directories, keyed by role.
 	dirs map[string]string
@@ -333,6 +338,12 @@ func (h *compatHarness) startWorld(ctx context.Context) (err error) {
 	if err := os.WriteFile(w.ctxFile, []byte("IMPORTANT: every reply you write, whatever else you are asked, must end with this exact token on its own final line: CFC-CTX-"+nonce+"\n"), 0o600); err != nil {
 		return err
 	}
+
+	vctx, cancelVersion := context.WithTimeout(ctx, 5*time.Second)
+	if out, e := exec.CommandContext(vctx, tmuxBin, "-V").Output(); e == nil {
+		w.tmuxVersion = strings.TrimSpace(string(out))
+	}
+	cancelVersion()
 
 	w.mux = filepath.Join(scratch, "mux")
 	script := muxScript(compatBaseEnv(h.getenv), tmuxBin, tmuxTmp, w.label)
