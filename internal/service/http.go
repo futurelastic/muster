@@ -92,6 +92,7 @@ func NewMux(svc *Service, cfg Config) *http.ServeMux {
 	mux.HandleFunc("GET /v1/machines/{machine}/sessions/{id}/turns", withAuth(cfg, revealing(handleTurns(svc))))
 	mux.HandleFunc("GET /v1/machines/{machine}/sessions/{id}/composer", withAuth(cfg, reading(handleComposer(svc))))
 	mux.HandleFunc("POST /v1/machines/{machine}/sessions/{id}/input", withAuth(cfg, mutating(svc, cfg, handleSendInput(svc))))
+	mux.HandleFunc("GET /v1/machines/{machine}/input-audit", withAuth(cfg, reading(handleInputAudit(svc))))
 	mux.HandleFunc("POST /v1/machines/{machine}/sessions/{id}/respond", withAuth(cfg, mutating(svc, cfg, handleRespond(svc))))
 	mux.HandleFunc("POST /v1/machines/{machine}/sessions/{id}/interrupt", withAuth(cfg, mutating(svc, cfg, handleInterrupt(svc))))
 	mux.HandleFunc("POST /v1/machines/{machine}/sessions/{id}/discard", withAuth(cfg, mutating(svc, cfg, handleDiscard(svc))))
@@ -1517,8 +1518,21 @@ func handleSendInput(svc *Service) http.HandlerFunc {
 		ctx, cancel := context.WithTimeout(r.Context(), deadline)
 		defer cancel()
 
+		// #330: the call is written down BEFORE the driver is asked to deliver,
+		// and given its outcome after — see inputaudit.go for why two phases.
+		auditID := svc.inputAudit.begin(InputRecord{
+			Principal:  svc.auditPrincipal(r),
+			Machine:    machine,
+			Session:    id,
+			SHA256:     textSHA256(body.Text),
+			Bytes:      len(body.Text),
+			HumanRelay: humanRelay,
+			Route:      body.Route,
+			Direction:  svc.directionOf(r, machine),
+		})
 		receipt, err := d.Send(ctx, req, fleet.SessionRef{Machine: machine, ID: id}, body.Text, driver.SendOptions{Submit: submit, ResumeIfStranded: body.ResumeIfStranded, ReplaceIfStranded: body.ReplaceIfStranded, ExpectComposerDigest: body.Expect, From: from, Route: route, HumanRelay: humanRelay, RemoteControl: svc.remoteControl(r), LiveLaneOnly: true})
 		if err != nil {
+			svc.inputAudit.finish(auditID, inputOutcomeError)
 			// A refusal from the driver is not this branch — Send returns
 			// it as a DeliveryReceipt value, not an error. Only a
 			// driver-level failure (unsupported, deadline exceeded, ...)
@@ -1526,6 +1540,7 @@ func handleSendInput(svc *Service) http.HandlerFunc {
 			writeDriverError(w, machine, deadline, err)
 			return
 		}
+		svc.inputAudit.finish(auditID, string(receipt.Outcome))
 		// api-http.md §3.3: a refusal is 200, not an HTTP error — this is
 		// the same 200 whether Outcome is submitted, queued, refused, or
 		// unknown.
