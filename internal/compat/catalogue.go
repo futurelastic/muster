@@ -150,7 +150,7 @@ var catalogue = []Spec{
 	{
 		ID:       "G2",
 		Gate:     GateMust,
-		Asserts:  "Bracketed paste is on at the composer, and a long single line, a long multi-line paste and text with control bytes each arrive whole and exactly once, with the control bytes removed as the sanitiser assumes.",
+		Asserts:  "Bracketed paste is on at the composer, and a long single line, a long multi-line paste and text with control bytes each arrive whole and exactly once, with the control bytes removed as the sanitiser assumes. The flag is read through the multiplexer, so it needs tmux 3.7 or newer: on an older tmux it reads empty, and the check says the multiplexer's version is the cause and names it (#333).",
 		ReliedOn: []string{"internal/drivers/tmux/terminalpath2.go#sanitizeForBracketedPaste"},
 	},
 	{
