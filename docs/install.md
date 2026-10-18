@@ -195,6 +195,14 @@ order of this page and the order of its output are the same.
      manager starts processes with a bare `PATH` that usually lacks it, and
      the failure appears only under the manager, never in your shell
      (row: `runtime`);
+   - use **tmux 3.7 or newer**. The terminal path pastes with bracketed paste
+     only when tmux can report that the pane asked for it
+     (`#{bracket_paste_flag}`), and that variable first exists in 3.7. On an
+     older tmux, measured on 3.4, 3.5a, 3.6 and 3.6a, it reads empty: sessions
+     are created and read but every send on the terminal path is refused. Most
+     distribution packages are older, so build or install a current tmux and
+     point `FLEET_TMUX_BIN` at it (row: `runtime.tmux-version`, which runs
+     `tmux -V` and fails on an older release);
    - when `FLEET_RUNTIME_OPENCODE=1`, set `FLEET_OPENCODE_BIN` to the opencode
      binary's absolute path, for the same reason (row: `runtime.opencode`,
      which resolves the binary and never runs it). A runtime that is enabled but

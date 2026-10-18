@@ -330,6 +330,13 @@ const (
 	// ever actually exercised in the field.
 	counterBracketPasteFlagUnknown = "bracket_paste.flag_unknown"
 	counterBracketPasteFlagOff     = "bracket_paste.flag_off"
+	// counterBracketPasteFlagUnsupported counts the third refusal: the query
+	// was answered with an empty string, which is what a tmux older than 3.7
+	// prints for a format variable it does not have (#333). It is kept apart
+	// from flag_off because the two want different fixes — a pane that
+	// declined bracketed paste is the runtime's doing, an unsupported variable
+	// is the multiplexer's.
+	counterBracketPasteFlagUnsupported = "bracket_paste.flag_unsupported"
 
 	// counterComposerLockContended counts every composer-touching call
 	// (Send, Respond, Discard, Keys — terminalpath2_lock.go) that had to

@@ -82,7 +82,7 @@ func (h *compatHarness) addSendChecks(s *compat.Suite) {
 		compat.Check{ID: "G2", Probes: append([]string{"boot.a"}, all...), Eval: func() compat.Verdict {
 			var bad []string
 			if f := h.ev.a.shot.bracket; f != "1" {
-				bad = append(bad, fmt.Sprintf("#{bracket_paste_flag} reads %q at the composer, so the driver refuses to paste", f))
+				bad = append(bad, bracketFlagFailure(f, h.tmuxVersionText()))
 			}
 			for _, n := range []string{"long", "multi", "control"} {
 				sd := h.sendOf(n)

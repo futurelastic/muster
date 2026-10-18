@@ -93,17 +93,34 @@ func sanitizeForBracketedPaste(text string) string {
 // distinguished from typed input sets, and the flag D2's non-bracketed
 // `paste-buffer` call ignored entirely.
 //
+// The answer has three shapes, and a caller must keep them apart:
+//
+//	"1"  the occupant asked for bracketed paste
+//	"0"  it did not
+//	""   this tmux does not know the variable (it first appears in 3.7, #333)
+//
 // ok is false only when the query itself could not be answered (the
-// multiplexer call failed) — never a stand-in for "flag is 0". A caller must
-// tell those apart: an unanswerable query is "cannot confirm safety",
-// which fails closed the same as an answered "0" does (see pasteBracketed),
-// but for a different, worth-counting reason.
-func (d *Driver) bracketPasteFlag(ctx context.Context, paneID string) (enabled, ok bool) {
+// multiplexer call failed) — never a stand-in for "flag is 0" or for "". An
+// unanswerable query is "cannot confirm safety", which fails closed the same
+// as an answered "0" does (see pasteBracketed), but for a different,
+// worth-counting reason.
+func (d *Driver) bracketPasteFlag(ctx context.Context, paneID string) (flag string, ok bool) {
 	out, err := d.run(ctx, d.bin, "display-message", "-p", "-t", paneID, "#{bracket_paste_flag}")
 	if err != nil {
-		return false, false
+		return "", false
 	}
-	return strings.TrimSpace(string(out)) == "1", true
+	return strings.TrimSpace(string(out)), true
+}
+
+// tmuxVersionText is `tmux -V` for the refusal that has to name it, or "" when
+// the multiplexer will not say. Only the refusal path asks, so a delivery that
+// goes through pays nothing for it.
+func (d *Driver) tmuxVersionText(ctx context.Context) string {
+	out, err := d.run(ctx, d.bin, "-V")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // pasteBracketed is terminal-path-v2's replacement for the plain
@@ -139,7 +156,7 @@ func (d *Driver) bracketPasteFlag(ctx context.Context, paneID string) (enabled, 
 // deploying UNMEASURED behaviour disguised as graceful degradation — the
 // same shape of mistake §5.6's "degrade, never emulate" already names.
 func (d *Driver) pasteBracketed(ctx context.Context, paneID, text string) error {
-	enabled, ok := d.bracketPasteFlag(ctx, paneID)
+	flag, ok := d.bracketPasteFlag(ctx, paneID)
 	if !ok {
 		d.counters.incr(counterBracketPasteFlagUnknown)
 		return fmt.Errorf("%w: could not confirm this pane's occupant has bracketed paste mode "+
@@ -147,7 +164,24 @@ func (d *Driver) pasteBracketed(ctx context.Context, paneID, text string) error 
 			"a bracketed delivery and the older CR-converting one; see pasteBracketed's own doc "+
 			"comment for why there is no fallback", errBracketPasteUnavailable)
 	}
-	if !enabled {
+	if flag == "" {
+		// An empty answer is how tmux says it does not know the variable. It
+		// is not the "0" of a pane that declined bracketed paste: no delivery
+		// shape was ever measured against it, and the pane may well have
+		// asked. Say what is actually wrong — the multiplexer — so nobody
+		// goes looking at the runtime's terminal setup (#333).
+		d.counters.incr(counterBracketPasteFlagUnsupported)
+		have := d.tmuxVersionText(ctx)
+		if have == "" {
+			have = "this tmux"
+		}
+		return fmt.Errorf("%w: %s does not report #{bracket_paste_flag} (it reads empty; the variable first "+
+			"exists in tmux %s), so this driver cannot confirm the pane's occupant asked for bracketed paste "+
+			"and refuses rather than falling back to the CR-converting paste this change replaces — install "+
+			"tmux %s or newer and point FLEET_TMUX_BIN at it (muster doctor names this as runtime.tmux-version)",
+			errBracketPasteUnavailable, have, BracketPasteFlagSince, BracketPasteFlagSince)
+	}
+	if flag != "1" {
 		d.counters.incr(counterBracketPasteFlagOff)
 		return fmt.Errorf("%w: this pane's occupant has not asked the terminal for bracketed "+
 			"paste mode (#{bracket_paste_flag} reads 0) — delivering literal newlines un-bracketed "+

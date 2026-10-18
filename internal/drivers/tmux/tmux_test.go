@@ -113,6 +113,10 @@ type fakeMux struct {
 	// exists at all; only a test that specifically wants to exercise the
 	// refusal sets a pane here.
 	bracketPasteOff map[string]bool
+	// bracketPasteUnsupported models a multiplexer older than 3.7 (#333): it
+	// does not know #{bracket_paste_flag}, so the query prints an empty line
+	// rather than "0" or "1", and `-V` names an old release.
+	bracketPasteUnsupported bool
 	// echoOutsideFence restores this fake's original paste model: delivered
 	// text is appended AFTER the whole pre-armed screen instead of being
 	// rendered inside the composer's fence (renderInComposer). That is the
@@ -414,6 +418,11 @@ func (f *fakeMux) exec(ctx context.Context, name string, args ...string) ([]byte
 		f.pasted = map[string]string{}
 	}
 	switch args[0] {
+	case "-V":
+		if f.bracketPasteUnsupported {
+			return []byte("tmux 3.4\n"), nil
+		}
+		return []byte("tmux 3.7a\n"), nil
 	case "load-buffer":
 		// One invocation carries both halves, separated by a literal ";":
 		//   load-buffer -b <name> <file> ; paste-buffer -b <name> -t <pane> -d
@@ -768,6 +777,9 @@ func (f *fakeMux) exec(ctx context.Context, name string, args ...string) ([]byte
 		// comment for why the default answer is "1" rather than "0".
 		if len(args) == 5 && args[4] == "#{bracket_paste_flag}" {
 			pane := args[3]
+			if f.bracketPasteUnsupported {
+				return []byte("\n"), nil
+			}
 			if f.bracketPasteOff[pane] {
 				return []byte("0\n"), nil
 			}

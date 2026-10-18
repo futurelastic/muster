@@ -18,6 +18,7 @@ import (
 
 	fleet "github.com/futurelastic/muster"
 	"github.com/futurelastic/muster/internal/drivers/opencode"
+	tmuxdriver "github.com/futurelastic/muster/internal/drivers/tmux"
 	"github.com/futurelastic/muster/internal/inboxclient"
 	"github.com/futurelastic/muster/internal/service"
 	"github.com/futurelastic/muster/internal/sessionenv"
@@ -28,6 +29,17 @@ import (
 // scheduled task of that name; main_run_test.go replaces it for them, and the
 // Windows tests that are about the row put the real one back.
 var doctorServiceTask = checkServiceTask
+
+// doctorTmuxVersion runs `<bin> -V`. A variable for the same reason as
+// doctorServiceTask: the generic doctor tests must not depend on which tmux, if
+// any, the machine they run on has. main_run_test.go replaces it; the tests that
+// are about the runtime.tmux-version row pass their own.
+var doctorTmuxVersion = runTmuxVersion
+
+func runTmuxVersion(ctx context.Context, bin string) (string, error) {
+	out, err := exec.CommandContext(ctx, bin, "-V").Output()
+	return strings.TrimSpace(string(out)), err
+}
 
 // `muster doctor` — is this installation complete? (muster #160)
 //
@@ -312,6 +324,7 @@ func runChecks(ctx context.Context, env doctorEnv) []doctorRow {
 		runtime = defaultRuntime()
 	}
 	c.add(checkRuntime(runtime, getenv("FLEET_TMUX_BIN"), env.LookPath))
+	c.add(checkTmuxVersion(ctx, runtime, getenv("FLEET_TMUX_BIN"), env))
 	c.add(checkOpencodeRuntime(getenv("FLEET_RUNTIME_OPENCODE") == "1", getenv("FLEET_OPENCODE_BIN")))
 
 	// --- the service manager's own record (Windows only) -----------------------
@@ -873,6 +886,71 @@ func checkRuntimeOn(goos, runtime, tmuxBin string, lookPath func(string) (string
 	default:
 		row.Status = statusFail
 		row.Summary = fmt.Sprintf("unknown FLEET_RUNTIME %q (want tmux, stub or none) — the service refuses to start", runtime)
+	}
+	return row
+}
+
+// checkTmuxVersion is the runtime.tmux-version row (muster #333): the terminal
+// path pastes with bracketed paste only when tmux can say the pane asked for it,
+// and tmux first can in 3.7 (`#{bracket_paste_flag}`). On an older tmux the
+// service starts, the session is created and read, and every send is refused at
+// run time — measured on a distribution's tmux 3.4 — so this names the missing
+// prerequisite where an install is checked instead of leaving it to be found by
+// the first refused send.
+//
+// It runs the binary the service will run (FLEET_TMUX_BIN, else the PATH
+// lookup the runtime row already did) with `-V`, which touches no server. A
+// version it cannot read is `unknown`, never a pass: a development build or a
+// wrapper script says nothing about the flag.
+//
+// `fail`, by ADR 160's definition: the service will refuse a call a configured
+// setup plainly intends — every send that takes the terminal path.
+func checkTmuxVersion(ctx context.Context, runtime, tmuxBin string, env doctorEnv) doctorRow {
+	row := doctorRow{ID: "runtime.tmux-version", Refs: []int{333}}
+	if runtime != "tmux" {
+		row.Status = statusSkip
+		row.Summary = fmt.Sprintf("FLEET_RUNTIME=%s does not run tmux", runtime)
+		return row
+	}
+	bin := tmuxBin
+	if bin == "" {
+		lookPath := env.LookPath
+		if lookPath == nil {
+			lookPath = exec.LookPath
+		}
+		p, err := lookPath("tmux")
+		if err != nil {
+			row.Status = statusSkip
+			row.Summary = "no tmux to ask — the runtime row says why"
+			return row
+		}
+		bin = p
+	}
+	vctx, cancel := context.WithTimeout(ctx, env.Timeout)
+	defer cancel()
+	out, err := doctorTmuxVersion(vctx, bin)
+	if err != nil {
+		row.Status = statusUnknown
+		row.Summary = "could not run the tmux binary with -V"
+		row.Detail = redact(err.Error(), bin, "FLEET_TMUX_BIN")
+		return row
+	}
+	provides, known := tmuxdriver.TmuxProvidesBracketPasteFlag(out)
+	switch {
+	case !known:
+		row.Status = statusUnknown
+		row.Summary = fmt.Sprintf("tmux version line not recognised (%q)", out)
+		row.Detail = "terminal-path delivery needs a tmux that provides #{bracket_paste_flag}, first released in tmux " +
+			tmuxdriver.BracketPasteFlagSince + "; a development build or a wrapper script cannot be judged from here"
+	case provides:
+		row.Status = statusPass
+		row.Summary = fmt.Sprintf("%s provides #{bracket_paste_flag}", out)
+	default:
+		row.Status = statusFail
+		row.Summary = fmt.Sprintf("%s does not provide #{bracket_paste_flag} — every send on the terminal path is refused", out)
+		row.Detail = "the driver pastes bracketed only when tmux can say the pane asked for it, and that variable first exists in tmux " +
+			tmuxdriver.BracketPasteFlagSince + " (measured: 3.4, 3.5a and 3.6a read it empty). Install tmux " +
+			tmuxdriver.BracketPasteFlagSince + " or newer and set FLEET_TMUX_BIN to its absolute path in the unit; sessions can still be created and read meanwhile"
 	}
 	return row
 }
