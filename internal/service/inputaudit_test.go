@@ -346,3 +346,194 @@ func TestInputAudit_CapDropsTheOldestAndSaysSo(t *testing.T) {
 		t.Errorf("coveredFrom moved backwards")
 	}
 }
+
+// muster #331. A write that did not finish leaves a partial line; the service
+// must start over it and say what it lost, and must not leave one mid-file.
+
+func writeAuditLog(t *testing.T, dir, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, inputAuditFile), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A crash mid-append leaves a partial final line. It is trimmed, the whole
+// records before it are kept (a pending one reads unknown), and coveredFrom
+// moves past the lost write.
+func TestInputAudit_TornTailIsTrimmedAndCoveredFromMoves(t *testing.T) {
+	dir := t.TempDir()
+	st, _ := state.Open(dir)
+	a := newInputAuditStore()
+	if err := a.load(st); err != nil {
+		t.Fatal(err)
+	}
+	a.begin(InputRecord{Session: "s", SHA256: textSHA256("one")}) // pending, whole
+	a.f.Close()
+	path := filepath.Join(dir, inputAuditFile)
+	whole, _ := os.ReadFile(path)
+	f, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	f.WriteString(`{"rec":{"id":"x-2","at":"2026-01-01T00:0`) // cut mid-line, no newline
+	f.Close()
+
+	b := newInputAuditStore()
+	loadedAt := time.Now().Add(time.Hour)
+	b.now = func() time.Time { return loadedAt }
+	if err := b.load(st); err != nil {
+		t.Fatalf("a torn tail stopped the service from starting: %v", err)
+	}
+	if got, _ := os.ReadFile(path); string(got) != string(whole) {
+		t.Errorf("the partial line was not trimmed away:\n%q\nwant\n%q", got, whole)
+	}
+	page := b.query(inputAuditQuery{Session: "s"})
+	if len(page.Records) != 1 || page.Records[0].Outcome != inputOutcomeUnknown {
+		t.Fatalf("records = %+v, want the one whole record, read as unknown", page.Records)
+	}
+	if !page.CoveredFrom.Equal(loadedAt.UTC()) {
+		t.Errorf("coveredFrom = %v, want %v — a reader must be told of the gap", page.CoveredFrom, loadedAt.UTC())
+	}
+	// and appending after it produces a log that loads clean
+	id := b.begin(InputRecord{Session: "s", SHA256: textSHA256("two")})
+	b.finish(id, "submitted")
+	b.f.Close()
+	c := newInputAuditStore()
+	if err := c.load(st); err != nil {
+		t.Fatalf("log after recovery does not load: %v", err)
+	}
+	if got := c.query(inputAuditQuery{Session: "s"}); len(got.Records) != 2 {
+		t.Errorf("after recovery %+v", got.Records)
+	}
+}
+
+// A final record that is whole but lost only its newline is kept, and the next
+// append starts a new line rather than running into it.
+func TestInputAudit_WholeRecordWithoutNewlineIsKept(t *testing.T) {
+	dir := t.TempDir()
+	st, _ := state.Open(dir)
+	a := newInputAuditStore()
+	if err := a.load(st); err != nil {
+		t.Fatal(err)
+	}
+	a.begin(InputRecord{Session: "s", SHA256: textSHA256("one")})
+	a.f.Close()
+	path := filepath.Join(dir, inputAuditFile)
+	raw, _ := os.ReadFile(path)
+	if err := os.WriteFile(path, []byte(strings.TrimSuffix(string(raw), "\n")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b := newInputAuditStore()
+	if err := b.load(st); err != nil {
+		t.Fatal(err)
+	}
+	b.begin(InputRecord{Session: "s", SHA256: textSHA256("two")})
+	b.f.Close()
+	c := newInputAuditStore()
+	if err := c.load(st); err != nil {
+		t.Fatalf("the appended record ran into the unterminated one: %v", err)
+	}
+	if got := c.query(inputAuditQuery{Session: "s"}); len(got.Records) != 2 {
+		t.Errorf("records = %+v, want both", got.Records)
+	}
+}
+
+// shortWriter writes half of a line and fails, as a full disk does.
+type shortWriter struct {
+	*os.File
+	failNext bool
+	noTrunc  bool
+}
+
+func (w *shortWriter) Write(p []byte) (int, error) {
+	if w.failNext {
+		w.failNext = false
+		n, _ := w.File.Write(p[:len(p)/2])
+		return n, errors.New("no space left on device")
+	}
+	return w.File.Write(p)
+}
+
+func (w *shortWriter) Truncate(n int64) error {
+	if w.noTrunc {
+		return errors.New("truncate refused")
+	}
+	return w.File.Truncate(n)
+}
+
+// A short write is taken back out of the file, so a later good append does not
+// bury a fragment mid-file, and the log still loads.
+func TestInputAudit_ShortWriteIsNotLeftInTheFile(t *testing.T) {
+	dir := t.TempDir()
+	st, _ := state.Open(dir)
+	a := newInputAuditStore()
+	if err := a.load(st); err != nil {
+		t.Fatal(err)
+	}
+	before := a.coveredFrom
+	sw := &shortWriter{File: a.f.(*os.File)}
+	a.f = sw
+	a.begin(InputRecord{Session: "s", SHA256: textSHA256("one")})
+	sw.failNext = true
+	time.Sleep(2 * time.Millisecond)
+	a.begin(InputRecord{Session: "s", SHA256: textSHA256("lost")})
+	if !a.coveredFrom.After(before) {
+		t.Errorf("coveredFrom did not move past the lost write")
+	}
+	a.begin(InputRecord{Session: "s", SHA256: textSHA256("three")})
+	sw.Close()
+
+	b := newInputAuditStore()
+	if err := b.load(st); err != nil {
+		t.Fatalf("a short write followed by a good append broke the log: %v", err)
+	}
+	got := b.query(inputAuditQuery{Session: "s"})
+	if len(got.Records) != 2 || got.Records[0].SHA256 != textSHA256("one") || got.Records[1].SHA256 != textSHA256("three") {
+		t.Errorf("records = %+v, want the first and third", got.Records)
+	}
+}
+
+// If the fragment cannot be taken out, the log stops taking appends, so the
+// fragment stays the final line and the next start trims it.
+func TestInputAudit_ShortWriteThatCannotBeTrimmedStopsAppending(t *testing.T) {
+	dir := t.TempDir()
+	st, _ := state.Open(dir)
+	a := newInputAuditStore()
+	if err := a.load(st); err != nil {
+		t.Fatal(err)
+	}
+	sw := &shortWriter{File: a.f.(*os.File), failNext: true, noTrunc: true}
+	a.f = sw
+	a.begin(InputRecord{Session: "s", SHA256: textSHA256("lost")})
+	a.begin(InputRecord{Session: "s", SHA256: textSHA256("after")})
+	if a.f != nil {
+		t.Errorf("the log kept taking appends after a fragment it could not remove")
+	}
+	b := newInputAuditStore()
+	if err := b.load(st); err != nil {
+		t.Fatalf("the fragment was not recoverable as a torn tail: %v", err)
+	}
+}
+
+// A newline-terminated bad line is still damage nobody here caused, mid-file or
+// last.
+func TestInputAudit_TerminatedCorruptLinesStillRefuse(t *testing.T) {
+	dir := t.TempDir()
+	st, _ := state.Open(dir)
+	a := newInputAuditStore()
+	if err := a.load(st); err != nil {
+		t.Fatal(err)
+	}
+	a.begin(InputRecord{Session: "s", SHA256: textSHA256("one")})
+	a.f.Close()
+	path := filepath.Join(dir, inputAuditFile)
+	raw, _ := os.ReadFile(path)
+	writeAuditLog(t, dir, string(raw)+"{torn\n"+string(raw))
+	if err := newInputAuditStore().load(st); err == nil {
+		t.Fatal("a corrupt mid-file line was accepted")
+	}
+	writeAuditLog(t, dir, string(raw)+"{torn\n")
+	if err := newInputAuditStore().load(st); err == nil {
+		t.Fatal("a newline-terminated corrupt final line was accepted")
+	}
+	if got, _ := os.ReadFile(path); string(got) != string(raw)+"{torn\n" {
+		t.Errorf("the log was modified: %q", got)
+	}
+}

@@ -41,6 +41,10 @@ record of that finding.
    recording began, the retention cut, the record cap's cut and any failed write.
    A window starting earlier than it cannot prove absence. A failed write never
    fails the input (the same stance as the history store).
+   The log also never costs availability: a partial final line (a crash or a
+   short write) is trimmed at load, `coveredFrom` moves to that moment, and a
+   failed write is cut back out of the file; a newline-terminated line that does
+   not parse still refuses to start (#331).
 5. **Both ends of a peer relay record.** The machine the call entered knows the
    authenticated principal; the owner knows the peer and its assertion, which it
    repeats only from a configured peer. The read is machine-local, with no
