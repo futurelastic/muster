@@ -126,6 +126,7 @@ GET /v1/machines[?verify=1]
                                 "modified": false, "time": "...",
                                 "go": "go1.26.5" },
                      "maxInputBytes": 1024,
+                     "address": "http://...",   ← a peer configured with several only
                      "peer": { "listsMeBack": true,
                                "grantsToMe": ["read", "send"],
                                "source": "observed",
@@ -305,6 +306,14 @@ directly; `/v1/machines` carries it per entry the same way it carries
 successful probe learned. Unlike `build`, an unanswered peer's entry needs
 no separate `known` flag — a real effective limit is never zero, so the
 zero value is unambiguous on its own as "not yet observed."
+
+**`address` on a `/v1/machines` item is the address this service is using to
+reach that machine** (muster #335): the one that answered last, for a peer
+configured with more than one. It is omitted — not empty — for self and for a
+peer with a single address, which has nothing to say its configuration does not
+already. A request is tried on the next address only when no connection could be
+made to the current one; once connected it is never replayed elsewhere, because
+the peer may already have acted on it.
 
 **`peer` on each `/v1/machines` item is this service's own standing on that
 machine** (muster #154) — the one credential a service holds that a peer

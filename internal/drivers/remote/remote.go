@@ -126,12 +126,18 @@ var ErrNoCallerAuthority = errors.New(
 // ordinary driver.Driver. The service registers it with RegisterPeerDriver
 // and never learns that it is remote — which is the design's whole claim.
 type Driver struct {
-	machine  fleet.MachineId
-	base     string
-	client   *http.Client
-	deadline time.Duration
-	margin   time.Duration
-	now      func() time.Time
+	machine fleet.MachineId
+	base    string
+	client  *http.Client
+
+	// bases is every address the peer is known by (#335), base first. A peer
+	// with one address leaves it holding just that one; see failover.go.
+	bases         []string
+	cur           int32 // index into bases of the last address that answered
+	connectBudget time.Duration
+	deadline      time.Duration
+	margin        time.Duration
+	now           func() time.Time
 
 	// identity is the credential THIS machine holds ON THIS PEER (§6).
 	//
@@ -345,6 +351,7 @@ func New(machine fleet.MachineId, base string, opts ...Option) *Driver {
 		now:      time.Now,
 		downPol:  defaultDownPolicy(),
 	}
+	d.bases = []string{d.base}
 	for _, o := range opts {
 		o(d)
 	}
@@ -1019,7 +1026,7 @@ func (d *Driver) doWithHeaders(ctx context.Context, req fleet.Request, method, p
 		rdr = bytes.NewReader(raw)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, method, d.base+path, rdr)
+	httpReq, err := http.NewRequestWithContext(ctx, method, d.current()+path, rdr)
 	if err != nil {
 		return fmt.Errorf("remote: building request: %w", err)
 	}
@@ -1042,7 +1049,7 @@ func (d *Driver) doWithHeaders(ctx context.Context, req fleet.Request, method, p
 	announceDeadline(ctx, httpReq.Header)
 
 	started := d.now()
-	resp, err := d.client.Do(httpReq)
+	resp, err := d.roundTrip(httpReq, path)
 	if err != nil {
 		// A transport failure is unreachable, never not_found. The peer did
 		// not answer, so nothing at all is known about the session
@@ -1517,7 +1524,7 @@ func (d *Driver) doWithKey(ctx context.Context, req fleet.Request, method, path 
 	if err != nil {
 		return fmt.Errorf("remote: encoding request: %w", err)
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, method, d.base+path, bytes.NewReader(raw))
+	httpReq, err := http.NewRequestWithContext(ctx, method, d.current()+path, bytes.NewReader(raw))
 	if err != nil {
 		return fmt.Errorf("remote: building request: %w", err)
 	}
@@ -1530,7 +1537,7 @@ func (d *Driver) doWithKey(ctx context.Context, req fleet.Request, method, path 
 	announceDeadline(ctx, httpReq.Header)
 
 	started := d.now()
-	resp, err := d.client.Do(httpReq)
+	resp, err := d.roundTrip(httpReq, path)
 	if err != nil {
 		return d.transportFailure(ctx, req, method, path, behalf, started, err)
 	}

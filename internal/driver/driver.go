@@ -809,6 +809,15 @@ type PeerStandingReporter interface {
 	PeerStanding() fleet.PeerStanding
 }
 
+// AddressReporter is another OPTIONAL capability, same shape: a driver fronting
+// a PEER that is configured with more than one address says which one it is
+// using right now — the last that answered (muster #335). ok is false for a
+// peer with a single address, which has nothing to say its configuration does
+// not already, and for every local driver.
+type AddressReporter interface {
+	Address() (addr string, ok bool)
+}
+
 // CapabilityRefresher is a driver that can re-probe its peer on demand —
 // what GET /v1/machines?verify=1 asks for, instead of the cached cycle.
 type CapabilityRefresher interface {

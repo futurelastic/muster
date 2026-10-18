@@ -33,6 +33,13 @@ type MachineInfo struct {
 	// §5.7's "absence and failure are different answers" holds here by
 	// construction rather than by an extra field.
 	MaxInputBytes int `json:"maxInputBytes,omitempty"`
+	// Address is the address this service is currently using to reach that
+	// machine — the last one that answered — and is present only when the peer
+	// is configured with more than one (muster #335), so a reader can tell
+	// which connection a machine that is known by several is on. Absent for
+	// self and for a peer with a single address. Until some address has
+	// answered it is the first one configured.
+	Address string `json:"address,omitempty"`
 	// Peer is this service's own standing on that machine — whether it lists
 	// this service back and what it grants the credential this service
 	// presents there (muster #154). Federation is two hand-kept halves

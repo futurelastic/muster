@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io/fs"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -26,9 +27,10 @@ type testPrincipal struct {
 }
 
 type testPeer struct {
-	Machine string `json:"machine"`
-	URL     string `json:"url"`
-	Token   string `json:"token,omitempty"`
+	Machine string   `json:"machine"`
+	URL     string   `json:"url,omitempty"`
+	URLs    []string `json:"urls,omitempty"`
+	Token   string   `json:"token,omitempty"`
 }
 
 const supervisorList = "read,create,send,interrupt,close,rename,discard,keys"
@@ -443,8 +445,9 @@ func TestDoctorBindAddr(t *testing.T) {
 		"10.0.0.5:9000":  statusPass,
 		"127.0.0.1:9000": statusPass,
 	}
+	everythingHere := func(net.IP) bool { return true }
 	for addr, want := range cases {
-		row := checkBind(addr)
+		row := checkBindWith(addr, everythingHere)
 		if row.Status != want {
 			t.Errorf("%q: got %+v, want %s", addr, row, want)
 		}
@@ -454,6 +457,35 @@ func TestDoctorBindAddr(t *testing.T) {
 	}
 	if row := checkBind("127.0.0.1:9000"); !strings.Contains(row.Summary, "loopback-only") {
 		t.Errorf("loopback bind must say so: %+v", row)
+	}
+}
+
+// #335: an entry whose address is not on this machine is waited for, and the
+// row says which — by position, never by echoing the address.
+func TestDoctorBindAddrReportsWaitingEntries(t *testing.T) {
+	onlyB := func(ip net.IP) bool { return ip.Equal(net.ParseIP("10.2.2.5")) }
+	row := checkBindWith("10.1.1.5:9000,10.2.2.5:9000", onlyB)
+	if row.Status != statusPass {
+		t.Errorf("one of two addresses absent is the expected state, not a warning: %+v", row)
+	}
+	if !strings.Contains(row.Summary, "1 of them waiting") {
+		t.Errorf("summary must count the waiting entry: %+v", row)
+	}
+	if !strings.Contains(row.Detail, "entry 1 is not assigned") || !strings.Contains(row.Detail, "entry 2 is assigned here") {
+		t.Errorf("detail must say which entry waits and which binds: %+v", row)
+	}
+	if strings.Contains(row.Summary+row.Detail, "10.1.1.5") || strings.Contains(row.Summary+row.Detail, "10.2.2.5") {
+		t.Errorf("row echoes an address: %+v", row)
+	}
+
+	none := checkBindWith("10.1.1.5:9000,10.2.2.5:9000", func(net.IP) bool { return false })
+	if none.Status != statusWarn || !strings.Contains(none.Summary, "none of the routable ones") {
+		t.Errorf("every routable address absent must warn: it is reachable only from itself: %+v", none)
+	}
+
+	// A hostname cannot be judged from the interface list: not waiting.
+	if row := checkBindWith("host.example:9000", func(net.IP) bool { return false }); row.Status != statusPass {
+		t.Errorf("a hostname entry is not judged absent: %+v", row)
 	}
 }
 
@@ -531,6 +563,46 @@ func TestDoctorPeerReachable(t *testing.T) {
 	}
 	if row := check(ok.URL, true); row.Status != statusUnknown {
 		t.Fatalf("offline: got %+v", row)
+	}
+}
+
+// #335: a peer known by several addresses is probed on each in order. An
+// absent one before the answering one is detail, not a failure; every one
+// absent is a failure naming how many.
+func TestDoctorPeerWithSeveralAddresses(t *testing.T) {
+	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"build":{"known":false}}`))
+	}))
+	defer ok.Close()
+	closed := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	closedURL := closed.URL
+	closed.Close()
+
+	check := func(urls ...string) []doctorRow {
+		cfg := writeTestConfig(t, t.TempDir(), []testPrincipal{
+			{Name: "system:m1", Token: "s", Grants: grants("read")},
+		}, []testPeer{{Machine: "m2", URLs: urls, Token: "peer-secret"}})
+		env := testDoctorEnv(map[string]string{"FLEET_MACHINE": "m1", "FLEET_CONFIG": cfg, "FLEET_RUNTIME": "stub"})
+		return runChecks(context.Background(), env)
+	}
+
+	rows := check(closedURL, ok.URL)
+	if row := rowByID(t, rows, "peer.m2.url"); row.Status != statusPass || !strings.Contains(row.Summary, "2 addresses") {
+		t.Errorf("url row: %+v", row)
+	}
+	row := rowByID(t, rows, "peer.m2.reachable")
+	if row.Status == statusFail || !strings.Contains(row.Summary, "address 2 of 2") || !strings.Contains(row.Detail, "address 1") {
+		t.Errorf("an absent first address must be detail, the second must answer: %+v", row)
+	}
+	for _, leak := range []string{ok.URL, closedURL, strings.TrimPrefix(ok.URL, "http://")} {
+		if strings.Contains(row.Summary+row.Detail, leak) {
+			t.Errorf("row echoes an address %q: %+v", leak, row)
+		}
+	}
+
+	rows = check(closedURL, closedURL)
+	if row := rowByID(t, rows, "peer.m2.reachable"); row.Status != statusFail || !strings.Contains(row.Summary, "all 2 addresses") {
+		t.Errorf("none answering: %+v", row)
 	}
 }
 

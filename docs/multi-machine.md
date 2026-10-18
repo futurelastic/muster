@@ -61,6 +61,54 @@ Both reading `ok` is the entire handshake. If machine-b reads `unreachable`,
 the bind address or the network path is wrong — **not** the token: a bad
 credential is a `401`, not a silence.
 
+### A machine that is known by more than one address
+
+Some machines have a different fixed address depending on how they are
+connected — a laptop that joins the private network through one of two
+connections gets one address on each, and only one of them exists at a time.
+Both sides handle that without anyone editing configuration when the laptop
+moves.
+
+**On the machine itself,** list every address in `FLEET_ADDR`, comma-separated:
+
+```sh
+export FLEET_ADDR=10.8.0.12:9000,10.9.0.12:9000
+```
+
+Each entry is *wanted*, not *required*. The service binds the ones that exist
+now and keeps retrying the others (every few seconds); it logs a line when an
+entry is waiting and another when it binds. If an address later goes away, that
+listener is closed and the entry goes back to waiting, so nothing is left
+holding an address no one can reach. The service starts as long as loopback
+binds — which is always mandatory and never waits.
+
+Only "that address is not on this machine" is waited out. An entry that is not
+`host:port`, a port another process already holds, a permission refusal and
+loopback itself still stop the service at startup, exactly as before. The
+rule against `0.0.0.0` is unchanged: the answer to an address that changes is
+several *specific* addresses, never a wildcard. `muster doctor` (row
+`bind.addr`) says how many entries will bind now and how many are waiting.
+
+**On the machines that call it,** give the peer several URLs, in the order to
+try them:
+
+```json
+{ "machine": "laptop", "urls": ["http://10.8.0.12:9000", "http://10.9.0.12:9000"], "token": "…" }
+```
+
+(`url` still works and means one address; setting both `url` and `urls` on one
+entry is refused. In `FLEET_PEERS`, name the machine more than once:
+`laptop=http://10.8.0.12:9000,laptop=http://10.9.0.12:9000`.)
+
+A call goes to the address that answered last, and falls over to the next one
+**only when no connection could be made** — refused, no route, or no answer
+within a few seconds. Once a connection exists the call is never retried on
+another address: the peer may already have acted on it, and running a create
+twice is worse than reporting it unreachable. A peer on neither address is
+`unreachable` exactly as before. `GET /v1/machines` shows the address in use
+(`address`) for a peer configured with more than one, and `muster doctor` probes
+each in order and names, by position, the one that answered.
+
 > **The two credentials are not symmetric.** The token machine-a presents for a
 > peer is *machine-a's identity on machine-b*, not machine-b's identity here.
 > They are different secrets, and conflating them is how a fleet quietly ends up

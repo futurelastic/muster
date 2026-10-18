@@ -19,7 +19,13 @@
 //	                       added automatically on the same port whenever it
 //	                       is not already covered — a service is not
 //	                       diagnosable if it can be cut off from its own
-//	                       machine by the failure being diagnosed.
+//	                       machine by the failure being diagnosed. Each entry
+//	                       is wanted, not required (#335): one whose address
+//	                       is not on this machine yet is retried and bound
+//	                       when it appears, and a bound one whose address
+//	                       goes away is closed and waits again. Only that
+//	                       case waits — a malformed entry, a port in use,
+//	                       and loopback still stop startup.
 //	FLEET_RUNTIME          "tmux" (default), "stub", or "none": no primary
 //	                       local driver, so the only local runtime is
 //	                       whatever FLEET_RUNTIME_OPENCODE enables (or none,
@@ -81,7 +87,10 @@
 //	                       statically configured; there is no discovery
 //	                       (§7.2), and the address is one the OPERATOR has
 //	                       confirmed reachable from THIS machine — never the
-//	                       peer's own idea of its name.
+//	                       peer's own idea of its name. A machine named more
+//	                       than once is one peer with several addresses,
+//	                       tried in order, the last that answered first
+//	                       (#335): "other=http://a:1,other=http://b:1".
 //	FLEET_STATE_DIR        directory for durable state: idempotency keys
 //	                       (§10) and the event sequence (§7.3). Absent means
 //	                       in-memory only, which is honest for a throwaway
@@ -770,18 +779,12 @@ func main() {
 	// §5.7 requires it to surface as a source reporting unreachable, not to
 	// vanish from the fleet because it happened to be down at startup. So
 	// registration never probes and never fails on reachability.
-	peerSpecs := splitList(os.Getenv("FLEET_PEERS"))
-	if cfgFile != nil && len(peerSpecs) == 0 {
-		for _, p := range cfgFile.Peers {
-			peerSpecs = append(peerSpecs, p.Machine+"="+p.URL)
-		}
+	peerList, err := resolvePeers(os.Getenv("FLEET_PEERS"), cfgFile)
+	if err != nil {
+		log.Fatalf("muster: bad peer list: %v", err)
 	}
-	for _, spec := range peerSpecs {
-		name, base, ok := strings.Cut(spec, "=")
-		if !ok || name == "" || base == "" {
-			log.Fatalf("muster: bad FLEET_PEERS entry %q (want name=url)", spec)
-		}
-		machine := fleet.MachineId(strings.TrimSpace(name))
+	for _, pe := range peerList {
+		machine := pe.machine
 		if machine == self {
 			log.Fatalf("muster: peer %q is this machine; fan-out is one hop and peers never recurse (§13.1)", machine)
 		}
@@ -797,11 +800,16 @@ func main() {
 		// own credential on us — conflating those is how a fleet ends up
 		// with one shared secret again by accident.
 		if cfgFile != nil {
-			if _, tok, ok := cfgFile.peerFor(machine); ok && tok != "" {
+			if tok, ok := cfgFile.peerTokenFor(machine); ok && tok != "" {
 				opts = append(opts, remote.WithIdentity(tok))
 			}
 		}
-		peer := remote.New(machine, strings.TrimSpace(base), opts...)
+		// More than one address: the first is the ordinary one, the rest are
+		// tried only when it cannot be connected to (#335).
+		if len(pe.urls) > 1 {
+			opts = append(opts, remote.WithFallbackURLs(pe.urls[1:]...))
+		}
+		peer := remote.New(machine, pe.urls[0], opts...)
 		if err := svc.RegisterPeerDriver(machine, peer); err != nil {
 			log.Fatalf("muster: registering peer %q: %v", machine, err)
 		}
@@ -926,30 +934,21 @@ func main() {
 	addrs = withLoopback(addrs)
 
 	// Listen on every configured address, and always on loopback (see
-	// withLoopback). The first bind failure is fatal: a service that came up
-	// on some of its addresses is a service whose reachability depends on
-	// which client you ask, and that is the ambiguity F36 was about.
+	// withLoopback). Each entry is wanted, not required (#335): one whose
+	// address is not on this machine yet waits and is bound when it appears,
+	// so a machine known by several addresses, only some present at a time,
+	// stays reachable on whichever exists. Every other bind failure is still
+	// fatal at startup: a service that came up on some of its addresses
+	// because the rest were misconfigured is a service whose reachability
+	// depends on which client you ask, and that is the ambiguity F36 was about.
 	srv := &http.Server{Handler: mux}
-	var listeners []net.Listener
-	for _, a := range addrs {
-		ln, err := net.Listen("tcp", a)
-		if err != nil {
-			for _, prev := range listeners {
-				_ = prev.Close()
-			}
-			log.Fatalf("muster: listen %s: %v", a, err)
-		}
-		listeners = append(listeners, ln)
+	listeners := newListenerSet(srv, func(ln net.Listener) {
 		log.Printf("muster: listening on %s (machine=%s runtime=%s)", ln.Addr(), self, runtimeLabel(runtimeID))
+	})
+	if err := listeners.start(addrs); err != nil {
+		log.Fatalf("muster: %v", err)
 	}
-
-	for _, ln := range listeners {
-		go func(ln net.Listener) {
-			if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
-				log.Fatalf("muster: serve %s: %v", ln.Addr(), err)
-			}
-		}(ln)
-	}
+	go listeners.run(addrRetryInterval)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
@@ -957,6 +956,7 @@ func main() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	listeners.stop()
 	_ = srv.Shutdown(ctx)
 
 	// #185: closing a module's stdin makes it drop its connections and keep

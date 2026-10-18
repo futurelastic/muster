@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	fleet "github.com/futurelastic/muster"
 	"github.com/futurelastic/muster/internal/drivers/opencode"
@@ -39,8 +40,16 @@ type fileConfig struct {
 	// again by accident.
 	Peers []struct {
 		Machine string `json:"machine"`
-		URL     string `json:"url"`
-		Token   string `json:"token"`
+		// URL is the one address this machine reaches that peer at.
+		// URLs is the same for a peer that is known by several (muster
+		// #335): a machine that joins the network through one of two
+		// connections has a different fixed address on each, and only one
+		// exists at a time. They are tried in order, the last one that
+		// answered first. Set one or the other — both is refused, because
+		// which comes first would be a guess.
+		URL   string   `json:"url"`
+		URLs  []string `json:"urls,omitempty"`
+		Token string   `json:"token"`
 	} `json:"peers"`
 
 	// TrustRoots are the directories under which #47's trust seeding runs:
@@ -227,13 +236,72 @@ func knownRuntimeIDs() []fleet.RuntimeId {
 	return []fleet.RuntimeId{tmux.DefaultRuntime, opencode.DefaultRuntime, "stub"}
 }
 
-func (c *fileConfig) peerFor(machine fleet.MachineId) (url, token string, ok bool) {
+// peerTokenFor is the credential this machine presents on a configured peer.
+func (c *fileConfig) peerTokenFor(machine fleet.MachineId) (token string, ok bool) {
 	for _, p := range c.Peers {
 		if fleet.MachineId(p.Machine) == machine {
-			return p.URL, p.Token, true
+			return p.Token, true
 		}
 	}
-	return "", "", false
+	return "", false
+}
+
+// peerEntry is one configured peer: a machine id and every address it is known
+// by, in the order they are to be tried. One address is the ordinary case.
+type peerEntry struct {
+	machine fleet.MachineId
+	urls    []string
+}
+
+// resolvePeers is the single reading of the peer list, shared by the service
+// and by `muster doctor` so the two cannot disagree about it. FLEET_PEERS wins
+// when set; the config file's peers are used otherwise.
+//
+// In FLEET_PEERS a machine named more than once is ONE peer with several
+// addresses ("other=http://a:1,other=http://b:1"), in the order given — the
+// env spelling of the file's urls. In the file an entry carries either url or
+// urls, never both. A machine listed in two separate file entries is left for
+// registration to refuse, as it always has been.
+func resolvePeers(peersEnv string, cfg *fileConfig) ([]peerEntry, error) {
+	var out []peerEntry
+	if specs := splitList(peersEnv); len(specs) > 0 {
+		index := map[fleet.MachineId]int{}
+		for i, spec := range specs {
+			name, base, ok := strings.Cut(spec, "=")
+			name, base = strings.TrimSpace(name), strings.TrimSpace(base)
+			if !ok || name == "" || base == "" {
+				return out, fmt.Errorf("peer entry %d is not name=url", i+1)
+			}
+			m := fleet.MachineId(name)
+			if at, seen := index[m]; seen {
+				out[at].urls = append(out[at].urls, base)
+				continue
+			}
+			index[m] = len(out)
+			out = append(out, peerEntry{machine: m, urls: []string{base}})
+		}
+		return out, nil
+	}
+	if cfg == nil {
+		return nil, nil
+	}
+	for i, p := range cfg.Peers {
+		name := strings.TrimSpace(p.Machine)
+		if p.URL != "" && len(p.URLs) > 0 {
+			return out, fmt.Errorf("peer entry %d sets both url and urls — use urls alone, in the order to try them", i+1)
+		}
+		var urls []string
+		for _, u := range append([]string{p.URL}, p.URLs...) {
+			if u = strings.TrimSpace(u); u != "" {
+				urls = append(urls, u)
+			}
+		}
+		if name == "" || len(urls) == 0 {
+			return out, fmt.Errorf("peer entry %d is not name=url", i+1)
+		}
+		out = append(out, peerEntry{machine: fleet.MachineId(name), urls: urls})
+	}
+	return out, nil
 }
 
 // selfCredential returns the token this machine has assigned its OWN system

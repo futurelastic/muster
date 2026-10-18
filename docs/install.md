@@ -71,7 +71,10 @@ order of this page and the order of its output are the same.
    unconfigured service is reachable only from its own machine, and it has no
    stable health URL either. Never `0.0.0.0` — the service reads paths and, when
    permitted, starts processes. Loopback is added on the same port
-   automatically. Row: `bind.addr`.
+   automatically. A machine known by several addresses lists them all,
+   comma-separated; the ones not present yet are waited for rather than
+   refused (see [Multi-machine](multi-machine.md#a-machine-that-is-known-by-more-than-one-address)).
+   Row: `bind.addr`.
 
 4. **Create the state directory**, mode `0700` — `FLEET_STATE_DIR`. Without it,
    idempotency keys and the event sequence live in memory and are lost on
@@ -150,7 +153,8 @@ order of this page and the order of its output are the same.
      ```
 
    The address is one **you** confirmed reachable from a, never b's own idea of
-   its name. Rows: `peer.self-credential`, `peer.<m>.url`,
+   its name. A peer known by several addresses takes `"urls": [...]` in place of
+   `"url"`, tried in order. Rows: `peer.self-credential`, `peer.<m>.url`,
    `peer.<m>.credential`, `peer.<m>.reachable`, `peer.<m>.grants`.
 
 7. **Inbox delivery, if this machine has an index writer** —
