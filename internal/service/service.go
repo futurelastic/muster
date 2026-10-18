@@ -104,6 +104,10 @@ type Service struct {
 	// (muster #179) — see history.go.
 	history *historyStore
 
+	// inputAudit keeps one record per /input call for a bounded time (muster
+	// #330) — see inputaudit.go.
+	inputAudit *inputAuditStore
+
 	// sweepMu guards the background re-listing a local session.closed event
 	// asks for (requestSweep).
 	sweepMu    sync.Mutex
@@ -249,6 +253,9 @@ func NewWithState(self fleet.MachineId, st *state.Store) (*Service, error) {
 	if err := svc.history.load(st); err != nil {
 		return nil, err
 	}
+	if err := svc.inputAudit.load(st); err != nil {
+		return nil, err
+	}
 
 	var seq eventSequence
 	found, err := st.Load("events", &seq)
@@ -280,14 +287,15 @@ func newService(self fleet.MachineId) *Service {
 		// compare against. Derived from startedAt rather than a random id
 		// — no dependency needed for a UUID, and it is human-legible in
 		// GET /v1/health.
-		epoch:     now.UTC().Format(time.RFC3339Nano),
-		startedAt: now,
-		build:     fleet.SelfBuild(),
-		local:     make(map[fleet.RuntimeId]driver.Driver),
-		peers:     make(map[fleet.MachineId]driver.Driver),
-		events:    newHub(self, now.UTC().Format(time.RFC3339Nano)),
-		labels:    newLabelStore(),
-		history:   newHistoryStore(self),
+		epoch:      now.UTC().Format(time.RFC3339Nano),
+		startedAt:  now,
+		build:      fleet.SelfBuild(),
+		local:      make(map[fleet.RuntimeId]driver.Driver),
+		peers:      make(map[fleet.MachineId]driver.Driver),
+		events:     newHub(self, now.UTC().Format(time.RFC3339Nano)),
+		labels:     newLabelStore(),
+		history:    newHistoryStore(self),
+		inputAudit: newInputAuditStore(),
 		// #130: every instance starts with the shipped default in force,
 		// not a zero value a caller could mistake for "no limit" — see the
 		// field's own doc comment.

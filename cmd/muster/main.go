@@ -756,6 +756,13 @@ func main() {
 		svc.SetClosedRetention(time.Duration(cfgFile.ClosedRetentionDays) * 24 * time.Hour)
 		log.Printf("muster: closed-session records kept %d days (#179)", cfgFile.ClosedRetentionDays)
 	}
+	if cfgFile != nil && cfgFile.InputAuditRetentionDays != 0 {
+		if cfgFile.InputAuditRetentionDays < 0 {
+			log.Fatalf("muster: inputAuditRetentionDays must be positive, got %d", cfgFile.InputAuditRetentionDays)
+		}
+		svc.SetInputAuditRetention(time.Duration(cfgFile.InputAuditRetentionDays) * 24 * time.Hour)
+		log.Printf("muster: input audit records kept %d days (#330)", cfgFile.InputAuditRetentionDays)
+	}
 
 	// --- peers ---------------------------------------------------------
 	//

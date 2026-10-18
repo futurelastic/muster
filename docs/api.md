@@ -96,6 +96,7 @@ every configured peer, exactly one hop — peers never recurse.
 | `GET` | `…/{id}/turns` | What the session's agent wrote — assistant turns only | `send` | yes |
 | `GET` | `…/{id}/composer` | The unsent text in the composer, with the digest `discard` accepts | `read` ⚠️ | yes |
 | `POST` | `…/{id}/input` | Deliver text to the composer | `send` | yes |
+| `GET` | `/v1/machines/{machine}/input-audit` | Which principal sent which text (by hash) to which session, and when | `read` | this machine only |
 | `POST` | `…/{id}/respond` | Answer a prompt the session is blocked on | `send` | yes |
 | `POST` | `…/{id}/keys` | Deliver one raw key to the screen (incl. `BTab`: cycles the permission mode) | `keys` ⚠️ | yes |
 | `POST` | `…/{id}/interrupt` | The equivalent of Ctrl-C | `interrupt` | yes |
@@ -296,6 +297,48 @@ What environment variables and `PATH` the session's process actually received �
 names only, never values. `{known: false}` is an ordinary `200`, not an error.
 This exists because a session that inherits the wrong `PATH` fails in a way
 nothing else in the API can explain.
+
+### `GET /v1/machines/{machine}/input-audit`
+
+Parameters: at least one of `session`, `sha256` (64 lowercase hex: the sha256 of
+the message text) or `since` (RFC 3339); optionally `until`, `principal` and
+`limit` (default 200, at most 1000). Machine-local: `{machine}` must be the
+machine you are talking to. Needs `read` (#330).
+
+The answer to "was this prompt typed by a person, or sent by another agent
+through `input`?" — a question the session's own transcript cannot answer, since
+it marks every user turn the same way. Every `input` that reaches a driver
+leaves one record: `id`, `at`, `principal` (who authenticated; a relayed call
+reads `<asserted principal> via <peer>`), `machine`, `session`, `sha256` and
+`bytes` of the text exactly as sent (never the text), `humanRelay`, `route`,
+`direction` and `outcome`.
+
+- **`humanRelay`** is the fact the service itself computed: the caller holds the
+  `human-relay` grant (or a configured peer asserted it did). `true` means the
+  message was delivered unlabelled as a person's own words; `false` means it
+  was labelled as an agent's. Nothing the caller sends can set it.
+- **`direction`**: `local` (this machine owns the session), `relayed-out` (this
+  machine forwarded the call to a peer) or `relayed-in` (a configured peer
+  forwarded it here). A relayed call is recorded on both machines; ask the
+  machine it entered for the original principal.
+- **`outcome`** is the receipt's (`submitted`, `queued`, `refused`, `unknown`,
+  …), `error` when the driver failed after the call was attempted (the text may
+  have arrived), or `unknown` for a call the process died in the middle of.
+  A request refused for its own shape (empty text, unknown field) never reached
+  a driver and leaves no record.
+
+Read `coveredFrom` before trusting an empty answer: it is the earliest instant
+for which this machine's record is complete (when recording began, the
+retention cut, or a lost write). A window that starts before it cannot prove
+that nobody sent a text. `truncated` means more records matched than `limit`;
+the newest are returned. `durable: false` means the machine has no state
+directory and the records go with the process.
+
+Records are kept for `inputAuditRetentionDays` (config file, default 14), in
+`input-audit.jsonl` in the state directory, up to 100000 of them. The log is
+written before the driver is asked to deliver and completed after, so a crash
+mid-delivery leaves an `unknown` record rather than none. The session is
+recorded under the id the caller used; a query uses the same id.
 
 ### `GET /v1/machines/{machine}/sessions/{id}/turns`
 

@@ -499,6 +499,37 @@ keeps records with `closedAt` at or after it; a malformed value is
 proxying service **must** report that source `degraded` with no items, never as
 an `ok` peer with nothing closed.
 
+#### Input audit
+
+```
+GET /v1/machines/{machine}/input-audit?session=&sha256=&since=&until=&principal=&limit=
+→ 200 {records[], truncated?, coveredFrom, durable}
+```
+
+One record per `input` call that reached a driver (muster #330): `id`, `at`,
+`principal`, `machine`, `session`, `sha256` and `bytes` of the delivered text
+(never the text), `humanRelay`, `route`, `direction`, `outcome`. It exists so a
+client can show that a prompt in a session was, or was not, sent by an agent
+principal: the engine's transcript marks every user turn alike, and the sender
+controls any label in the text.
+
+- `humanRelay` is the service's own finding (§5, `human-relay`), never a caller
+  statement. `principal` is the credential that authenticated; for a relayed
+  call it is `<asserted principal> via <relaying peer>`, and an assertion from a
+  caller that is not a configured peer is not repeated.
+- `direction` is `local`, `relayed-out` or `relayed-in`. A relayed call is
+  recorded on both ends; the machine it entered holds the original principal.
+- A record is appended **before** the driver is asked to deliver and completed
+  after. A call the process died in the middle of reads `outcome: "unknown"`; a
+  driver failure after the attempt reads `error`. A request refused for its own
+  shape never reached a driver and leaves no record.
+- `coveredFrom` is the earliest instant the record is complete for. An empty
+  answer to a window that begins before it is **not** an absence proof. It moves
+  forward with retention, with a record cap, and with any write the service
+  failed to make; a failed write never fails the input.
+- The route is machine-local (`400 invalid` for another machine), needs `read`,
+  and requires at least one of `session`, `sha256` or `since`.
+
 ### 3.3 Deadlines
 
 Every request carries an effective deadline:
@@ -2433,7 +2464,9 @@ ordering is wrong rather than handing you a cursor that would skip.
   new grant in the model plus a migration for every existing principal, which
   is not worth buying against a distinction nothing has yet been harmed by
   (muster #81).
-- Every remote-originated mutation is logged: actor, verb, target, outcome.
+- Every remote-originated mutation is logged: actor, verb, target, outcome. Every
+  `input` is additionally recorded durably, with a hash of its text, and can be
+  read back by a `read` principal (§3.2, *Input audit*; muster #330).
 
 ## 6. What this API deliberately lacks
 

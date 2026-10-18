@@ -142,6 +142,13 @@ type fileConfig struct {
 	// records live in this machine's state directory and are read from it.
 	// A negative value is refused at startup.
 	ClosedRetentionDays int `json:"closedRetentionDays,omitempty"`
+
+	// InputAuditRetentionDays is how long this machine keeps its record of each
+	// /input call (muster #330, GET /v1/machines/{machine}/input-audit). Absent
+	// or zero means the shipped default (service.DefaultInputAuditRetention, 14
+	// days). Config-file-only and per machine, like ClosedRetentionDays. A
+	// negative value is refused at startup.
+	InputAuditRetentionDays int `json:"inputAuditRetentionDays,omitempty"`
 }
 
 func loadConfig(path string) (*fileConfig, error) {
