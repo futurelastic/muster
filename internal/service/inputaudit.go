@@ -2,10 +2,12 @@ package service
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -52,6 +54,16 @@ import (
 // A write that fails never fails the input: the failure is logged and the
 // store's coveredFrom moves to the failure, so a reader sees a gap instead of a
 // silent claim of completeness.
+
+// auditLogFile is the open log. An interface so a test can make a write end
+// short; in service it is always an *os.File.
+type auditLogFile interface {
+	io.Writer
+	Sync() error
+	Truncate(size int64) error
+	Stat() (os.FileInfo, error)
+	Close() error
+}
 
 // inputAuditFile is this store's log in the state directory.
 const inputAuditFile = "input-audit.jsonl"
@@ -145,7 +157,7 @@ type InputAuditPage struct {
 type inputAuditStore struct {
 	mu          sync.Mutex
 	dir         string // empty: in memory only
-	f           *os.File
+	f           auditLogFile
 	recs        []*InputRecord // oldest first
 	byID        map[string]*InputRecord
 	retention   time.Duration
@@ -180,36 +192,29 @@ func (a *inputAuditStore) load(st *state.Store) error {
 	a.dir = st.Dir()
 	path := filepath.Join(a.dir, inputAuditFile)
 
-	if raw, err := os.Open(path); err == nil {
-		defer raw.Close()
-		sc := bufio.NewScanner(raw)
-		sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
-		n := 0
-		var begin time.Time
-		for sc.Scan() {
-			n++
-			if len(strings.TrimSpace(sc.Text())) == 0 {
-				continue
-			}
-			var ln inputAuditLine
-			if err := json.Unmarshal(sc.Bytes(), &ln); err != nil {
-				return fmt.Errorf("input audit: %s line %d is corrupt (not overwriting): %w", inputAuditFile, n, err)
-			}
-			if ln.Begin != nil {
-				begin = *ln.Begin
-			}
-			if ln.Rec != nil {
-				a.adoptLocked(*ln.Rec)
-			}
-		}
-		if err := sc.Err(); err != nil {
-			return fmt.Errorf("input audit: reading %s: %w", inputAuditFile, err)
-		}
+	torn, unterminated, begin, found, err := a.readLogLocked(path)
+	if err != nil {
+		return err
+	}
+	if found {
 		if !begin.IsZero() {
 			a.coveredFrom = begin
 		}
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("input audit: %w", err)
+		if torn >= 0 {
+			// The process died (or the disk filled) in the middle of a write. The
+			// partial line is not evidence of anything — it was never a whole
+			// record — but what it was the start of is lost, so the log cannot
+			// vouch for the time from here. The moment this machine noticed is
+			// the honest bound: the lost record's own time is unreadable, and
+			// nothing has been recorded since the service went down.
+			if err := os.Truncate(path, torn); err != nil {
+				return fmt.Errorf("input audit: %s ends in a partial line and could not be trimmed: %w", inputAuditFile, err)
+			}
+			if now := a.now(); now.After(a.coveredFrom) {
+				a.coveredFrom = now
+			}
+			log.Printf("input audit: %s ended in a partial line (a write that did not finish); trimmed it, reads now report coveredFrom %s", inputAuditFile, a.coveredFrom.UTC().Format(time.RFC3339))
+		}
 	} else {
 		// A first run: recording begins now, and the file says so.
 		if err := a.rewriteLocked(); err != nil {
@@ -229,7 +234,74 @@ func (a *inputAuditStore) load(st *state.Store) error {
 	if a.f != nil {
 		return nil // the first-run rewrite already opened it
 	}
-	return a.openLocked()
+	if err := a.openLocked(); err != nil {
+		return err
+	}
+	if unterminated {
+		// A whole record that lost only its newline: end the line, or the next
+		// append would run into it and make the two unreadable.
+		if _, err := a.f.Write([]byte{'\n'}); err != nil {
+			return fmt.Errorf("input audit: %w", err)
+		}
+	}
+	return nil
+}
+
+// readLogLocked adopts every record in the log at path. found is false when
+// there is no log. torn is the byte offset where a partial final line begins
+// (-1 when the log ends cleanly); unterminated is true when the final line is a
+// whole record with no newline after it.
+//
+// Only the final line can be torn: a write appends one newline-terminated line,
+// so a crash or a short write leaves a tail with no newline. Any other line
+// that does not parse — in particular a newline-terminated one — is damage this
+// code did not cause, and stays an error the operator sees.
+func (a *inputAuditStore) readLogLocked(path string) (torn int64, unterminated bool, begin time.Time, found bool, err error) {
+	torn = -1
+	raw, err := os.Open(path)
+	if os.IsNotExist(err) {
+		return torn, false, begin, false, nil
+	}
+	if err != nil {
+		return torn, false, begin, false, fmt.Errorf("input audit: %w", err)
+	}
+	defer raw.Close()
+	rd := bufio.NewReaderSize(raw, 64*1024)
+	var off int64
+	for n := 1; ; n++ {
+		line, rerr := rd.ReadBytes('\n')
+		if rerr != nil && rerr != io.EOF {
+			return torn, false, begin, true, fmt.Errorf("input audit: reading %s: %w", inputAuditFile, rerr)
+		}
+		if len(line) == 0 {
+			break
+		}
+		start := off
+		off += int64(len(line))
+		terminated := line[len(line)-1] == '\n'
+		if len(bytes.TrimSpace(line)) > 0 {
+			var ln inputAuditLine
+			if jerr := json.Unmarshal(line, &ln); jerr != nil {
+				if terminated {
+					return torn, false, begin, true, fmt.Errorf("input audit: %s line %d is corrupt (not overwriting): %w", inputAuditFile, n, jerr)
+				}
+				return start, false, begin, true, nil // the torn tail; nothing follows it
+			}
+			if ln.Begin != nil {
+				begin = *ln.Begin
+			}
+			if ln.Rec != nil {
+				a.adoptLocked(*ln.Rec)
+			}
+			unterminated = !terminated
+		} else if !terminated {
+			return start, false, begin, true, nil // trailing blanks with no newline: a torn tail too
+		}
+		if rerr == io.EOF {
+			break
+		}
+	}
+	return torn, unterminated, begin, true, nil
 }
 
 // adoptLocked folds one log line in: a later line with the same id replaces the
@@ -302,8 +374,8 @@ func (a *inputAuditStore) appendLocked(r InputRecord, sync bool, now time.Time) 
 		raw = append(raw, '\n')
 		if a.f == nil {
 			err = fmt.Errorf("log is not open")
-		} else if _, err = a.f.Write(raw); err == nil && sync {
-			err = a.f.Sync()
+		} else {
+			err = a.writeLineLocked(raw, sync)
 		}
 	}
 	if err != nil {
@@ -312,6 +384,32 @@ func (a *inputAuditStore) appendLocked(r InputRecord, sync bool, now time.Time) 
 			a.coveredFrom = now
 		}
 	}
+}
+
+// writeLineLocked appends one whole line, and leaves no part of it behind when
+// that fails. A short write (a full disk) that stayed in the file would sit
+// mid-file once a later append succeeded, and load refuses a corrupt line that
+// is not the last one — the service would not start. So the file is put back
+// to the length it had; if even that cannot be done the log is closed, so no
+// later append can bury the fragment, and the next start trims it as a torn
+// tail.
+func (a *inputAuditStore) writeLineLocked(raw []byte, sync bool) error {
+	fi, serr := a.f.Stat()
+	_, err := a.f.Write(raw)
+	if err != nil {
+		if serr == nil {
+			serr = a.f.Truncate(fi.Size())
+		}
+		if serr != nil {
+			a.f.Close()
+			a.f = nil
+		}
+		return err
+	}
+	if sync {
+		return a.f.Sync()
+	}
+	return nil
 }
 
 // pruneLocked drops records past retention or past the cap and, at most once an
