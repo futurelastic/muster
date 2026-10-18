@@ -439,16 +439,35 @@ func runChecks(ctx context.Context, env doctorEnv) []doctorRow {
 				Detail:  "fan-out is one hop and peers never recurse (§13.1)"})
 			continue
 		}
-		u, err := url.Parse(p.base)
-		urlOK := err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
-		if urlOK {
-			c.add(doctorRow{ID: prefix + ".url", Status: statusPass, Summary: "address parses as " + u.Scheme})
-		} else {
+		urlOK := true
+		var schemes []string
+		for _, b := range p.bases {
+			u, err := url.Parse(b)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+				urlOK = false
+				break
+			}
+			schemes = append(schemes, u.Scheme)
+		}
+		switch {
+		case urlOK && len(p.bases) == 1:
+			c.add(doctorRow{ID: prefix + ".url", Status: statusPass, Summary: "address parses as " + schemes[0]})
+		case urlOK:
+			c.add(doctorRow{ID: prefix + ".url", Status: statusPass,
+				Summary: fmt.Sprintf("%d addresses, tried in order; each parses as %s", len(p.bases), strings.Join(schemes, "/")),
+				Refs:    []int{335}})
+		case len(p.bases) == 1:
 			c.add(doctorRow{ID: prefix + ".url", Status: statusFail,
 				Summary: "address is not an http(s) URL with a host"})
+		default:
+			c.add(doctorRow{ID: prefix + ".url", Status: statusFail,
+				Summary: "an address is not an http(s) URL with a host", Refs: []int{335}})
 		}
 
 		credential := p.token
+		// The address that answered the reachability probe, so the grants read
+		// asks the same one; the first when none did or none was probed.
+		answered := p.bases[0]
 		switch {
 		case p.token != "":
 			c.add(doctorRow{ID: prefix + ".credential", Status: statusPass,
@@ -474,7 +493,9 @@ func runChecks(ctx context.Context, env doctorEnv) []doctorRow {
 			if c.skipped(prefix + ".reachable") {
 				c.add(doctorRow{ID: prefix + ".reachable"})
 			} else {
-				c.add(probePeer(ctx, env, prefix+".reachable", strings.TrimRight(p.base, "/"), credential))
+				var row doctorRow
+				row, answered = probePeerAny(ctx, env, prefix+".reachable", p.bases, credential)
+				c.add(row)
 			}
 		}
 
@@ -490,7 +511,7 @@ func runChecks(ctx context.Context, env doctorEnv) []doctorRow {
 		case c.skipped(prefix + ".grants"):
 			c.add(doctorRow{ID: prefix + ".grants"})
 		default:
-			c.add(probePeerGrants(ctx, env, prefix+".grants", strings.TrimRight(p.base, "/"), credential, self, p.machine))
+			c.add(probePeerGrants(ctx, env, prefix+".grants", strings.TrimRight(answered, "/"), credential, self, p.machine))
 		}
 	}
 
@@ -548,35 +569,29 @@ func validateConfigExtras(cfg *fileConfig, getenv func(string) string) error {
 
 type doctorPeer struct {
 	machine fleet.MachineId
-	base    string
-	token   string
+	// bases is every address the peer is known by, in the order tried. One is
+	// the ordinary case (#335).
+	bases []string
+	token string
 }
 
-// doctorPeers resolves the peer list exactly as main.go does: FLEET_PEERS
-// wins, the config file's peers otherwise; the per-peer credential always
-// comes from the config file.
+// doctorPeers resolves the peer list exactly as main.go does — through the
+// same resolvePeers, so the two cannot disagree: FLEET_PEERS wins, the config
+// file's peers otherwise; the per-peer credential always comes from the config
+// file.
 func doctorPeers(getenv func(string) string, cfg *fileConfig) ([]doctorPeer, error) {
-	specs := splitList(getenv("FLEET_PEERS"))
-	if cfg != nil && len(specs) == 0 {
-		for _, p := range cfg.Peers {
-			specs = append(specs, p.Machine+"="+p.URL)
-		}
-	}
+	entries, err := resolvePeers(getenv("FLEET_PEERS"), cfg)
 	var out []doctorPeer
-	for i, spec := range specs {
-		name, base, ok := strings.Cut(spec, "=")
-		if !ok || strings.TrimSpace(name) == "" || strings.TrimSpace(base) == "" {
-			return out, fmt.Errorf("peer entry %d is not name=url", i+1)
-		}
-		p := doctorPeer{machine: fleet.MachineId(strings.TrimSpace(name)), base: strings.TrimSpace(base)}
+	for _, e := range entries {
+		p := doctorPeer{machine: e.machine, bases: e.urls}
 		if cfg != nil {
-			if _, tok, ok := cfg.peerFor(p.machine); ok {
+			if tok, ok := cfg.peerTokenFor(p.machine); ok {
 				p.token = tok
 			}
 		}
 		out = append(out, p)
 	}
-	return out, nil
+	return out, err
 }
 
 // supervisorGrants is every verb a supervising client performs on a machine's
@@ -1134,6 +1149,34 @@ func checkModeClass(dir string) doctorRow {
 // with. It is routed through the peer's withAuth and reading() gates, so a 200
 // proves more than reachability: the credential this machine presents is
 // known to that peer and holds read.
+// probePeerAny probes a peer known by several addresses in the order they are
+// tried and reports the first that answers, naming (by position, never by
+// value) any before it that did not. An absent address is the expected state of
+// a machine on one of its connections, so it is detail, not a warning. When
+// none answers the row fails and the second return is the first address.
+func probePeerAny(ctx context.Context, env doctorEnv, id string, bases []string, credential string) (doctorRow, string) {
+	if len(bases) == 1 {
+		return probePeer(ctx, env, id, strings.TrimRight(bases[0], "/"), credential), bases[0]
+	}
+	var missed []string
+	for i, b := range bases {
+		row := probePeer(ctx, env, id, strings.TrimRight(b, "/"), credential)
+		if strings.HasPrefix(row.Summary, "unreachable:") {
+			missed = append(missed, fmt.Sprintf("address %d: %s", i+1, strings.TrimPrefix(row.Summary, "unreachable: ")))
+			continue
+		}
+		row.Refs = append(row.Refs, 335)
+		row.Summary = fmt.Sprintf("address %d of %d: %s", i+1, len(bases), row.Summary)
+		if len(missed) > 0 {
+			row.Detail = strings.TrimSpace(row.Detail + " " + "not answering before it — " + strings.Join(missed, "; "))
+		}
+		return row, b
+	}
+	return doctorRow{ID: id, Status: statusFail, Refs: []int{98, 335},
+		Summary: fmt.Sprintf("unreachable on all %d addresses", len(bases)),
+		Detail:  strings.Join(missed, "; ") + " — the bind address or the network path is wrong on every one — not the credential"}, bases[0]
+}
+
 func probePeer(ctx context.Context, env doctorEnv, id, base, credential string) doctorRow {
 	row := doctorRow{ID: id, Refs: []int{98}}
 	ctx, cancel := context.WithTimeout(ctx, env.Timeout)

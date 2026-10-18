@@ -338,7 +338,7 @@ func (d *Driver) askHealth(req fleet.Request) (answered, asked bool) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, d.base+"/v1/health", nil)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, d.current()+"/v1/health", nil)
 	if err != nil {
 		return false, false
 	}
@@ -346,7 +346,7 @@ func (d *Driver) askHealth(req fleet.Request) (answered, asked bool) {
 	if behalf != "" {
 		httpReq.Header.Set("Fleet-On-Behalf-Of", behalf)
 	}
-	resp, err := d.client.Do(httpReq)
+	resp, err := d.roundTrip(httpReq, "/v1/health")
 	if err != nil {
 		return false, true
 	}

@@ -141,7 +141,8 @@ func (s *peerStream) consume(ctx context.Context, fromCursor int64, fromEpoch st
 		q.Set("epoch", fromEpoch)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, s.d.base+"/v1/events?"+q.Encode(), nil)
+	eventsPath := "/v1/events?" + q.Encode()
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, s.d.current()+eventsPath, nil)
 	if err != nil {
 		return 0, "", err
 	}
@@ -159,7 +160,7 @@ func (s *peerStream) consume(ctx context.Context, fromCursor int64, fromEpoch st
 	// open, and §4.4's per-call bound describes calls that must return.
 	// Liveness is the stream's own business — an idle peer is not a failed
 	// one, and cancelling ctx is how a caller ends this.
-	resp, err := s.d.client.Do(httpReq)
+	resp, err := s.d.roundTrip(httpReq, eventsPath)
 	if err != nil {
 		return 0, "", err
 	}

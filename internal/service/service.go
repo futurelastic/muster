@@ -812,9 +812,15 @@ func (s *Service) ListMachines(ctx context.Context, req fleet.Request, callerDea
 		if reporter, ok := d.(driver.PeerStandingReporter); ok {
 			peer = reporter.PeerStanding()
 		}
+		address := ""
+		if reporter, ok := d.(driver.AddressReporter); ok {
+			if a, ok := reporter.Address(); ok {
+				address = a
+			}
+		}
 		items = append(items, fleet.MachineInfo{
 			Machine: machine, Self: false, Status: status, ObservedAt: observed,
-			Build: build, MaxInputBytes: maxInputBytes, Peer: peer,
+			Build: build, MaxInputBytes: maxInputBytes, Address: address, Peer: peer,
 		})
 		sources = append(sources, fleet.SourceStatus{Machine: machine, Status: status, Error: errText, ObservedAt: observed})
 	}

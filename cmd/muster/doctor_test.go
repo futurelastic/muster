@@ -27,9 +27,10 @@ type testPrincipal struct {
 }
 
 type testPeer struct {
-	Machine string `json:"machine"`
-	URL     string `json:"url"`
-	Token   string `json:"token,omitempty"`
+	Machine string   `json:"machine"`
+	URL     string   `json:"url,omitempty"`
+	URLs    []string `json:"urls,omitempty"`
+	Token   string   `json:"token,omitempty"`
 }
 
 const supervisorList = "read,create,send,interrupt,close,rename,discard,keys"
@@ -562,6 +563,46 @@ func TestDoctorPeerReachable(t *testing.T) {
 	}
 	if row := check(ok.URL, true); row.Status != statusUnknown {
 		t.Fatalf("offline: got %+v", row)
+	}
+}
+
+// #335: a peer known by several addresses is probed on each in order. An
+// absent one before the answering one is detail, not a failure; every one
+// absent is a failure naming how many.
+func TestDoctorPeerWithSeveralAddresses(t *testing.T) {
+	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"build":{"known":false}}`))
+	}))
+	defer ok.Close()
+	closed := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	closedURL := closed.URL
+	closed.Close()
+
+	check := func(urls ...string) []doctorRow {
+		cfg := writeTestConfig(t, t.TempDir(), []testPrincipal{
+			{Name: "system:m1", Token: "s", Grants: grants("read")},
+		}, []testPeer{{Machine: "m2", URLs: urls, Token: "peer-secret"}})
+		env := testDoctorEnv(map[string]string{"FLEET_MACHINE": "m1", "FLEET_CONFIG": cfg, "FLEET_RUNTIME": "stub"})
+		return runChecks(context.Background(), env)
+	}
+
+	rows := check(closedURL, ok.URL)
+	if row := rowByID(t, rows, "peer.m2.url"); row.Status != statusPass || !strings.Contains(row.Summary, "2 addresses") {
+		t.Errorf("url row: %+v", row)
+	}
+	row := rowByID(t, rows, "peer.m2.reachable")
+	if row.Status == statusFail || !strings.Contains(row.Summary, "address 2 of 2") || !strings.Contains(row.Detail, "address 1") {
+		t.Errorf("an absent first address must be detail, the second must answer: %+v", row)
+	}
+	for _, leak := range []string{ok.URL, closedURL, strings.TrimPrefix(ok.URL, "http://")} {
+		if strings.Contains(row.Summary+row.Detail, leak) {
+			t.Errorf("row echoes an address %q: %+v", leak, row)
+		}
+	}
+
+	rows = check(closedURL, closedURL)
+	if row := rowByID(t, rows, "peer.m2.reachable"); row.Status != statusFail || !strings.Contains(row.Summary, "all 2 addresses") {
+		t.Errorf("none answering: %+v", row)
 	}
 }
 
