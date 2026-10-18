@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io/fs"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -443,8 +444,9 @@ func TestDoctorBindAddr(t *testing.T) {
 		"10.0.0.5:9000":  statusPass,
 		"127.0.0.1:9000": statusPass,
 	}
+	everythingHere := func(net.IP) bool { return true }
 	for addr, want := range cases {
-		row := checkBind(addr)
+		row := checkBindWith(addr, everythingHere)
 		if row.Status != want {
 			t.Errorf("%q: got %+v, want %s", addr, row, want)
 		}
@@ -454,6 +456,35 @@ func TestDoctorBindAddr(t *testing.T) {
 	}
 	if row := checkBind("127.0.0.1:9000"); !strings.Contains(row.Summary, "loopback-only") {
 		t.Errorf("loopback bind must say so: %+v", row)
+	}
+}
+
+// #335: an entry whose address is not on this machine is waited for, and the
+// row says which — by position, never by echoing the address.
+func TestDoctorBindAddrReportsWaitingEntries(t *testing.T) {
+	onlyB := func(ip net.IP) bool { return ip.Equal(net.ParseIP("10.2.2.5")) }
+	row := checkBindWith("10.1.1.5:9000,10.2.2.5:9000", onlyB)
+	if row.Status != statusPass {
+		t.Errorf("one of two addresses absent is the expected state, not a warning: %+v", row)
+	}
+	if !strings.Contains(row.Summary, "1 of them waiting") {
+		t.Errorf("summary must count the waiting entry: %+v", row)
+	}
+	if !strings.Contains(row.Detail, "entry 1 is not assigned") || !strings.Contains(row.Detail, "entry 2 is assigned here") {
+		t.Errorf("detail must say which entry waits and which binds: %+v", row)
+	}
+	if strings.Contains(row.Summary+row.Detail, "10.1.1.5") || strings.Contains(row.Summary+row.Detail, "10.2.2.5") {
+		t.Errorf("row echoes an address: %+v", row)
+	}
+
+	none := checkBindWith("10.1.1.5:9000,10.2.2.5:9000", func(net.IP) bool { return false })
+	if none.Status != statusWarn || !strings.Contains(none.Summary, "none of the routable ones") {
+		t.Errorf("every routable address absent must warn: it is reachable only from itself: %+v", none)
+	}
+
+	// A hostname cannot be judged from the interface list: not waiting.
+	if row := checkBindWith("host.example:9000", func(net.IP) bool { return false }); row.Status != statusPass {
+		t.Errorf("a hostname entry is not judged absent: %+v", row)
 	}
 }
 

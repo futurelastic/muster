@@ -926,30 +926,21 @@ func main() {
 	addrs = withLoopback(addrs)
 
 	// Listen on every configured address, and always on loopback (see
-	// withLoopback). The first bind failure is fatal: a service that came up
-	// on some of its addresses is a service whose reachability depends on
-	// which client you ask, and that is the ambiguity F36 was about.
+	// withLoopback). Each entry is wanted, not required (#335): one whose
+	// address is not on this machine yet waits and is bound when it appears,
+	// so a machine known by several addresses, only some present at a time,
+	// stays reachable on whichever exists. Every other bind failure is still
+	// fatal at startup: a service that came up on some of its addresses
+	// because the rest were misconfigured is a service whose reachability
+	// depends on which client you ask, and that is the ambiguity F36 was about.
 	srv := &http.Server{Handler: mux}
-	var listeners []net.Listener
-	for _, a := range addrs {
-		ln, err := net.Listen("tcp", a)
-		if err != nil {
-			for _, prev := range listeners {
-				_ = prev.Close()
-			}
-			log.Fatalf("muster: listen %s: %v", a, err)
-		}
-		listeners = append(listeners, ln)
+	listeners := newListenerSet(srv, func(ln net.Listener) {
 		log.Printf("muster: listening on %s (machine=%s runtime=%s)", ln.Addr(), self, runtimeLabel(runtimeID))
+	})
+	if err := listeners.start(addrs); err != nil {
+		log.Fatalf("muster: %v", err)
 	}
-
-	for _, ln := range listeners {
-		go func(ln net.Listener) {
-			if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
-				log.Fatalf("muster: serve %s: %v", ln.Addr(), err)
-			}
-		}(ln)
-	}
+	go listeners.run(addrRetryInterval)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
@@ -957,6 +948,7 @@ func main() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	listeners.stop()
 	_ = srv.Shutdown(ctx)
 
 	// #185: closing a module's stdin makes it drop its connections and keep

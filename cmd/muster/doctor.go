@@ -782,7 +782,17 @@ func checkHumanRelay(runtime, indexDir string, cfgFailed, tableMode bool, princi
 	return row
 }
 
-func checkBind(raw string) doctorRow {
+func checkBind(raw string) doctorRow { return checkBindWith(raw, localAddrPresent) }
+
+// checkBindWith is checkBind with the question "is this address assigned to
+// this machine right now" injectable. The service treats each FLEET_ADDR entry
+// as wanted, not required (#335): an address that is not here yet is waited
+// for, so a row that only parsed the list could not tell an operator which
+// entries the service has bound and which it is waiting on. This one reads the
+// interface list, which is what the service's own retry loop reads — so it
+// reports the state the service converges to, without needing the service to
+// be running.
+func checkBindWith(raw string, hasAddr func(net.IP) bool) doctorRow {
 	row := doctorRow{ID: "bind.addr"}
 	addrs := splitList(raw)
 	if len(addrs) == 0 {
@@ -794,6 +804,7 @@ func checkBind(raw string) doctorRow {
 	status := statusPass
 	var notes []string
 	routable := false
+	waiting, routableNow := 0, 0
 	for i, a := range addrs {
 		host, port, err := net.SplitHostPort(a)
 		if err != nil {
@@ -811,13 +822,31 @@ func checkBind(raw string) doctorRow {
 			status = worse(status, statusWarn)
 			notes = append(notes, fmt.Sprintf("entry %d binds every interface — bind a specific one (§6.1)", i+1))
 			routable = true
+			routableNow++
 		case "127.0.0.1", "localhost", "::1":
 		default:
 			routable = true
+			if ip := checkableIP(a); ip != nil && !isLoopbackHost(host) && hasAddr != nil && !hasAddr(ip) {
+				waiting++
+				notes = append(notes, fmt.Sprintf("entry %d is not assigned to this machine now — the service waits for it and binds it when it appears", i+1))
+			} else {
+				routableNow++
+				if ip != nil {
+					notes = append(notes, fmt.Sprintf("entry %d is assigned here — the service binds it", i+1))
+				}
+			}
 		}
 	}
 	row.Status = status
-	if routable {
+	if routable && routableNow == 0 {
+		// Every routable entry is absent: the service starts, on loopback, and
+		// no peer can reach it until one of the addresses appears.
+		status = worse(status, statusWarn)
+		row.Status = status
+		row.Summary = fmt.Sprintf("%d address(es), none of the routable ones is on this machine now — reachable only from itself until one appears", len(addrs))
+	} else if routable && waiting > 0 {
+		row.Summary = fmt.Sprintf("%d address(es), routable; %d of them waiting for their address to appear (loopback is added automatically)", len(addrs), waiting)
+	} else if routable {
 		row.Summary = fmt.Sprintf("%d address(es), routable (loopback is added automatically)", len(addrs))
 	} else {
 		row.Summary = fmt.Sprintf("%d address(es), loopback-only — no peer can reach this machine", len(addrs))

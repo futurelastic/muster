@@ -16,3 +16,14 @@ const wsaeconnrefused syscall.Errno = 10061
 func isConnRefused(err error) bool {
 	return errors.Is(err, wsaeconnrefused) || errors.Is(err, syscall.ECONNREFUSED)
 }
+
+// wsaeaddrnotavail is WSAEADDRNOTAVAIL, Winsock's own number for a bind to an
+// address no interface holds (see wsaeconnrefused for why the portable
+// syscall value is not enough).
+const wsaeaddrnotavail syscall.Errno = 10049
+
+// isAddrNotAvailable reports whether err is a bind to an address that is not
+// assigned to this machine.
+func isAddrNotAvailable(err error) bool {
+	return errors.Is(err, wsaeaddrnotavail) || errors.Is(err, syscall.EADDRNOTAVAIL)
+}
