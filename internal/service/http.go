@@ -1326,7 +1326,11 @@ func handleGetSession(svc *Service) http.HandlerFunc {
 		// The cost is one enumeration, which is a constant number of
 		// subprocess spawns on the driver that motivated that design; a
 		// per-session query would not be cheaper.
-		if col, err := d.List(ctx, req, driver.ListFilter{}); err == nil {
+		//
+		// Narrowed to the one id (#339): without it every poll of one session
+		// read the runtime record of every session on the machine. A driver
+		// that cannot narrow ignores the field, hence the id check below.
+		if col, err := d.List(ctx, req, driver.ListFilter{ID: id}); err == nil {
 			for _, s := range col.Items() {
 				if s.ID == id {
 					if via != resolvedPeer {

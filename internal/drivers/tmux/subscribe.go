@@ -85,6 +85,16 @@ const (
 	// second; the state it is in changes far more slowly. Without this,
 	// a chatty session would drive one full enumeration per output chunk.
 	coalesceWindow = 150 * time.Millisecond
+
+	// streamRecordMaxAge is how stale a session's record-derived fields
+	// (conversation, turns, usage) may be in a listing the stream takes, when
+	// that session's screen has not changed since they were read (#339). The
+	// stream lists the whole fleet after every burst, which without this
+	// statted every session's transcript several times a second for one busy
+	// session. A record that grows behind a static screen is noticed within
+	// this bound; a session that is actually working changes its screen and is
+	// read every time.
+	streamRecordMaxAge = 5 * time.Second
 )
 
 // ctlNote is one parsed control-mode notification: the leading %name and
@@ -615,7 +625,7 @@ func (s *eventStream) run(ctx context.Context, trigger <-chan struct{}, known ma
 		}
 		drain(trigger)
 
-		cur, err := s.d.List(ctx, s.req, driver.ListFilter{CwdPrefix: s.filter.CwdPrefix})
+		cur, err := s.d.List(ctx, s.req, driver.ListFilter{CwdPrefix: s.filter.CwdPrefix, RecordMaxAge: streamRecordMaxAge})
 		if err != nil {
 			continue
 		}

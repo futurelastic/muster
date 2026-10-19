@@ -428,6 +428,11 @@ type Driver struct {
 	// usagerecord.go.
 	usage usageReader
 
+	// records is what the last listing read from each session's runtime
+	// record, kept so a caller that accepts bounded staleness can skip
+	// rereading it (muster #339); see recordcache.go.
+	records recordCache
+
 	// resumeIntents remembers, per session, the conversation id a create
 	// asked the runtime to resume — the durable note #72 needs to say
 	// whether that was honoured, once the session's own conversation
@@ -1751,6 +1756,9 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 		pid     int
 	}
 	var pending []pendingConversation
+	// Sessions whose record-derived fields were served from d.records rather
+	// than read (#339).
+	reused := map[string]bool{}
 
 	now := d.now()
 	// Read once, outside the loop, and stamp every session in this response
@@ -1844,7 +1852,16 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 		if !matchesFilter(s, filter) {
 			continue
 		}
-		if d.conversations != nil {
+		if reuse, ok := d.records.get(r.session, r.created, digest, now, filter.RecordMaxAge); ok {
+			// #339: this screen is the one the last real read saw, and that
+			// read is younger than the bound the caller accepted. The record
+			// is not opened, statted or looked up again.
+			s.Conversation = reuse.conversation
+			s.ResumeOutcome = reuse.resume
+			s.State.Turns = reuse.turns
+			s.State.Usage = reuse.usage
+			reused[r.session] = true
+		} else if d.conversations != nil {
 			// Keyed on the pane rather than the session name, because a
 			// rename changes the name and the title already written into the
 			// record does not — see conversationKey.
@@ -1912,11 +1929,15 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 	// delivered into ever opens its record for this, so a fleet with
 	// nothing dispatched through Send pays nothing extra here.
 	for i := range sessions {
+		if reused[sessions[i].ID] {
+			continue
+		}
 		sessions[i].State.Turns = d.turnsFor(sessions[i].ID, string(sessions[i].Cwd), sessions[i].Conversation)
 		// muster #285: unlike `turns`, not gated on a delivery mark — a session
 		// nothing was dispatched into still spends.
 		sessions[i].State.Usage = d.usageFor(string(sessions[i].Cwd), sessions[i].Conversation)
 	}
+	d.rememberRecords(rows, sessions, reused, now)
 
 	// muster #269: where the screen reader found no label, the runtime's own
 	// record and the launch decide between active, off and "not read". Done here
@@ -2234,6 +2255,9 @@ func (d *Driver) reassertNames(ctx context.Context, rows []paneRow, drift []name
 }
 
 func matchesFilter(s fleet.Session, f driver.ListFilter) bool {
+	if f.ID != "" && s.ID != f.ID {
+		return false
+	}
 	if f.Status != "" && s.State.Status != f.Status {
 		return false
 	}
