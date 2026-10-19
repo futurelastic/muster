@@ -337,8 +337,15 @@ type Driver struct {
 	bareExec     bool
 	run          execFunc
 	dial         ctlDialer
-	now          func() time.Time
-	nonce        func() string
+
+	// muster #336: the macOS security-session guard and its report.
+	allowDesktopServer bool
+	goos               string
+	managerName        managerNameFunc
+	sctxCache          serverContextCache
+
+	now   func() time.Time
+	nonce func() string
 
 	store   *state.Store
 	idemErr error
@@ -1019,6 +1026,9 @@ func (d *Driver) Capabilities() fleet.DriverCapabilities {
 		// #185: the optional external delivery modules enabled here and how
 		// each is wired; absent when none is.
 		DeliveryModules: d.moduleStatuses(),
+		// muster #336: the security-session context of this service and of the
+		// multiplexer server; nil off macOS.
+		ServerContext: d.reportServerContext(),
 		// A local driver is describing itself, so this is observed by
 		// definition — there is no network between the claim and its
 		// subject.
@@ -4989,6 +4999,14 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 		}
 	}
 
+	// muster #336: the create below may START the multiplexer server, which
+	// would carry this service's security-session context into every session
+	// it ever runs. Refused before any side effect, so no reservation exists
+	// to release.
+	if err := d.guardServerStart(ctx); err != nil {
+		return fleet.Session{}, err
+	}
+
 	// Intent first. A crash between here and the session starting leaves a
 	// pending record, which the next attempt resolves by looking rather
 	// than guessing.
@@ -5056,6 +5074,9 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 		}
 		return fleet.Session{}, fmt.Errorf("create: %w", err)
 	}
+	// The server may be new; do not let a health read keep reporting "no
+	// server" for the rest of the cache window (muster #336).
+	d.forgetServerContext()
 	if envPath != "" {
 		// The wrapper unlinks it the moment it has read it. This is the case
 		// where it never does — the shell died, the agent binary was missing —

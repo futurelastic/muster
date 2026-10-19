@@ -226,6 +226,16 @@ modules this machine enabled — `name`, `status` (`starting`, `available`,
 `protocol`, `version`, `platform` and `peerCheck`, and per-lane state counts.
 It is **absent** when none is enabled, which is the ordinary state, not a fault.
 
+`capabilities.serverContext` (#336) is present on a macOS host's terminal runtime
+only: `service` is this service's launchd session (`Background` is the only safe
+one), `server` the running session server's (`pid`, `context`), and `warning` is
+set when either is not `Background`. A server already in the desktop (`Aqua`)
+context warns even when the service is fine, since the service cannot change an
+existing server's context. A create that would have to *start* the server from
+any context but `Background` is refused `501`, `retryable: false`, `reason:
+"unsafe_server_context"`; `FLEET_TMUX_ALLOW_DESKTOP_SERVER=1` is the explicit
+override.
+
 `capabilities.remoteControl` (#269) — `{ "toggle": true, "off": true }` — is
 declared only by a runtime that can turn a **running** session's remote control
 on through `POST …/remote-control`; today that is the Claude Code runtime, and the

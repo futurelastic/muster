@@ -249,6 +249,12 @@ type DriverCapabilities struct {
 	// fault.
 	DeliveryModules []DeliveryModuleStatus `json:"deliveryModules,omitempty"`
 
+	// ServerContext reports the macOS security-session context this machine's
+	// terminal-multiplexer driver runs in and the context of the multiplexer
+	// server it talks to (muster #336). Absent on every other platform and on
+	// every other runtime: nothing was measured, which is not a clean bill.
+	ServerContext *ServerContext `json:"serverContext,omitempty"`
+
 	// DeadlineMs is mandatory (§4.4): "a driver that can block without a
 	// bound is a specification violation, not a slow driver." Measured
 	// directly against a stopped peer, an undeadlined call was still
@@ -299,4 +305,39 @@ func (c DriverCapabilities) Validate() error {
 		return ErrNoDeadline
 	}
 	return nil
+}
+
+// ServerContext is what a macOS host's multiplexer driver knows about the
+// security-session context its sessions run in (muster #336).
+//
+// Every process in a multiplexer server inherits the security session of
+// whoever started the server. A server started from the desktop (Aqua)
+// context hands that context to every agent session in it, and an agent
+// runtime that stores its login in the login Keychain then loses it the day
+// the same sessions are reached from the Background context. The context is
+// invisible from outside, so it is reported here.
+type ServerContext struct {
+	// Service is the context of this service process (`launchctl
+	// managername`): "Background" for a service loaded into the user's
+	// Background domain, "Aqua" for one started from a desktop login, or
+	// "unknown" when it could not be read.
+	Service string `json:"service"`
+	// Server is the running multiplexer server's own context. Absent when no
+	// server is running (the next create starts one, in Service's context) or
+	// when it could not be asked.
+	Server *ServerProcessContext `json:"server,omitempty"`
+	// Warning is set when a desktop (or unreadable) context is in play. A
+	// server already running in a desktop context is a warning even when this
+	// service is fine: the service attaches to an existing server and cannot
+	// change its context.
+	Warning string `json:"warning,omitempty"`
+}
+
+// ServerProcessContext is one multiplexer server's pid and security-session
+// context.
+type ServerProcessContext struct {
+	PID int `json:"pid,omitempty"`
+	// Context is "Background", "Aqua", another launchd session name, or
+	// "unknown" when the server did not say.
+	Context string `json:"context"`
 }

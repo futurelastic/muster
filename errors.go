@@ -179,6 +179,14 @@ const ReasonReplayOfEndedSession = "replay-of-ended-session"
 // needs somebody's hands answers unsupported (not retryable).
 const ReasonRuntimeUnavailable = "runtime-unavailable"
 
+// ReasonUnsafeServerContext marks the unsupported (501, non-retryable) a
+// create returns when it would have to start the terminal-multiplexer server
+// from a macOS desktop (Aqua) context, or from one it cannot read (muster
+// #336). The server would hand that context to every session it ever runs. The
+// operator's fix is to run the service from the Background domain, or to set
+// the explicit override the message names.
+const ReasonUnsafeServerContext = "unsafe_server_context"
+
 func (e *Error) Error() string {
 	if e.Machine != "" {
 		return fmt.Sprintf("fleet: %s (%s, machine=%s)", e.Message, e.Kind, e.Machine)
