@@ -279,12 +279,28 @@ type ListFilter struct {
 	// driver, so the service applies this itself. The remote driver forwards
 	// it so a peer narrows its own answer.
 	Labels map[string]string
+
+	// ID keeps only the session with this id (muster #339). It exists so a
+	// caller that wants ONE session does not make the driver read the runtime
+	// record of every session on the machine to answer it. A driver that
+	// cannot narrow by id may ignore it, so a caller must still pick the id
+	// out of what it gets back.
+	ID string
+
+	// RecordMaxAge (muster #339) lets a driver answer a session whose screen
+	// has not changed since the driver's previous listing from the fields it
+	// read out of that session's runtime record then (conversation, turns,
+	// usage), provided they were read less than this long ago. It is a
+	// freshness bound the caller accepts, not a filter: zero means every
+	// listing reads every record, which is what every ordinary caller wants.
+	// A driver with no such fields ignores it.
+	RecordMaxAge time.Duration
 }
 
 // IsZero reports whether the filter narrows nothing — the one listing whose
 // result is the complete set of a driver's sessions.
 func (f ListFilter) IsZero() bool {
-	return f.Status == "" && f.Agent == "" && f.CwdPrefix == "" && len(f.Labels) == 0
+	return f.Status == "" && f.Agent == "" && f.CwdPrefix == "" && len(f.Labels) == 0 && f.ID == ""
 }
 
 // ClosedLister is an OPTIONAL capability: a driver fronting a PEER that can
