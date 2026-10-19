@@ -45,7 +45,7 @@ served, and the federated ones have been exercised peer to peer.
 | `unauthorized` | 401 / 403 | Caller not permitted for this verb on this machine |
 | `not_found` | 404 | The machine answered, and there is no such session |
 | `conflict` | 409 | Idempotency key reused with a different body; a replayed key whose session has since ended (`reason: "replay-of-ended-session"`, §3.3); or a destructive request whose `startedAt` disagrees with the live session (§5.4) — the request is well formed, the caller's belief is stale |
-| `unsupported` | 501 | Driver lacks the capability (§4.3 of the model); or a runtime this machine's operator enabled has no working driver and no retry under way (`reason: "runtime-unavailable"`, §3.1) |
+| `unsupported` | 501 | Driver lacks the capability (§4.3 of the model); or a runtime this machine's operator enabled has no working driver and no retry under way (`reason: "runtime-unavailable"`, §3.1); or, on macOS, a create that would start the terminal runtime's session server from a context other than `Background` (`reason: "unsafe_server_context"`, `retryable: false`, §3.1) |
 | `unreachable` | 504 | **The machine did not answer.** Nothing is known. Also a runtime that is enabled and still being retried (`reason: "runtime-unavailable"`, `retryable: true`, §3.1) |
 
 **`not_found` and `unreachable` must never be conflated.** One means the fleet
@@ -66,6 +66,9 @@ unless a case documents one. Two cases do today:
 - `runtime-unavailable` on an `unreachable` or an `unsupported` (muster #297)
   — a call named, or was routed to, a runtime the operator enabled and that has
   no working driver at this moment. See §3.1 for which kind carries it and why.
+- `unsafe_server_context` on an `unsupported` (muster #336) — a `create` that
+  would start the terminal runtime's session server from a macOS context other
+  than `Background`. `retryable: false`; see §3.1.
 
 **An id that is a live session's conversation id (muster #268).** `{id}` is
 always this service's session `id`; a session's *conversation* id (the runtime's
@@ -237,6 +240,29 @@ enabled" for the same reason it did on `GET /v1/runtimes`. A `drivers` row from
 a build that predates #300 has no `status` and is available; a reader that
 needs to know whether a runtime can serve reads `status`, never the row's
 presence.
+
+**`capabilities.serverContext` on a macOS host's terminal runtime names the
+security-session context its sessions run in** (muster #336). Every process in a
+session server inherits the context of whoever started the server, and an agent
+runtime that moves its saved login into the login Keychain loses it when the
+same sessions are reached from the `Background` context. The field is
+`{ "service": "Background", "server": { "pid": 4242, "context": "Background" },
+"warning": "..." }`: `service` is this service's own context (`launchctl
+managername`), `server` is the running session server's (absent when none is
+running), and each is `"unknown"` when it could not be read. `warning` is set
+whenever either is not `Background`. **A server already running in a desktop
+(`Aqua`) context is a warning even when the service is fine**, because the
+service attaches to an existing server and cannot change its context. The
+field is absent on every other platform and runtime, which means nothing was
+measured, not that the context is safe.
+
+**A create never starts the session server from a context other than exactly
+`Background`.** When no server is running and this service's context is
+`Aqua`, another launchd session, or one it cannot read, the create is refused
+`unsupported` (501), `retryable: false`, `reason: "unsafe_server_context"`,
+before any side effect. A create into a server that already exists starts
+nothing and is not refused. An operator may override the refusal only with an
+explicit setting (`FLEET_TMUX_ALLOW_DESKTOP_SERVER=1`), never by default.
 
 **`deliversToInbox` is how an operator confirms muster #119's inbox
 delivery path is actually live on a machine, without inferring it from a

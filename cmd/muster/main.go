@@ -35,6 +35,13 @@
 //	FLEET_TMUX_BIN         path to the multiplexer binary. Defaults to
 //	                       "tmux" on PATH — which a non-interactive ssh
 //	                       session may not have.
+//	FLEET_TMUX_ALLOW_DESKTOP_SERVER
+//	                       set to 1 to let a create start the multiplexer
+//	                       server from a macOS context that is not
+//	                       Background (muster #336). Off by default: the
+//	                       server hands its security session to every
+//	                       session it runs, and a desktop one loses the
+//	                       login Keychain-held logins of agent runtimes.
 //	FLEET_RUNTIME_OPENCODE set to 1 to ALSO register a second local driver
 //	                       (muster issue #55) over opencode
 //	                       (github.com/sst/opencode), a third-party agent
@@ -467,6 +474,12 @@ func main() {
 		}
 		if bin := os.Getenv("FLEET_TMUX_BIN"); bin != "" {
 			opts = append(opts, tmux.WithBinary(bin))
+		}
+		// #336: the explicit override of the macOS server-context guard. Never
+		// the default; says so in the log, because it widens what a create may do.
+		if os.Getenv("FLEET_TMUX_ALLOW_DESKTOP_SERVER") == "1" {
+			opts = append(opts, tmux.WithAllowDesktopServer(true))
+			log.Print("muster: FLEET_TMUX_ALLOW_DESKTOP_SERVER=1 — a create may start the session server from a non-Background macOS context (#336)")
 		}
 		// Where the runtime keeps its own record of each conversation. The
 		// driver defaults this to OFF so that constructing one never reads a

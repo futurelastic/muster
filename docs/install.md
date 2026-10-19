@@ -207,6 +207,16 @@ order of this page and the order of its output are the same.
      distribution packages are older, so build or install a current tmux and
      point `FLEET_TMUX_BIN` at it (row: `runtime.tmux-version`, which runs
      `tmux -V` and fails on an older release);
+   - on macOS, load the service into the user's **Background** launchd domain
+     (`launchctl bootstrap user/$(id -u) …`, with `LimitLoadToSessionType=Background`
+     in the plist), not `gui/<uid>` and not from a Terminal window. Every session
+     inherits the security session of the process that started the session server;
+     one started from the desktop (Aqua) context can move an agent runtime's saved
+     login into the login Keychain, which a Background session cannot read. The
+     service refuses to start a server from any other context (`reason:
+     "unsafe_server_context"`) and `GET /v1/health` shows `serverContext` for both
+     the service and the running server; `FLEET_TMUX_ALLOW_DESKTOP_SERVER=1` is the
+     explicit override;
    - when `FLEET_RUNTIME_OPENCODE=1`, set `FLEET_OPENCODE_BIN` to the opencode
      binary's absolute path, for the same reason (row: `runtime.opencode`,
      which resolves the binary and never runs it). A runtime that is enabled but

@@ -1945,6 +1945,7 @@ DriverCapabilities {
   validatesModel  : boolean   // checks `model` against the runtime's own list at create and refuses an unknown id `invalid` (§4.3, muster #287)
   remoteControl?  : { toggle: boolean, off: boolean }   // can turn a RUNNING session's remote control on (and off); absent = cannot (muster #269)
   deliveryModules? : DeliveryModuleStatus[]   // optional external delivery modules enabled here (§2.15); absent = none
+  serverContext?  : { service: string, server?: { pid?: number, context: string }, warning?: string }   // macOS terminal runtime only (muster #336): the security-session context this service and its session server run in; absent = not measured
   deadlineMs      : number    // declared upper bound on any single call
   source          : "observed" | "assumed"
   observedAt?     : Timestamp | null
