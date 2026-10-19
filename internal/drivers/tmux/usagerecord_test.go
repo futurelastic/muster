@@ -324,3 +324,32 @@ func mustTime(s string) time.Time {
 	}
 	return v
 }
+
+// #338: a listing runs after every output burst and reads every session's
+// usage. A record nothing was appended to costs a stat, never an open.
+func TestUsage_UnchangedRecordIsNotOpened(t *testing.T) {
+	p := writeTurnsRecord(t, usageEntry_(t, 1, "m1", 10, 5, 0, 0))
+	opens := 0
+	prev := openRecord
+	openRecord = func(name string) (*os.File, error) { opens++; return prev(name) }
+	t.Cleanup(func() { openRecord = prev })
+
+	var r usageReader
+	first := r.read(p)
+	if first == nil || opens != 1 {
+		t.Fatalf("first read: usage=%+v opens=%d, want a result from exactly one open", first, opens)
+	}
+	for i := 0; i < 5; i++ {
+		u := r.read(p)
+		if u == nil || u.Output != first.Output {
+			t.Fatalf("idle read %d = %+v, want the memoised %+v", i, u, first)
+		}
+	}
+	if opens != 1 {
+		t.Fatalf("5 reads of an unchanged record opened it %d more times, want 0", opens-1)
+	}
+	appendLine(t, p, usageEntry_(t, 2, "m2", 1, 1, 0, 0))
+	if u := r.read(p); u == nil || u.Output != 6 || opens != 2 {
+		t.Fatalf("after an append: usage=%+v opens=%d, want output 6 from one more open", u, opens)
+	}
+}

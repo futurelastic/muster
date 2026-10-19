@@ -216,11 +216,14 @@ func (m *usageMemo) feed(line []byte) {
 	}
 }
 
+// openRecord opens a record for reading; a variable so a test can count opens.
+var openRecord = os.Open
+
 // advance reads the record from m.offset to its last complete line.
 // ok is false when the file cannot be read or is now shorter than the memo
 // (truncated or replaced: the caller starts over).
 func (m *usageMemo) advance(path string) (ok bool) {
-	f, err := os.Open(path)
+	f, err := openRecord(path)
 	if err != nil {
 		return false
 	}
@@ -289,6 +292,11 @@ func (u *usageReader) read(path string) *fleet.Usage {
 			u.scanAsyncLocked(path)
 			return nil
 		}
+	} else if info.Size() == m.offset {
+		// Nothing appended since the last read: the stat above is the whole
+		// cost. Opening the file just to learn its size again was one open per
+		// session per listing, and a listing is run after every output burst.
+		return m.snapshot()
 	} else if info.Size()-m.offset > usageSyncMaxBytes {
 		u.scanAsyncLocked(path)
 		return m.snapshot()
