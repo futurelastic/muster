@@ -15,6 +15,61 @@ It does not install or configure a service manager, for the same reason
 It states what the unit must execute, what its environment must contain, and
 in what order — and it ends with a command that checks all of it.
 
+## The short way: `muster service install`
+
+On one macOS or Linux machine, for the current user, one command does the
+procedure below ([the manual procedure](#the-procedure) stays as the reference
+for what each step is for, and for everything the command leaves out):
+
+```sh
+npm i -g @futurelastic/muster
+muster service install
+```
+
+It copies the running binary to `~/.local/bin/muster` (so an npm upgrade never
+changes what the unit executes), creates the state directory
+`~/.local/state/muster` (`0700`) and a principal table in
+`~/.config/muster/config.json`, writes the unit, runs `muster doctor` under the
+unit's own environment and prints it, loads the unit and checks `/v1/health`.
+The unit is a launchd job in the user's **Background** domain on macOS and a
+`systemd --user` service on Linux; it sets `FLEET_MACHINE` (the short
+hostname), `FLEET_ADDR` (`127.0.0.1:9470`), `FLEET_STATE_DIR`, `FLEET_CONFIG`
+and `FLEET_TMUX_BIN` (the tmux found on `PATH`, recorded as an absolute path),
+and restarts the service when it exits.
+
+- **A new table is not empty.** The procedure writes `{}` and enrols the
+  supervisor next, because a table with nobody in it fails `config.load` and the
+  service refuses to start. A new table therefore gets one principal,
+  `supervisor`, with every grant a supervising client uses (not `relay`: that is
+  for peers), and its token in `supervisor.token` beside it. A table that exists
+  is never changed.
+- **A restart does not end the sessions.** The units ask the manager to leave
+  the multiplexer server the service started alone when the service stops
+  (`KillMode=process`, `AbandonProcessGroup`).
+- **Idempotent.** A second run changes nothing and says `Nothing to change`. After
+  an npm upgrade it replaces the installed binary and restarts the service. A rerun
+  without flags keeps the machine id, address and tmux path the unit already has;
+  `--machine`, `--addr` and `--tmux` change them.
+- **Loopback only.** `--addr` takes a loopback `HOST:PORT` with a fixed port; any
+  other address is refused. Putting the service on a network interface is step 3
+  of the manual procedure.
+- **`doctor` fails, the service is not started.** The unit and files stay;
+  fix the failing row and run it again. `--no-start` writes everything and runs
+  `doctor` without loading or starting the unit.
+- **Linux, no one logged in.** A user service runs while its user has a session.
+  To have it run at boot, `loginctl enable-linger` (the command prints this; it
+  does not change the account's setting).
+
+```sh
+muster service status        # unit present, loaded, running, healthy, which binary; exit 1 unless all hold
+muster service uninstall     # unload and remove the unit; configuration, tokens, state and binary stay
+muster service uninstall --purge   # ...and delete them (the tokens go too)
+```
+
+Not covered, and continuing in the manual procedure: peers (steps 5-6 of it, the
+two-sided enrolment), inbox delivery (step 7), tmux 3.7 or newer (step 8), and
+Windows ([its own section](#windows)). The command prints these when it finishes.
+
 ## What a working installation is
 
 Every row below is something an installation can be missing and still start.

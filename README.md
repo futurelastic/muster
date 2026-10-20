@@ -182,7 +182,8 @@ across the hop) is [`docs/driving-a-machine.md`](docs/driving-a-machine.md).
 > **This is a demo, not an install.** Every process above ends with its shell.
 > A service that survives a reboot — a principal table, a state directory, a
 > service unit, and a `muster doctor` run that checks all of it — is
-> [`docs/install.md`](docs/install.md).
+> [`docs/install.md`](docs/install.md); on one macOS or Linux machine,
+> `muster service install` does it for the current user in one command.
 
 ## Who it serves
 
