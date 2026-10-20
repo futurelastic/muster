@@ -91,6 +91,7 @@ type seenRecord struct {
 	ID           string                 `json:"id"`
 	Name         string                 `json:"name,omitempty"`
 	Cwd          fleet.AbsolutePath     `json:"cwd,omitempty"`
+	Agent        fleet.AgentId          `json:"agent,omitempty"`
 	StartedAt    *fleet.Timestamp       `json:"startedAt,omitempty"`
 	Conversation *fleet.ConversationRef `json:"conversation,omitempty"`
 	LastSeen     time.Time              `json:"lastSeen"`
@@ -359,7 +360,7 @@ func (h *historyStore) sightLocked(rt fleet.RuntimeId, s fleet.Session, at time.
 	mode := observedMode(s)
 	r, had := h.seen[k]
 	if !had {
-		r = &seenRecord{Runtime: rt, ID: s.ID, Name: s.Name, Cwd: s.Cwd,
+		r = &seenRecord{Runtime: rt, ID: s.ID, Name: s.Name, Cwd: s.Cwd, Agent: s.Agent,
 			StartedAt: s.StartedAt, Conversation: conv, LastSeen: at, ObsMode: mode}
 		h.seen[k] = r
 		h.syncLaunchLocked(r, at)
@@ -374,6 +375,9 @@ func (h *historyStore) sightLocked(rt fleet.RuntimeId, s fleet.Session, at time.
 	}
 	if s.Cwd != "" && s.Cwd != r.Cwd {
 		r.Cwd, changed = s.Cwd, true
+	}
+	if s.Agent != "" && s.Agent != r.Agent {
+		r.Agent, changed = s.Agent, true
 	}
 	if s.StartedAt != nil && (r.StartedAt == nil || !r.StartedAt.Equal(*s.StartedAt)) {
 		r.StartedAt, changed = s.StartedAt, true
@@ -470,6 +474,7 @@ func (h *historyStore) tombstoneLocked(r *seenRecord, at time.Time, by fleet.Clo
 		SessionRef:   fleet.SessionRef{Machine: h.self, ID: r.ID, Name: name},
 		Runtime:      r.Runtime,
 		Cwd:          r.Cwd,
+		Agent:        r.Agent,
 		StartedAt:    r.StartedAt,
 		Conversation: r.Conversation,
 		LastSeenAt:   r.LastSeen,
@@ -495,6 +500,7 @@ func (h *historyStore) tombstoneExitLocked(r *seenRecord, e driver.CapturedExit)
 		SessionRef:   fleet.SessionRef{Machine: h.self, ID: r.ID, Name: name},
 		Runtime:      r.Runtime,
 		Cwd:          r.Cwd,
+		Agent:        r.Agent,
 		StartedAt:    r.StartedAt,
 		Conversation: r.Conversation,
 		LastSeenAt:   r.LastSeen,

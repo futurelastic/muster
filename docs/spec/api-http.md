@@ -497,7 +497,8 @@ A service keeps **one record per local session that ended**, for a configured
 retention period, across restarts (muster #179). It is deliberately not a
 persisted event window: the record carries only the metadata the live record
 already carried as last seen (`machine`, `id`, `name`, `runtime`, `cwd`,
-`startedAt`, and `conversation` when it was known), never content, plus
+`startedAt`, `agent` when a sighting reported one, and `conversation` when it
+was known), never content, plus
 `lastSeenAt`, `closedAt`, `closedBy`, `evidence`, and — only for
 `closedBy: "exit"` — `exit` (#235, below).
 

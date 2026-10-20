@@ -427,3 +427,69 @@ func TestClosed_LoadSweepsOrphanExitScreenFiles(t *testing.T) {
 		t.Fatalf("a file a live record still names should survive the sweep: %v", err)
 	}
 }
+
+// setAgent stands in for a driver that can read a live session's applied
+// agent (muster #301): the next listing reports it.
+func (d *labelDriver) setAgent(id string, a fleet.AgentId) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	s := d.sessions[id]
+	s.Agent = a
+	d.sessions[id] = s
+}
+
+// muster #319: the closed record carries the agent hint the live session had —
+// through every way a session ends — and omits it, on the wire too, when no
+// sighting ever reported one.
+func TestClosed_CarriesTheAgentTheLiveSessionHad(t *testing.T) {
+	d := newLabelDriver()
+	srv := labelServer(t, New("test-machine"), d, tokenCfg())
+	mk := func() string {
+		_, raw := create(t, srv, testToken, nil)
+		return decodeSession(t, raw).ID
+	}
+	closed, vanished, exited, unknown := mk(), mk(), mk(), mk()
+	for _, id := range []string{closed, vanished, exited} {
+		d.setAgent(id, "reviewer")
+	}
+	listLocal(t, srv, "") // the sighting that learns the agent
+
+	closeSession(t, srv, closed)
+	d.vanish(vanished)
+	d.exitVia(exited, 0, "")
+	d.vanish(unknown)
+	listLocal(t, srv, "") // complete read: records the vanished and exited ones
+
+	col, body := listClosed(t, srv, "")
+	if len(col.Items()) != 4 {
+		t.Fatalf("want four closed sessions, got %s", body)
+	}
+	byID := map[string]fleet.ClosedSession{}
+	for _, c := range col.Items() {
+		byID[c.ID] = c
+	}
+	for name, id := range map[string]string{"close": closed, "absent": vanished, "exit": exited} {
+		if got := byID[id].Agent; got != "reviewer" {
+			t.Errorf("%s: closed record agent = %q, want reviewer", name, got)
+		}
+	}
+	if got := byID[unknown].Agent; got != "" {
+		t.Errorf("never reported: agent = %q, want empty", got)
+	}
+
+	// On the wire: present for the first case, the key absent for the second.
+	var raw struct {
+		Items []map[string]json.RawMessage `json:"items"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range raw.Items {
+		var id string
+		_ = json.Unmarshal(it["id"], &id)
+		_, has := it["agent"]
+		if want := id != unknown; has != want {
+			t.Errorf("session %s: agent key present = %v, want %v (%s)", id, has, want, body)
+		}
+	}
+}
