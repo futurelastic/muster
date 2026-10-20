@@ -76,9 +76,16 @@ list — never a pass it did not earn.
 - Behaviour that differs from Unix, stated: no graceful stop; a service crash
   ends its sessions' servers instead of leaving them to be reaped; names in the
   session environment are case-folded and a collision is refused.
-- Module discovery judges POSIX mode bits, which Windows does not have. There
-  it asks only for a regular, non-symlink file and **does not check who can
-  write it** — a follow-up (read the file's list, as `privfs.Check` does).
+- Module discovery judges POSIX mode bits on Unix, which Windows does not
+  have. There it reads the file's access list (`privfs.WritableByOthers`, #310)
+  and refuses a module that any trustee other than the service's account, the
+  system account, the administrators group and the operating system's own
+  installer account can write, append to, delete, re-permission or take
+  ownership of — the same rule, "anyone who could rewrite it could run code as
+  the service", asked of the list instead of a mode. Entries meant only for
+  children are ignored, an earlier deny for the same trustee takes its rights
+  away, and a list that cannot be read refuses the module. The modules
+  directory itself is still the install's job.
 - The Windows CI job runs an allowlist (`scripts/gate-windows.sh`: procgroup,
   privfs, the subprocess driver, modclient, state, and `cmd/muster` since #311),
   prints every skip, and fails if a named must-run test did not PASS. Widening

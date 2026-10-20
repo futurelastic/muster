@@ -307,6 +307,29 @@ func Check(path string) Report {
 	return Report{Verdict: v, Detail: why}
 }
 
+// WritableByOthers reads path's access list and returns who, other than the
+// current user and the machine's own accounts (system, administrators), is
+// granted a right to change the file: write or append data, delete, change its
+// permissions or take its ownership — directly or by inheritance. An empty
+// result means nobody is. The error is non-nil when the list could not be read
+// or understood; the caller decides whether that refuses (a check guarding code
+// that will be run should).
+func WritableByOthers(path string) ([]string, error) {
+	text, err := daclText(path)
+	if err != nil {
+		return nil, err
+	}
+	d, err := parseSDDL(text)
+	if err != nil {
+		return nil, err
+	}
+	sid, err := userSID()
+	if err != nil {
+		return nil, err
+	}
+	return writableBy(d, sid), nil
+}
+
 // daclText returns the SDDL text of path's discretionary access list.
 func daclText(path string) (string, error) {
 	p, err := syscall.UTF16PtrFromString(path)

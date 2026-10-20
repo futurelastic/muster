@@ -49,6 +49,8 @@ MUST_PASS=(
 	TestIsolation_RuntimePathReachesTheSession
 	TestSandboxRefusedOnAHostWithoutTheMechanism
 	TestCreatedFileHasOwnerOnlyProtectedDACL
+	TestWritableByOthersReadsTheRealList
+	TestDiscover_RefusesAModuleOthersCanWrite
 	TestSaveThenLoadRoundTrips
 	TestStoreDirectoryAndDocumentAreOwnerOnly
 	TestCorruptDocumentIsReportedAndNeverReplaced

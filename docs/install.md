@@ -181,7 +181,10 @@ order of this page and the order of its output are the same.
    (`FLEET_MODULES_DIR`, default `<prefix>/libexec/muster/modules` where
    `<prefix>` is the parent of the daemon binary's directory — set it explicitly
    when the binary is reached through a symlink), one file per module named by
-   the module, mode not group- or world-writable, and list the name. A name with
+   the module, not writable by anyone but the service's account (on Unix: mode not
+   group- or world-writable; on Windows: an access list that grants no other
+   account, apart from system and administrators, a write, delete or
+   change-permissions right), and list the name. A name with
    no executable is logged once and skipped: a machine that could not fetch the
    module is a supported state. `scripts/deploy.sh` can install one for you
    (`deploy.md`, "Optional delivery modules"). Row: `delivery.modules`, which
