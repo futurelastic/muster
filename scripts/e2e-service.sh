@@ -31,7 +31,7 @@ step() { echo; echo "== $* =="; }
 # A multiplexer the doctor will accept. The service starts without one running;
 # only the path has to name an executable file.
 tmux_bin="$(command -v tmux || true)"
-[ -n "$tmux_bin" ] || tmux_bin=/bin/true
+[ -n "$tmux_bin" ] || tmux_bin="$(command -v true)"
 
 # A fixed port for the health check, away from the default.
 addr="127.0.0.1:19470"

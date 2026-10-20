@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -109,6 +110,11 @@ type svcFixture struct {
 // health endpoint that answers 200 only with the supervisor's token.
 func newSvcFixture(t *testing.T, goos string) *svcFixture {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		// The fixture lays out a unix home and a fake executable by mode bits;
+		// the command itself refuses Windows, which a test below covers.
+		t.Skip("per-user service units are written on macOS and Linux")
+	}
 	home := t.TempDir()
 	dir := t.TempDir()
 	exe := filepath.Join(dir, "muster-src")
