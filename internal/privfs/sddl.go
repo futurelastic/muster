@@ -250,3 +250,100 @@ func dedupe(in []string) []string {
 	}
 	return out
 }
+
+// The access-mask bits that let a trustee change what a file runs as, or whose
+// it is: write or append data, delete, change the list, take ownership, and the
+// generic rights that expand into those. Writing extended attributes or
+// attributes alone is not here — neither changes the code in the file.
+const (
+	rightWriteData    = 0x00000002
+	rightAppendData   = 0x00000004
+	rightDelete       = 0x00010000
+	rightWriteDAC     = 0x00040000
+	rightWriteOwner   = 0x00080000
+	rightGenericAll   = 0x10000000
+	rightGenericWrite = 0x40000000
+
+	writeRights = rightWriteData | rightAppendData | rightDelete | rightWriteDAC |
+		rightWriteOwner | rightGenericAll | rightGenericWrite
+)
+
+// trustedWriters are the trustees whose write access to a file does not count as
+// "someone else": the machine's own accounts, which can run code as the service
+// whatever this file says. The current user is added by the caller.
+//
+// "CO" (creator owner) is the owner of the object, which is the current user or
+// an administrator for a file the service's install put there.
+var trustedWriters = map[string]bool{
+	"S-1-5-18":     true, // local system
+	"S-1-5-32-544": true, // built-in administrators
+	"S-1-3-0":      true, // creator owner
+	// TrustedInstaller, which owns the operating system's own files and appears
+	// on most files under the program-files directories.
+	"S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464": true,
+}
+
+// trusteeClasses names the well-known trustees a reason is likely to meet, so
+// the message says what kind of account can write instead of printing a SID.
+var trusteeClasses = map[string]string{
+	"S-1-1-0":      "Everyone",
+	"S-1-5-11":     "Authenticated Users",
+	"S-1-5-32-545": "Users",
+	"S-1-5-32-546": "Guests",
+	"S-1-5-32-547": "Power Users",
+	"S-1-5-32-551": "Backup Operators",
+	"S-1-5-4":      "the interactive logon group",
+	"S-1-5-2":      "the network logon group",
+	"S-1-5-7":      "the anonymous logon",
+	"S-1-5-19":     "the local service account",
+	"S-1-5-20":     "the network service account",
+	"S-1-15-2-1":   "all application packages",
+}
+
+// trusteeClass names a trustee for a diagnostic.
+func trusteeClass(sid string) string {
+	if c, ok := trusteeClasses[sid]; ok {
+		return c
+	}
+	return "the account " + sid
+}
+
+// writableBy returns the trustees, other than user and the machine's own
+// accounts, that d grants a write, delete, change-permissions or take-ownership
+// right on the file it belongs to (nil when there are none). A missing list
+// ("D:NO_ACCESS_CONTROL") grants everyone every right.
+//
+// Only what applies to the file itself counts: an entry flagged inherit-only
+// (IO) is a template for children and says nothing about this object. An allow
+// entry is reduced by an earlier deny entry for the same trustee, which is the
+// order the system evaluates a well-formed list in; a deny for a group does not
+// reduce an allow for a different trustee, because whether the two overlap
+// depends on who is in which group, and this reading has no token to ask.
+func writableBy(d dacl, user string) []string {
+	if d.Null {
+		return []string{trusteeClass("S-1-1-0")}
+	}
+	user = strings.ToUpper(user)
+	denied := map[string]uint32{}
+	var who []string
+	for _, a := range d.ACEs {
+		if a.Flags["IO"] {
+			continue
+		}
+		switch a.Type {
+		case "D":
+			denied[a.Trustee] |= a.Rights
+		case "A", "XA", "OA":
+			// "LA" is the built-in administrator account, which is as trusted as
+			// the administrators group.
+			if sameTrustee(a.Trustee, user) || trustedWriters[a.Trustee] || a.Trustee == "LA" {
+				continue
+			}
+			if a.Rights&^denied[a.Trustee]&writeRights != 0 {
+				who = append(who, trusteeClass(a.Trustee))
+			}
+		}
+	}
+	sort.Strings(who)
+	return dedupe(who)
+}

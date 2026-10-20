@@ -105,7 +105,8 @@ func checkExecutable(dir, name string) string {
 	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\\x00") {
 		return "invalid module name"
 	}
-	st, err := os.Lstat(filepath.Join(dir, name))
+	path := filepath.Join(dir, name)
+	st, err := os.Lstat(path)
 	switch {
 	case err != nil && os.IsNotExist(err):
 		return "no executable installed"
@@ -114,7 +115,7 @@ func checkExecutable(dir, name string) string {
 	case !st.Mode().IsRegular():
 		return "not a regular file (symbolic links are not followed)"
 	}
-	return modeProblem(st.Mode())
+	return modeProblem(path, st.Mode())
 }
 
 // baseEnv are the only names taken from the daemon's own environment, plus the

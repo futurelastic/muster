@@ -124,3 +124,59 @@ func TestJudge_ADomainRelativeAliasIsTheUserOnlyWhenTheUserIsThatAccount(t *test
 		t.Errorf("a non-domain SID must not match the alias: verdict = %s, want loose", v)
 	}
 }
+
+func TestWritableBy(t *testing.T) {
+	for _, tc := range []struct {
+		name, in string
+		want     []string
+	}{
+		{"only the user", "D:P(A;;FA;;;" + user + ")", nil},
+		{"the machine's own accounts", "D:PAI(A;ID;FA;;;SY)(A;ID;FA;;;BA)(A;ID;FA;;;" + user + ")", nil},
+		{"trusted installer", "D:P(A;;FA;;;S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464)(A;;FA;;;" + user + ")", nil},
+		{"the built-in administrator account", "D:P(A;;FA;;;LA)(A;;FA;;;" + user + ")", nil},
+		{"users may only read and run", "D:P(A;;FA;;;" + user + ")(A;;FRFX;;;BU)", nil},
+		{"read-only by right mask", "D:P(A;;0x120089;;;WD)", nil},
+		{"users may write", "D:P(A;;FA;;;" + user + ")(A;;FW;;;BU)", []string{"Users"}},
+		{"everyone, full control", "D:P(A;;FA;;;WD)", []string{"Everyone"}},
+		{"authenticated users may modify", "D:PAI(A;ID;0x1301bf;;;AU)", []string{"Authenticated Users"}},
+		{"generic write", "D:P(A;;GW;;;BU)", []string{"Users"}},
+		{"append only", "D:P(A;;0x100004;;;BU)", []string{"Users"}},
+		{"delete only", "D:P(A;;SD;;;BU)", []string{"Users"}},
+		{"change the list only", "D:P(A;;WD;;;BU)", []string{"Users"}},
+		{"take ownership only", "D:P(A;;WO;;;BU)", []string{"Users"}},
+		{"another account", "D:P(A;;FW;;;S-1-5-21-111-222-333-1002)", []string{"the account S-1-5-21-111-222-333-1002"}},
+		{"two classes, sorted and once each", "D:P(A;;FW;;;BU)(A;;FW;;;AU)(A;;GW;;;BU)", []string{"Authenticated Users", "Users"}},
+		{"inherit-only entries are not about this file", "D:P(A;OICIIO;FA;;;BU)(A;;FA;;;" + user + ")", nil},
+		{"an earlier deny of the same trustee takes the write away", "D:P(D;;FW;;;BU)(A;;FW;;;BU)", nil},
+		{"a deny of only some of the rights leaves the rest", "D:P(D;;WD;;;BU)(A;;FW;;;BU)", []string{"Users"}},
+		{"a deny after the allow does not undo it", "D:P(A;;FW;;;BU)(D;;FW;;;BU)", []string{"Users"}},
+		{"a deny for another trustee does not undo it", "D:P(D;;FW;;;AU)(A;;FW;;;BU)", []string{"Users"}},
+		{"no access list", "D:NO_ACCESS_CONTROL", []string{"Everyone"}},
+		{"an empty list", "D:P", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, err := parseSDDL(tc.in)
+			if err != nil {
+				t.Fatalf("parseSDDL: %v", err)
+			}
+			got := writableBy(d, user)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("writableBy(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWritableBy_TheCurrentUserIsNeverOthers(t *testing.T) {
+	d, err := parseSDDL("D:P(A;;FA;;;SY)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := writableBy(d, "S-1-5-18"); got != nil {
+		t.Errorf("a service running as the system account: %q, want none", got)
+	}
+	d, _ = parseSDDL("D:P(A;;FA;;;LA)")
+	if got := writableBy(d, "S-1-5-21-1-2-3-500"); got != nil {
+		t.Errorf("the built-in administrator's own entry: %q, want none", got)
+	}
+}

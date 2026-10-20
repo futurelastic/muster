@@ -7,7 +7,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
+	"unsafe"
 )
 
 // ownerOnlyProtected asserts p carries the protected list naming only the
@@ -129,5 +131,64 @@ func TestExistingLooseFileIsFixedByWriteFile(t *testing.T) {
 func TestCheckOfAnAbsentPathIsUnknown(t *testing.T) {
 	if r := Check(filepath.Join(t.TempDir(), "nope")); r.Verdict != Unknown {
 		t.Errorf("Check(absent) = %+v, want unknown", r)
+	}
+}
+
+// setDACL replaces path's list with the one sddl describes.
+func setDACL(t *testing.T, path, sddl string) {
+	t.Helper()
+	str, err := syscall.UTF16PtrFromString(sddl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sd syscall.Handle
+	if r, _, e := procConvertStringSDToSD.Call(uintptr(unsafe.Pointer(str)), sddlRevision1, uintptr(unsafe.Pointer(&sd)), 0); r == 0 {
+		t.Fatalf("building %q: %v", sddl, e)
+	}
+	defer syscall.LocalFree(sd)
+	var present, defaulted int32
+	var acl uintptr
+	if r, _, e := procGetSecurityDescriptorD.Call(uintptr(sd), uintptr(unsafe.Pointer(&present)), uintptr(unsafe.Pointer(&acl)), uintptr(unsafe.Pointer(&defaulted))); r == 0 {
+		t.Fatalf("reading the list of %q: %v", sddl, e)
+	}
+	p, _ := syscall.UTF16PtrFromString(path)
+	if code, _, _ := procSetNamedSecurityInfo.Call(uintptr(unsafe.Pointer(p)), seFileObject,
+		daclSecurityInformation|protectedDACLSecurityInformation, 0, 0, acl, 0); code != 0 {
+		t.Fatalf("applying %q to %s: %v", sddl, path, syscall.Errno(code))
+	}
+}
+
+func TestWritableByOthersReadsTheRealList(t *testing.T) {
+	dir := t.TempDir()
+	sid, err := userSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "module.exe")
+	if err := WriteFile(p, []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if who, err := WritableByOthers(p); err != nil || len(who) != 0 {
+		t.Errorf("an owner-only file: WritableByOthers = %q, %v, want none", who, err)
+	}
+
+	// The machine's own accounts and read-and-run for the users group are not
+	// "others".
+	setDACL(t, p, "D:P(A;;FA;;;"+sid+")(A;;FA;;;SY)(A;;FA;;;BA)(A;;FRFX;;;BU)")
+	if who, err := WritableByOthers(p); err != nil || len(who) != 0 {
+		t.Errorf("system, administrators and a read-only users group: WritableByOthers = %q, %v, want none", who, err)
+	}
+
+	setDACL(t, p, "D:P(A;;FA;;;"+sid+")(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1301bf;;;BU)")
+	who, err := WritableByOthers(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(who) != 1 || who[0] != "Users" {
+		t.Errorf("a users group that may modify: WritableByOthers = %q, want [Users]", who)
+	}
+
+	if _, err := WritableByOthers(filepath.Join(dir, "absent")); err == nil {
+		t.Error("an absent path: WritableByOthers returned no error")
 	}
 }

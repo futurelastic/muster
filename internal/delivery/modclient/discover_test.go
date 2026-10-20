@@ -84,7 +84,7 @@ func TestDiscover_AbsentOrEmptyDirectory(t *testing.T) {
 
 func TestDiscover_RefusesGroupWritable(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("a file's writability by others is an ACL question there, not mode bits (windows, #303)")
+		t.Skip("a file's writability by others is an ACL question there, not mode bits; see discover_windows_test.go (windows, #303)")
 	}
 	dir := t.TempDir()
 	writeModule(t, dir, "groupw", 0o775)

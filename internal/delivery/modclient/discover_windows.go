@@ -2,19 +2,36 @@
 
 package modclient
 
-import "os"
+import (
+	"fmt"
+	"os"
+	"strings"
 
-// modeProblem has nothing to judge on Windows. Go reports a made-up mode there
-// (it never carries an execute bit, and "writable by others" is an ACL, not a
-// bit), so applying the POSIX test would refuse every module, and any other
-// reading of the mode would be a guess. What remains is that the entry is a
-// regular file that is not a symbolic link, which checkExecutable has already
-// established; whether the process may be created is decided by the operating
-// system at exec time.
+	"github.com/futurelastic/muster/internal/privfs"
+)
+
+// modeProblem judges a module file by its access list. Go reports a made-up mode
+// on Windows (it never carries an execute bit, and "writable by others" is an
+// ACL, not a bit), so the POSIX test would refuse every module and any other
+// reading of the mode would be a guess. What this asks instead is the question
+// the POSIX test stands for: could anyone but the service's own account, or the
+// machine's own accounts (system, administrators), rewrite the file? Anyone who
+// could would run code as the service. Whether the process may be created at all
+// is decided by the operating system at exec time, as before.
 //
-// What is NOT checked here, and is therefore the install's job: that the
-// modules directory is writable only by the account that runs the service (its
-// default ACL under a per-machine install directory does that). Judging a file's
-// DACL for write access by a third party is a follow-up to the Windows port
-// (#303), not something to approximate from mode bits.
-func modeProblem(os.FileMode) string { return "" }
+// An access list that cannot be read or understood refuses the module: this
+// check guards code that is about to be run, so "unknown" is not a pass.
+//
+// Not checked here, and therefore the install's job: the modules directory. A
+// writable directory lets its owner swap a file even when the file is tight, and
+// its default list under a per-machine install directory does not allow that.
+func modeProblem(path string, _ os.FileMode) string {
+	who, err := privfs.WritableByOthers(path)
+	switch {
+	case err != nil:
+		return "its access list could not be read (" + err.Error() + ")"
+	case len(who) > 0:
+		return fmt.Sprintf("writable by others (%s)", strings.Join(who, ", "))
+	}
+	return ""
+}
