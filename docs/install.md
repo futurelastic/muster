@@ -199,14 +199,18 @@ order of this page and the order of its output are the same.
      manager starts processes with a bare `PATH` that usually lacks it, and
      the failure appears only under the manager, never in your shell
      (row: `runtime`);
-   - use **tmux 3.7 or newer**. The terminal path pastes with bracketed paste
-     only when tmux can report that the pane asked for it
-     (`#{bracket_paste_flag}`), and that variable first exists in 3.7. On an
-     older tmux, measured on 3.4, 3.5a, 3.6 and 3.6a, it reads empty: sessions
-     are created and read but every send on the terminal path is refused. Most
-     distribution packages are older, so build or install a current tmux and
-     point `FLEET_TMUX_BIN` at it (row: `runtime.tmux-version`, which runs
-     `tmux -V` and fails on an older release);
+   - prefer **tmux 3.7 or newer**. The terminal path pastes with bracketed paste,
+     and from 3.7 tmux can report that the pane asked for it
+     (`#{bracket_paste_flag}`), so the driver checks before it pastes. Older
+     tmux (measured on 3.4, 3.5a, 3.6 and 3.6a; most distribution packages) reads
+     that variable empty. There the driver pastes with `paste-buffer -p` and no
+     pre-check — tmux brackets exactly when the pane asked — and relies on the
+     composer read-back before it presses Enter. Sends work, proven for one
+     runtime build by `muster compat` run against that tmux (check `G2`); the
+     row `runtime.tmux-version` is a `warn` naming what is not being checked.
+     To get the check back, install tmux 3.7 or newer and point `FLEET_TMUX_BIN`
+     at it. A development build whose version cannot be read, or a 3.7+ tmux that
+     prints nothing, still refuses every send;
    - on macOS, load the service into the user's **Background** launchd domain
      (`launchctl bootstrap user/$(id -u) …`, with `LimitLoadToSessionType=Background`
      in the plist), not `gui/<uid>` and not from a Terminal window. Every session

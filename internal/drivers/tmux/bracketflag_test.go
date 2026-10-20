@@ -59,3 +59,41 @@ func TestBracketFlagFailureSeparatesTheMultiplexerFromTheCandidate(t *testing.T)
 		}
 	}
 }
+
+// #334: an empty flag is excused only when the release is known to predate it.
+func TestFlagUnreadableByVersion(t *testing.T) {
+	for _, tc := range []struct {
+		flag, version string
+		want          bool
+	}{
+		{"", "tmux 3.4", true},
+		{"", "tmux 3.6a", true},
+		{"", "tmux 3.7", false},
+		{"", "tmux 3.7b", false},
+		{"", "tmux next-3.8", false},
+		{"", "", false},
+		{"0", "tmux 3.4", false},
+		{"1", "tmux 3.4", false},
+	} {
+		if got := flagUnreadableByVersion(tc.flag, tc.version); got != tc.want {
+			t.Errorf("flagUnreadableByVersion(%q, %q) = %v, want %v", tc.flag, tc.version, got, tc.want)
+		}
+	}
+}
+
+// G2 on a tmux that cannot read the flag rests on the runtime's own marker: a
+// bracketed paste collapses, an unbracketed one lands as raw rows.
+func TestBracketedArrivalProof(t *testing.T) {
+	collapsed40 := &compatDraft{ran: true, markers: map[pasteKey]int{{lines: 39}: 1}, holds: true}
+	collapsed900 := &compatDraft{ran: true, markers: map[pasteKey]int{{lines: 0}: 1}, holds: true}
+	raw := &compatDraft{ran: true, markers: map[pasteKey]int{}}
+	if bad := bracketedArrivalProof(collapsed40, collapsed900); len(bad) != 0 {
+		t.Errorf("both pastes collapsed, yet findings: %v", bad)
+	}
+	if bad := bracketedArrivalProof(raw, collapsed900); len(bad) != 1 || !strings.Contains(bad[0], "40-line") {
+		t.Errorf("a 40-line paste that did not collapse must be the one finding, got %v", bad)
+	}
+	if bad := bracketedArrivalProof(collapsed40, &compatDraft{skipped: "no composer"}); len(bad) != 1 || !strings.Contains(bad[0], "no composer") {
+		t.Errorf("a draft that never ran must be named, got %v", bad)
+	}
+}

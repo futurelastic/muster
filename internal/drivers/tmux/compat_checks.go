@@ -419,34 +419,14 @@ func (h *compatHarness) addComposerChecks(s *compat.Suite) {
 		}},
 
 		compat.Check{ID: "F-PASTEMARK", Probes: []string{"draft.paste40", "draft.paste900"}, Eval: func() compat.Verdict {
-			var bad []string
-			only := func(m map[pasteKey]int) (pasteKey, bool) {
-				if len(m) != 1 {
-					return pasteKey{}, false
-				}
-				for k, n := range m {
-					return k, n == 1
-				}
-				return pasteKey{}, false
-			}
-			d40 := h.draftOf("paste40")
+			d40, d900 := h.draftOf("paste40"), h.draftOf("paste900")
 			if v, skip := unrun(d40); skip {
 				return v
 			}
-			if d40.pasteErr != nil {
-				bad = append(bad, "a 40-line paste could not be made: "+d40.pasteErr.Error())
-			} else if k, ok := only(d40.markers); !ok || k.lines != 39 || !d40.holds {
-				bad = append(bad, fmt.Sprintf("a 40-line paste should show one marker of +39 lines, found %v (holds a collapsed paste: %v)", d40.markers, d40.holds))
-			}
-			d900 := h.draftOf("paste900")
 			if v, skip := unrun(d900); skip {
 				return v
 			}
-			if d900.pasteErr != nil {
-				bad = append(bad, "a 900-byte single-line paste could not be made: "+d900.pasteErr.Error())
-			} else if k, ok := only(d900.markers); !ok || k.lines != 0 || !d900.holds {
-				bad = append(bad, fmt.Sprintf("a 900-byte single line should show one bare marker, found %v (holds a collapsed paste: %v)", d900.markers, d900.holds))
-			}
+			bad := collapseFindings(d40, d900)
 			if len(bad) > 0 {
 				return compat.Failed(strings.Join(bad, "; "))
 			}
@@ -509,4 +489,32 @@ func (h *compatHarness) addComposerChecks(s *compat.Suite) {
 			return compat.Passed("a leading ! enters shell mode (the composer becomes unreadable to the driver, as its guard assumes); the same text after a space, and a slash after a space, stay plain prompts")
 		}},
 	)
+}
+
+// collapseFindings is what the two long drafts must show for the paste to have
+// been bracketed: the runtime collapses a bracketed 40-line paste to one marker
+// of +39 lines and a bracketed 900-byte single line to one bare marker. Each
+// draft must already have run.
+func collapseFindings(d40, d900 *compatDraft) []string {
+	var bad []string
+	only := func(m map[pasteKey]int) (pasteKey, bool) {
+		if len(m) != 1 {
+			return pasteKey{}, false
+		}
+		for k, n := range m {
+			return k, n == 1
+		}
+		return pasteKey{}, false
+	}
+	if d40.pasteErr != nil {
+		bad = append(bad, "a 40-line paste could not be made: "+d40.pasteErr.Error())
+	} else if k, ok := only(d40.markers); !ok || k.lines != 39 || !d40.holds {
+		bad = append(bad, fmt.Sprintf("a 40-line paste should show one marker of +39 lines, found %v (holds a collapsed paste: %v)", d40.markers, d40.holds))
+	}
+	if d900.pasteErr != nil {
+		bad = append(bad, "a 900-byte single-line paste could not be made: "+d900.pasteErr.Error())
+	} else if k, ok := only(d900.markers); !ok || k.lines != 0 || !d900.holds {
+		bad = append(bad, fmt.Sprintf("a 900-byte single line should show one bare marker, found %v (holds a collapsed paste: %v)", d900.markers, d900.holds))
+	}
+	return bad
 }

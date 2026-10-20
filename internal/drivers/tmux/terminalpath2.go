@@ -155,6 +155,16 @@ func (d *Driver) tmuxVersionText(ctx context.Context) string {
 // pane (round-1 measured only flag=1), so a fallback branch would be
 // deploying UNMEASURED behaviour disguised as graceful degradation — the
 // same shape of mistake §5.6's "degrade, never emulate" already names.
+//
+// # A multiplexer older than 3.7 (#334)
+//
+// Before 3.7 the flag cannot be read at all, so "refuse unless it reads 1"
+// would refuse every send on a distribution's tmux. There the query is skipped
+// in effect (it reads empty and the release is known to predate the variable)
+// and the same `paste-buffer -p -r` is issued: tmux itself brackets exactly
+// when the pane asked, so a pane that did is delivered to as on 3.7, and one
+// that did not receives the payload's newlines as plain input — which the
+// read-back in Send then has to catch before Enter, as it must anyway.
 func (d *Driver) pasteBracketed(ctx context.Context, paneID, text string) error {
 	flag, ok := d.bracketPasteFlag(ctx, paneID)
 	if !ok {
@@ -166,22 +176,34 @@ func (d *Driver) pasteBracketed(ctx context.Context, paneID, text string) error 
 	}
 	if flag == "" {
 		// An empty answer is how tmux says it does not know the variable. It
-		// is not the "0" of a pane that declined bracketed paste: no delivery
-		// shape was ever measured against it, and the pane may well have
-		// asked. Say what is actually wrong — the multiplexer — so nobody
-		// goes looking at the runtime's terminal setup (#333).
-		d.counters.incr(counterBracketPasteFlagUnsupported)
+		// is not the "0" of a pane that declined bracketed paste, so what to do
+		// depends on which multiplexer printed it (#333, #334).
 		have := d.tmuxVersionText(ctx)
-		if have == "" {
-			have = "this tmux"
+		if provides, known := TmuxProvidesBracketPasteFlag(have); known && !provides {
+			// A release older than 3.7 cannot answer, whatever the pane did, and
+			// its `paste-buffer -p` brackets only when the pane asked (cmd-paste-
+			// buffer.c, 3.4; measured here on 3.4 and 3.6a). So the delivery is
+			// the same -p -r call with nothing read first. Both arrivals were
+			// measured against the real runtime: bracketed, a long paste collapses
+			// to one marker; unbracketed, it lands as raw rows and nothing submits
+			// it by itself (Enter is pressed only after Send's landed check). That
+			// check is not claimed to tell the two apart; the compat check G2 is
+			// what proves a build bracketed on this tmux. See docs/compat.md.
+			d.counters.incr(counterBracketPasteUnreadablePre37)
+		} else {
+			// A 3.7+ tmux that printed nothing, or a build whose version this
+			// driver will not guess at: no delivery shape was measured against it.
+			d.counters.incr(counterBracketPasteFlagUnsupported)
+			if have == "" {
+				have = "this tmux"
+			}
+			return fmt.Errorf("%w: %s did not report #{bracket_paste_flag} (it reads empty; the variable first "+
+				"exists in tmux %s), so this driver cannot confirm the pane's occupant asked for bracketed paste "+
+				"and refuses rather than falling back to the CR-converting paste this change replaces — use "+
+				"tmux %s or newer and point FLEET_TMUX_BIN at it (muster doctor names this as runtime.tmux-version)",
+				errBracketPasteUnavailable, have, BracketPasteFlagSince, BracketPasteFlagSince)
 		}
-		return fmt.Errorf("%w: %s does not report #{bracket_paste_flag} (it reads empty; the variable first "+
-			"exists in tmux %s), so this driver cannot confirm the pane's occupant asked for bracketed paste "+
-			"and refuses rather than falling back to the CR-converting paste this change replaces — install "+
-			"tmux %s or newer and point FLEET_TMUX_BIN at it (muster doctor names this as runtime.tmux-version)",
-			errBracketPasteUnavailable, have, BracketPasteFlagSince, BracketPasteFlagSince)
-	}
-	if flag != "1" {
+	} else if flag != "1" {
 		d.counters.incr(counterBracketPasteFlagOff)
 		return fmt.Errorf("%w: this pane's occupant has not asked the terminal for bracketed "+
 			"paste mode (#{bracket_paste_flag} reads 0) — delivering literal newlines un-bracketed "+

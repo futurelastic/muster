@@ -79,10 +79,19 @@ func (h *compatHarness) addSendChecks(s *compat.Suite) {
 				short.dur.Round(100*time.Millisecond), firstConfirmation(warm)))
 		}},
 
-		compat.Check{ID: "G2", Probes: append([]string{"boot.a"}, all...), Eval: func() compat.Verdict {
+		compat.Check{ID: "G2", Probes: append([]string{"boot.a", "draft.paste40", "draft.paste900"}, all...), Eval: func() compat.Verdict {
 			var bad []string
+			unreadable := false
 			if f := h.ev.a.shot.bracket; f != "1" {
-				bad = append(bad, bracketFlagFailure(f, h.tmuxVersionText()))
+				if flagUnreadableByVersion(f, h.tmuxVersionText()) {
+					// A multiplexer older than 3.7 cannot say whether the pane asked
+					// (#334). The proof that it did is what only a bracketed paste
+					// can do: a long paste collapses into the runtime's marker.
+					unreadable = true
+					bad = append(bad, bracketedArrivalProof(h.draftOf("paste40"), h.draftOf("paste900"))...)
+				} else {
+					bad = append(bad, bracketFlagFailure(f, h.tmuxVersionText()))
+				}
 			}
 			for _, n := range []string{"long", "multi", "control"} {
 				sd := h.sendOf(n)
@@ -101,6 +110,9 @@ func (h *compatHarness) addSendChecks(s *compat.Suite) {
 			}
 			if len(bad) > 0 {
 				return compat.Failed(strings.Join(bad, "; "))
+			}
+			if unreadable {
+				return compat.Passed("the multiplexer is older than " + BracketPasteFlagSince + " and cannot report the flag; a 40-line paste and a 900-byte single line still collapsed to the runtime's paste marker, which only a bracketed paste does, and a 900-byte single line, a 40-line paste and text with control bytes each arrived exactly once, the control bytes not reaching the runtime")
 			}
 			return compat.Passed("bracketed paste is on at the composer; a 900-byte single line, a 40-line paste and text with control bytes each arrived exactly once, and the control bytes did not reach the runtime")
 		}},

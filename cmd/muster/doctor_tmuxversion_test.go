@@ -24,8 +24,8 @@ func TestCheckTmuxVersion(t *testing.T) {
 		want    rowStatus
 		summary string
 	}{
-		{"distribution tmux 3.4 fails", "tmux", "", found, say("tmux 3.4", nil), statusFail, "does not provide #{bracket_paste_flag}"},
-		{"3.6a fails", "tmux", "", found, say("tmux 3.6a", nil), statusFail, "tmux 3.6a"},
+		{"distribution tmux 3.4 warns", "tmux", "", found, say("tmux 3.4", nil), statusWarn, "cannot report #{bracket_paste_flag}"},
+		{"3.6a warns", "tmux", "", found, say("tmux 3.6a", nil), statusWarn, "tmux 3.6a"},
 		{"3.7 passes", "tmux", "", found, say("tmux 3.7", nil), statusPass, "provides #{bracket_paste_flag}"},
 		{"an explicit binary is the one asked", "tmux", "/opt/tmux/bin/tmux", notFound, say("tmux 3.7c", nil), statusPass, "tmux 3.7c"},
 		{"a development build is unknown, not a pass", "tmux", "", found, say("tmux next-3.8", nil), statusUnknown, "not recognised"},
@@ -49,23 +49,24 @@ func TestCheckTmuxVersion(t *testing.T) {
 			if !strings.Contains(row.Summary, tc.summary) {
 				t.Errorf("summary = %q, want it to contain %q", row.Summary, tc.summary)
 			}
-			if tc.want == statusFail && !strings.Contains(row.Detail, "FLEET_TMUX_BIN") {
-				t.Errorf("a failing row must say how to fix it; detail = %q", row.Detail)
+			if tc.want == statusWarn && !strings.Contains(row.Detail, "FLEET_TMUX_BIN") {
+				t.Errorf("a warning row must say how to fix it; detail = %q", row.Detail)
 			}
 		})
 	}
 }
 
-// The row is part of a doctor run, is skippable by id, and a failing one fails
-// the run's exit code (ADR 160: every terminal-path send is refused).
+// The row is part of a doctor run and is skippable by id. An older tmux is a
+// warning, not a failure: since #334 its sends are delivered, just without the
+// flag check (ADR 160).
 func TestDoctorRunsTheTmuxVersionRow(t *testing.T) {
 	old := doctorTmuxVersion
 	doctorTmuxVersion = func(context.Context, string) (string, error) { return "tmux 3.4", nil }
 	defer func() { doctorTmuxVersion = old }()
 
 	rows := runChecks(context.Background(), testDoctorEnv(nil))
-	if r := rowByID(t, rows, "runtime.tmux-version"); r.Status != statusFail {
-		t.Fatalf("tmux 3.4: status = %s, want fail", r.Status)
+	if r := rowByID(t, rows, "runtime.tmux-version"); r.Status != statusWarn {
+		t.Fatalf("tmux 3.4: status = %s, want warn", r.Status)
 	}
 
 	env := testDoctorEnv(nil)
