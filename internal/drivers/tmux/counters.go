@@ -337,6 +337,12 @@ const (
 	// declined bracketed paste is the runtime's doing, an unsupported variable
 	// is the multiplexer's.
 	counterBracketPasteFlagUnsupported = "bracket_paste.flag_unsupported"
+	// counterBracketPasteUnreadablePre37 counts a paste sent on a multiplexer that
+	// reports the release it is and is older than 3.7 (#334): the flag cannot be
+	// read there, so the paste went out as `paste-buffer -p` with no pre-check and
+	// the multiplexer alone decided whether to bracket it. A rate here is how many
+	// deliveries rest on that rather than on a flag read.
+	counterBracketPasteUnreadablePre37 = "bracket_paste.unreadable_pre37"
 
 	// counterComposerLockContended counts every composer-touching call
 	// (Send, Respond, Discard, Keys — terminalpath2_lock.go) that had to

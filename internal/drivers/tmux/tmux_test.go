@@ -117,6 +117,10 @@ type fakeMux struct {
 	// does not know #{bracket_paste_flag}, so the query prints an empty line
 	// rather than "0" or "1", and `-V` names an old release.
 	bracketPasteUnsupported bool
+	// versionLine, when set, is what `-V` prints, whatever bracketPasteUnsupported
+	// says: a release that could answer the query but prints nothing, or one the
+	// driver cannot place (#334).
+	versionLine string
 	// echoOutsideFence restores this fake's original paste model: delivered
 	// text is appended AFTER the whole pre-armed screen instead of being
 	// rendered inside the composer's fence (renderInComposer). That is the
@@ -419,6 +423,9 @@ func (f *fakeMux) exec(ctx context.Context, name string, args ...string) ([]byte
 	}
 	switch args[0] {
 	case "-V":
+		if f.versionLine != "" {
+			return []byte(f.versionLine + "\n"), nil
+		}
 		if f.bracketPasteUnsupported {
 			return []byte("tmux 3.4\n"), nil
 		}

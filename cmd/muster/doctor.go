@@ -935,22 +935,21 @@ func checkRuntimeOn(goos, runtime, tmuxBin string, lookPath func(string) (string
 }
 
 // checkTmuxVersion is the runtime.tmux-version row (muster #333): the terminal
-// path pastes with bracketed paste only when tmux can say the pane asked for it,
-// and tmux first can in 3.7 (`#{bracket_paste_flag}`). On an older tmux the
-// service starts, the session is created and read, and every send is refused at
-// run time — measured on a distribution's tmux 3.4 — so this names the missing
-// prerequisite where an install is checked instead of leaving it to be found by
-// the first refused send.
+// path pastes with bracketed paste, and tmux first can say whether the pane
+// asked for it in 3.7 (`#{bracket_paste_flag}`). On an older tmux the pre-check
+// is not possible; since #334 a send there goes out as `paste-buffer -p` without
+// it, so this row is a `warn` naming what is not being checked rather than a
+// failure (it was a `fail` while every send there was refused, #333).
 //
 // It runs the binary the service will run (FLEET_TMUX_BIN, else the PATH
 // lookup the runtime row already did) with `-V`, which touches no server. A
 // version it cannot read is `unknown`, never a pass: a development build or a
 // wrapper script says nothing about the flag.
 //
-// `fail`, by ADR 160's definition: the service will refuse a call a configured
-// setup plainly intends — every send that takes the terminal path.
+// `warn`, by ADR 160's definition: the service works, with a check missing that
+// the operator can restore. A version it cannot read stays `unknown`.
 func checkTmuxVersion(ctx context.Context, runtime, tmuxBin string, env doctorEnv) doctorRow {
-	row := doctorRow{ID: "runtime.tmux-version", Refs: []int{333}}
+	row := doctorRow{ID: "runtime.tmux-version", Refs: []int{333, 334}}
 	if runtime != "tmux" {
 		row.Status = statusSkip
 		row.Summary = fmt.Sprintf("FLEET_RUNTIME=%s does not run tmux", runtime)
@@ -990,11 +989,12 @@ func checkTmuxVersion(ctx context.Context, runtime, tmuxBin string, env doctorEn
 		row.Status = statusPass
 		row.Summary = fmt.Sprintf("%s provides #{bracket_paste_flag}", out)
 	default:
-		row.Status = statusFail
-		row.Summary = fmt.Sprintf("%s does not provide #{bracket_paste_flag} — every send on the terminal path is refused", out)
-		row.Detail = "the driver pastes bracketed only when tmux can say the pane asked for it, and that variable first exists in tmux " +
-			tmuxdriver.BracketPasteFlagSince + " (measured: 3.4, 3.5a and 3.6a read it empty). Install tmux " +
-			tmuxdriver.BracketPasteFlagSince + " or newer and set FLEET_TMUX_BIN to its absolute path in the unit; sessions can still be created and read meanwhile"
+		row.Status = statusWarn
+		row.Summary = fmt.Sprintf("%s cannot report #{bracket_paste_flag} — terminal-path sends go out without that check", out)
+		row.Detail = "that variable first exists in tmux " + tmuxdriver.BracketPasteFlagSince + " (measured: 3.4, 3.5a and 3.6a read it empty). " +
+			"Here the driver pastes with `paste-buffer -p`, which brackets only when the pane asked, and relies on the composer read-back " +
+			"before it presses Enter (muster #334; docs/compat.md, G2). Run `muster compat` against this tmux to prove it for your runtime build, " +
+			"or use tmux " + tmuxdriver.BracketPasteFlagSince + " or newer via FLEET_TMUX_BIN to restore the check"
 	}
 	return row
 }

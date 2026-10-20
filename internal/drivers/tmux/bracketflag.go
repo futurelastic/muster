@@ -95,3 +95,35 @@ func bracketFlagFailure(flag, tmuxVersion string) string {
 		"so the driver cannot tell whether the candidate asked for bracketed paste and refuses to paste — this is the multiplexer's version, not the candidate; "+
 		"run the check with tmux %s or newer (FLEET_TMUX_BIN)", have, BracketPasteFlagSince, BracketPasteFlagSince)
 }
+
+// flagUnreadableByVersion reports whether an empty flag is explained by the
+// multiplexer's release: it is a version older than 3.7, which cannot answer
+// (#334). A flag that read anything else, or a release that could have
+// answered or is not recognised, is not.
+func flagUnreadableByVersion(flag, tmuxVersion string) bool {
+	if flag != "" {
+		return false
+	}
+	provides, known := TmuxProvidesBracketPasteFlag(tmuxVersion)
+	return known && !provides
+}
+
+// bracketedArrivalProof is G2's evidence that a paste was bracketed when the
+// flag cannot be read: only a bracketed paste collapses into the runtime's
+// marker, so a 40-line paste and a 900-byte single line that both did were
+// delivered bracketed (#334). A draft that did not run is a finding too.
+func bracketedArrivalProof(d40, d900 *compatDraft) []string {
+	var bad []string
+	for _, c := range []struct {
+		name string
+		d    *compatDraft
+	}{{"40-line", d40}, {"900-byte", d900}} {
+		if !c.d.ran {
+			bad = append(bad, c.name+" draft not made, so bracketed arrival was not shown: "+c.d.skipped)
+		}
+	}
+	if len(bad) > 0 {
+		return bad
+	}
+	return collapseFindings(d40, d900)
+}

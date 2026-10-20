@@ -124,6 +124,12 @@ func (h *compatHarness) awaitBracket(ctx context.Context, b *compatBoot) {
 	if !b.ready || b.shot.bracket == "1" {
 		return
 	}
+	// A multiplexer older than 3.7 never answers, so there is nothing to wait for
+	// (#334): the paste is sent without the pre-check, and G2 judges it by what
+	// the runtime did with it.
+	if flagUnreadableByVersion(b.shot.bracket, h.tmuxVersionText()) {
+		return
+	}
 	if s, ok := h.world.waitShot(ctx, b.ref, compatBracketWait, func(s compatShot) bool { return s.bracket == "1" }); ok {
 		b.shot = s
 	} else {

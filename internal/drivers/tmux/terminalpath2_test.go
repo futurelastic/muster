@@ -245,38 +245,104 @@ func TestPasteBracketedRefusesWhenFlagIsOff(t *testing.T) {
 	}
 }
 
-// #333: a tmux older than 3.7 prints an empty line for a format variable it does
-// not know. That is not the "0" of a pane that declined bracketed paste, and the
-// refusal must say which multiplexer is at fault instead of claiming the flag
-// reads 0.
-func TestPasteBracketedNamesAnUnsupportedFlagApartFromAnOffOne(t *testing.T) {
+// #334: a tmux older than 3.7 prints an empty line for a format variable it does
+// not know, whatever the pane did. The paste still goes out, as the same
+// `paste-buffer -p -r`, because tmux brackets exactly when the pane asked — and
+// the delivery is counted apart from one that rested on a flag read.
+func TestPasteBracketedProceedsWithoutThePreCheckOnATmuxOlderThan37(t *testing.T) {
 	f := twoSessions()
 	f.mu.Lock()
 	f.bracketPasteUnsupported = true
 	f.mu.Unlock()
 	d := newTestDriver(f)
 
-	err := d.pasteBracketed(context.Background(), "%1", "hello")
-	if err == nil {
-		t.Fatal("pasteBracketed delivered through a tmux that cannot report the flag")
+	text := "line one\nline two"
+	if err := d.pasteBracketed(context.Background(), "%1", text); err != nil {
+		t.Fatalf("pasteBracketed refused on a tmux that cannot answer the query: %v", err)
 	}
-	if !errors.Is(err, errBracketPasteUnavailable) {
-		t.Errorf("error %v does not wrap errBracketPasteUnavailable, so Send cannot classify it", err)
-	}
-	for _, want := range []string{"tmux 3.4", "reads empty", "3.7", "FLEET_TMUX_BIN"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error = %q, want it to contain %q", err.Error(), want)
-		}
-	}
-	if strings.Contains(err.Error(), "reads 0") {
-		t.Errorf("error = %q still blames a pane that reads 0", err.Error())
+	if f.pasted["%1"] != text {
+		t.Errorf("pasted = %q, want %q", f.pasted["%1"], text)
 	}
 	snap := d.counters.Snapshot()
-	if snap[counterBracketPasteFlagUnsupported] != 1 || snap[counterBracketPasteFlagOff] != 0 {
-		t.Errorf("counters unsupported=%d off=%d, want 1 and 0", snap[counterBracketPasteFlagUnsupported], snap[counterBracketPasteFlagOff])
+	if snap[counterBracketPasteUnreadablePre37] != 1 || snap[counterBracketPasteFlagUnsupported] != 0 || snap[counterBracketPasteFlagOff] != 0 {
+		t.Errorf("counters pre37=%d unsupported=%d off=%d, want 1, 0, 0",
+			snap[counterBracketPasteUnreadablePre37], snap[counterBracketPasteFlagUnsupported], snap[counterBracketPasteFlagOff])
 	}
-	if f.pasted["%1"] != "" {
-		t.Errorf("a paste reached the pane despite the refusal")
+	for _, c := range f.callsSnapshot() {
+		for i, a := range c {
+			if a == "paste-buffer" && !(strings.Contains(strings.Join(c[i:], " "), "-p") && strings.Contains(strings.Join(c[i:], " "), "-r")) {
+				t.Errorf("paste-buffer call %v lacks -p and/or -r", c)
+			}
+		}
+	}
+}
+
+// #333/#334: an empty answer is excused only by a release that is known to
+// predate the variable. A tmux that could have answered, or one whose version the
+// driver cannot place, still refuses and says why.
+func TestPasteBracketedStillRefusesAnEmptyAnswerNotExplainedByTheVersion(t *testing.T) {
+	for name, version := range map[string]string{
+		"a release that provides the variable": "tmux 3.7a",
+		"a build it cannot place":              "tmux next-3.8",
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := twoSessions()
+			f.mu.Lock()
+			f.bracketPasteUnsupported = true
+			f.versionLine = version
+			f.mu.Unlock()
+			d := newTestDriver(f)
+
+			err := d.pasteBracketed(context.Background(), "%1", "hello")
+			if err == nil {
+				t.Fatal("pasteBracketed delivered on an empty answer the version does not explain")
+			}
+			if !errors.Is(err, errBracketPasteUnavailable) {
+				t.Errorf("error %v does not wrap errBracketPasteUnavailable, so Send cannot classify it", err)
+			}
+			for _, want := range []string{version, "reads empty", "3.7", "FLEET_TMUX_BIN"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %q, want it to contain %q", err.Error(), want)
+				}
+			}
+			snap := d.counters.Snapshot()
+			if snap[counterBracketPasteFlagUnsupported] != 1 || snap[counterBracketPasteUnreadablePre37] != 0 {
+				t.Errorf("counters unsupported=%d pre37=%d, want 1 and 0", snap[counterBracketPasteFlagUnsupported], snap[counterBracketPasteUnreadablePre37])
+			}
+			if f.pasted["%1"] != "" {
+				t.Errorf("a paste reached the pane despite the refusal")
+			}
+		})
+	}
+}
+
+// End to end through Send: on a tmux older than 3.7 the message is delivered
+// rather than refused (#334).
+func TestSendDeliversThroughATmuxOlderThan37(t *testing.T) {
+	f := twoSessions()
+	f.mu.Lock()
+	f.bracketPasteUnsupported = true
+	f.mu.Unlock()
+	d := newTestDriver(f)
+
+	got, err := d.Send(context.Background(), testCaller, fleet.SessionRef{Machine: "testbox", ID: "alpha💬"},
+		"hello", driver.SendOptions{Submit: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Outcome == fleet.OutcomeRefused {
+		t.Fatalf("Send refused on a tmux older than 3.7: %s", got.Reason)
+	}
+	pasted := false
+	for _, c := range f.callsSnapshot() {
+		for _, a := range c {
+			if a == "paste-buffer" {
+				pasted = true
+			}
+		}
+	}
+	if !pasted {
+		t.Error("no paste-buffer call: nothing was delivered")
 	}
 }
 

@@ -150,7 +150,7 @@ var catalogue = []Spec{
 	{
 		ID:       "G2",
 		Gate:     GateMust,
-		Asserts:  "Bracketed paste is on at the composer, and a long single line, a long multi-line paste and text with control bytes each arrive whole and exactly once, with the control bytes removed as the sanitiser assumes. The flag is read through the multiplexer, so it needs tmux 3.7 or newer: on an older tmux it reads empty, and the check says the multiplexer's version is the cause and names it (#333).",
+		Asserts:  "Bracketed paste is on at the composer, and a long single line, a long multi-line paste and text with control bytes each arrive whole and exactly once, with the control bytes removed as the sanitiser assumes. The flag is read through the multiplexer, so on tmux 3.7 or newer it must read `1`. On an older tmux it reads empty and cannot be asked (#333); the check then asks for the evidence only a bracketed paste leaves — a 40-line paste and a 900-byte single line each collapse into the runtime's one paste marker — on top of the same exactly-once sends (#334). That is how a send on an older tmux is proven: run `muster compat` with `FLEET_TMUX_BIN` pointing at it. An unbracketed arrival was measured to look different (a long paste lands as raw rows with no marker, and nothing submits it by itself), which is what lets this check tell the two apart; a short paste lands the same either way, and a send's own pre-Enter read-back is not claimed to catch the long one.",
 		ReliedOn: []string{"internal/drivers/tmux/terminalpath2.go#sanitizeForBracketedPaste"},
 	},
 	{
