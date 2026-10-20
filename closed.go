@@ -34,6 +34,12 @@ type ClosedSession struct {
 	Runtime RuntimeId    `json:"runtime,omitempty"`
 	Cwd     AbsolutePath `json:"cwd,omitempty"`
 
+	// Agent is the same hint the live record carries (Session.Agent), copied
+	// from the last sighting that reported one. Same contract as the live
+	// field: a hint, omitted when it was never known, never guessed. A peer
+	// whose build predates the field simply omits it.
+	Agent AgentId `json:"agent,omitempty"`
+
 	// StartedAt is the same field the live record carries (§5.4's identity
 	// pairing with ID), copied from the last sighting. Absent when the
 	// runtime never reported it.
