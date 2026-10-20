@@ -146,3 +146,53 @@ jobs:
         shell: pwsh
         timeout-minutes: 25
         run: ./scripts/e2e-windows.ps1
+
+  # `muster service` (#341) against a real service manager. The unit tests use a
+  # fake one; this is the check that the unit it writes loads, starts, answers
+  # /v1/health, survives a second install untouched, restarts on an upgrade and
+  # unloads. The hosted Linux runner has systemd but no user session, so the step
+  # starts the user manager the way a login would (linger), and points
+  # `systemctl --user` at it.
+  service-linux:
+    name: muster service on systemd --user
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build
+        run: go build -o "$RUNNER_TEMP/muster" ./cmd/muster
+      - name: Start a user manager
+        run: |
+          sudo apt-get install -y tmux
+          sudo loginctl enable-linger "$USER"
+          sudo systemctl start "user@$(id -u).service"
+          uid="$(id -u)"
+          for _ in $(seq 1 20); do
+            [ -S "/run/user/$uid/bus" ] && break
+            sleep 0.5
+          done
+          echo "XDG_RUNTIME_DIR=/run/user/$uid" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" >> "$GITHUB_ENV"
+      - name: install, status, second install, upgrade, uninstall
+        run: ./scripts/e2e-service.sh full "$RUNNER_TEMP/muster"
+      - name: The service's log, on failure
+        if: failure()
+        run: journalctl --user -u muster.service --no-pager -n 100 || true
+
+  # The macOS half stops short of loading: a Background launchd job needs a login
+  # session a hosted runner does not give. It does run the real install path as
+  # far as the unit and lint what was written.
+  service-macos:
+    name: muster service plist
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build
+        run: go build -o "$RUNNER_TEMP/muster" ./cmd/muster
+      - name: install --no-start, lint the plist, second install, uninstall
+        run: ./scripts/e2e-service.sh lint "$RUNNER_TEMP/muster"

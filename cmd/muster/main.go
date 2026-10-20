@@ -335,6 +335,11 @@ func main() {
 	if handled, code := runCompat(args, os.Getenv, os.Stdout, os.Stderr); handled {
 		os.Exit(code)
 	}
+	// service installs, checks and removes the per-user service unit
+	// (muster #341). Like the others it needs none of the service's environment.
+	if handled, code := runService(args, os.Stdout, os.Stderr); handled {
+		os.Exit(code)
+	}
 	if handled, err := runPrincipal(args); handled {
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -1149,6 +1154,7 @@ func usageTop() string {
 		"usage: muster serve                    start the service (configured by FLEET_* environment only)",
 		"       muster doctor [--json] ...      read-only installation check (muster doctor --help)",
 		"       muster compat --claude PATH     check a candidate runtime build (muster compat --help)",
+		"       muster service install|status|uninstall  set up this binary as a per-user service (muster service -h)",
 		"       muster principal add|list|grant|revoke   enrol, list or re-grant clients (muster principal)",
 		"       muster --version                print the build",
 		"       muster -h | --help              print this usage",

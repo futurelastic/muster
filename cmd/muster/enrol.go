@@ -143,18 +143,31 @@ func listPrincipals(cfgPath string) error {
 }
 
 func addPrincipal(cfgPath, name, grantList, tokenFile string) error {
+	grants, tokenFile, err := enrolPrincipal(cfgPath, name, grantList, tokenFile)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("added principal %q with grants %s\n", name, strings.Join(grants, ","))
+	fmt.Printf("token written to %s (%s)\n", tokenFile, privfs.Label)
+	fmt.Printf("the running service still has the OLD table; reload it when ready\n")
+	return nil
+}
+
+// enrolPrincipal is addPrincipal without the report: it validates, mints,
+// writes the token file and then the table, and returns what it wrote. The
+// service installer enrols its supervisor through it and says its own thing.
+func enrolPrincipal(cfgPath, name, grantList, tokenFile string) (grants []string, tokenPath string, err error) {
 	if strings.TrimSpace(name) == "" {
-		return errors.New("a principal needs a name")
+		return nil, "", errors.New("a principal needs a name")
 	}
 	if strings.TrimSpace(grantList) == "" {
 		// Silence is not "read-only". §6's default is denied, and a principal
 		// created with no grants can do nothing — which is more likely a
 		// forgotten flag than an intent, so say so rather than create it.
-		return errors.New("--grants is required (a principal with none can do nothing); " +
+		return nil, "", errors.New("--grants is required (a principal with none can do nothing); " +
 			"available: " + strings.Join(grantNames(), ", "))
 	}
 
-	var grants []string
 	for _, g := range strings.Split(grantList, ",") {
 		g = strings.TrimSpace(g)
 		if g == "" {
@@ -164,29 +177,29 @@ func addPrincipal(cfgPath, name, grantList, tokenFile string) error {
 		// alternative is what happened once already: an unknown grant written
 		// to disk, discovered only when the service refused to start.
 		if !service.ValidGrant(service.Grant(g)) {
-			return fmt.Errorf("unknown grant %q; available: %s", g, strings.Join(grantNames(), ", "))
+			return nil, "", fmt.Errorf("unknown grant %q; available: %s", g, strings.Join(grantNames(), ", "))
 		}
 		grants = append(grants, g)
 	}
 
 	raw, err := os.ReadFile(cfgPath)
 	if err != nil {
-		return fmt.Errorf("reading %s: %w", cfgPath, err)
+		return nil, "", fmt.Errorf("reading %s: %w", cfgPath, err)
 	}
 	var doc map[string]any
 	if err := json.Unmarshal(raw, &doc); err != nil {
-		return fmt.Errorf("%s is not valid JSON, refusing to rewrite it: %w", cfgPath, err)
+		return nil, "", fmt.Errorf("%s is not valid JSON, refusing to rewrite it: %w", cfgPath, err)
 	}
 	list, _ := doc["principals"].([]any)
 	for _, entry := range list {
 		if m, ok := entry.(map[string]any); ok && m["name"] == name {
-			return fmt.Errorf("principal %q already exists; use `muster principal grant|revoke` to change its grants", name)
+			return nil, "", fmt.Errorf("principal %q already exists; use `muster principal grant|revoke` to change its grants", name)
 		}
 	}
 
 	token, err := mintToken()
 	if err != nil {
-		return err
+		return nil, "", err
 	}
 	doc["principals"] = append(list, map[string]any{
 		"name": name, "token": token, "grants": grants,
@@ -199,16 +212,13 @@ func addPrincipal(cfgPath, name, grantList, tokenFile string) error {
 	// is worse than a token file with no principal, because the first looks
 	// finished.
 	if err := privfs.WriteFile(tokenFile, []byte(token+"\n")); err != nil {
-		return fmt.Errorf("writing %s: %w", tokenFile, err)
+		return nil, "", fmt.Errorf("writing %s: %w", tokenFile, err)
 	}
 	if err := writeJSONAtomic(cfgPath, doc); err != nil {
-		return fmt.Errorf("writing %s: %w", cfgPath, err)
+		return nil, "", fmt.Errorf("writing %s: %w", cfgPath, err)
 	}
 
-	fmt.Printf("added principal %q with grants %s\n", name, strings.Join(grants, ","))
-	fmt.Printf("token written to %s (%s)\n", tokenFile, privfs.Label)
-	fmt.Printf("the running service still has the OLD table; reload it when ready\n")
-	return nil
+	return grants, tokenFile, nil
 }
 
 // mintToken produces a bearer credential.
