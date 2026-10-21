@@ -379,7 +379,11 @@ func (s *Service) localRuntimeRows(ctx context.Context) []fleet.RuntimeInfo {
 			})
 			continue
 		}
-		up = append(up, fleet.RuntimeInfo{Machine: s.self, Runtime: rt, Capabilities: d.Capabilities(), Status: fleet.RuntimeAvailable})
+		// muster #344: only a runtime that works advertises what it can enforce
+		// of a posture; a row that is unavailable or has no driver carries none.
+		caps := d.Capabilities()
+		ps := fleet.PostureSupportFrom(caps)
+		up = append(up, fleet.RuntimeInfo{Machine: s.self, Runtime: rt, Capabilities: caps, Status: fleet.RuntimeAvailable, Posture: &ps})
 	}
 	return append(append(up, down...), noDriver...)
 }

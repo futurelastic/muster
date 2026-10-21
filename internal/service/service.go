@@ -900,7 +900,12 @@ func (s *Service) ListRuntimes(ctx context.Context) (fleet.Collection[fleet.Runt
 		// happens to report an empty runtime id is a different, genuine
 		// case this endpoint has no basis to hide.
 		if rt != "" || st == fleet.SourceOK {
-			items = append(items, fleet.RuntimeInfo{Machine: m, Runtime: rt, Capabilities: caps, Status: fleet.RuntimeAvailable})
+			row := fleet.RuntimeInfo{Machine: m, Runtime: rt, Capabilities: caps, Status: fleet.RuntimeAvailable}
+			if caps.Source != fleet.CapabilitiesAssumed {
+				ps := fleet.PostureSupportFrom(caps)
+				row.Posture = &ps
+			}
+			items = append(items, row)
 		}
 		sources = append(sources, fleet.SourceStatus{
 			Machine: m, Status: st, ObservedAt: now,

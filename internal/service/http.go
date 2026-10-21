@@ -83,6 +83,9 @@ func NewMux(svc *Service, cfg Config) *http.ServeMux {
 	mux.HandleFunc("GET /v1/whoami", withAuth(cfg, handleWhoAmI(svc, cfg)))
 	mux.HandleFunc("GET /v1/machines", withAuth(cfg, reading(handleMachines(svc))))
 	mux.HandleFunc("GET /v1/runtimes", withAuth(cfg, reading(handleRuntimes(svc))))
+	// A read in every sense but the verb: it carries a body and changes nothing,
+	// so it needs only the read grant (grantForVerb, #344).
+	mux.HandleFunc("POST /v1/posture/dry-run", withAuth(cfg, reading(handlePostureDryRun(svc))))
 	mux.HandleFunc("GET /v1/sessions", withAuth(cfg, reading(handleListSessions(svc))))
 	mux.HandleFunc("GET /v1/sessions/closed", withAuth(cfg, reading(handleListClosedSessions(svc))))
 	mux.HandleFunc("GET /v1/sessions/watch", withAuth(cfg, reading(handleWatchSessions(svc))))
@@ -896,6 +899,12 @@ type createSessionBody struct {
 	// so it needs no grant beyond create. See fleet.SandboxSpec.
 	Sandbox *fleet.SandboxSpec `json:"sandbox"`
 
+	// Posture is the engine-neutral posture of the session (muster #344): what
+	// the work needs, which the service lowers onto PermissionMode, Sandbox and
+	// IsolateEnvironment for the runtime it resolves, or refuses. It excludes
+	// those three fields in the same body. See fleet.Posture.
+	Posture *fleet.Posture `json:"posture"`
+
 	// ConversationId asks the runtime to start a NEW conversation under a
 	// caller-chosen UUID (muster #224) — mutually exclusive with Resume,
 	// which continues one. See fleet.SessionSpec.ConversationId.
@@ -929,6 +938,10 @@ func createNeedsSend(body createSessionBody) string {
 		return "trustCwd"
 	case len(body.Consents) > 0:
 		return "consents"
+	case body.Posture != nil && body.Posture.Unattended():
+		// An unattended posture lowers to permissionMode "bypass" — a session
+		// that acts without asking — so it carries the same grant (#344).
+		return "posture (unattended)"
 	case fleet.PermissionModeNeedsSend(body.PermissionMode):
 		// The explicit ordinary mode (#256) and plan (#329) ask for nothing
 		// beyond a create; acceptEdits, auto and bypass let the agent act
@@ -1120,6 +1133,21 @@ func handleCreateSession(svc *Service) http.HandlerFunc {
 			}
 		}
 
+		// muster #344: a posture is a second spelling of three fields this body
+		// can also carry. Both at once would have two sources of truth for one
+		// session, so the request is refused rather than one silently winning.
+		if body.Posture != nil {
+			if body.Sandbox != nil || body.PermissionMode != "" || body.IsolateEnvironment {
+				writeError(w, &fleet.Error{Kind: fleet.ErrorInvalid, Message: "posture cannot be combined with sandbox, " +
+					"permissionMode or isolateEnvironment: it is the engine-neutral spelling of those three; send one of the two (#344)", Machine: machine})
+				return
+			}
+			if err := body.Posture.Validate(); err != nil {
+				writeError(w, &fleet.Error{Kind: fleet.ErrorInvalid, Message: err.Error() + " (#344)", Machine: machine})
+				return
+			}
+		}
+
 		// create has no id yet to resolve existence-first against — that is
 		// exactly the "genuine miss" shape resolveSessionDriver falls to the
 		// configured default for when body.Runtime names none (§60).
@@ -1139,6 +1167,28 @@ func handleCreateSession(svc *Service) http.HandlerFunc {
 				writeError(w, unavailableError(machine, resolvedRuntime, u))
 				return
 			}
+		}
+
+		// muster #344: lower the posture onto the per-runtime fields using what
+		// THIS runtime declares, before anything reads them below (the resume
+		// carry, the driver). It comes AFTER the #342 check above: a runtime that
+		// is not up cannot be asked whether it could enforce anything, and the
+		// dry run reports such a runtime as unavailable, not as unenforceable.
+		// A runtime that cannot enforce the posture refuses here, the driver
+		// never asked — and the same refusal the dry run shows.
+		if body.Posture != nil {
+			mapped, perr := body.Posture.Lower(d.Capabilities())
+			if perr != nil {
+				var fe *fleet.Error
+				if errors.As(perr, &fe) {
+					fe.Machine = machine
+					writeError(w, fe)
+					return
+				}
+				writeError(w, &fleet.Error{Kind: fleet.ErrorInvalid, Message: perr.Error(), Machine: machine})
+				return
+			}
+			body.PermissionMode, body.Sandbox, body.IsolateEnvironment = mapped.PermissionMode, mapped.Sandbox, mapped.IsolateEnvironment
 		}
 
 		// #180: refuse env naming a variable this machine's delivery module
