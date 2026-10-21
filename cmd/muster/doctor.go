@@ -1040,7 +1040,12 @@ func checkAgentProgram(ctx context.Context, runtime string, timeout time.Duratio
 		row.Status = statusPass
 		row.Summary = fmt.Sprintf("%s is found where a session starts it", program)
 	default:
-		row.Status = statusFail
+		// A warning, not a failure: the service is healthy and says so itself
+		// (the runtime is listed unavailable, a create is refused), and the
+		// program may be installed after the service, which needs no restart.
+		// A failing row would also stop `muster service install` from starting
+		// the unit on a machine that gets the agent CLI a minute later.
+		row.Status = statusWarn
 		row.Summary = fmt.Sprintf("%s was not found where a session starts it (not-installed)", program)
 		row.Detail = "sessions are started through $SHELL -lic, so the program must be on that shell's PATH. " +
 			"Until it is, GET /v1/runtimes lists the terminal runtime as unavailable / not-installed and a create is refused with runtime-unavailable; " +

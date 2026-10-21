@@ -21,7 +21,7 @@ func TestCheckAgentProgram(t *testing.T) {
 		summary string
 	}{
 		{"found passes", "tmux", say(true, true), statusPass, "is found"},
-		{"missing fails with the cause", "tmux", say(false, true), statusFail, "not-installed"},
+		{"missing warns with the cause", "tmux", say(false, true), statusWarn, "not-installed"},
 		{"a probe that could not decide is unknown, not a failure", "tmux", say(false, false), statusUnknown, "could not tell"},
 		{"another runtime starts no agent program", "stub", say(false, true), statusSkip, "does not start"},
 	} {
@@ -33,10 +33,10 @@ func TestCheckAgentProgram(t *testing.T) {
 			if row.ID != "runtime.agent-program" || row.Status != tc.want || !strings.Contains(row.Summary, tc.summary) {
 				t.Errorf("row = %+v, want %s containing %q", row, tc.want, tc.summary)
 			}
-			if tc.want == statusFail && !strings.Contains(row.Detail, "runtime-unavailable") {
-				t.Errorf("a failing row must say what the service does meanwhile; detail = %q", row.Detail)
+			if tc.want == statusWarn && !strings.Contains(row.Detail, "runtime-unavailable") {
+				t.Errorf("a warning row must say what the service does meanwhile; detail = %q", row.Detail)
 			}
-			if strings.Contains(row.Summary+row.Detail, "/") && tc.want != statusFail {
+			if strings.Contains(row.Summary+row.Detail, "/") && tc.want != statusWarn {
 				t.Errorf("row carries a path: %+v", row)
 			}
 		})
@@ -49,8 +49,8 @@ func TestDoctorRunsTheAgentProgramRow(t *testing.T) {
 	defer func() { doctorAgentProgram = old }()
 
 	rows := runChecks(context.Background(), testDoctorEnv(nil))
-	if r := rowByID(t, rows, "runtime.agent-program"); r.Status != statusFail {
-		t.Fatalf("missing program: status = %s, want fail", r.Status)
+	if r := rowByID(t, rows, "runtime.agent-program"); r.Status != statusWarn {
+		t.Fatalf("missing program: status = %s, want warn", r.Status)
 	}
 	env := testDoctorEnv(nil)
 	env.Skip = map[string]bool{"runtime.agent-program": true}
