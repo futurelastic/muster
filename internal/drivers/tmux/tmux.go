@@ -337,6 +337,8 @@ type Driver struct {
 	bareExec     bool
 	run          execFunc
 	dial         ctlDialer
+	// settleDelays overrides defaultSettleDelays for the event stream; tests only.
+	settleDelays []time.Duration
 
 	// muster #336: the macOS security-session guard and its report.
 	allowDesktopServer bool

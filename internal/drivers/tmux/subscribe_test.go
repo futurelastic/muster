@@ -1263,3 +1263,112 @@ func TestReattachBudgetResetsWhenTheSessionIsObservedGone(t *testing.T) {
 	t.Errorf("gamma closed but its re-attach bookkeeping survived (futile=%d); a reused session "+
 		"id would start its next life with a spent budget", spent())
 }
+
+// withSettleDelays shortens the follow-up schedule (#343) so a test does not
+// wait out the production one.
+func withSettleDelays(ds ...time.Duration) Option {
+	return func(d *Driver) { d.settleDelays = ds }
+}
+
+// #343: a session created while the subscription is already at its content
+// client cap has no client that can hear its own startup repaint, so nothing
+// ever wakes a read for it. The feed announced it as unknown and then said
+// nothing; here the repaint (unknown -> idle) happens with NO notification on
+// any client, and the stream must still carry the settled state.
+func TestSubscribeFollowsUpANewSessionThatHasNoContentClient(t *testing.T) {
+	f := twoSessions()
+	for i := 0; i < maxContentClients+4; i++ {
+		id := "%" + intToStr(500+i)
+		f.sessions = append(f.sessions, fakeSession{
+			name: "big" + intToStr(i), paneID: id, cwd: "/w", pid: 5000 + i, created: 1785600002,
+		})
+		f.captures[id] = idleFixtureFor("big" + intToStr(i))
+	}
+	r := &ctlRegistry{}
+	d := newSubDriver(f, r)
+	withSettleDelays(50*time.Millisecond, 50*time.Millisecond, 50*time.Millisecond)(d)
+
+	s, err := d.Subscribe(context.Background(), testCaller, driver.SubscribeFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	// A new session whose screen has not painted yet. The lifecycle client says
+	// it exists; no content client can be opened for it (cap is full).
+	f.addSession(fakeSession{
+		name: "newcomer", paneID: "%9", cwd: "/work/new", pid: 300, created: 1785600003,
+	}, "")
+	fire(r.opened[0], "sessions-changed")
+
+	ev, ok := nextWithin(t, s, 3*time.Second)
+	if !ok || ev.Kind != fleet.EventSessionCreated {
+		t.Fatalf("want session.created first, got %+v ok=%v", ev, ok)
+	}
+	if sess := ev.Payload.(fleet.Session); sess.State.Status != fleet.StatusUnknown {
+		t.Fatalf("fixture error: the newcomer must start unknown, got %q", sess.State.Status)
+	}
+	if r.contentFor("newcomer") != nil {
+		t.Fatal("fixture error: the cap was supposed to leave the newcomer without a content client")
+	}
+
+	// The repaint. No notification fires anywhere.
+	f.setCapture("%9", idleFixtureFor("newcomer"))
+
+	ev, ok = nextWithin(t, s, 3*time.Second)
+	if !ok {
+		t.Fatal("no session.state for a new session whose state settled without any notification")
+	}
+	p, isState := ev.Payload.(fleet.SessionStatePayload)
+	if ev.Kind != fleet.EventSessionState || !isState || p.Ref.ID != "newcomer" || p.State.Status == fleet.StatusUnknown {
+		t.Fatalf("want session.state newcomer -> not unknown, got %q %+v", ev.Kind, ev.Payload)
+	}
+}
+
+// The follow-up is armed by an unsettled session and by nothing else: a fleet
+// in which every session is settled reads nothing without a notification.
+func TestSettleFollowUpArmsNothingOnAQuietFleet(t *testing.T) {
+	f := &fakeMux{
+		sessions: []fakeSession{{name: "a", paneID: "%1", cwd: "/w", pid: 1, created: 1785600000, title: "2_1_220"}},
+		captures: map[string]string{"%1": idleFixtureFor("a")},
+	}
+	r := &ctlRegistry{}
+	d := newSubDriver(f, r)
+	withSettleDelays(10 * time.Millisecond)(d)
+
+	s, err := d.Subscribe(context.Background(), testCaller, driver.SubscribeFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	before := len(f.callsSnapshot())
+	time.Sleep(300 * time.Millisecond)
+	if after := len(f.callsSnapshot()); after != before {
+		t.Errorf("a settled, quiet fleet made %d multiplexer calls with no notification", after-before)
+	}
+}
+
+func TestSettled(t *testing.T) {
+	id := "session_x"
+	for _, tc := range []struct {
+		name string
+		st   fleet.SessionState
+		want bool
+	}{
+		{"unknown", fleet.SessionState{Status: fleet.StatusUnknown}, false},
+		{"idle, no channel", fleet.SessionState{Status: fleet.StatusIdle}, true},
+		{"idle, channel connecting", fleet.SessionState{Status: fleet.StatusIdle,
+			ControlChannel: &fleet.ControlChannel{State: fleet.ControlChannelConnecting}}, false},
+		{"idle, active without a bridge id", fleet.SessionState{Status: fleet.StatusIdle,
+			ControlChannel: &fleet.ControlChannel{State: fleet.ControlChannelActive}}, false},
+		{"idle, active with a bridge id", fleet.SessionState{Status: fleet.StatusIdle,
+			ControlChannel: &fleet.ControlChannel{State: fleet.ControlChannelActive, BridgeID: &id}}, true},
+		{"idle, channel off", fleet.SessionState{Status: fleet.StatusIdle,
+			ControlChannel: &fleet.ControlChannel{State: fleet.ControlChannelOff}}, true},
+	} {
+		if got := settled(tc.st); got != tc.want {
+			t.Errorf("%s: settled = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

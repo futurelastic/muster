@@ -97,6 +97,42 @@ const (
 	streamRecordMaxAge = 5 * time.Second
 )
 
+// defaultSettleDelays is the bounded follow-up schedule for a session whose
+// state is not yet settled (#343): the reads taken after the one that first
+// showed it, each delay measured from the previous read. Five reads over about
+// half a minute covers a runtime's startup repaint and its bridge coming up
+// (measured at 3-5 s) with room to spare, then stops.
+//
+// This is not polling in the sense the notes above rule out, and it is the
+// reason it can exist beside them: it is armed by an EDGE (a session appearing,
+// or being found unsettled), spends a fixed budget per session, and arms nothing
+// at all while every session is settled — an idle fleet still costs nothing.
+// What it covers is the one thing a push cannot: a session that has no content
+// client because the subscription is already at maxContentClients repaints
+// without any notification reaching this stream.
+var defaultSettleDelays = []time.Duration{
+	1 * time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second,
+}
+
+// settled reports whether a state has finished its startup: a status the
+// driver could actually read, and a control channel that is not mid-handshake
+// (connecting, or up without the bridge id a viewer is opened with). A nil or
+// off channel is settled — there is no handshake to wait for.
+func settled(st fleet.SessionState) bool {
+	if st.Status == fleet.StatusUnknown {
+		return false
+	}
+	if cc := st.ControlChannel; cc != nil {
+		switch cc.State {
+		case fleet.ControlChannelConnecting:
+			return false
+		case fleet.ControlChannelActive:
+			return cc.BridgeID != nil && *cc.BridgeID != ""
+		}
+	}
+	return true
+}
+
 // ctlNote is one parsed control-mode notification: the leading %name and
 // its whitespace-separated arguments. The payload after the arguments is
 // deliberately discarded — see "push-triggered pull" above.
@@ -419,7 +455,8 @@ func (d *Driver) Subscribe(ctx context.Context, req fleet.Request, filter driver
 			// reporter manufactured" this project keeps meeting.
 			log.Printf("tmux: subscription watching %d sessions, capped at %d content clients; "+
 				"changes are still detected fleet-wide (notifications are triggers, not data), "+
-				"latency may rise for unwatched sessions",
+				"a session without one is followed up by a bounded set of reads while its state settles, "+
+				"otherwise latency may rise for unwatched sessions",
 				len(rows), maxContentClients)
 			break
 		}
@@ -609,11 +646,69 @@ func (s *eventStream) run(ctx context.Context, trigger <-chan struct{}, known ma
 		close(s.out)
 	}()
 
+	// Sessions whose first state has not settled yet (#343), mapped to how many
+	// follow-up reads they have already had. Owned by this goroutine alone.
+	//
+	// Why this exists: a session is only re-read when SOMETHING notifies, and a
+	// session the subscription holds no content client for (the cap is full) never
+	// notifies about its own startup repaint. Announced as session.created with
+	// status unknown, it would then stay unknown in the feed until an unrelated
+	// notification happened to wake a read — measured as 20 s to never.
+	delays := s.d.settleDelays
+	if delays == nil {
+		delays = defaultSettleDelays
+	}
+	settling := map[string]int{}
+	settleC := make(chan struct{}, 1)
+	var settleTimer *time.Timer
+	armed := false
+	defer func() {
+		if settleTimer != nil {
+			settleTimer.Stop()
+		}
+	}()
+	rearm := func() {
+		if armed || len(settling) == 0 {
+			return
+		}
+		next := len(delays)
+		for _, n := range settling {
+			if n < next {
+				next = n
+			}
+		}
+		armed = true
+		settleTimer = time.AfterFunc(delays[next], func() {
+			select {
+			case settleC <- struct{}{}:
+			default:
+			}
+		})
+	}
+	for id, sess := range known {
+		if !settled(sess.State) {
+			settling[id] = 0
+		}
+	}
+	rearm()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-trigger:
+		case <-settleC:
+			armed = false
+			// One follow-up read is being spent on every unsettled session.
+			for id, n := range settling {
+				settling[id] = n + 1
+				if n+1 >= len(delays) {
+					// Said once and then stops: this is the budget, not a retry loop.
+					log.Printf("tmux: session %s still not settled after %d follow-up reads; "+
+						"its next change is picked up when any notification wakes a read", id, len(delays))
+					delete(settling, id)
+				}
+			}
 		}
 
 		// Let a burst settle. An agent mid-turn emits many notifications
@@ -627,6 +722,7 @@ func (s *eventStream) run(ctx context.Context, trigger <-chan struct{}, known ma
 
 		cur, err := s.d.List(ctx, s.req, driver.ListFilter{CwdPrefix: s.filter.CwdPrefix, RecordMaxAge: streamRecordMaxAge})
 		if err != nil {
+			rearm()
 			continue
 		}
 		if !cur.Complete() {
@@ -642,6 +738,7 @@ func (s *eventStream) run(ctx context.Context, trigger <-chan struct{}, known ma
 					})
 				}
 			}
+			rearm()
 			continue
 		}
 
@@ -720,6 +817,9 @@ func (s *eventStream) run(ctx context.Context, trigger <-chan struct{}, known ma
 					Payload: sess,
 				})
 				s.attachContent(ctx, sess)
+				if !settled(sess.State) {
+					settling[sess.ID] = 0
+				}
 			case sess.State.MateriallyDiffers(prev.State):
 				// Any material change, not only a change of Status. A
 				// subscriber maintaining a mirror off this feed renders the
@@ -750,6 +850,9 @@ func (s *eventStream) run(ctx context.Context, trigger <-chan struct{}, known ma
 				s.attachContent(ctx, sess)
 			}
 			known[sess.ID] = sess
+			if settled(sess.State) {
+				delete(settling, sess.ID)
+			}
 		}
 		for id, prev := range known {
 			if seen[id] {
@@ -765,6 +868,7 @@ func (s *eventStream) run(ctx context.Context, trigger <-chan struct{}, known ma
 				},
 			})
 			delete(known, id)
+			delete(settling, id)
 			s.detachContent(id)
 			// The session is gone, so any re-attach mark for it is stale, and
 			// its futile count must not be carried into a future incarnation.
@@ -775,6 +879,7 @@ func (s *eventStream) run(ctx context.Context, trigger <-chan struct{}, known ma
 			// while clearing first would lose a mark a pump sets in the gap.
 			s.clearReattach(id)
 		}
+		rearm()
 	}
 }
 
