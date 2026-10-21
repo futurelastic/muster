@@ -303,3 +303,83 @@ func pendingRuntimeSources(machine fleet.MachineId, pending map[fleet.RuntimeId]
 	}
 	return out
 }
+
+// agentProgramDown reports whether a REGISTERED local driver is, right now,
+// unable to start a session because the program each session runs is not on
+// this machine (muster #342).
+//
+// A registered driver is not an available runtime. The terminal runtime
+// registers with nothing but its multiplexer, so a machine without the agent
+// CLI listed it as available and then answered a create 201 for a session that
+// was gone before it could be read. The driver, which knows how it starts a
+// session, is asked (driver.AgentProgramReporter); a driver that cannot say, or
+// could not tell, reads as fine.
+//
+// Unlike a runtime that failed to build, nothing here is remembered: the
+// driver re-resolves the program on every ask, so installing it makes the row
+// available again without a restart. The row is therefore never "retrying" —
+// that word is for the service's own background attempts — and a create is
+// refused as unsupported, not as try-again-shortly: it needs somebody's hands.
+//
+// The reason names the program, never a path.
+func (s *Service) agentProgramDown(ctx context.Context, rt fleet.RuntimeId, d driver.Driver) (unavailableRuntime, bool) {
+	r, ok := d.(driver.AgentProgramReporter)
+	if !ok {
+		return unavailableRuntime{}, false
+	}
+	program, missing := r.AgentProgramMissing(ctx)
+	if !missing {
+		return unavailableRuntime{}, false
+	}
+	return unavailableRuntime{
+		// The floor, as for every unavailable row: what the driver would declare
+		// describes a runtime that can serve, and this one cannot.
+		caps:  fleet.DriverCapabilities{DeadlineMs: d.Capabilities().DeadlineMs}.Assumed(),
+		cause: fleet.CauseNotInstalled,
+		reason: fmt.Sprintf("the %s runtime is registered, but the program its sessions run (%q) was not found "+
+			"where a session starts it; install it, or fix that PATH, and the runtime becomes available without a restart", rt, program),
+	}, true
+}
+
+// localRuntimeRows lists this machine's runtimes as rows: the registered
+// drivers that can start a session first, then registered drivers that cannot
+// because their agent program is missing, then enabled runtimes with no driver
+// (muster #297). The order is part of the contract (an older reader takes the
+// first row for a machine and must never take an unavailable one), and each
+// group is in runtime-id order.
+//
+// The registered drivers and the no-driver rows are read under ONE lock. A
+// runtime registering late moves from the second set to the first, and reading
+// them separately could list it twice, or not at all.
+//
+// The lock is released before any driver is asked: the program check may start
+// a shell.
+func (s *Service) localRuntimeRows(ctx context.Context) []fleet.RuntimeInfo {
+	s.mu.RLock()
+	local := make(map[fleet.RuntimeId]driver.Driver, len(s.local))
+	for rt, d := range s.local {
+		local[rt] = d
+	}
+	noDriver := s.unavailableRowsLocked()
+	s.mu.RUnlock()
+
+	ids := make([]string, 0, len(local))
+	for rt := range local {
+		ids = append(ids, string(rt))
+	}
+	sort.Strings(ids)
+	var up, down []fleet.RuntimeInfo
+	for _, id := range ids {
+		rt := fleet.RuntimeId(id)
+		d := local[rt]
+		if u, bad := s.agentProgramDown(ctx, rt, d); bad {
+			down = append(down, fleet.RuntimeInfo{
+				Machine: s.self, Runtime: rt, Capabilities: u.caps,
+				Status: fleet.RuntimeUnavailable, Cause: u.cause, Reason: u.reason,
+			})
+			continue
+		}
+		up = append(up, fleet.RuntimeInfo{Machine: s.self, Runtime: rt, Capabilities: d.Capabilities(), Status: fleet.RuntimeAvailable})
+	}
+	return append(append(up, down...), noDriver...)
+}

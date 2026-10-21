@@ -333,6 +333,11 @@ type Driver struct {
 	deadline     time.Duration
 	captureLines int
 	build        CommandBuilder
+	// agentProgram is the program the default command builder starts ("claude").
+	// Empty when a caller replaced the builder: this driver then cannot say what
+	// a session runs, and reports nothing about it (agentprogram.go).
+	agentProgram string
+	agentProbe   agentProbeCache
 	shell        string
 	bareExec     bool
 	run          execFunc
@@ -683,6 +688,7 @@ func WithCommandBuilder(b CommandBuilder) Option {
 	return func(d *Driver) {
 		if b != nil {
 			d.build = b
+			d.agentProgram = ""
 		}
 	}
 }
@@ -859,6 +865,7 @@ func New(machine fleet.MachineId, opts ...Option) *Driver {
 		deadline:     defaultDeadlineMs * time.Millisecond,
 		captureLines: defaultCaptureLines,
 		build:        claudeCodeCommand,
+		agentProgram: defaultAgentProgram,
 		run:          runReal,
 		dial:         dialReal,
 		psBin:        "/bin/ps",

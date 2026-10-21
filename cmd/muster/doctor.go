@@ -36,6 +36,12 @@ var doctorServiceTask = checkServiceTask
 // are about the runtime.tmux-version row pass their own.
 var doctorTmuxVersion = runTmuxVersion
 
+// doctorAgentProgram asks whether the program a terminal session runs is found
+// the way a session finds it. A variable for the same reason as
+// doctorTmuxVersion: the generic doctor tests must not depend on whether the
+// machine they run on has the agent CLI. main_run_test.go replaces it.
+var doctorAgentProgram = tmuxdriver.ProbeAgentProgram
+
 func runTmuxVersion(ctx context.Context, bin string) (string, error) {
 	out, err := exec.CommandContext(ctx, bin, "-V").Output()
 	return strings.TrimSpace(string(out)), err
@@ -325,6 +331,7 @@ func runChecks(ctx context.Context, env doctorEnv) []doctorRow {
 	}
 	c.add(checkRuntime(runtime, getenv("FLEET_TMUX_BIN"), env.LookPath))
 	c.add(checkTmuxVersion(ctx, runtime, getenv("FLEET_TMUX_BIN"), env))
+	c.add(checkAgentProgram(ctx, runtime, env.Timeout))
 	c.add(checkOpencodeRuntime(getenv("FLEET_RUNTIME_OPENCODE") == "1", getenv("FLEET_OPENCODE_BIN")))
 
 	// --- the service manager's own record (Windows only) -----------------------
@@ -995,6 +1002,49 @@ func checkTmuxVersion(ctx context.Context, runtime, tmuxBin string, env doctorEn
 			"Here the driver pastes with `paste-buffer -p`, which brackets only when the pane asked, and relies on the composer read-back " +
 			"before it presses Enter (muster #334; docs/compat.md, G2). Run `muster compat` against this tmux to prove it for your runtime build, " +
 			"or use tmux " + tmuxdriver.BracketPasteFlagSince + " or newer via FLEET_TMUX_BIN to restore the check"
+	}
+	return row
+}
+
+// checkAgentProgram is the runtime.agent-program row (muster #342): the
+// terminal runtime registers with nothing but its multiplexer, so a machine
+// with tmux and without the agent CLI looked ready, answered a create 201, and
+// lost the session at once. GET /v1/runtimes now says `unavailable` /
+// `not-installed` for it; this row says the same before the service starts.
+//
+// It asks the way a session will start the program — through the login shell
+// the driver wraps it in — so a PATH that only the user's startup files extend
+// counts, and a bare service-manager PATH does not hide it. It names the
+// program, never a path.
+func checkAgentProgram(ctx context.Context, runtime string, timeout time.Duration) doctorRow {
+	row := doctorRow{ID: "runtime.agent-program", Refs: []int{342}}
+	if runtime != "tmux" {
+		row.Status = statusSkip
+		row.Summary = fmt.Sprintf("FLEET_RUNTIME=%s does not start an agent program", runtime)
+		return row
+	}
+	const program = "claude"
+	pctx := ctx
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		pctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	found, known := doctorAgentProgram(pctx, program)
+	switch {
+	case !known:
+		row.Status = statusUnknown
+		row.Summary = fmt.Sprintf("could not tell whether %s is found where a session starts it", program)
+		row.Detail = "the check runs the login shell the service wraps sessions in; it did not answer in time or could not run on this platform"
+	case found:
+		row.Status = statusPass
+		row.Summary = fmt.Sprintf("%s is found where a session starts it", program)
+	default:
+		row.Status = statusFail
+		row.Summary = fmt.Sprintf("%s was not found where a session starts it (not-installed)", program)
+		row.Detail = "sessions are started through $SHELL -lic, so the program must be on that shell's PATH. " +
+			"Until it is, GET /v1/runtimes lists the terminal runtime as unavailable / not-installed and a create is refused with runtime-unavailable; " +
+			"installing it makes the runtime available again without a restart"
 	}
 	return row
 }

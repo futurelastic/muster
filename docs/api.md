@@ -205,6 +205,20 @@ somebody to change something. A create naming such a runtime answers
 `reason: "runtime-unavailable"` — 504 and `retryable: true` while it is being
 retried, 501 otherwise — and not the 404 an id nobody enabled gets.
 
+**`available` means a session can start, not only that a driver answers**
+(#342). The terminal runtime needs its multiplexer to register, and the agent
+program each session runs is a separate thing on the machine. When that program
+is not found — resolved the way a session starts it, through the login shell the
+service wraps sessions in, not the service's own `PATH` — the runtime's row is
+`unavailable` with `cause: "not-installed"` and a `reason` naming the program
+(never a path), listed after the rows that work, and a create on it answers
+`501` `unsupported` with `reason: "runtime-unavailable"` and `retryable: false`
+instead of a `201` for a session that is gone at once. Nothing is remembered:
+install the program and the row is `available` again within seconds, with no
+restart. A check that could not be made (the shell would not start, the probe
+timed out) leaves the row `available`; `muster doctor` reports it as row
+`runtime.agent-program`.
+
 The same runtime is not hidden elsewhere (#300). `GET /v1/health`'s `drivers`
 lists it with the same `status`, `cause` and `reason`. While it is being
 retried, `GET /v1/sessions` adds a `degraded` source for this machine whose
