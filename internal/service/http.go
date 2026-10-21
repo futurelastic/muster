@@ -509,7 +509,7 @@ func handleHealth(svc *Service) http.HandlerFunc {
 			// "refuse a non-bypass create" rather than forwarding it into a
 			// 400 — or, worse, into an older build that drops the field.
 			"launchSettingsOutsideBypass": fleet.LaunchSettingsOutsideBypass(),
-			"drivers":                     svc.driverSummaries(),
+			"drivers":                     svc.driverSummaries(r.Context()),
 			// counters is the read path #9 asked for onto the registry #44
 			// built (internal/drivers/tmux/counters.go): an integer per
 			// named fact, keyed by runtime. It is deliberately read here
@@ -1129,6 +1129,17 @@ func handleCreateSession(svc *Service) http.HandlerFunc {
 			return
 		}
 		setResolutionHeaders(w, resolvedRuntime, via)
+
+		// muster #342: a registered driver whose agent program is not on this
+		// machine would accept the create and lose the session at once. Refused
+		// here, before any side effect, with the same answer the runtime's row
+		// gives. A relayed create is the owning machine's to judge.
+		if via != resolvedPeer {
+			if u, bad := svc.agentProgramDown(r.Context(), resolvedRuntime, d); bad {
+				writeError(w, unavailableError(machine, resolvedRuntime, u))
+				return
+			}
+		}
 
 		// #180: refuse env naming a variable this machine's delivery module
 		// reserves, as a 400 naming it. A relaying driver does not report

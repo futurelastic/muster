@@ -22,5 +22,8 @@ func TestMain(m *testing.M) {
 	// Likewise which tmux, if any, the machine has: the runtime.tmux-version row
 	// is tested on its own with versions it is handed.
 	doctorTmuxVersion = func(context.Context, string) (string, error) { return "tmux 3.7a", nil }
+	// And whether it has the agent CLI: runtime.agent-program is tested on its own
+	// with answers it is handed.
+	doctorAgentProgram = func(context.Context, string) (bool, bool) { return true, true }
 	os.Exit(m.Run())
 }
