@@ -1334,6 +1334,21 @@ turn failed — all of them fire `session.state`. What does not fire is
 fresh as the last real change; read the session directly if you want the
 current words.
 
+**A new session's first reading is followed up.** A session is often announced
+as `session.created` while its screen has not painted yet (`status` `unknown`,
+no `controlChannel.bridgeId`). The service re-reads such a session a few more
+times over roughly half a minute after it appears — at most five reads, and none
+at all once the status is known and the control channel is not mid-handshake —
+so the `session.state` that takes it out of `unknown`, and the one that carries
+its bridge id, arrive without your having to re-list. This is bounded and
+started by the session appearing, not a timer on the fleet: a quiet fleet of
+settled sessions still produces no reads.
+
+**A burst of `session.state` after a `machine.account` event is expected.**
+`credentialGeneration` is part of every session's state and is re-stamped from
+the credential store on each read, so when the store changes, every session's
+state differs at once and each one is announced.
+
 ### Long-polling instead, if a stream is the wrong shape
 
 ```
