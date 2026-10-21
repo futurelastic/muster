@@ -851,16 +851,12 @@ func (s *Service) ListRuntimes(ctx context.Context) (fleet.Collection[fleet.Runt
 	var items []fleet.RuntimeInfo
 	sources := []fleet.SourceStatus{{Machine: s.self, Status: fleet.SourceOK, ObservedAt: now}}
 
-	s.mu.RLock()
-	for rt, d := range s.local {
-		caps := d.Capabilities()
-		ps := fleet.PostureSupportFrom(caps)
-		items = append(items, fleet.RuntimeInfo{Machine: s.self, Runtime: rt, Capabilities: caps, Status: fleet.RuntimeAvailable, Posture: &ps})
-	}
+	// A registered driver whose agent program is missing is listed after the
+	// ones that work, with its cause (muster #342).
 	// Enabled runtimes with no driver follow the registered ones (muster
-	// #297). The order is part of the contract: an older reader takes the
-	// first row for a machine, and must never take one of these.
-	items = append(items, s.unavailableRowsLocked()...)
+	// #297); localRuntimeRows owns that order.
+	items = append(items, s.localRuntimeRows(ctx)...)
+	s.mu.RLock()
 	peers := make(map[fleet.MachineId]driver.Driver, len(s.peers))
 	for m, d := range s.peers {
 		peers[m] = d
@@ -936,15 +932,10 @@ type driverSummary struct {
 // driverSummaries lists registered drivers first, then enabled runtimes with
 // no driver, each group in runtime-id order — the order GET /v1/runtimes uses,
 // so a reader that takes the first row never takes an unavailable one.
-func (s *Service) driverSummaries() []driverSummary {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make([]driverSummary, 0, len(s.local)+len(s.unavailable))
-	for rt, d := range s.local {
-		out = append(out, driverSummary{Machine: s.self, Runtime: rt, Capabilities: d.Capabilities(), Status: fleet.RuntimeAvailable})
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Runtime < out[j].Runtime })
-	for _, row := range s.unavailableRowsLocked() {
+func (s *Service) driverSummaries(ctx context.Context) []driverSummary {
+	rows := s.localRuntimeRows(ctx)
+	out := make([]driverSummary, 0, len(rows))
+	for _, row := range rows {
 		out = append(out, driverSummary{
 			Machine: row.Machine, Runtime: row.Runtime, Capabilities: row.Capabilities,
 			Status: row.Status, Cause: row.Cause, Reason: row.Reason,

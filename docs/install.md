@@ -285,6 +285,12 @@ order of this page and the order of its output are the same.
      not usable does not stop the service: it is listed on `GET /v1/runtimes`
      as `unavailable` with a `cause`, and a version check that merely timed out
      under load is retried until it answers;
+   - install the agent program the terminal runtime starts (`claude`) where the
+     login shell finds it. Sessions are started through `$SHELL -lic`, so that
+     shell's `PATH` decides, not the unit's. Without it the runtime is listed
+     `unavailable` / `not-installed` on `GET /v1/runtimes` and a create is refused
+     with `runtime-unavailable`; installing it needs no restart (row:
+     `runtime.agent-program`);
    - run as the user who owns the sessions it will manage;
    - restart the process when it exits, and start it at boot;
    - put **no secret** in the unit's environment. With a principal table,

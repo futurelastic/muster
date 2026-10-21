@@ -777,6 +777,28 @@ type BuildReporter interface {
 	Build() fleet.Build
 }
 
+// AgentProgramReporter is another OPTIONAL capability, same shape as
+// BuildReporter: a driver whose sessions each start a program on THIS machine
+// (the agent CLI) can say whether that program can be found the way a session
+// would find it (muster #342).
+//
+// Optional because most drivers have no such program to look for: a driver
+// fronting a peer cannot know, and a runtime that is its own program is
+// already judged when it is built (OptionalRuntime). Only a driver that
+// registers fine without its agent installed has something to say.
+//
+// The answer is a fact about the machine right now, so a driver may cache it
+// briefly but must not remember it for the life of the process: installing
+// the program is the whole fix, and it must not need a restart.
+//
+// Missing is true only when the program was positively not found. A check
+// that could not be made (the shell would not start, the probe timed out)
+// reads as "not missing": the service must not take a working runtime offline
+// on a probe's bad day.
+type AgentProgramReporter interface {
+	AgentProgramMissing(ctx context.Context) (program string, missing bool)
+}
+
 // PeerDownReporter is another OPTIONAL capability, same shape as
 // BuildReporter: a driver fronting a PEER machine that remembers its own
 // recent failures and can say, from memory and without a network call, that

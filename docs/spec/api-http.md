@@ -232,6 +232,15 @@ runtime nobody had ever configured. Now:
   answers, the runtime is registered and its row becomes `available` — no
   restart. Every other cause waits for somebody to change something, and the
   row stays until the service restarts.
+- **`available` means a session can start** (muster #342). A runtime whose
+  driver registers without the program each session runs — the terminal
+  runtime needs only its multiplexer — is listed `unavailable` with
+  `cause: "not-installed"` while that program is not found where a session
+  starts it, after the rows that work. This cause is not remembered: the
+  service re-checks (briefly cached), so the row is `available` again once the
+  program is installed, with no restart. A check that could not be made leaves
+  the row `available`. A create naming or routed to it is refused with `501`
+  `unsupported`, `reason: "runtime-unavailable"`, before any session exists.
 - An unavailable row's `capabilities` are the conservative floor — every flag
   false, `source: "assumed"`, the deadline its driver will declare. They
   describe nothing the runtime can do; do not act on them.
