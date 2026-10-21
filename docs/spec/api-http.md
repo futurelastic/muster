@@ -45,7 +45,7 @@ served, and the federated ones have been exercised peer to peer.
 | `unauthorized` | 401 / 403 | Caller not permitted for this verb on this machine |
 | `not_found` | 404 | The machine answered, and there is no such session |
 | `conflict` | 409 | Idempotency key reused with a different body; a replayed key whose session has since ended (`reason: "replay-of-ended-session"`, §3.3); or a destructive request whose `startedAt` disagrees with the live session (§5.4) — the request is well formed, the caller's belief is stale |
-| `unsupported` | 501 | Driver lacks the capability (§4.3 of the model); or a runtime this machine's operator enabled has no working driver and no retry under way (`reason: "runtime-unavailable"`, §3.1); or, on macOS, a create that would start the terminal runtime's session server from a context other than `Background` (`reason: "unsafe_server_context"`, `retryable: false`, §3.1) |
+| `unsupported` | 501 | Driver lacks the capability (§4.3 of the model); or a runtime this machine's operator enabled has no working driver and no retry under way (`reason: "runtime-unavailable"`, §3.1); or, on macOS, a create that would start the terminal runtime's session server from a context other than `Background` (`reason: "unsafe_server_context"`, `retryable: false`, §3.1); or a create whose `posture` the resolved runtime cannot enforce (`reason: "posture-unenforceable"`, `retryable: false`, §3.2) |
 | `unreachable` | 504 | **The machine did not answer.** Nothing is known. Also a runtime that is enabled and still being retried (`reason: "runtime-unavailable"`, `retryable: true`, §3.1) |
 
 **`not_found` and `unreachable` must never be conflated.** One means the fleet
@@ -69,6 +69,9 @@ unless a case documents one. Two cases do today:
 - `unsafe_server_context` on an `unsupported` (muster #336) — a `create` that
   would start the terminal runtime's session server from a macOS context other
   than `Background`. `retryable: false`; see §3.1.
+- `posture-unenforceable` on an `unsupported` (muster #344) — a `create` whose
+  `posture` the runtime it resolved cannot enforce; `message` names what is
+  missing. `retryable: false`; see §3.2.
 
 **An id that is a live session's conversation id (muster #268).** `{id}` is
 always this service's session `id`; a session's *conversation* id (the runtime's
@@ -156,7 +159,10 @@ GET /v1/runtimes
                                        "remoteControl": { "toggle": true,
                                                           "off": true },
                                        "source": "observed",
-                                       "observedAt": "..." } },
+                                       "observedAt": "..." },
+                     "posture": { "unattended": true, "files": true,   ← what `posture` can ask of it (#344);
+                                  "network": ["open", "closed"],        absent on a peer not yet reached
+                                  "isolatedEnvironment": true } },
                    { "machine": "...", "runtime": "...",         ← enabled, no working driver
                      "status": "unavailable",
                      "cause": "probe-timeout",
@@ -164,6 +170,15 @@ GET /v1/runtimes
                      "capabilities": { "deadlineMs": 30000,
                                        "source": "assumed" } } ],
         "sources": [...], "complete": true }
+
+POST /v1/posture/dry-run                                        ← needs only `read` (#344)
+{ "posture": { "attendance": "unattended", "files": {"writePaths": ["/abs"]}, "network": "closed" } }
+→ 200 { "runtimes": [ { "machine": "...", "runtime": "...", "enforceable": true, "known": true,
+                        "mapping": { "permissionMode": "bypass",
+                                     "sandbox": {"writePaths": ["/abs"], "network": "closed"},
+                                     "isolateEnvironment": false } },
+                      { "machine": "...", "runtime": "...", "enforceable": false, "known": true,
+                        "reason": "create: posture cannot be enforced by this runtime: ..." } ] }
 
 GET /v1/whoami[?machine=<id>][&peer=<id>]
 → 200 { "principal": "...", "machine": "...", "grants": ["read", "send"],
@@ -626,6 +641,8 @@ Idempotency-Key: <caller-supplied, required>
   "env": {"NAME": "value"}, "isolateEnvironment": true,
   "sandbox": {"readPaths": ["/abs"], "writePaths": ["/abs"], "network": "open",
               "packageCache": {"path": "/abs/cache", "mode": "private"}},
+  "posture": {"attendance": "unattended", "files": {"writePaths": ["/abs"], "readPaths": ["/abs"]},
+              "network": "closed", "isolatedEnvironment": true},   ← instead of the three fields above (#344)
   "resume": "<conversation id>", "conversationId": "<caller-chosen uuid>",
   "permissionMode": "bypass", "consents": ["folder-trust"],
   "mcpConfig": ["/abs/servers.json"],
@@ -731,6 +748,31 @@ user's home directory is `400` where the session runs. It needs only `create`: i
 session reaches and grants nothing. A `201` then means the session runs under the profile that
 `state.sandbox` reports on every read; it does **not** make the working directory trustworthy
 afterwards (§2.1: run any git against it inside the same profile).
+
+**`posture` is the engine-neutral spelling of `permissionMode`, `sandbox` and
+`isolateEnvironment`** (muster #344). It says what the work needs and never how a runtime
+spells it: `attendance` (`attended`, the default, or `unattended` — no permission prompts),
+`files` (present: file access confined to the working directory and the session's private
+directory plus the `writePaths` and `readPaths` named), `network` (`open` or `closed`) and
+`isolatedEnvironment`. Every field present is a requirement. The service lowers it onto the
+three per-runtime fields using only what the resolved runtime declares in `/v1/runtimes`
+(`posture` on each row says which parts it can enforce), and **refuses with `unsupported`,
+`reason: "posture-unenforceable"`, before anything is started** when it cannot enforce all of
+it — never a weaker posture under the same name. Two rules shape the mapping. **`unattended`
+always implies a confined session** (`permissionMode: "bypass"` inside the sandbox, with
+the `files` and `network` asked for on top): a prompt-free session that can read the whole user
+account is the posture this field exists to prevent, so a runtime without a sandbox refuses it;
+`permissionMode: "bypass"` stays for a caller that really wants prompt-free and unconfined. And
+the terminal runtime, whose sessions run in the user's own multiplexer, declares no sandbox, so it
+enforces only an empty or `attended` posture and refuses the rest. A peer that has not been
+reached is not refused locally: the lowered fields are forwarded and the peer's own refusals
+apply. `posture` is **mutually exclusive** with the three fields it replaces (`400`); a malformed
+one (a relative or unclean path, a writable shared temporary directory, an unknown value) is `400`
+on any machine. `unattended` needs the `send` grant on top of `create`, as `bypass` does; a posture
+that only narrows needs `create`. `POST /v1/posture/dry-run` takes `{"posture": {...}}` and
+returns, per runtime, whether it is enforceable and the fields it lowers to, changing nothing; it is
+the same function a create runs. `permissionMode`, `sandbox` and `isolateEnvironment` keep working
+unchanged for one release and are **deprecated** in favour of `posture`.
 
 **A 201 for a create that asked to pin `agent`/`model`/`effort` is not proof
 the pin was applied** — a value this driver cannot pass through safely is

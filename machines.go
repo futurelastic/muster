@@ -145,6 +145,11 @@ type RuntimeInfo struct {
 	// Reason is a sentence for people, set only when the runtime is
 	// unavailable. It never carries the resolved path of the runtime's binary.
 	Reason string `json:"reason,omitempty"`
+	// Posture is what this runtime can enforce of a create's `posture`
+	// (muster #344), derived from its capabilities. Absent on an unavailable
+	// runtime and on a peer whose capabilities have not been obtained: nobody
+	// has said, which is "unknown", never "nothing enforceable".
+	Posture *PostureSupport `json:"posture,omitempty"`
 }
 
 // Available reports whether the row describes a runtime with a working

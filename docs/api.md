@@ -576,6 +576,21 @@ actually in force. Needs only `create`. Two things are yours: seed the repositor
 reference before the session starts, and treat the working directory as untrusted afterwards — run
 git on it only inside the same profile. See session-abstraction.md §2.1.
 
+**`posture`** (#344) is the one field to send when you drive more than one runtime. It says what
+the work needs, not how a runtime spells it — `attendance` (`attended` default, or `unattended`:
+no permission prompts), `files` (present: confine file access to the working directory and the
+session's private directory, plus `writePaths` / `readPaths` you name — a linked worktree's git
+common directory goes in `writePaths`), `network` (`open` or `closed`) and `isolatedEnvironment` —
+and the service maps it onto each runtime's own permission mode, pre-approval and sandbox. A runtime
+that cannot enforce all of it answers `unsupported` with `reason: "posture-unenforceable"` before
+anything starts; `GET /v1/runtimes` reports each runtime's `posture` (what it can enforce), and
+`POST /v1/posture/dry-run` with `{"posture": {...}}` shows the mapping per runtime without creating
+anything. `unattended` always means confined: it is `bypass` inside the sandbox, so a runtime with no
+sandbox — today the interactive-terminal runtime — refuses it rather than start a prompt-free session
+that reads the whole account. It cannot be combined with `sandbox`, `permissionMode` or
+`isolateEnvironment`, which keep working for one release and are **deprecated** in its favour.
+`unattended` needs `send` as well as `create`; the rest needs only `create`.
+
 **Providers an opencode session may use** (#293) are the operator's decision, not a field:
 `FLEET_OPENCODE_PROVIDERS` (comma-separated provider ids) is the whole allowed set, and when it
 is unset the runtime's built-in hosted provider is off — with no credential configured it is
