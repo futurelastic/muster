@@ -168,6 +168,11 @@ func mutating(svc *Service, cfg Config, next http.HandlerFunc) http.HandlerFunc 
 	return func(w http.ResponseWriter, r *http.Request) {
 		target := fleet.MachineId(r.PathValue("machine"))
 
+		// The acting-person claim is decided once, here, before anything builds a
+		// Caller or writes an audit line from the request (muster #349).
+		acting := svc.resolveActing(r)
+		r = r.WithContext(withActing(r.Context(), acting))
+
 		// With a principal table, §6 requirement 3 is expressible as
 		// written: per verb, per identity. D6's host/client split survives
 		// as the difference between a verb grant and GrantRelay.
@@ -193,6 +198,7 @@ func mutating(svc *Service, cfg Config, next http.HandlerFunc) http.HandlerFunc 
 			// authorization decision as though it were the outcome made a
 			// destroy and a refusal indistinguishable in the trail.
 			aw := &auditWriter{ResponseWriter: w}
+			logActingDrop(p, r)
 			next(aw, r)
 			logMutation(p, need, target, r, aw.status)
 			return
@@ -1594,7 +1600,7 @@ func handleSendInput(svc *Service) http.HandlerFunc {
 			HumanRelay: humanRelay,
 			Route:      body.Route,
 			Direction:  svc.directionOf(r, machine),
-		})
+		}.withActing(actingOf(r)))
 		receipt, err := d.Send(ctx, req, fleet.SessionRef{Machine: machine, ID: id}, body.Text, driver.SendOptions{Submit: submit, ResumeIfStranded: body.ResumeIfStranded, ReplaceIfStranded: body.ReplaceIfStranded, ExpectComposerDigest: body.Expect, From: from, Route: route, HumanRelay: humanRelay, RemoteControl: svc.remoteControl(r), LiveLaneOnly: true})
 		if err != nil {
 			svc.inputAudit.finish(auditID, inputOutcomeError)

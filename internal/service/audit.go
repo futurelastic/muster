@@ -28,7 +28,14 @@ import (
 // so the peer can record who asked. Two places deriving "who is acting" is one
 // too many, and the one nobody reads during a test is the one that drifts.
 func actorOf(p Principal, r *http.Request) string {
-	return callerFor(p, r).Principal
+	c := callerFor(p, r)
+	if c.Person != nil {
+		// "<person> · <principal> via <peer>" (muster #349): the person leads
+		// because it is the answer to "who", with the principal that vouched for
+		// them behind it.
+		return c.Person.String() + " · " + c.Principal
+	}
+	return c.Principal
 }
 
 // auditWriter records the status a handler actually produced, so the audit
@@ -106,6 +113,18 @@ func routeOf(r *http.Request) string {
 	// matched, and every route this service logs is reached through NewMux.
 	// A coarser fact beats a silently empty field if that ever isn't true.
 	return r.Method + " " + r.URL.Path
+}
+
+// logActingDrop records an acting-person claim that was not honoured. A claim
+// that is silently ignored would look, to the client that made it, exactly like
+// one that was recorded.
+func logActingDrop(p Principal, r *http.Request) {
+	a := actingOf(r)
+	if a.Dropped == "" {
+		return
+	}
+	log.Printf("audit: acting-person dropped actor=%q route=%s claimed=%q reason=%q",
+		callerFor(p, r).Principal, routeOf(r), a.Claimed, a.Dropped)
 }
 
 func logMutation(p Principal, g Grant, target fleet.MachineId, r *http.Request, status int) {

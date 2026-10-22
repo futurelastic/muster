@@ -627,7 +627,10 @@ func supervisorGrants() []service.Grant {
 		// grant exists for, and requiring it here would turn every existing
 		// full supervisor into a warning the day this build lands, same as
 		// label/relay would.
-		if g != service.GrantRelay && g != service.GrantLabel && g != service.GrantRemoteControl && g != service.GrantHumanRelay {
+		//
+		// acting-person (muster #349) is excluded the same way: it lets a client
+		// name the human it acts for in the audit, and drives nothing.
+		if g != service.GrantRelay && g != service.GrantLabel && g != service.GrantRemoteControl && g != service.GrantHumanRelay && g != service.GrantActingPerson {
 			out = append(out, g)
 		}
 	}

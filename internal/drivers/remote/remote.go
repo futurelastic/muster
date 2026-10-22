@@ -1037,6 +1037,13 @@ func (d *Driver) doWithHeaders(ctx context.Context, req fleet.Request, method, p
 		// a substitute for the credential above.
 		httpReq.Header.Set("Fleet-On-Behalf-Of", behalf)
 	}
+	if person := req.Caller.Person; person != nil {
+		// The person the entering machine already vouched for (#349): the peer
+		// honours it only if this machine is a configured peer holding its own
+		// acting-person grant there.
+		httpReq.Header.Set("Fleet-Acting-Person", person.ID)
+		httpReq.Header.Set("Fleet-Acting-Issuer", person.Issuer)
+	}
 	if body != nil {
 		httpReq.Header.Set("Content-Type", "application/json")
 	}

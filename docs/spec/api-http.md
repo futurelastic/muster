@@ -568,7 +568,9 @@ GET /v1/machines/{machine}/input-audit?session=&sha256=&since=&until=&principal=
 
 One record per `input` call that reached a driver (muster #330): `id`, `at`,
 `principal`, `machine`, `session`, `sha256` and `bytes` of the delivered text
-(never the text), `humanRelay`, `route`, `direction`, `outcome`. It exists so a
+(never the text), `humanRelay`, `route`, `direction`, `outcome`, and, when the
+caller named the person it acted for, `person` or `personDropped` (§5, *Acting
+person*). It exists so a
 client can show that a prompt in a session was, or was not, sent by an agent
 principal: the engine's transcript marks every user turn alike, and the sender
 controls any label in the text.
@@ -2500,7 +2502,7 @@ ordering is wrong rather than handing you a cursor that would skip.
   development.
 - Permissions are **per verb, per machine**. `list` and `state` may be granted
   broadly; `create`, `input`, `interrupt`, `close`, `rename`, `discard`, `keys`,
-  `label` and `remote-control` are granted per peer and default to denied. That default is deliberate
+  `label`, `remote-control` and `acting-person` are granted per peer and default to denied. That default is deliberate
   and applies to a fresh deployment as much as an established one — no grant is
   implied by anything else, including a runtime advertising the capability the
   grant gates (§3, `keys`; muster #68).
@@ -2522,6 +2524,22 @@ ordering is wrong rather than handing you a cursor that would skip.
   §3.3, `route`). It defaults to denied
   like every other grant, and it is not something to hand to an agent: it is the
   grant that lets a message skip the label.
+- **`acting-person` is attribution, not a verb** (muster #349). A mutating
+  request may carry `Fleet-Acting-Person` (an opaque id) and
+  `Fleet-Acting-Issuer` (the id of whatever minted it), both required together,
+  at most 128 bytes each, valid UTF-8, no control characters. The claim is
+  honoured only when the authenticated principal holds `acting-person`; across a
+  relay, only when the relaying machine is a configured peer of the receiver
+  **and** holds `acting-person` there (the entering machine having already
+  judged its own caller). Otherwise it is **dropped and the drop is recorded**,
+  never trusted silently and never refused: the call proceeds as if no person
+  had been named. A machine with no principal table drops every claim. A
+  honoured claim is recorded as `person` (`<id>@<issuer>`) in the input audit
+  and leads the audit actor, `<person> · <principal> via <peer>`; a dropped one
+  as `personDropped`. The field is **never an input to authorization** — the
+  authenticated principal's verb grants decide what is allowed, whoever is
+  named. Denied by default like every grant, and not implied by the legacy
+  all-verbs flags.
 - Each caller presents its own credential and holds per-verb grants (§6).
 - **`GET /v1/whoami` is the one read exempt from needing the `read` grant
   itself** (§3.1, session-abstraction.md §7.7, muster #106). It reports
