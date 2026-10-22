@@ -5,6 +5,81 @@ its own local service. This is the end-to-end walk-through; once both machines
 read `ok`, [Driving a session on another machine](driving-a-machine.md) shows what
 it buys you.
 
+## Recommended: signed requests, no shared secret
+
+A bearer token is sent on every request, usually over plain http. Anything that
+sees it once can use it forever, and nothing makes it expire. A peer can
+instead hold a **key pair**: each request to it is *signed*, valid for about a
+minute, accepted once, and good only for that method, path, body and target
+machine. Nothing reusable crosses the wire, so a captured request is useless to
+replay, to redirect, or to alter.
+
+Be exact about what this gives. A signature authenticates the **caller** to the
+peer and makes capture useless. It does **not** encrypt: traffic on plain http is
+still readable by anyone on the path, and it does not prove to the caller that
+the answer came from the peer. Use a private network, as before.
+
+Do **machine-b first**. Both machines need a state directory and a config file
+with a principal table (`muster service install` makes all three; see
+[`install.md`](install.md)).
+
+**1. Each machine makes its key.** `muster service install` already did; otherwise:
+
+```sh
+muster key init       # prints the PUBLIC key; the private half stays in the state directory, owner-only
+muster key show       # print it again later
+```
+
+**2. Each machine lists the other as a principal, by public key.** On machine-b,
+with machine-a's public key; on machine-a, the reverse:
+
+```sh
+muster principal add machine-a --grants=read,create,send --public-key=ed25519:...
+```
+
+The principal's name is the other machine's id, exactly as it names itself
+(`FLEET_MACHINE`). There is no token to mint, file to protect or copy to carry.
+
+**3. On machine-a, say the peer is a key peer** (`config.json`):
+
+```json
+{ "peers": [ { "machine": "machine-b", "url": "http://10.8.0.12:9000", "auth": "key" } ] }
+```
+
+Restart both services. A peer entry with `"auth": "key"` has no `token`.
+
+**4. Verify.** `muster doctor` has a `peer.machine-b.credential` row that says it
+authenticates by key and shows the key's fingerprint; `GET /v1/machines` carries
+`peer.auth: "key"` for it. Both machines must agree on the time to within a
+minute — a signature outside that is refused, and the refusal names both clocks.
+
+A machine may mix kinds while it migrates: some peers `"auth": "key"`, others
+with a `token`, as the sections below describe. Moving a pair over is adding the
+two principals and the `auth` line, then removing the old token.
+
+### Rotating a key
+
+```sh
+muster key rotate
+```
+
+It makes a new key, tells every key peer (signing the request with the *old* key,
+which is the proof it is you), and only when all of them have accepted switches to
+the new one. A running service picks it up without a restart. The peer keeps
+accepting the old key for ten minutes, so nothing is dropped in the gap, and
+refuses to let that retired key rotate anything. If a peer is down the command
+says so, leaves the old key in place and keeps the new one pending; run it again
+and the same new key is offered. Do that within ten minutes of the first success.
+A peer must have a state directory to accept a rotation: one without would forget
+it at the next restart.
+
+If a private key may have leaked, do not wait for the next rotation: rotate now,
+and the retired key is useless ten minutes later.
+
+## Token peers
+
+The setup below is the older one and still works unchanged.
+
 Four steps. Start from a service you can already run — see the
 [Quickstart](../README.md#quickstart) for the single-machine form. Do **machine-b first** — machine-a needs an address to point at.
 

@@ -53,7 +53,25 @@ type Caller struct {
 	// own credentials — the fallback is the confused-deputy bug, and it
 	// fails by succeeding.
 	Credential string
+
+	// Person is the human the caller says it acts for (muster #349), or nil.
+	// It is attribution only — never an input to authorization. A service sets
+	// it only after deciding the claim may be trusted (the calling principal
+	// holds the acting-person grant), and a remote driver forwards it to the
+	// peer, which decides again for itself.
+	Person *Person
 }
+
+// Person names a human on whose behalf a request is made. The ID is opaque to
+// this service: it means something only to the Issuer that minted it, which is
+// why the two travel and are recorded together.
+type Person struct {
+	ID     string
+	Issuer string
+}
+
+// String is the form recorded in an audit line: "<id>@<issuer>".
+func (p Person) String() string { return p.ID + "@" + p.Issuer }
 
 // SystemCaller is the authority for work a service performs on its own
 // behalf rather than for a request — startup reconciliation (§12), for

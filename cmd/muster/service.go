@@ -21,6 +21,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/futurelastic/muster/internal/peerkey"
 	"github.com/futurelastic/muster/internal/privfs"
 )
 
@@ -659,6 +660,15 @@ func svcInstall(ctx context.Context, e svcEnv, o svcInstallOpts) error {
 		return fmt.Errorf("state directory: %w", err)
 	}
 	rep.line("state", stateNew, p.StateDir)
+
+	// This machine's signing key (muster #350), made now so the public half is
+	// ready to hand to a peer. Never replaced: running install again must not
+	// lock every peer out.
+	keyPub, keyNew, err := ensureMachineKey(filepath.Join(p.StateDir, machineKeyFile))
+	if err != nil {
+		return fmt.Errorf("machine key: %w", err)
+	}
+	rep.line("key", keyNew, "fingerprint "+peerkey.Fingerprint(keyPub)+" (muster key show prints the public key)")
 
 	cfgDirNew, err := ensureDir(p.ConfigDir)
 	if err != nil {

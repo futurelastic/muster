@@ -1,9 +1,13 @@
 package service
 
 import (
+	"context"
+	"crypto/ed25519"
 	"crypto/subtle"
 	"net/http"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	fleet "github.com/futurelastic/muster"
 )
@@ -153,6 +157,22 @@ const (
 	// hand to an agent. Absent means denied, like every other grant, so no
 	// existing principal gains it by upgrading.
 	GrantHumanRelay Grant = "human-relay"
+	// GrantActingPerson lets a principal name the person it acts for on a
+	// mutating request (muster #349): the Fleet-Acting-Person and
+	// Fleet-Acting-Issuer headers.
+	//
+	// A web client that signs several people in authenticates as ONE principal;
+	// without this the audit can say which client sent a request and never which
+	// person asked it. The grant is attribution only. It authorizes nothing: what
+	// the request may do is still decided by the verb grants of the principal that
+	// authenticated, so naming a person can neither widen nor narrow it.
+	//
+	// Its own grant rather than a rider on send or human-relay because the
+	// assertion is the client's word about someone this service cannot check, and
+	// an operator should choose which principals get to make it. Across a peer
+	// relay the peer must hold it too (see actingPerson). Absent means denied, like
+	// every other grant, so no existing principal gains it by upgrading.
+	GrantActingPerson Grant = "acting-person"
 )
 
 // Grants is every grant this service defines, in the order an operator would
@@ -169,7 +189,7 @@ func Grants() []Grant {
 	return []Grant{
 		GrantRead, GrantCreate, GrantSend, GrantInterrupt,
 		GrantClose, GrantRename, GrantDiscard, GrantKeys, GrantLabel, GrantRemoteControl,
-		GrantRelay, GrantHumanRelay,
+		GrantRelay, GrantHumanRelay, GrantActingPerson,
 	}
 }
 
@@ -191,6 +211,17 @@ type Principal struct {
 	Name string
 	// Token is the bearer credential this principal presents.
 	Token string
+	// PublicKey is set INSTEAD of Token for a principal that authenticates by
+	// signing its requests (muster #350): the caller proves it holds the private
+	// half, and no reusable secret crosses the wire. A principal has one or the
+	// other; the loader refuses both.
+	PublicKey ed25519.PublicKey
+	// signed is set on the copy a request carries when it authenticated by
+	// signature. Never configured.
+	signed bool
+	// signedRetired is set when the signature verified only against a retired
+	// key still in its grace period.
+	signedRetired bool
 	// Grants is what it may do. Absent means read-only is not implied:
 	// absent means nothing is permitted, because §6's default is denied.
 	Grants []Grant
@@ -356,6 +387,99 @@ func (svc *Service) remoteControl(r *http.Request) bool {
 	return p.Allows(GrantRemoteControl)
 }
 
+// The acting person (muster #349) travels as two headers: an opaque id and the
+// issuer that minted it. Headers rather than a body field because the verbs
+// that need it have no common body (a DELETE has none), and because a relaying
+// service forwards them exactly as it forwards the other assertions here.
+const (
+	actingPersonHeader = "Fleet-Acting-Person"
+	actingIssuerHeader = "Fleet-Acting-Issuer"
+	// maxActingPartBytes bounds each half; both end up in a log line and a
+	// durable record, so a caller cannot make either arbitrarily large.
+	maxActingPartBytes = 128
+)
+
+// actingResult is what this service decided about a request's acting-person
+// claim. The zero value means the request made none.
+type actingResult struct {
+	// Person is the honoured claim, or nil.
+	Person *fleet.Person
+	// Dropped is why a claim that WAS made is not honoured, in words an
+	// operator reads in a log; empty when there was no claim or it was honoured.
+	// A drop is never silent: it is recorded wherever the person would have been.
+	Dropped string
+	// Claimed is the claim as made, for the record of a drop. Empty when the
+	// claim was too malformed to echo safely.
+	Claimed string
+}
+
+type actingKey struct{}
+
+func withActing(ctx context.Context, a actingResult) context.Context {
+	return context.WithValue(ctx, actingKey{}, a)
+}
+
+// actingOf returns the decision resolveActing made for this request.
+func actingOf(r *http.Request) actingResult {
+	a, _ := r.Context().Value(actingKey{}).(actingResult)
+	return a
+}
+
+// resolveActing decides whether a request's acting-person claim is trusted.
+//
+// The rule is the human-relay rule with its own grant. Locally, the
+// authenticated principal must hold GrantActingPerson. From a relaying peer
+// (a request carrying an on-behalf-of assertion), that peer must be one of this
+// service's configured peers (relayTrusted) AND hold the grant here: the
+// entering machine already checked the original caller, and this machine trusts
+// that check exactly as far as it trusts the peer — no further.
+//
+// On a machine with no principal table nobody holds a grant, so the claim is
+// dropped: a shared token names no one, and attribution that anyone holding it
+// could forge is not attribution.
+func (svc *Service) resolveActing(r *http.Request) actingResult {
+	id, issuer := r.Header.Get(actingPersonHeader), r.Header.Get(actingIssuerHeader)
+	if id == "" && issuer == "" {
+		return actingResult{}
+	}
+	if reason := actingMalformed(id, issuer); reason != "" {
+		return actingResult{Dropped: reason}
+	}
+	person := fleet.Person{ID: id, Issuer: issuer}
+	drop := func(reason string) actingResult {
+		return actingResult{Dropped: reason, Claimed: person.String()}
+	}
+	p, ok := principalOf(r)
+	if !ok {
+		return drop("this machine has no principal table, so no caller holds the " + string(GrantActingPerson) + " grant")
+	}
+	if r.Header.Get(onBehalfOfHeader) != "" && !svc.relayTrusted(r) {
+		return drop("the request was relayed by " + p.Name + ", which is not a configured peer")
+	}
+	if !p.Allows(GrantActingPerson) {
+		return drop("principal " + p.Name + " does not hold the " + string(GrantActingPerson) + " grant")
+	}
+	return actingResult{Person: &person}
+}
+
+// actingMalformed reports why an acting-person claim cannot be recorded at all
+// ("" when it can). Both halves are required: an id means something only to its
+// issuer, and an id with no issuer would be read as meaning something it does
+// not.
+func actingMalformed(id, issuer string) string {
+	switch {
+	case id == "" || issuer == "":
+		return "the claim must carry both " + actingPersonHeader + " and " + actingIssuerHeader
+	case len(id) > maxActingPartBytes || len(issuer) > maxActingPartBytes:
+		return "the claim is longer than 128 bytes in one of its parts"
+	case !utf8.ValidString(id) || !utf8.ValidString(issuer):
+		return "the claim is not valid UTF-8"
+	case strings.IndexFunc(id+issuer, unicode.IsControl) >= 0:
+		return "the claim contains a control character"
+	}
+	return ""
+}
+
 // callerFor builds the Request a resolved principal makes.
 func callerFor(p Principal, r *http.Request) fleet.Caller {
 	name := p.Name
@@ -365,5 +489,5 @@ func callerFor(p Principal, r *http.Request) fleet.Caller {
 	if behalf := r.Header.Get(onBehalfOfHeader); behalf != "" {
 		name = behalf + " via " + p.Name
 	}
-	return fleet.Caller{Principal: name, Credential: p.Token}
+	return fleet.Caller{Principal: name, Credential: p.Token, Person: actingOf(r).Person}
 }

@@ -99,6 +99,9 @@ func (d *Driver) order() []string {
 // roundTrip is client.Do for a request built against current()+rel, trying the
 // peer's other addresses when this one cannot be connected to.
 func (d *Driver) roundTrip(req *http.Request, rel string) (*http.Response, error) {
+	if err := d.sign(req); err != nil {
+		return nil, err
+	}
 	if len(d.bases) <= 1 {
 		return d.client.Do(req)
 	}
@@ -213,4 +216,31 @@ func (d *Driver) noteAnswered(base string) {
 		}
 		return
 	}
+}
+
+// sign replaces the request's Authorization with a signature when this driver
+// authenticates by key (muster #350). It is done here, once, because every call
+// to the peer — a verb, a probe, a stream — passes through roundTrip, and a site
+// that was added later and forgot to sign would otherwise send an empty bearer.
+//
+// The signature binds the path and query, not the address, so it stays valid
+// when the request is retried against another of the peer's addresses; the
+// retry is only ever made when nothing was delivered, so the nonce is unspent.
+func (d *Driver) sign(req *http.Request) error {
+	if d.signer == nil {
+		return nil
+	}
+	var body []byte
+	if req.GetBody != nil && req.Body != nil && req.Body != http.NoBody {
+		rc, err := req.GetBody()
+		if err != nil {
+			return err
+		}
+		body, err = io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			return err
+		}
+	}
+	return d.signer.Sign(req, body, string(d.machine))
 }

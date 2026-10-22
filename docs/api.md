@@ -155,7 +155,11 @@ stamps say.
 sources, complete}`. Always probes peers; there is no `scope` here.
 
 `peer` is this service's own standing on each machine:
-`{listsMeBack, grantsToMe, source, observedAt?}` — whether that machine lists
+`{listsMeBack, grantsToMe, source, observedAt?, auth}` — `auth` is `"key"` when
+this service signs its requests to that machine and `"token"` when it presents a
+bearer credential (#350; absent on the `self` item). Unlike the rest of the
+standing it is a fact of this machine's own configuration, so it is present
+even when `source` is `"assumed"`. `listsMeBack` is whether that machine lists
 this one back, and what it grants the credential this machine presents there.
 Read it before relying on a cross-machine write, instead of learning from a
 `403`. `source: "assumed"` with `listsMeBack: null` means nobody could tell
@@ -163,6 +167,34 @@ Read it before relying on a cross-machine write, instead of learning from a
 listed". `observed` with `grantsToMe: []` is a real negative. The `self` item
 reports `listsMeBack: true` and what this machine's own table grants the
 credential it presents to peers. `?verify=1` re-probes every peer first.
+
+### Signed requests and `POST /v1/peer-key` (#350)
+
+A principal configured with a **public key** instead of a token authenticates by
+signing each request:
+
+```
+Authorization: Muster-Sig v1 machine=<sender id>, ts=<unix seconds>, nonce=<random>, sig=<base64url ed25519>
+Fleet-Content-Digest: sha256=<hex of the body>
+```
+
+The signature covers the method, the path and query, the body digest, the
+receiving machine's id, the sender, the time, the nonce, and the relay-assertion
+headers (`Fleet-On-Behalf-Of`, `-Human-Relay`, `-Remote-Control`,
+`-Acting-Person`, `-Acting-Issuer`). A request is refused with `401
+unauthorized` when the time is more than 60 seconds from the receiver's clock (the
+message names both clocks), when the nonce has been used, when the body does not
+match its digest, or when the signature does not verify — which also covers a
+sender no principal lists and a request addressed to a different machine; those
+read alike on purpose. Authorization is unchanged: the verified sender is a
+principal with grants, like any other. A client does not normally build these;
+peers do (`muster key`).
+
+`POST /v1/peer-key` `{publicKey: "ed25519:…"}` replaces the key the *calling peer*
+is verified with. It must itself be signed with that peer's **current** key. The
+previous key stays acceptable for ten minutes and cannot rotate anything. It
+needs a state directory (`unsupported` without one) and is refused for a bearer
+token. `muster key rotate` is the client.
 
 ### `GET /v1/whoami`
 
@@ -322,6 +354,34 @@ names only, never values. `{known: false}` is an ordinary `200`, not an error.
 This exists because a session that inherits the wrong `PATH` fails in a way
 nothing else in the API can explain.
 
+### Acting person (`Fleet-Acting-Person`, `Fleet-Acting-Issuer`)
+
+A client that signs people in authenticates as one principal, so the audit can
+say which client sent a request and never which person asked. Any mutating
+request may therefore carry two headers:
+
+| Header | Meaning |
+|---|---|
+| `Fleet-Acting-Person` | an opaque id, meaningful only to its issuer |
+| `Fleet-Acting-Issuer` | the id of whatever minted it (an identity provider, a deployment) |
+
+Both are required together, at most 128 bytes each, valid UTF-8 with no control
+characters; anything else is dropped. Reads ignore them.
+
+**Trust.** The claim is honoured only when the principal that authenticated
+holds the **`acting-person`** grant (its own grant, denied by default, not part
+of the legacy all-verbs flags). Across a relay the entering machine checks its
+caller and forwards the claim; the owning machine honours it only if the
+relaying machine is one of its configured peers **and** holds `acting-person`
+there. A claim that fails either check is dropped, the call still proceeds, and
+the drop is recorded (`personDropped` in the input audit, an `audit:` line in the
+log). A machine with no principal table drops every claim: a shared token names
+no one.
+
+**It is attribution, never authorization.** The call is allowed or refused by
+the authenticated principal's verb grants alone. Naming a person widens nothing
+and narrows nothing; a client keeps its own permissions for its own people.
+
 ### `GET /v1/machines/{machine}/input-audit`
 
 Parameters: at least one of `session`, `sha256` (64 lowercase hex: the sha256 of
@@ -335,8 +395,19 @@ it marks every user turn the same way. Every `input` that reaches a driver
 leaves one record: `id`, `at`, `principal` (who authenticated; a relayed call
 reads `<asserted principal> via <peer>`), `machine`, `session`, `sha256` and
 `bytes` of the text exactly as sent (never the text), `humanRelay`, `route`,
-`direction` and `outcome`.
+`direction` and `outcome`, and — when the caller named the person it acted
+for — `person` or `personDropped` (below).
 
+- **`person`** (#349) is the human the caller said it acted for, `<id>@<issuer>`,
+  recorded only when the claim was honoured (see *Acting person*). Read it with
+  `principal`: a person is as trustworthy as the principal that vouched for
+  them, and the pair reads `<person> · <principal> via <peer>` in the service's
+  audit log. It is attribution only; it never changes what the call was allowed
+  to do.
+- **`personDropped`** is set when a claim was made and not honoured, and says
+  why, with the claim as made. `person` is then empty. A dropped claim is
+  recorded rather than ignored, so a client that thinks it attributed a call can
+  find out it did not.
 - **`humanRelay`** is the fact the service itself computed: the caller holds the
   `human-relay` grant (or a configured peer asserted it did). `true` means the
   message was delivered unlabelled as a person's own words; `false` means it

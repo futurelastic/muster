@@ -93,6 +93,7 @@ import (
 
 	fleet "github.com/futurelastic/muster"
 	"github.com/futurelastic/muster/internal/driver"
+	"github.com/futurelastic/muster/internal/peerkey"
 )
 
 const defaultDeadlineMs = 3000
@@ -158,6 +159,11 @@ type Driver struct {
 	// names. Empty means shared-token mode, where the caller's credential is
 	// forwarded as before.
 	identity string
+
+	// signer, when set, replaces the bearer token entirely (muster #350): every
+	// request to this peer is signed with this machine's key and carries no
+	// reusable secret. It is set INSTEAD of identity; the two never coexist.
+	signer *peerkey.Signer
 
 	mu       sync.RWMutex
 	caps     fleet.DriverCapabilities
@@ -313,6 +319,13 @@ func WithIdentity(token string) Option {
 	return func(d *Driver) { d.identity = token }
 }
 
+// WithSigner makes this driver authenticate to its peer by signing each request
+// with this machine's key instead of presenting a token (muster #350). The peer
+// must list this machine's public key as a principal.
+func WithSigner(s *peerkey.Signer) Option {
+	return func(d *Driver) { d.signer = s }
+}
+
 // WithSelf names this machine, so the probe can ask the peer whether it lists
 // this machine back (muster #154).
 func WithSelf(machine fleet.MachineId) Option {
@@ -324,6 +337,10 @@ func withClock(f func() time.Time) Option { return func(d *Driver) { d.now = f }
 // bearerFor decides what a proxied request authenticates with, and whom it
 // names. See the identity field for why these are two different things.
 func (d *Driver) bearerFor(req fleet.Request) (token, onBehalfOf string, ok bool) {
+	if d.signer != nil {
+		// No token: roundTrip replaces the Authorization header with a signature.
+		return "", req.Caller.Principal, true
+	}
 	if d.identity != "" {
 		return d.identity, req.Caller.Principal, true
 	}
@@ -833,7 +850,7 @@ func (d *Driver) noteSuccessfulContact(req fleet.Request) {
 // assumed — never as false, which would report a registration problem nobody
 // has.
 func (d *Driver) refreshStanding(ctx context.Context, req fleet.Request) {
-	if d.identity == "" || d.self == "" {
+	if (d.identity == "" && d.signer == nil) || d.self == "" {
 		return
 	}
 	var raw map[string]json.RawMessage
@@ -884,10 +901,23 @@ func (d *Driver) PeerStanding() fleet.PeerStanding {
 	d.mu.RUnlock()
 	if !seen || st.Source != fleet.CapabilitiesObserved ||
 		(st.ObservedAt != nil && d.now().Sub(*st.ObservedAt) > capabilityStaleness) {
-		return fleet.AssumedPeerStanding()
+		st = fleet.AssumedPeerStanding()
 	}
 	st.GrantsToMe = append([]string{}, st.GrantsToMe...)
+	// Which credential this machine presents there is a fact of its own
+	// configuration, known without asking, so it is reported even when nothing
+	// else about the standing has been observed.
+	st.Auth = d.authKind()
 	return st
+}
+
+// authKind is how this driver authenticates to its peer: "key" (it signs each
+// request), or "token" (a bearer credential, including shared-token mode).
+func (d *Driver) authKind() string {
+	if d.signer != nil {
+		return fleet.PeerAuthKey
+	}
+	return fleet.PeerAuthToken
 }
 
 var _ driver.PeerStandingReporter = (*Driver)(nil)
@@ -1036,6 +1066,13 @@ func (d *Driver) doWithHeaders(ctx context.Context, req fleet.Request, method, p
 		// Who asked, for the peer's audit trail (§6 requirement 4). Never
 		// a substitute for the credential above.
 		httpReq.Header.Set("Fleet-On-Behalf-Of", behalf)
+	}
+	if person := req.Caller.Person; person != nil {
+		// The person the entering machine already vouched for (#349): the peer
+		// honours it only if this machine is a configured peer holding its own
+		// acting-person grant there.
+		httpReq.Header.Set("Fleet-Acting-Person", person.ID)
+		httpReq.Header.Set("Fleet-Acting-Issuer", person.Issuer)
 	}
 	if body != nil {
 		httpReq.Header.Set("Content-Type", "application/json")

@@ -23,6 +23,7 @@ import (
 	fleet "github.com/futurelastic/muster"
 	"github.com/futurelastic/muster/internal/delivery"
 	"github.com/futurelastic/muster/internal/driver"
+	"github.com/futurelastic/muster/internal/peerkey"
 	"github.com/futurelastic/muster/internal/state"
 )
 
@@ -107,6 +108,11 @@ type Service struct {
 	// inputAudit keeps one record per /input call for a bounded time (muster
 	// #330) — see inputaudit.go.
 	inputAudit *inputAuditStore
+
+	// peerKeys is the rotation overlay for principals that sign (muster #350),
+	// and sigReplay the nonces of the signatures already accepted.
+	peerKeys  *peerKeyStore
+	sigReplay *peerkey.ReplayCache
 
 	// sweepMu guards the background re-listing a local session.closed event
 	// asks for (requestSweep).
@@ -256,6 +262,9 @@ func NewWithState(self fleet.MachineId, st *state.Store) (*Service, error) {
 	if err := svc.inputAudit.load(st); err != nil {
 		return nil, err
 	}
+	if err := svc.peerKeys.load(st); err != nil {
+		return nil, err
+	}
 
 	var seq eventSequence
 	found, err := st.Load("events", &seq)
@@ -296,6 +305,8 @@ func newService(self fleet.MachineId) *Service {
 		labels:     newLabelStore(),
 		history:    newHistoryStore(self),
 		inputAudit: newInputAuditStore(),
+		peerKeys:   newPeerKeyStore(),
+		sigReplay:  peerkey.NewReplayCache(maxSignedNonces),
 		// #130: every instance starts with the shipped default in force,
 		// not a zero value a caller could mistake for "no limit" — see the
 		// field's own doc comment.

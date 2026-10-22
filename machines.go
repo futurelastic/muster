@@ -79,7 +79,19 @@ type PeerStanding struct {
 	// ObservedAt is when the answer arrived, on this machine's clock. Absent
 	// under "assumed".
 	ObservedAt *Timestamp `json:"observedAt,omitempty"`
+	// Auth is how this service authenticates to that machine: PeerAuthKey (it
+	// signs each request, no reusable secret crosses the wire) or PeerAuthToken
+	// (a bearer credential). A fact of this machine's own configuration, so it
+	// is present whatever Source says; absent only on the self item (muster
+	// #350).
+	Auth string `json:"auth,omitempty"`
 }
+
+// How a service authenticates to a peer (PeerStanding.Auth).
+const (
+	PeerAuthKey   = "key"
+	PeerAuthToken = "token"
+)
 
 // AssumedPeerStanding is the conservative floor: nothing confirmed.
 func AssumedPeerStanding() PeerStanding {

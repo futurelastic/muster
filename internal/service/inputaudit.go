@@ -130,6 +130,32 @@ type InputRecord struct {
 	// Outcome is the receipt's outcome (submitted, queued, refused, unknown, …),
 	// "error" when the driver failed, or "pending".
 	Outcome string `json:"outcome"`
+	// Person is the human the caller said it acted for, "<id>@<issuer>", set
+	// only when the claim was honoured (muster #349): the principal held the
+	// acting-person grant here, or a configured peer holding it relayed the
+	// claim. Attribution only. Read it with Principal: a person is as
+	// trustworthy as the principal that vouched for them, and the pair reads
+	// "<person> · <principal> via <peer>".
+	Person string `json:"person,omitempty"`
+	// PersonDropped is set when a claim was made and NOT honoured: why, and the
+	// claim as made. Person is then empty. A dropped claim is recorded rather
+	// than ignored so a client that thinks it attributed a call can find out it
+	// did not.
+	PersonDropped string `json:"personDropped,omitempty"`
+}
+
+// withActing copies a request's acting-person decision into the record.
+func (rec InputRecord) withActing(a actingResult) InputRecord {
+	if a.Person != nil {
+		rec.Person = a.Person.String()
+	}
+	if a.Dropped != "" {
+		rec.PersonDropped = a.Dropped
+		if a.Claimed != "" {
+			rec.PersonDropped = a.Claimed + ": " + a.Dropped
+		}
+	}
+	return rec
 }
 
 // inputAuditLine is what the log holds: a record, or the file's begin marker.
@@ -560,7 +586,9 @@ func (svc *Service) auditPrincipal(r *http.Request) string {
 	if r.Header.Get(onBehalfOfHeader) != "" && !svc.relayTrusted(r) {
 		return p.Name
 	}
-	return actorOf(p, r)
+	// Without the person: that has its own field (InputRecord.Person), so a
+	// reader filtering on principal still matches a call that named one.
+	return callerFor(p, r).Principal
 }
 
 // directionOf names where a call entered relative to the machine that owns the

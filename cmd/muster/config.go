@@ -9,6 +9,7 @@ import (
 	fleet "github.com/futurelastic/muster"
 	"github.com/futurelastic/muster/internal/drivers/opencode"
 	"github.com/futurelastic/muster/internal/drivers/tmux"
+	"github.com/futurelastic/muster/internal/peerkey"
 	"github.com/futurelastic/muster/internal/service"
 	"github.com/futurelastic/muster/internal/sessionenv"
 )
@@ -28,9 +29,15 @@ import (
 type fileConfig struct {
 	// Principals may call THIS machine, and with what permission.
 	Principals []struct {
-		Name   string   `json:"name"`
-		Token  string   `json:"token"`
-		Grants []string `json:"grants"`
+		Name  string `json:"name"`
+		Token string `json:"token,omitempty"`
+		// PublicKey is the principal's ed25519 public key, "ed25519:<base64url>",
+		// INSTEAD of a token (muster #350): the principal proves itself by
+		// signing each request, so nothing reusable crosses the wire. Exactly
+		// one of Token and PublicKey. `muster key show` on the other machine
+		// prints it.
+		PublicKey string   `json:"publicKey,omitempty"`
+		Grants    []string `json:"grants"`
 	} `json:"principals"`
 
 	// Peers are machines this one may call, each with the credential THIS
@@ -50,6 +57,12 @@ type fileConfig struct {
 		URL   string   `json:"url"`
 		URLs  []string `json:"urls,omitempty"`
 		Token string   `json:"token"`
+		// Auth is how this machine authenticates there: "token" (the default,
+		// and the only choice before #350) or "key", which signs each request
+		// with this machine's key (`muster key show` prints the public half for
+		// the peer to list as a principal). "key" takes no token. A machine may
+		// mix both across its peers while it migrates.
+		Auth string `json:"auth,omitempty"`
 	} `json:"peers"`
 
 	// TrustRoots are the directories under which #47's trust seeding runs:
@@ -176,8 +189,29 @@ func loadConfig(path string) (*fileConfig, error) {
 			"would deny every request, which is more likely a mistake than an intent", path)
 	}
 	for _, p := range c.Principals {
-		if p.Name == "" || p.Token == "" {
-			return nil, fmt.Errorf("%s: a principal needs both a name and a token", path)
+		if p.Name == "" {
+			return nil, fmt.Errorf("%s: a principal needs a name", path)
+		}
+		switch {
+		case p.Token != "" && p.PublicKey != "":
+			return nil, fmt.Errorf("%s: principal %q has both a token and a publicKey; it authenticates one way", path, p.Name)
+		case p.Token == "" && p.PublicKey == "":
+			return nil, fmt.Errorf("%s: a principal needs a name and either a token or a publicKey", path)
+		case p.PublicKey != "":
+			if _, err := peerkey.ParsePublicKey(p.PublicKey); err != nil {
+				return nil, fmt.Errorf("%s: principal %q: publicKey: %w", path, p.Name, err)
+			}
+		}
+	}
+	for i, p := range c.Peers {
+		switch p.Auth {
+		case "", peerAuthToken:
+		case peerAuthKey:
+			if p.Token != "" {
+				return nil, fmt.Errorf("%s: peer entry %d authenticates by key and must not carry a token", path, i+1)
+			}
+		default:
+			return nil, fmt.Errorf("%s: peer entry %d: auth %q is not %q or %q", path, i+1, p.Auth, peerAuthToken, peerAuthKey)
 		}
 	}
 	return &c, nil
@@ -194,7 +228,15 @@ func (c *fileConfig) principals() ([]service.Principal, error) {
 			}
 			grants = append(grants, gr)
 		}
-		out = append(out, service.Principal{Name: p.Name, Token: p.Token, Grants: grants})
+		pr := service.Principal{Name: p.Name, Token: p.Token, Grants: grants}
+		if p.PublicKey != "" {
+			k, err := peerkey.ParsePublicKey(p.PublicKey)
+			if err != nil {
+				return nil, fmt.Errorf("principal %q: publicKey: %w", p.Name, err)
+			}
+			pr.PublicKey = k
+		}
+		out = append(out, pr)
 	}
 	return out, nil
 }
@@ -234,6 +276,26 @@ func (c *fileConfig) sessionEnv() []sessionenv.Entry {
 // disagree about what a valid id is.
 func knownRuntimeIDs() []fleet.RuntimeId {
 	return []fleet.RuntimeId{tmux.DefaultRuntime, opencode.DefaultRuntime, "stub"}
+}
+
+// How this machine authenticates to a peer (peers[].auth).
+const (
+	peerAuthToken = "token"
+	peerAuthKey   = "key"
+)
+
+// peerAuthFor is how this machine authenticates to a configured peer. A peer in
+// FLEET_PEERS only, or with no entry, has no auth setting: token, as before.
+func (c *fileConfig) peerAuthFor(machine fleet.MachineId) string {
+	if c == nil {
+		return peerAuthToken
+	}
+	for _, p := range c.Peers {
+		if fleet.MachineId(p.Machine) == machine && p.Auth == peerAuthKey {
+			return peerAuthKey
+		}
+	}
+	return peerAuthToken
 }
 
 // peerTokenFor is the credential this machine presents on a configured peer.
@@ -329,7 +391,7 @@ func resolvePeers(peersEnv string, cfg *fileConfig) ([]peerEntry, error) {
 func (c *fileConfig) selfCredential(self fleet.MachineId) (token string, ok bool) {
 	name := "system:" + string(self)
 	for _, p := range c.Principals {
-		if p.Name == name {
+		if p.Name == name && p.Token != "" {
 			return p.Token, true
 		}
 	}

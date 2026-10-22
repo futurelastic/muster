@@ -136,7 +136,8 @@ GET /v1/machines[?verify=1]
                      "peer": { "listsMeBack": true,
                                "grantsToMe": ["read", "send"],
                                "source": "observed",
-                               "observedAt": "..." } } ],
+                               "observedAt": "...",
+                               "auth": "key" } } ],   ← "key" | "token"; absent on self (#350)
         "sources": [...], "complete": true }
 
 GET /v1/runtimes
@@ -377,6 +378,8 @@ PeerStanding {
   grantsToMe  : string[]         // grants that machine gives the credential this service presents
   source      : "observed" | "assumed"
   observedAt? : Timestamp        // this machine's clock; absent under "assumed"
+  auth?       : "key" | "token"  // how this service authenticates to that machine (#350); a fact of
+                                 // this machine's own configuration, so present under "assumed" too
 }
 ```
 
@@ -568,7 +571,9 @@ GET /v1/machines/{machine}/input-audit?session=&sha256=&since=&until=&principal=
 
 One record per `input` call that reached a driver (muster #330): `id`, `at`,
 `principal`, `machine`, `session`, `sha256` and `bytes` of the delivered text
-(never the text), `humanRelay`, `route`, `direction`, `outcome`. It exists so a
+(never the text), `humanRelay`, `route`, `direction`, `outcome`, and, when the
+caller named the person it acted for, `person` or `personDropped` (§5, *Acting
+person*). It exists so a
 client can show that a prompt in a session was, or was not, sent by an agent
 principal: the engine's transcript marks every user turn alike, and the sender
 controls any label in the text.
@@ -2500,7 +2505,7 @@ ordering is wrong rather than handing you a cursor that would skip.
   development.
 - Permissions are **per verb, per machine**. `list` and `state` may be granted
   broadly; `create`, `input`, `interrupt`, `close`, `rename`, `discard`, `keys`,
-  `label` and `remote-control` are granted per peer and default to denied. That default is deliberate
+  `label`, `remote-control` and `acting-person` are granted per peer and default to denied. That default is deliberate
   and applies to a fresh deployment as much as an established one — no grant is
   implied by anything else, including a runtime advertising the capability the
   grant gates (§3, `keys`; muster #68).
@@ -2522,6 +2527,47 @@ ordering is wrong rather than handing you a cursor that would skip.
   §3.3, `route`). It defaults to denied
   like every other grant, and it is not something to hand to an agent: it is the
   grant that lets a message skip the label.
+- **`acting-person` is attribution, not a verb** (muster #349). A mutating
+  request may carry `Fleet-Acting-Person` (an opaque id) and
+  `Fleet-Acting-Issuer` (the id of whatever minted it), both required together,
+  at most 128 bytes each, valid UTF-8, no control characters. The claim is
+  honoured only when the authenticated principal holds `acting-person`; across a
+  relay, only when the relaying machine is a configured peer of the receiver
+  **and** holds `acting-person` there (the entering machine having already
+  judged its own caller). Otherwise it is **dropped and the drop is recorded**,
+  never trusted silently and never refused: the call proceeds as if no person
+  had been named. A machine with no principal table drops every claim. A
+  honoured claim is recorded as `person` (`<id>@<issuer>`) in the input audit
+  and leads the audit actor, `<person> · <principal> via <peer>`; a dropped one
+  as `personDropped`. The field is **never an input to authorization** — the
+  authenticated principal's verb grants decide what is allowed, whoever is
+  named. Denied by default like every grant, and not implied by the legacy
+  all-verbs flags.
+- **A principal authenticates by token or by signature** (muster #350). One
+  configured with a public key (`ed25519:<base64url>`) and no token sends
+  `Authorization: Muster-Sig v1 machine=<id>, ts=<unix>, nonce=<n>, sig=<s>` and
+  `Fleet-Content-Digest: sha256=<hex>`. The signed text is
+  `muster-sig-v1`, then one per line: method, request URI (path and query),
+  lowercase hex sha256 of the body, the **receiving** machine's id, the sender's
+  id, ts, nonce, and the values (empty when absent) of `Fleet-On-Behalf-Of`,
+  `Fleet-Human-Relay`, `Fleet-Remote-Control`, `Fleet-Acting-Person`,
+  `Fleet-Acting-Issuer`. A verifier MUST refuse, with `401 unauthorized` and
+  without performing the request: a ts more than 60 s from its own clock in
+  either direction; a nonce already used by that sender within the window (a
+  verifier that cannot remember another nonce MUST fail closed, not forget); a
+  body that does not hash to the digest; a signature that does not verify against
+  the sender's current key or a retired key within its grace period. An unknown
+  sender and a bad signature are indistinguishable to the caller. A verified
+  sender is the principal named by `machine`, with that principal's grants; a
+  request is judged exactly as one authenticated by token. It does not encrypt
+  and does not authenticate responses.
+- **Key rotation.** `POST /v1/peer-key {"publicKey": "ed25519:…"}`, signed with
+  the sender's **current** key, replaces the key the sender is verified with. The
+  replaced key is accepted for at most ten minutes and MUST NOT be able to rotate
+  to a different key, so that a retired key is never a way to take a principal
+  over. A bearer token MUST NOT be accepted for it. A service with no state
+  directory MUST refuse it (`unsupported`): a rotation it would forget at restart
+  locks the peer out. A machine MAY have peers of both kinds at once.
 - Each caller presents its own credential and holds per-verb grants (§6).
 - **`GET /v1/whoami` is the one read exempt from needing the `read` grant
   itself** (§3.1, session-abstraction.md §7.7, muster #106). It reports

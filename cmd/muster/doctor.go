@@ -20,6 +20,7 @@ import (
 	"github.com/futurelastic/muster/internal/drivers/opencode"
 	tmuxdriver "github.com/futurelastic/muster/internal/drivers/tmux"
 	"github.com/futurelastic/muster/internal/inboxclient"
+	"github.com/futurelastic/muster/internal/peerkey"
 	"github.com/futurelastic/muster/internal/service"
 	"github.com/futurelastic/muster/internal/sessionenv"
 )
@@ -471,16 +472,20 @@ func runChecks(ctx context.Context, env doctorEnv) []doctorRow {
 				Summary: "an address is not an http(s) URL with a host", Refs: []int{335}})
 		}
 
-		credential := p.token
+		credential := peerCred{bearer: p.token, peer: p.machine}
+		var keyRow doctorRow
 		// The address that answered the reachability probe, so the grants read
 		// asks the same one; the first when none did or none was probed.
 		answered := p.bases[0]
 		switch {
+		case p.auth == peerAuthKey:
+			credential, keyRow = keyCredential(getenv, self, p.machine)
+			c.add(keyRow)
 		case p.token != "":
 			c.add(doctorRow{ID: prefix + ".credential", Status: statusPass,
-				Summary: "per-peer credential configured"})
+				Summary: "per-peer credential configured (token)"})
 		case token != "":
-			credential = token
+			credential.bearer = token
 			c.add(doctorRow{ID: prefix + ".credential", Status: statusWarn,
 				Summary: "no per-peer credential — the caller's credential is forwarded (shared-token mode)",
 				Detail:  "works only while every machine accepts the same secret"})
@@ -493,7 +498,7 @@ func runChecks(ctx context.Context, env doctorEnv) []doctorRow {
 		switch {
 		case env.Offline:
 			c.add(doctorRow{ID: prefix + ".reachable", Status: statusUnknown, Summary: "not probed (--offline)"})
-		case !urlOK || credential == "":
+		case !urlOK || credential.empty():
 			c.add(doctorRow{ID: prefix + ".reachable", Status: statusUnknown,
 				Summary: "not probed — no usable address or credential"})
 		default:
@@ -512,7 +517,7 @@ func runChecks(ctx context.Context, env doctorEnv) []doctorRow {
 		case env.Offline:
 			c.add(doctorRow{ID: prefix + ".grants", Status: statusUnknown,
 				Summary: "not probed (--offline)", Refs: []int{154}})
-		case !urlOK || credential == "":
+		case !urlOK || credential.empty():
 			c.add(doctorRow{ID: prefix + ".grants", Status: statusUnknown,
 				Summary: "not probed — no usable address or credential", Refs: []int{154}})
 		case c.skipped(prefix + ".grants"):
@@ -580,6 +585,8 @@ type doctorPeer struct {
 	// the ordinary case (#335).
 	bases []string
 	token string
+	// auth is how this machine authenticates there: peerAuthToken or peerAuthKey.
+	auth string
 }
 
 // doctorPeers resolves the peer list exactly as main.go does — through the
@@ -590,7 +597,7 @@ func doctorPeers(getenv func(string) string, cfg *fileConfig) ([]doctorPeer, err
 	entries, err := resolvePeers(getenv("FLEET_PEERS"), cfg)
 	var out []doctorPeer
 	for _, e := range entries {
-		p := doctorPeer{machine: e.machine, bases: e.urls}
+		p := doctorPeer{machine: e.machine, bases: e.urls, auth: cfg.peerAuthFor(e.machine)}
 		if cfg != nil {
 			if tok, ok := cfg.peerTokenFor(p.machine); ok {
 				p.token = tok
@@ -627,7 +634,10 @@ func supervisorGrants() []service.Grant {
 		// grant exists for, and requiring it here would turn every existing
 		// full supervisor into a warning the day this build lands, same as
 		// label/relay would.
-		if g != service.GrantRelay && g != service.GrantLabel && g != service.GrantRemoteControl && g != service.GrantHumanRelay {
+		//
+		// acting-person (muster #349) is excluded the same way: it lets a client
+		// name the human it acts for in the audit, and drives nothing.
+		if g != service.GrantRelay && g != service.GrantLabel && g != service.GrantRemoteControl && g != service.GrantHumanRelay && g != service.GrantActingPerson {
 			out = append(out, g)
 		}
 	}
@@ -1209,7 +1219,25 @@ func checkModeClass(dir string) doctorRow {
 // value) any before it that did not. An absent address is the expected state of
 // a machine on one of its connections, so it is detail, not a warning. When
 // none answers the row fails and the second return is the first address.
-func probePeerAny(ctx context.Context, env doctorEnv, id string, bases []string, credential string) (doctorRow, string) {
+// peerCred is what a probe presents to a peer: a bearer token, or a signature
+// made with this machine's key (muster #350).
+type peerCred struct {
+	bearer string
+	signer *peerkey.Signer
+	peer   fleet.MachineId
+}
+
+func (c peerCred) empty() bool { return c.signer == nil && c.bearer == "" }
+
+func (c peerCred) apply(req *http.Request) error {
+	if c.signer != nil {
+		return c.signer.Sign(req, nil, string(c.peer))
+	}
+	req.Header.Set("Authorization", "Bearer "+c.bearer)
+	return nil
+}
+
+func probePeerAny(ctx context.Context, env doctorEnv, id string, bases []string, credential peerCred) (doctorRow, string) {
 	if len(bases) == 1 {
 		return probePeer(ctx, env, id, strings.TrimRight(bases[0], "/"), credential), bases[0]
 	}
@@ -1232,7 +1260,7 @@ func probePeerAny(ctx context.Context, env doctorEnv, id string, bases []string,
 		Detail:  strings.Join(missed, "; ") + " — the bind address or the network path is wrong on every one — not the credential"}, bases[0]
 }
 
-func probePeer(ctx context.Context, env doctorEnv, id, base, credential string) doctorRow {
+func probePeer(ctx context.Context, env doctorEnv, id, base string, credential peerCred) doctorRow {
 	row := doctorRow{ID: id, Refs: []int{98}}
 	ctx, cancel := context.WithTimeout(ctx, env.Timeout)
 	defer cancel()
@@ -1242,7 +1270,11 @@ func probePeer(ctx context.Context, env doctorEnv, id, base, credential string) 
 		row.Summary = "request could not be built from the configured address"
 		return row
 	}
-	req.Header.Set("Authorization", "Bearer "+credential)
+	if err := credential.apply(req); err != nil {
+		row.Status = statusFail
+		row.Summary = "could not sign the request: " + err.Error()
+		return row
+	}
 	client := env.HTTP
 	if client == nil {
 		client = &http.Client{Timeout: env.Timeout}
@@ -1261,6 +1293,10 @@ func probePeer(ctx context.Context, env doctorEnv, id, base, credential string) 
 		row.Status = statusFail
 		row.Summary = fmt.Sprintf("reachable, but the credential is refused (%d)", resp.StatusCode)
 		row.Detail = "the peer holds no principal with this token, or that principal lacks read (#98: token VALUE must match on both sides)"
+		if credential.signer != nil {
+			row.Detail = "the peer does not list this machine's public key as a principal (muster key show; muster principal add <this-machine> --public-key=...), " +
+				"or its clock differs from this one by more than a minute, or that principal lacks read"
+		}
 		return row
 	default:
 		row.Status = statusFail
@@ -1288,7 +1324,7 @@ func probePeer(ctx context.Context, env doctorEnv, id, base, credential string) 
 // Read-only like every other row. A peer that cannot answer the question —
 // unreachable, or on a build without the read — is unknown, never a failure:
 // the reachable row already reports reachability.
-func probePeerGrants(ctx context.Context, env doctorEnv, id, base, credential string, self, peer fleet.MachineId) doctorRow {
+func probePeerGrants(ctx context.Context, env doctorEnv, id, base string, credential peerCred, self, peer fleet.MachineId) doctorRow {
 	row := doctorRow{ID: id, Refs: []int{154}}
 	ctx, cancel := context.WithTimeout(ctx, env.Timeout)
 	defer cancel()
@@ -1299,7 +1335,11 @@ func probePeerGrants(ctx context.Context, env doctorEnv, id, base, credential st
 		row.Summary = "not read — request could not be built from the configured address"
 		return row
 	}
-	req.Header.Set("Authorization", "Bearer "+credential)
+	if err := credential.apply(req); err != nil {
+		row.Status = statusUnknown
+		row.Summary = "not read — could not sign the request: " + err.Error()
+		return row
+	}
 	client := env.HTTP
 	if client == nil {
 		client = &http.Client{Timeout: env.Timeout}

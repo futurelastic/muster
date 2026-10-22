@@ -191,15 +191,18 @@ func TestWhoAmIUnderLegacyTokenMode(t *testing.T) {
 			// nothing about. It is granted only by explicit principal
 			// configuration (Config.Principals), never implied by the two
 			// legacy flags.
-			if g == GrantHumanRelay {
+			// GrantActingPerson (#349) is excluded for the same reason: naming
+			// the human behind a request is a client's claim, never implied by a
+			// blanket flag.
+			if g == GrantHumanRelay || g == GrantActingPerson {
 				continue
 			}
 			if !hasGrant(report.Grants, g) {
 				t.Errorf("grants = %v, missing %s (both legacy flags are on)", report.Grants, g)
 			}
 		}
-		if hasGrant(report.Grants, GrantHumanRelay) {
-			t.Errorf("grants = %v, legacy mode must never imply human-relay", report.Grants)
+		if hasGrant(report.Grants, GrantHumanRelay) || hasGrant(report.Grants, GrantActingPerson) {
+			t.Errorf("grants = %v, legacy mode must never imply human-relay or acting-person", report.Grants)
 		}
 	})
 }
