@@ -16,6 +16,7 @@ import (
 	"github.com/futurelastic/muster/internal/delivery"
 	"github.com/futurelastic/muster/internal/driver"
 	"github.com/futurelastic/muster/internal/inboxclient"
+	"github.com/futurelastic/muster/internal/peerkey"
 )
 
 // Config wires the pieces an HTTP server needs beyond the Service itself.
@@ -75,36 +76,37 @@ func NewMux(svc *Service, cfg Config) *http.ServeMux {
 	// cfg, which only the mux holds.
 	svc.setSelfGrantResolver(func(tok string) []string { return grantsForToken(cfg, tok) })
 
-	mux.HandleFunc("GET /v1/health", withAuth(cfg, reading(handleHealth(svc))))
+	mux.HandleFunc("GET /v1/health", withAuth(svc, cfg, reading(handleHealth(svc))))
 	// GET /v1/whoami deliberately skips reading()'s GrantRead gate — see
 	// handleWhoAmI's doc comment (whoami.go) for why a caller reading its
 	// own grants is not the same authorization question as a caller
 	// reading someone else's data.
-	mux.HandleFunc("GET /v1/whoami", withAuth(cfg, handleWhoAmI(svc, cfg)))
-	mux.HandleFunc("GET /v1/machines", withAuth(cfg, reading(handleMachines(svc))))
-	mux.HandleFunc("GET /v1/runtimes", withAuth(cfg, reading(handleRuntimes(svc))))
+	mux.HandleFunc("POST /v1/peer-key", withAuth(svc, cfg, handleRotatePeerKey(svc, cfg)))
+	mux.HandleFunc("GET /v1/whoami", withAuth(svc, cfg, handleWhoAmI(svc, cfg)))
+	mux.HandleFunc("GET /v1/machines", withAuth(svc, cfg, reading(handleMachines(svc))))
+	mux.HandleFunc("GET /v1/runtimes", withAuth(svc, cfg, reading(handleRuntimes(svc))))
 	// A read in every sense but the verb: it carries a body and changes nothing,
 	// so it needs only the read grant (grantForVerb, #344).
-	mux.HandleFunc("POST /v1/posture/dry-run", withAuth(cfg, reading(handlePostureDryRun(svc))))
-	mux.HandleFunc("GET /v1/sessions", withAuth(cfg, reading(handleListSessions(svc))))
-	mux.HandleFunc("GET /v1/sessions/closed", withAuth(cfg, reading(handleListClosedSessions(svc))))
-	mux.HandleFunc("GET /v1/sessions/watch", withAuth(cfg, reading(handleWatchSessions(svc))))
-	mux.HandleFunc("POST /v1/machines/{machine}/sessions", withAuth(cfg, mutating(svc, cfg, handleCreateSession(svc))))
-	mux.HandleFunc("GET /v1/machines/{machine}/sessions/{id}", withAuth(cfg, reading(handleGetSession(svc))))
-	mux.HandleFunc("GET /v1/machines/{machine}/sessions/{id}/environment", withAuth(cfg, reading(handleSessionEnvironment(svc))))
-	mux.HandleFunc("GET /v1/machines/{machine}/sessions/{id}/turns", withAuth(cfg, revealing(handleTurns(svc))))
-	mux.HandleFunc("GET /v1/machines/{machine}/sessions/{id}/composer", withAuth(cfg, reading(handleComposer(svc))))
-	mux.HandleFunc("POST /v1/machines/{machine}/sessions/{id}/input", withAuth(cfg, mutating(svc, cfg, handleSendInput(svc))))
-	mux.HandleFunc("GET /v1/machines/{machine}/input-audit", withAuth(cfg, reading(handleInputAudit(svc))))
-	mux.HandleFunc("POST /v1/machines/{machine}/sessions/{id}/respond", withAuth(cfg, mutating(svc, cfg, handleRespond(svc))))
-	mux.HandleFunc("POST /v1/machines/{machine}/sessions/{id}/interrupt", withAuth(cfg, mutating(svc, cfg, handleInterrupt(svc))))
-	mux.HandleFunc("POST /v1/machines/{machine}/sessions/{id}/discard", withAuth(cfg, mutating(svc, cfg, handleDiscard(svc))))
-	mux.HandleFunc("POST /v1/machines/{machine}/sessions/{id}/rename", withAuth(cfg, mutating(svc, cfg, handleRename(svc))))
-	mux.HandleFunc("POST /v1/machines/{machine}/sessions/{id}/keys", withAuth(cfg, mutating(svc, cfg, handleKeys(svc))))
-	mux.HandleFunc("POST /v1/machines/{machine}/sessions/{id}/labels", withAuth(cfg, mutating(svc, cfg, handleLabels(svc))))
-	mux.HandleFunc("POST /v1/machines/{machine}/sessions/{id}/remote-control", withAuth(cfg, mutating(svc, cfg, handleRemoteControl(svc))))
-	mux.HandleFunc("DELETE /v1/machines/{machine}/sessions/{id}", withAuth(cfg, mutating(svc, cfg, handleClose(svc))))
-	mux.HandleFunc("GET /v1/events", withAuth(cfg, reading(handleEvents(svc))))
+	mux.HandleFunc("POST /v1/posture/dry-run", withAuth(svc, cfg, reading(handlePostureDryRun(svc))))
+	mux.HandleFunc("GET /v1/sessions", withAuth(svc, cfg, reading(handleListSessions(svc))))
+	mux.HandleFunc("GET /v1/sessions/closed", withAuth(svc, cfg, reading(handleListClosedSessions(svc))))
+	mux.HandleFunc("GET /v1/sessions/watch", withAuth(svc, cfg, reading(handleWatchSessions(svc))))
+	mux.HandleFunc("POST /v1/machines/{machine}/sessions", withAuth(svc, cfg, mutating(svc, cfg, handleCreateSession(svc))))
+	mux.HandleFunc("GET /v1/machines/{machine}/sessions/{id}", withAuth(svc, cfg, reading(handleGetSession(svc))))
+	mux.HandleFunc("GET /v1/machines/{machine}/sessions/{id}/environment", withAuth(svc, cfg, reading(handleSessionEnvironment(svc))))
+	mux.HandleFunc("GET /v1/machines/{machine}/sessions/{id}/turns", withAuth(svc, cfg, revealing(handleTurns(svc))))
+	mux.HandleFunc("GET /v1/machines/{machine}/sessions/{id}/composer", withAuth(svc, cfg, reading(handleComposer(svc))))
+	mux.HandleFunc("POST /v1/machines/{machine}/sessions/{id}/input", withAuth(svc, cfg, mutating(svc, cfg, handleSendInput(svc))))
+	mux.HandleFunc("GET /v1/machines/{machine}/input-audit", withAuth(svc, cfg, reading(handleInputAudit(svc))))
+	mux.HandleFunc("POST /v1/machines/{machine}/sessions/{id}/respond", withAuth(svc, cfg, mutating(svc, cfg, handleRespond(svc))))
+	mux.HandleFunc("POST /v1/machines/{machine}/sessions/{id}/interrupt", withAuth(svc, cfg, mutating(svc, cfg, handleInterrupt(svc))))
+	mux.HandleFunc("POST /v1/machines/{machine}/sessions/{id}/discard", withAuth(svc, cfg, mutating(svc, cfg, handleDiscard(svc))))
+	mux.HandleFunc("POST /v1/machines/{machine}/sessions/{id}/rename", withAuth(svc, cfg, mutating(svc, cfg, handleRename(svc))))
+	mux.HandleFunc("POST /v1/machines/{machine}/sessions/{id}/keys", withAuth(svc, cfg, mutating(svc, cfg, handleKeys(svc))))
+	mux.HandleFunc("POST /v1/machines/{machine}/sessions/{id}/labels", withAuth(svc, cfg, mutating(svc, cfg, handleLabels(svc))))
+	mux.HandleFunc("POST /v1/machines/{machine}/sessions/{id}/remote-control", withAuth(svc, cfg, mutating(svc, cfg, handleRemoteControl(svc))))
+	mux.HandleFunc("DELETE /v1/machines/{machine}/sessions/{id}", withAuth(svc, cfg, mutating(svc, cfg, handleClose(svc))))
+	mux.HandleFunc("GET /v1/events", withAuth(svc, cfg, reading(handleEvents(svc))))
 
 	return mux
 }
@@ -121,9 +123,20 @@ func NewMux(svc *Service, cfg Config) *http.ServeMux {
 // drifted from the code it sits above: the "future work" it once was had
 // already landed for the mutating verbs by the time this was written, and
 // only the read half was still true).
-func withAuth(cfg Config, next http.HandlerFunc) http.HandlerFunc {
+func withAuth(svc *Service, cfg Config, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if len(cfg.Principals) > 0 {
+			if peerkey.IsSigned(r.Header.Get("Authorization")) {
+				// A peer proving it holds a private key (muster #350). Token
+				// peers never reach this: their header is "Bearer …".
+				p, ferr := svc.authenticateSigned(cfg, r)
+				if ferr != nil {
+					writeError(w, ferr)
+					return
+				}
+				next(w, r.WithContext(withPrincipal(r.Context(), p)))
+				return
+			}
 			p, ok := cfg.principalFor(r)
 			if !ok {
 				writeError(w, &fleet.Error{

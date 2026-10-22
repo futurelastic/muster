@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/futurelastic/muster/internal/peerkey"
 	"github.com/futurelastic/muster/internal/privfs"
 	"github.com/futurelastic/muster/internal/service"
 )
@@ -55,6 +56,7 @@ import (
 func usageEnrol() string {
 	return strings.Join([]string{
 		"usage: muster principal add <name> --grants=read[,send,...] [--config PATH] [--token-file PATH]",
+		"       muster principal add <name> --grants=... --public-key=ed25519:... [--config PATH]   (a peer that signs; no token)",
 		"       muster principal list [--config PATH]",
 		"       muster principal grant|revoke <name> <grant>... [--config PATH]   (muster principal grant -h)",
 		"",
@@ -97,10 +99,13 @@ func runPrincipal(args []string) (handled bool, err error) {
 
 	cfgPath := os.Getenv("FLEET_CONFIG")
 	tokenFile := ""
+	publicKey := ""
 	var positional []string
 	grants := ""
 	for _, a := range args[2:] {
 		switch {
+		case strings.HasPrefix(a, "--public-key="):
+			publicKey = strings.TrimPrefix(a, "--public-key=")
 		case strings.HasPrefix(a, "--grants="):
 			grants = strings.TrimPrefix(a, "--grants=")
 		case strings.HasPrefix(a, "--config="):
@@ -122,6 +127,12 @@ func runPrincipal(args []string) (handled bool, err error) {
 		if len(positional) != 1 {
 			return true, errors.New(usageEnrol())
 		}
+		if publicKey != "" {
+			if tokenFile != "" {
+				return true, errors.New("--public-key and --token-file are exclusive: a principal that signs has no token")
+			}
+			return true, addKeyPrincipal(cfgPath, positional[0], grants, publicKey)
+		}
 		return true, addPrincipal(cfgPath, positional[0], grants, tokenFile)
 	default:
 		return true, errors.New(usageEnrol())
@@ -137,7 +148,15 @@ func listPrincipals(cfgPath string) error {
 		// Tokens are never printed. An operator asking "who can do what" is
 		// not asking to have every secret on the machine echoed into a
 		// terminal, a screen share, or a scrollback buffer.
-		fmt.Printf("%-20s %s\n", p.Name, strings.Join(p.Grants, ","))
+		kind := "token"
+		if p.PublicKey != "" {
+			if k, err := peerkey.ParsePublicKey(p.PublicKey); err == nil {
+				kind = "key " + peerkey.Fingerprint(k)
+			} else {
+				kind = "key"
+			}
+		}
+		fmt.Printf("%-20s %-24s %s\n", p.Name, kind, strings.Join(p.Grants, ","))
 	}
 	return nil
 }
@@ -219,6 +238,57 @@ func enrolPrincipal(cfgPath, name, grantList, tokenFile string) (grants []string
 	}
 
 	return grants, tokenFile, nil
+}
+
+// addKeyPrincipal enrols a principal that authenticates by signing (muster
+// #350): the operator is handed the other machine's PUBLIC key, there is no
+// secret to mint or file to write, and nothing to protect on this side.
+func addKeyPrincipal(cfgPath, name, grantList, publicKey string) error {
+	if strings.TrimSpace(name) == "" {
+		return errors.New("a principal needs a name")
+	}
+	if strings.TrimSpace(grantList) == "" {
+		return errors.New("--grants is required (a principal with none can do nothing); " +
+			"available: " + strings.Join(grantNames(), ", "))
+	}
+	key, err := peerkey.ParsePublicKey(publicKey)
+	if err != nil {
+		return fmt.Errorf("--public-key: %w", err)
+	}
+	var grants []string
+	for _, g := range strings.Split(grantList, ",") {
+		g = strings.TrimSpace(g)
+		if g == "" {
+			continue
+		}
+		if !service.ValidGrant(service.Grant(g)) {
+			return fmt.Errorf("unknown grant %q; available: %s", g, strings.Join(grantNames(), ", "))
+		}
+		grants = append(grants, g)
+	}
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", cfgPath, err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return fmt.Errorf("%s is not valid JSON, refusing to rewrite it: %w", cfgPath, err)
+	}
+	list, _ := doc["principals"].([]any)
+	for _, entry := range list {
+		if m, ok := entry.(map[string]any); ok && m["name"] == name {
+			return fmt.Errorf("principal %q already exists; use `muster principal grant|revoke` to change its grants", name)
+		}
+	}
+	doc["principals"] = append(list, map[string]any{
+		"name": name, "publicKey": peerkey.FormatPublicKey(key), "grants": grants,
+	})
+	if err := writeJSONAtomic(cfgPath, doc); err != nil {
+		return fmt.Errorf("writing %s: %w", cfgPath, err)
+	}
+	fmt.Printf("added principal %q (key %s) with grants %s\n", name, peerkey.Fingerprint(key), strings.Join(grants, ","))
+	fmt.Printf("the running service still has the OLD table; reload it when ready\n")
+	return nil
 }
 
 // mintToken produces a bearer credential.

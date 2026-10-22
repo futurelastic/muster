@@ -155,7 +155,11 @@ stamps say.
 sources, complete}`. Always probes peers; there is no `scope` here.
 
 `peer` is this service's own standing on each machine:
-`{listsMeBack, grantsToMe, source, observedAt?}` — whether that machine lists
+`{listsMeBack, grantsToMe, source, observedAt?, auth}` — `auth` is `"key"` when
+this service signs its requests to that machine and `"token"` when it presents a
+bearer credential (#350; absent on the `self` item). Unlike the rest of the
+standing it is a fact of this machine's own configuration, so it is present
+even when `source` is `"assumed"`. `listsMeBack` is whether that machine lists
 this one back, and what it grants the credential this machine presents there.
 Read it before relying on a cross-machine write, instead of learning from a
 `403`. `source: "assumed"` with `listsMeBack: null` means nobody could tell
@@ -163,6 +167,34 @@ Read it before relying on a cross-machine write, instead of learning from a
 listed". `observed` with `grantsToMe: []` is a real negative. The `self` item
 reports `listsMeBack: true` and what this machine's own table grants the
 credential it presents to peers. `?verify=1` re-probes every peer first.
+
+### Signed requests and `POST /v1/peer-key` (#350)
+
+A principal configured with a **public key** instead of a token authenticates by
+signing each request:
+
+```
+Authorization: Muster-Sig v1 machine=<sender id>, ts=<unix seconds>, nonce=<random>, sig=<base64url ed25519>
+Fleet-Content-Digest: sha256=<hex of the body>
+```
+
+The signature covers the method, the path and query, the body digest, the
+receiving machine's id, the sender, the time, the nonce, and the relay-assertion
+headers (`Fleet-On-Behalf-Of`, `-Human-Relay`, `-Remote-Control`,
+`-Acting-Person`, `-Acting-Issuer`). A request is refused with `401
+unauthorized` when the time is more than 60 seconds from the receiver's clock (the
+message names both clocks), when the nonce has been used, when the body does not
+match its digest, or when the signature does not verify — which also covers a
+sender no principal lists and a request addressed to a different machine; those
+read alike on purpose. Authorization is unchanged: the verified sender is a
+principal with grants, like any other. A client does not normally build these;
+peers do (`muster key`).
+
+`POST /v1/peer-key` `{publicKey: "ed25519:…"}` replaces the key the *calling peer*
+is verified with. It must itself be signed with that peer's **current** key. The
+previous key stays acceptable for ten minutes and cannot rotate anything. It
+needs a state directory (`unsupported` without one) and is refused for a bearer
+token. `muster key rotate` is the client.
 
 ### `GET /v1/whoami`
 

@@ -304,6 +304,7 @@ import (
 	"github.com/futurelastic/muster/internal/drivers/remote"
 	"github.com/futurelastic/muster/internal/drivers/stub"
 	"github.com/futurelastic/muster/internal/drivers/tmux"
+	"github.com/futurelastic/muster/internal/peerkey"
 	"github.com/futurelastic/muster/internal/service"
 	"github.com/futurelastic/muster/internal/sessionenv"
 	"github.com/futurelastic/muster/internal/state"
@@ -338,6 +339,9 @@ func main() {
 	// service installs, checks and removes the per-user service unit
 	// (muster #341). Like the others it needs none of the service's environment.
 	if handled, code := runService(args, os.Stdout, os.Stderr); handled {
+		os.Exit(code)
+	}
+	if handled, code := runKey(args, os.Getenv, os.Stdout, os.Stderr); handled {
 		os.Exit(code)
 	}
 	if handled, err := runPrincipal(args); handled {
@@ -801,6 +805,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("muster: bad peer list: %v", err)
 	}
+	var keySigner *peerkey.Signer
 	for _, pe := range peerList {
 		machine := pe.machine
 		if machine == self {
@@ -818,7 +823,18 @@ func main() {
 		// own credential on us — conflating those is how a fleet ends up
 		// with one shared secret again by accident.
 		if cfgFile != nil {
-			if tok, ok := cfgFile.peerTokenFor(machine); ok && tok != "" {
+			if cfgFile.peerAuthFor(machine) == peerAuthKey {
+				// This machine signs its requests to that peer (muster #350):
+				// no token, nothing reusable on the wire. One key serves every
+				// key peer; the peer lists its public half as a principal.
+				if keySigner == nil {
+					keySigner, err = openMachineSigner(os.Getenv("FLEET_STATE_DIR"), self)
+					if err != nil {
+						log.Fatalf("muster: peer %q authenticates by key: %v", machine, err)
+					}
+				}
+				opts = append(opts, remote.WithSigner(keySigner))
+			} else if tok, ok := cfgFile.peerTokenFor(machine); ok && tok != "" {
 				opts = append(opts, remote.WithIdentity(tok))
 			}
 		}
@@ -1156,6 +1172,7 @@ func usageTop() string {
 		"       muster compat --claude PATH     check a candidate runtime build (muster compat --help)",
 		"       muster service install|status|uninstall  set up this binary as a per-user service (muster service -h)",
 		"       muster principal add|list|grant|revoke   enrol, list or re-grant clients (muster principal)",
+		"       muster key init|show|rotate     this machine's signing key for peers that authenticate by key (muster key -h)",
 		"       muster --version                print the build",
 		"       muster -h | --help              print this usage",
 		"",

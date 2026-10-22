@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/subtle"
 	"net/http"
 	"strings"
@@ -210,6 +211,17 @@ type Principal struct {
 	Name string
 	// Token is the bearer credential this principal presents.
 	Token string
+	// PublicKey is set INSTEAD of Token for a principal that authenticates by
+	// signing its requests (muster #350): the caller proves it holds the private
+	// half, and no reusable secret crosses the wire. A principal has one or the
+	// other; the loader refuses both.
+	PublicKey ed25519.PublicKey
+	// signed is set on the copy a request carries when it authenticated by
+	// signature. Never configured.
+	signed bool
+	// signedRetired is set when the signature verified only against a retired
+	// key still in its grace period.
+	signedRetired bool
 	// Grants is what it may do. Absent means read-only is not implied:
 	// absent means nothing is permitted, because §6's default is denied.
 	Grants []Grant

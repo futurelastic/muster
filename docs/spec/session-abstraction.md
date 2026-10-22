@@ -845,6 +845,12 @@ Request {
 Caller {
   principal  : string       // who is asking — audit trail (§6)
   credential : string       // authority to present onward when proxying (§13)
+  person?    : Person       // the human the caller acts for — attribution only, never authorization (muster #349)
+}
+
+Person {
+  id     : string           // opaque; meaningful only to its issuer
+  issuer : string           // what minted the id
 }
 
 Expectation {
