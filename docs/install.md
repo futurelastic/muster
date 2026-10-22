@@ -212,6 +212,11 @@ order of this page and the order of its output are the same.
    `"url"`, tried in order. Rows: `peer.self-credential`, `peer.<m>.url`,
    `peer.<m>.credential`, `peer.<m>.reachable`, `peer.<m>.grants`.
 
+   With more than a few machines, do not hand-write peers: have the owner sign
+   one machine list and point each machine's `machineList` block at it
+   (`shadow` first, read the `machine-list` row, then `prefer` or `only`). See
+   [`machine-list.md`](machine-list.md).
+
 7. **Inbox delivery, if this machine has an index writer** —
    `FLEET_INBOX_INDEX`. Absent means every delivery uses the pane path, which is
    correct on a machine with nothing populating an index and is #122 on a

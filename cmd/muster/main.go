@@ -344,6 +344,9 @@ func main() {
 	if handled, code := runKey(args, os.Getenv, os.Stdout, os.Stderr); handled {
 		os.Exit(code)
 	}
+	if handled, code := runMachineList(args, os.Getenv, os.Stdout, os.Stderr); handled {
+		os.Exit(code)
+	}
 	if handled, err := runPrincipal(args); handled {
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -801,9 +804,28 @@ func main() {
 	// §5.7 requires it to surface as a source reporting unreachable, not to
 	// vanish from the fleet because it happened to be down at startup. So
 	// registration never probes and never fails on reachability.
-	peerList, err := resolvePeers(os.Getenv("FLEET_PEERS"), cfgFile)
+	handPeers, err := resolvePeers(os.Getenv("FLEET_PEERS"), cfgFile)
 	if err != nil {
 		log.Fatalf("muster: bad peer list: %v", err)
+	}
+	// The owner-signed machine list (muster #351), over the hand-written peers.
+	// In only mode a list that does not verify stops the start; in prefer it is
+	// reported and the hand-written peers stand; in shadow it only reports.
+	listOut := loadMachineList(cfgFile, os.Getenv("FLEET_STATE_DIR"), self)
+	if listOut.mode != listModeOff {
+		log.Printf("muster: %s", listOut.describe())
+		if listOut.mode == listModeShadow {
+			for _, line := range listOut.shadowDiff(handPeers) {
+				log.Printf("muster:   (shadow, not applied) %s", line)
+			}
+		}
+	}
+	if err := listOut.fatal(); err != nil {
+		log.Fatalf("muster: %v", err)
+	}
+	peerList := listOut.peers(handPeers)
+	if err := listOut.commit(); err != nil {
+		log.Fatalf("muster: recording the machine list sequence: %v", err)
 	}
 	var keySigner *peerkey.Signer
 	for _, pe := range peerList {
@@ -822,8 +844,12 @@ func main() {
 		// anything a caller presents here, and distinct from the peer's
 		// own credential on us — conflating those is how a fleet ends up
 		// with one shared secret again by accident.
-		if cfgFile != nil {
-			if cfgFile.peerAuthFor(machine) == peerAuthKey {
+		auth := pe.auth
+		if auth == "" {
+			auth = cfgFile.peerAuthFor(machine)
+		}
+		if auth == peerAuthKey || cfgFile != nil {
+			if auth == peerAuthKey {
 				// This machine signs its requests to that peer (muster #350):
 				// no token, nothing reusable on the wire. One key serves every
 				// key peer; the peer lists its public half as a principal.
@@ -896,6 +922,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("muster: %v", err)
 		}
+		principals = listOut.principalsFor(principals, handPeers)
 		svcCfg.Principals = principals
 		for _, p := range principals {
 			log.Printf("muster: principal %q grants=%v", p.Name, p.Grants)
@@ -1173,6 +1200,7 @@ func usageTop() string {
 		"       muster service install|status|uninstall  set up this binary as a per-user service (muster service -h)",
 		"       muster principal add|list|grant|revoke   enrol, list or re-grant clients (muster principal)",
 		"       muster key init|show|rotate     this machine's signing key for peers that authenticate by key (muster key -h)",
+		"       muster machine-list keygen|create|sign|verify|show   the owner-signed machine list (muster machine-list -h)",
 		"       muster --version                print the build",
 		"       muster -h | --help              print this usage",
 		"",
