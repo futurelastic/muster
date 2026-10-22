@@ -433,6 +433,13 @@ func runChecks(ctx context.Context, env doctorEnv) []doctorRow {
 	// --- delivery modules (#185) -----------------------------------------------
 	c.add(checkDeliveryModules(getenv))
 
+	// --- the owner-signed machine list (#351) ----------------------------------
+	{
+		base, _ := resolvePeers(getenv("FLEET_PEERS"), cfg)
+		listSelf := self
+		c.add(listDoctorRow(loadMachineList(cfg, getenv("FLEET_STATE_DIR"), listSelf), base))
+	}
+
 	// --- peers ----------------------------------------------------------------
 	if peerErr != nil {
 		c.add(doctorRow{ID: "peers.config", Status: statusFail,
@@ -594,10 +601,13 @@ type doctorPeer struct {
 // file's peers otherwise; the per-peer credential always comes from the config
 // file.
 func doctorPeers(getenv func(string) string, cfg *fileConfig) ([]doctorPeer, error) {
-	entries, err := resolvePeers(getenv("FLEET_PEERS"), cfg)
+	entries, _, err := resolveEffectivePeers(getenv, cfg)
 	var out []doctorPeer
 	for _, e := range entries {
-		p := doctorPeer{machine: e.machine, bases: e.urls, auth: cfg.peerAuthFor(e.machine)}
+		p := doctorPeer{machine: e.machine, bases: e.urls, auth: e.auth}
+		if p.auth == "" {
+			p.auth = cfg.peerAuthFor(e.machine)
+		}
 		if cfg != nil {
 			if tok, ok := cfg.peerTokenFor(p.machine); ok {
 				p.token = tok

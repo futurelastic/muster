@@ -171,6 +171,11 @@ type fileConfig struct {
 	// days). Config-file-only and per machine, like ClosedRetentionDays. A
 	// negative value is refused at startup.
 	InputAuditRetentionDays int `json:"inputAuditRetentionDays,omitempty"`
+
+	// MachineList points at an owner-signed list of the fleet's machines that
+	// the service reads in place of (or over) hand-written peers (muster #351).
+	// Absent means off. See machinelist.go for the modes.
+	MachineList *machineListConfig `json:"machineList,omitempty"`
 }
 
 func loadConfig(path string) (*fileConfig, error) {
@@ -213,6 +218,9 @@ func loadConfig(path string) (*fileConfig, error) {
 		default:
 			return nil, fmt.Errorf("%s: peer entry %d: auth %q is not %q or %q", path, i+1, p.Auth, peerAuthToken, peerAuthKey)
 		}
+	}
+	if err := c.MachineList.validate(); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return &c, nil
 }
@@ -313,6 +321,10 @@ func (c *fileConfig) peerTokenFor(machine fleet.MachineId) (token string, ok boo
 type peerEntry struct {
 	machine fleet.MachineId
 	urls    []string
+	// auth is how this machine authenticates there, when the entry itself says
+	// so (a peer that came from the machine list is always a key peer). Empty
+	// means the config file's peers[].auth decides, as before.
+	auth string
 }
 
 // resolvePeers is the single reading of the peer list, shared by the service

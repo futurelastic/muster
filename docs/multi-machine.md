@@ -76,6 +76,15 @@ it at the next restart.
 If a private key may have leaked, do not wait for the next rotation: rotate now,
 and the retired key is useless ten minutes later.
 
+## Many machines: an owner-signed list
+
+Writing every machine into every other does not scale past a few. An owner can
+instead sign **one list** of the fleet's machines (their keys, addresses and
+grants) and each machine reads it in place of hand-written peers. The signer's
+key is pinned locally by a person, and the list can arrive by any channel.
+[`machine-list.md`](machine-list.md) has the commands, the four rollout modes
+(`off`, `shadow`, `prefer`, `only`) and the format.
+
 ## Token peers
 
 The setup below is the older one and still works unchanged.
