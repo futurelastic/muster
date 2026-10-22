@@ -189,7 +189,15 @@ func TestKeyRotate_PeersAreToldThenTheKeySwitches(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	st, _ := state.Open(t.TempDir())
+	// Not t.TempDir(): the service holds its input-audit log open for its whole
+	// life and has no Close, and Windows cannot remove an open file, which would
+	// fail the test's cleanup rather than the test. The leftover is a few bytes
+	// in the OS temp directory.
+	stateDir, err := os.MkdirTemp("", "muster-rotate-state-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, _ := state.Open(stateDir)
 	svc, err := service.NewWithState("owner", st)
 	if err != nil {
 		t.Fatal(err)
