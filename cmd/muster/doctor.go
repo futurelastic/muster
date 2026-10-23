@@ -281,6 +281,7 @@ func runChecks(ctx context.Context, env doctorEnv) []doctorRow {
 			c.add(doctorRow{ID: "config.load", Status: statusPass,
 				Summary: fmt.Sprintf("principal table loaded: %d principal(s)", len(principals)),
 				Refs:    []int{95}})
+			c.add(checkReloadStatus(getenv("FLEET_STATE_DIR"), cfgPath))
 		}
 	}
 

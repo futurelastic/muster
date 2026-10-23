@@ -36,6 +36,11 @@ type Config struct {
 	// it decides everything.
 	Principals []Principal
 
+	// Table, when set, is the live principal table and is used in place of
+	// Principals (muster #347): a running service replaces its contents without
+	// a restart. Its non-emptiness decides the mode the way Principals does.
+	Table *PrincipalTable
+
 	// AllowLocalMutations permits create/input/interrupt/close against
 	// sessions ON THIS MACHINE. Defaults FALSE — §6 requirement 3 taken
 	// literally: reads may be granted broadly, mutations are opt-in.
@@ -75,6 +80,7 @@ func NewMux(svc *Service, cfg Config) *http.ServeMux {
 	// model grants the credential it presents to peers (#154); the model is
 	// cfg, which only the mux holds.
 	svc.setSelfGrantResolver(func(tok string) []string { return grantsForToken(cfg, tok) })
+	svc.setPrincipalTable(cfg.Table)
 
 	mux.HandleFunc("GET /v1/health", withAuth(svc, cfg, reading(handleHealth(svc))))
 	// GET /v1/whoami deliberately skips reading()'s GrantRead gate — see
@@ -125,7 +131,7 @@ func NewMux(svc *Service, cfg Config) *http.ServeMux {
 // only the read half was still true).
 func withAuth(svc *Service, cfg Config, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if len(cfg.Principals) > 0 {
+		if len(cfg.principals()) > 0 {
 			if peerkey.IsSigned(r.Header.Get("Authorization")) {
 				// A peer proving it holds a private key (muster #350). Token
 				// peers never reach this: their header is "Bearer …".
@@ -763,7 +769,10 @@ func handleWatchSessions(svc *Service) http.HandlerFunc {
 
 		wait := watchWait(r)
 
-		ch, backlog, needResync, cancel := svc.Events(r.Context(), scope, filter, since, fromEpoch)
+		// Bound to the caller's credential: revoking it closes this wait (#347).
+		ctx, release := svc.streamContext(r)
+		defer release()
+		ch, backlog, needResync, cancel := svc.Events(ctx, scope, filter, since, fromEpoch)
 		defer cancel()
 
 		epoch := svc.Epoch()
@@ -795,7 +804,12 @@ func handleWatchSessions(svc *Service) http.HandlerFunc {
 			timer := time.NewTimer(wait)
 			defer timer.Stop()
 			select {
-			case <-r.Context().Done():
+			case <-ctx.Done():
+				if r.Context().Err() == nil {
+					// Not the caller hanging up: its credential was revoked while
+					// it waited (#347). Say so, so it does not read an empty 200.
+					writeError(w, &fleet.Error{Kind: fleet.ErrorUnauthorized, Message: "credential no longer accepted"})
+				}
 				return
 			case <-timer.C:
 			case ev, open := <-ch:
@@ -2251,7 +2265,10 @@ func handleEvents(svc *Service) http.HandlerFunc {
 		if q.Get("scope") == string(ScopeLocal) {
 			scope = ScopeLocal
 		}
-		ch, backlog, needResync, cancel := svc.Events(r.Context(), scope, filter, fromCursor, fromEpoch)
+		// Bound to the caller's credential: revoking it closes this stream (#347).
+		ctx, release := svc.streamContext(r)
+		defer release()
+		ch, backlog, needResync, cancel := svc.Events(ctx, scope, filter, fromCursor, fromEpoch)
 		defer cancel()
 
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -2280,7 +2297,7 @@ func handleEvents(svc *Service) http.HandlerFunc {
 
 		for {
 			select {
-			case <-r.Context().Done():
+			case <-ctx.Done():
 				return
 			case ev, open := <-ch:
 				if !open {

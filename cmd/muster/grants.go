@@ -33,9 +33,9 @@ import (
 // for it: a route that edits grants would change who may grant what, and that
 // is a permission-model decision of its own.
 //
-// It does not reload a running service. The service reads its table at start,
-// so the new set takes effect on the next start; the command says so rather
-// than leave an operator believing it is already in force.
+// It does not signal a running service either. The service watches the file it
+// was started from and applies a changed table within seconds (reload.go, muster
+// #347); the command says so, and points at the doctor row that confirms it.
 
 // humanRelayWarning is printed when --allow-human-relay is used.
 //
@@ -66,7 +66,7 @@ func usageGrants() string {
 		"grants: " + strings.Join(grantNames(), " · "),
 		"",
 		"Grants may be separated by spaces or commas. The config is rewritten atomically after a dated",
-		"backup beside it. A running service keeps its old table until it is restarted.",
+		"backup beside it. A running service applies the change within seconds, without a restart.",
 		"human-relay is refused unless --allow-human-relay is given.",
 	}, "\n")
 }
@@ -274,7 +274,7 @@ func applyGrantEdit(e grantEdit, out io.Writer) error {
 		fmt.Fprintf(out, "note: principal %q now holds no grants and can do nothing\n", e.name)
 	}
 	printGrantSet(out, e.name, next)
-	fmt.Fprintln(out, "the running service still has the OLD table; restart it to apply")
+	fmt.Fprintln(out, "a running service applies this within seconds, without a restart; `muster doctor` (row config.reload) says whether it did")
 	return nil
 }
 

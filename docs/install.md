@@ -170,11 +170,12 @@ order of this page and the order of its output are the same.
 
    Grant names are checked against the build, the config is replaced atomically
    after a dated backup (`config.json.<YYYYMMDD-HHMMSS>.bak`, `0600`), and the
-   resulting set is printed as `{principal, grants}`. It edits the file only:
-   restart the service to apply it, then confirm with `whoami`. It is local to
-   the machine and has no HTTP route. `human-relay` is refused unless
+   resulting set is printed as `{principal, grants}`. It edits the file only, and
+   a running service applies the change within seconds with no restart (see
+   *Changing principals and peers while it runs*, below); confirm with `whoami`
+   or the `config.reload` row. It is local to the machine and has no HTTP route. `human-relay` is refused unless
    `--allow-human-relay` is given, which prints the shared-principal warning.
-   Rows: `config.load`, `token.source`, `principals.supervisor`,
+   Rows: `config.load`, `config.reload`, `token.source`, `principals.supervisor`,
    `principals.relay`, `local.mutations`.
 
 6. **Peers, both halves** — only for a fleet. Each direction needs one secret
@@ -338,6 +339,38 @@ order of this page and the order of its output are the same.
     to report, not this machine's.
 
 From here on, every change is a deploy: [`deploy.md`](deploy.md).
+
+### Changing principals and peers while it runs
+
+Enrolling a client, changing or revoking its grants, and adding, changing or
+removing a peer take effect on the running service **without a restart**, and
+without dropping anyone else's connections. The service watches the config file
+it was started from (a content check every two seconds); `kill -HUP` applies it
+at once. `muster principal add|grant|revoke` and a hand edit are the same thing
+to it.
+
+- A new or changed principal works from its next request. A **revoked** one gets
+  a `401` from its next request on, and the event streams and parked long polls
+  it had open are closed; every other principal's streams are untouched. A
+  principal whose token or key is replaced loses its open streams the same way;
+  one whose grants change but still includes `read` keeps them.
+- The file is applied **as a whole or not at all.** If it does not parse, names
+  an unknown grant, lists this machine as its own peer, or fails any other check
+  the start applies, the service keeps the last good table, logs the reason, and
+  records it for `muster doctor` (row `config.reload`: `warn`, with the reason).
+  Fix the file and the next check applies it.
+- Only the two tables move. `trustRoots`, `defaultRuntime`, `sessionEnv`,
+  `maxInputBytes`, `gateRemoteControlInput`, `closedRetentionDays`,
+  `inputAuditRetentionDays` and `machineList` are read at start, so an edit that
+  changes one of them is **refused whole**, naming it, and none of that edit —
+  principals and peers included — is applied until the service restarts. The
+  bind addresses and the state directory come from the environment, so no edit
+  to this file can change them.
+- A peer that comes from the owner-signed machine list is not re-read on a
+  reload: that list has its own rollback guard and is read at start. The
+  hand-written peers are re-resolved and the list is laid over them as before.
+- `config.reload` reads a status file the service writes in `FLEET_STATE_DIR`.
+  With no state directory the reload still works; the row says it cannot compare.
 
 ## Windows
 

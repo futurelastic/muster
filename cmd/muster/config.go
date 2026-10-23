@@ -179,10 +179,23 @@ type fileConfig struct {
 }
 
 func loadConfig(path string) (*fileConfig, error) {
+	c, _, err := loadConfigRaw(path)
+	return c, err
+}
+
+// loadConfigRaw is loadConfig that also returns the bytes it parsed, so a
+// caller that watches the file for changes (reload.go) compares against exactly
+// what was loaded rather than a second read of a file that may have moved on.
+func loadConfigRaw(path string) (*fileConfig, []byte, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	c, err := parseConfig(path, raw)
+	return c, raw, err
+}
+
+func parseConfig(path string, raw []byte) (*fileConfig, error) {
 	var c fileConfig
 	dec := json.NewDecoder(newTrimReader(raw))
 	dec.DisallowUnknownFields()

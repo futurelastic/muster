@@ -130,8 +130,8 @@ func grantsForToken(cfg Config, token string) []string {
 	if token == "" {
 		return []string{}
 	}
-	if len(cfg.Principals) > 0 {
-		for _, p := range cfg.Principals {
+	if len(cfg.principals()) > 0 {
+		for _, p := range cfg.principals() {
 			if p.Token != "" && subtle.ConstantTimeCompare([]byte(p.Token), []byte(token)) == 1 {
 				return grantNames(p.Grants)
 			}

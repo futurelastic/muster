@@ -136,7 +136,7 @@ func (s *peerKeyStore) rotate(name string, configured, next ed25519.PublicKey, n
 // signedKeyFor finds the configured public key of the principal that claims to
 // be machine.
 func signedKeyFor(cfg Config, machine string) (Principal, bool) {
-	for _, p := range cfg.Principals {
+	for _, p := range cfg.principals() {
 		if p.Name == machine && len(p.PublicKey) > 0 {
 			return p, true
 		}
