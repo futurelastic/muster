@@ -3,6 +3,7 @@ package tmux
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -882,6 +883,9 @@ func parseMenuShape(s screen) (p *fleet.SessionPrompt, shape menuShape) {
 	var descs []string
 	labelCol, gap := 0, false
 	ruleSeen := from > 0 && isRule(s.lines[from-1])
+	// autoDeny is the seconds left on the unattended-session countdown, or -1
+	// when the dialog shows none (muster#353).
+	autoDeny := -1
 
 	// Review fix (#180 review): mask OUT the active composer's own
 	// fenced rows before scanning for a menu. numberedOption/selected below
@@ -937,6 +941,14 @@ func parseMenuShape(s screen) (p *fleet.SessionPrompt, shape menuShape) {
 		}
 		if line == "" {
 			gap = true
+			continue
+		}
+		if secs, ok := autoDenyCountdown(line); ok {
+			// The countdown is the runtime's clock, not part of the question:
+			// it changes every second while the dialog does not. It is read
+			// into AutoDenyAt and the row is dropped, leaving every other
+			// state of the loop as if it had not been drawn (muster#353).
+			autoDeny = secs
 			continue
 		}
 		wasGap := gap
@@ -1114,6 +1126,10 @@ func parseMenuShape(s screen) (p *fleet.SessionPrompt, shape menuShape) {
 		question = question[n-keep:]
 	}
 	p.Question = strings.Join(question, " ")
+	if autoDeny >= 0 {
+		at := promptNow().Add(time.Duration(autoDeny) * time.Second).Truncate(time.Second)
+		p.AutoDenyAt = &at
+	}
 	if headerRow >= 0 {
 		shape.headerAt = headerRow + 1
 		rawHeader := header // no escapes to read a highlight from: the position stays unread
@@ -1997,6 +2013,32 @@ func classifyPromptKind(p *fleet.SessionPrompt) fleet.PromptKind {
 	// there and is not available here, which is why the answer differs by
 	// caller rather than by wording.
 	return ""
+}
+
+// promptNow is the clock AutoDenyAt is computed against. A seam so a test can
+// freeze it.
+var promptNow = time.Now
+
+// autoDenyRow matches the unattended-session countdown a tool-permission dialog
+// carries in recent runtime versions: "⚠ Claude Code will automatically deny
+// this request in 1:13, to avoid blocking progress on an unattended session".
+// Anchored on the one phrase that must survive a rewording, and nothing around
+// it: the runtime may change the rest, and a miss here only means the old
+// behaviour (a nonce that moves), never a wrong answer.
+var autoDenyRow = regexp.MustCompile(`(?i)automatically deny this request in\s+(?:(\d+):)?(\d+):(\d{2})`)
+
+// autoDenyCountdown reports the seconds left on a countdown row, and whether
+// the row is one.
+func autoDenyCountdown(line string) (int, bool) {
+	m := autoDenyRow.FindStringSubmatch(line)
+	if m == nil {
+		return 0, false
+	}
+	atoi := func(s string) int {
+		n, _ := strconv.Atoi(s)
+		return n
+	}
+	return atoi(m[1])*3600 + atoi(m[2])*60 + atoi(m[3]), true
 }
 
 func promptNonce(p *fleet.SessionPrompt) string {

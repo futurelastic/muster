@@ -964,6 +964,16 @@ unchanged: `respond` answers the current tab, with the nonce the same read gave.
   touch … && echo done This command requires approval Do you want to proceed?` —
   and `kind` is `tool-permission`. Show it; do not parse it. Two calls that share a
   leading word have different nonces.
+- **A permission dialog's auto-deny countdown is a field, not text** (#353). Recent
+  runtime versions add an unattended-session row to a tool-permission dialog
+  ("will automatically deny this request in 1:13"). It is left out of `question`
+  and out of `nonce` — it changes every second while the dialog does not, so a
+  nonce that carried it could never be answered — and reported as
+  `prompt.autoDenyAt` (RFC 3339, the deadline computed when the screen was read).
+  Show "auto-denied in 1:13" from it, and use it to tell a denial by the clock
+  from an answer someone gave. A `respond` carrying a nonce read a few seconds
+  earlier still matches the same dialog. Absent when the dialog shows no
+  countdown, and on a peer that predates it.
 - **`optionDetails`** (#324) is one `{label, description?, preview?}` per entry of
   `options`, same order: the description the agent wrote under each option, and
   the preview pane's text on the highlighted option only.
