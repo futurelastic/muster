@@ -62,7 +62,7 @@ func usageEnrol() string {
 		"",
 		"grants: " + strings.Join(grantNames(), " · "),
 		"",
-		"Adding a principal does not disturb a running service; reload it when ready.",
+		"A running service picks the new principal up within seconds, with no restart and no dropped connections (SIGHUP applies it now).",
 	}, "\n")
 }
 
@@ -168,7 +168,7 @@ func addPrincipal(cfgPath, name, grantList, tokenFile string) error {
 	}
 	fmt.Printf("added principal %q with grants %s\n", name, strings.Join(grants, ","))
 	fmt.Printf("token written to %s (%s)\n", tokenFile, privfs.Label)
-	fmt.Printf("the running service still has the OLD table; reload it when ready\n")
+	fmt.Printf("a running service applies this within seconds, without a restart; `muster doctor` (row config.reload) says whether it did\n")
 	return nil
 }
 
@@ -287,7 +287,7 @@ func addKeyPrincipal(cfgPath, name, grantList, publicKey string) error {
 		return fmt.Errorf("writing %s: %w", cfgPath, err)
 	}
 	fmt.Printf("added principal %q (key %s) with grants %s\n", name, peerkey.Fingerprint(key), strings.Join(grants, ","))
-	fmt.Printf("the running service still has the OLD table; reload it when ready\n")
+	fmt.Printf("a running service applies this within seconds, without a restart; `muster doctor` (row config.reload) says whether it did\n")
 	return nil
 }
 

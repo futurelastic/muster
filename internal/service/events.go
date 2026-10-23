@@ -389,7 +389,14 @@ func eventTarget(ev fleet.Event) (id, cwd string) {
 // is mutating a live subscription's filter, which the Driver interface does
 // not offer and which would need its own resync story to be correct. A restart
 // is visible, cheap at these scales, and cannot silently half-apply.
-func (s *Service) ensureStream(ctx context.Context) {
+func (s *Service) ensureStream(ctx context.Context) { s.ensureStreamForce(ctx, false) }
+
+// ensureStreamForce is ensureStream, optionally restarting a running
+// driver-side stream even though its filter is unchanged. A change to the set of
+// peers needs that: the peer pumps are started with the stream, so a stream
+// already running would otherwise never hear from a peer added after it began
+// (muster #347). Subscribers keep their connections; only the pumps restart.
+func (s *Service) ensureStreamForce(ctx context.Context, force bool) {
 	h := s.events
 	want := h.unionFilter()
 	listeners := h.subscriberCount()
@@ -413,7 +420,7 @@ func (s *Service) ensureStream(ctx context.Context) {
 	h.disarmLinger()
 
 	switch {
-	case on && sameFilter(cur, want):
+	case on && !force && sameFilter(cur, want):
 		return
 	case on:
 		cancel()

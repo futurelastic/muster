@@ -247,7 +247,7 @@ func (c Config) principalFor(r *http.Request) (Principal, bool) {
 	if presented == "" {
 		return Principal{}, false
 	}
-	for _, p := range c.Principals {
+	for _, p := range c.principals() {
 		if p.Token == "" {
 			continue
 		}

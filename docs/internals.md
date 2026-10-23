@@ -235,6 +235,7 @@ evidence, not on taste.
 | Proxy topology, not redirect | spec §13 |
 | A remote peer is just another driver | proven — spec §4.2 |
 | Go, and zero dependencies | below |
+| A running service applies principal and peer edits live; a config with any restart-only change is refused whole | [install.md](install.md#changing-principals-and-peers-while-it-runs); `cmd/muster/reload.go` |
 | Delivery goes through a module seam; the draft rule; terminal path v2 | [ADR 180](adr/180-delivery-module-and-terminal-path-v2.md) |
 | `BTab` (Shift+Tab) is a `keys` key under the `keys` grant, so `keys` can escalate a session | [ADR 188](adr/188-btab-rides-the-keys-grant.md) |
 | A session's permission mode is published in `state`, read off the runtime's own indicator row; absent means nothing read, `unknown` means read and unnamed, never a guess | [ADR 194](adr/194-permission-mode-in-state.md) |
@@ -285,8 +286,9 @@ Stated plainly so nobody rediscovers them the expensive way.
   (`muster principal add`) that mints a token and validates grants before
   writing. What is still missing is the rest of a lifecycle: nothing expires, a
   compromised token is revoked by editing a file. Changing grants is a command
-  (`muster principal grant|revoke`, #274), but it edits the file and does not
-  reload a running service.
+  (`muster principal grant|revoke`, #274). A running service picks up an edit to
+  the principal or peer tables without a restart (#347); see the
+  decisions table above.
 - **`SourceState` has no member for "reachable but unsupported"** — currently
   squeezed into `degraded`.
 - **Enumeration cost is the real scaling risk, not the network** — and the fix

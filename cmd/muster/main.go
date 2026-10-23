@@ -120,6 +120,13 @@
 //	                       FLEET_ALLOW_* are ignored. Absent means
 //	                       single-token mode.
 //
+//	                       The principals and peers in the file are re-read
+//	                       while the service runs (muster #347): an edit applies
+//	                       within seconds, or at once on SIGHUP, with no restart
+//	                       and no dropped connections. Every other setting in the
+//	                       file needs a restart, and an edit that changes one is
+//	                       refused whole, naming it.
+//
 //	                       muster #98: a table-only deployment (no
 //	                       FLEET_TOKEN) has nothing to present for its OWN
 //	                       long-lived peer reads unless the table names a
@@ -301,10 +308,8 @@ import (
 	fleet "github.com/futurelastic/muster"
 	"github.com/futurelastic/muster/internal/driver"
 	"github.com/futurelastic/muster/internal/drivers/opencode"
-	"github.com/futurelastic/muster/internal/drivers/remote"
 	"github.com/futurelastic/muster/internal/drivers/stub"
 	"github.com/futurelastic/muster/internal/drivers/tmux"
-	"github.com/futurelastic/muster/internal/peerkey"
 	"github.com/futurelastic/muster/internal/service"
 	"github.com/futurelastic/muster/internal/sessionenv"
 	"github.com/futurelastic/muster/internal/state"
@@ -398,9 +403,10 @@ func main() {
 	// with cfgFile != nil means a non-empty, validated principal table is
 	// in hand, not merely a path that was set.
 	var cfgFile *fileConfig
+	var cfgRaw []byte
 	if path := os.Getenv("FLEET_CONFIG"); path != "" {
 		var err error
-		cfgFile, err = loadConfig(path)
+		cfgFile, cfgRaw, err = loadConfigRaw(path)
 		if err != nil {
 			log.Fatalf("muster: %v", err)
 		}
@@ -827,83 +833,27 @@ func main() {
 	if err := listOut.commit(); err != nil {
 		log.Fatalf("muster: recording the machine list sequence: %v", err)
 	}
-	var keySigner *peerkey.Signer
-	for _, pe := range peerList {
-		machine := pe.machine
-		if machine == self {
-			log.Fatalf("muster: peer %q is this machine; fan-out is one hop and peers never recurse (§13.1)", machine)
-		}
-		// No credential is handed to the peer driver, and none exists to
-		// hand: it presents the authority of whoever made the request
-		// (§13). A proxy holding its own identity is the confused deputy
-		// this design forbids.
-		// WithSelf lets the probe ask the peer whether it lists this machine
-		// back (muster #154).
-		opts := []remote.Option{remote.WithDeadline(3 * time.Second), remote.WithSelf(self)}
-		// The credential THIS machine holds on that peer. Distinct from
-		// anything a caller presents here, and distinct from the peer's
-		// own credential on us — conflating those is how a fleet ends up
-		// with one shared secret again by accident.
-		auth := pe.auth
-		if auth == "" {
-			auth = cfgFile.peerAuthFor(machine)
-		}
-		if auth == peerAuthKey || cfgFile != nil {
-			if auth == peerAuthKey {
-				// This machine signs its requests to that peer (muster #350):
-				// no token, nothing reusable on the wire. One key serves every
-				// key peer; the peer lists its public half as a principal.
-				if keySigner == nil {
-					keySigner, err = openMachineSigner(os.Getenv("FLEET_STATE_DIR"), self)
-					if err != nil {
-						log.Fatalf("muster: peer %q authenticates by key: %v", machine, err)
-					}
-				}
-				opts = append(opts, remote.WithSigner(keySigner))
-			} else if tok, ok := cfgFile.peerTokenFor(machine); ok && tok != "" {
-				opts = append(opts, remote.WithIdentity(tok))
-			}
-		}
-		// More than one address: the first is the ordinary one, the rest are
-		// tried only when it cannot be connected to (#335).
-		if len(pe.urls) > 1 {
-			opts = append(opts, remote.WithFallbackURLs(pe.urls[1:]...))
-		}
-		peer := remote.New(machine, pe.urls[0], opts...)
-		if err := svc.RegisterPeerDriver(machine, peer); err != nil {
-			log.Fatalf("muster: registering peer %q: %v", machine, err)
-		}
-		log.Printf("muster: peer %s configured", machine)
-
-		// Learn the peer's declared deadline so this driver does not
-		// abandon calls the peer would have completed (§14 D7). Best
-		// effort: a peer that is down stays configured (§5.7), and the
-		// driver falls back to its floor until the peer answers.
-		go func(p *remote.Driver, m fleet.MachineId) {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			if err := p.RefreshCapabilities(ctx, fleet.Request{
-				Caller: fleet.Caller{Principal: "system:self", Credential: token},
-			}); err != nil {
-				log.Printf("muster: peer %s capabilities unknown for now: %v", m, err)
-				return
-			}
-			log.Printf("muster: peer %s deadline learned: %dms",
-				m, p.Capabilities().DeadlineMs)
-
-			// Version skew, said out loud. Two machines ran different
-			// builds silently, and the older one still had a bug the
-			// newer had fixed — the symptom looked like a defect in code
-			// that no longer existed. SameAs deliberately refuses to call
-			// unknown or dirty builds equal, so this warns in the cases
-			// where a comparison cannot be trusted rather than staying
-			// quiet about them.
-			if why := selfBuild.DifferenceFrom(p.Build()); why != "" {
-				log.Printf("muster: NOTE peer %s build %s vs ours %s — %s; "+
-					"a disagreement between these two may be skew rather than a bug",
-					m, p.Build().Short(), selfBuild.Short(), why)
-			}
-		}(peer, machine)
+	// Peers are built and registered through the same code a live reload uses
+	// (reload.go), so a start and a reload cannot disagree about how a peer is
+	// made. A peer that is down stays configured (§5.7).
+	rl := &reloader{
+		path:   os.Getenv("FLEET_CONFIG"),
+		getenv: os.Getenv,
+		self:   self,
+		svc:    svc,
+		builder: &peerBuilder{
+			self: self, stateDir: os.Getenv("FLEET_STATE_DIR"),
+			token: token, selfBuild: selfBuild,
+		},
+		token:     token,
+		listOut:   listOut,
+		statusDir: os.Getenv("FLEET_STATE_DIR"),
+		applied:   cfgFile,
+		lastHash:  contentHash(cfgRaw),
+		peers:     map[fleet.MachineId]appliedPeer{},
+	}
+	if err := rl.startPeers(peerList, cfgFile); err != nil {
+		log.Fatalf("muster: %v", err)
 	}
 
 	// Two independent grants (§6, and defect D6 for why one was not enough):
@@ -923,7 +873,9 @@ func main() {
 			log.Fatalf("muster: %v", err)
 		}
 		principals = listOut.principalsFor(principals, handPeers)
-		svcCfg.Principals = principals
+		// A live table, so a reload swaps it without rebuilding the mux (#347).
+		rl.table = service.NewPrincipalTable(principals)
+		svcCfg.Table = rl.table
 		for _, p := range principals {
 			log.Printf("muster: principal %q grants=%v", p.Name, p.Grants)
 		}
@@ -1010,6 +962,14 @@ func main() {
 		log.Fatalf("muster: %v", err)
 	}
 	go listeners.run(addrRetryInterval)
+
+	// Pick up edits to the principal and peer tables without a restart (#347).
+	if rl.table != nil {
+		reloadCtx, stopReload := context.WithCancel(context.Background())
+		defer stopReload()
+		go rl.run(reloadCtx, reloadPollInterval)
+		log.Printf("muster: watching the config file for principal and peer changes (SIGHUP applies it now)")
+	}
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)

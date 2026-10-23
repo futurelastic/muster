@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	fleet "github.com/futurelastic/muster"
@@ -123,6 +124,10 @@ type Service struct {
 	// events is the service-wide event plane: §7.3's cursor and epoch live
 	// here because they are per service instance, not per driver.
 	events *hub
+
+	// principalTable is the live principal table the mux was built over, if any
+	// (muster #347); long-lived handlers bind their streams to it.
+	principalTable atomic.Pointer[PrincipalTable]
 
 	mu    sync.RWMutex
 	local map[fleet.RuntimeId]driver.Driver
@@ -397,6 +402,23 @@ func (s *Service) RegisterPeerDriver(machine fleet.MachineId, d driver.Driver) e
 	defer s.mu.Unlock()
 	s.peers[machine] = d
 	return nil
+}
+
+// UnregisterPeerDriver removes the driver fronting one peer machine, returning
+// it (nil when there was none) so the caller can stop it (muster #347).
+func (s *Service) UnregisterPeerDriver(machine fleet.MachineId) driver.Driver {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d := s.peers[machine]
+	delete(s.peers, machine)
+	return d
+}
+
+// PeersChanged tells the event plane that the set of peer drivers changed, so a
+// running stream restarts its peer pumps against the new set. Subscribers stay
+// connected. Call it once after a batch of Register/UnregisterPeerDriver.
+func (s *Service) PeersChanged() {
+	s.ensureStreamForce(context.Background(), true)
 }
 
 // SetDefaultRuntime configures this machine's tiebreak for bare-id session
