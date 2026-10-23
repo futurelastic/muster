@@ -2080,6 +2080,17 @@ share a leading word no longer share a nonce. A dialog with no divider reads as
 before. `GET …/turns` still carries no `pending` for this dialog; `question` is
 the only place the call is reported.
 
+`state.prompt.autoDenyAt` (muster issue #353) is when the runtime will deny the
+request by itself, as an RFC 3339 time, for a tool-permission dialog that shows an
+unattended-session countdown ("will automatically deny this request in m:ss").
+The service computes it from the countdown when the screen is read. The countdown
+row is read out of `question` and is not part of `nonce`: it changes every second
+while the dialog does not, so a client's `respond` with a nonce read a few seconds
+earlier still matches the same dialog. Recognition is anchored on the phrase
+"automatically deny this request in <m:ss>" and nothing around it. The field is
+additive and fails to absent (§5.7): omitted when no countdown is shown, and on a
+peer that predates it — absent is not "never denied".
+
 `state.prompt.optionDetails` carries what an option is drawn with besides its
 label (muster issue #324): one `{label, description?, preview?}` per entry of
 `options`, in the same order, so a client can show "Path A — Full rewrite, slower
