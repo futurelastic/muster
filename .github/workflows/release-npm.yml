@@ -133,11 +133,14 @@ jobs:
           sha256sum -c SHA256SUMS
           ./muster-"$TAG"-linux-amd64 --version | tee /dev/stderr | grep -qF "muster $TAG "
 
-      # Workflow artifacts, not release assets: the only consumer is the npm
-      # job below.
+      # Workflow artifacts, not release assets: the consumers are the npm job
+      # below and, for a final, publish-downloads.yml (#355), which reads this
+      # artifact from the run that built it. The name carries the tag: one run can
+      # publish two tags (a candidate and a final) and upload-artifact refuses a
+      # second artifact of the same name in a run.
       - uses: actions/upload-artifact@v4
         with:
-          name: muster-binaries
+          name: muster-binaries-${{ inputs.tag }}
           path: ${{ runner.temp }}/dist/muster-*
           if-no-files-found: error
           retention-days: 7
@@ -191,7 +194,7 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: muster-binaries
+          name: muster-binaries-${{ inputs.tag }}
           path: ${{ runner.temp }}/dist
 
       # The assembly script and the packaging tests come from the checkout at the

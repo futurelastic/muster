@@ -20,7 +20,9 @@ name: Release (auto)
 # a candidate goes to npm `next`, a final to `latest`.
 #
 # NO GITHUB RELEASE. Nothing is attached to a Release and nothing installs from
-# one: npx is the one install surface (see release-npm.yml).
+# one: npx is the one install surface (see release-npm.yml). A final is ALSO
+# published to a self-hosted downloads site (#355) — see the `downloads-*` jobs
+# at the end, which are skipped until the repo variable DOWNLOADS_URL is set.
 #
 # TRUSTED PUBLISHING. npm matches the workflow that STARTS the run, and each of
 # the five packages holds one trusted publisher: `release-auto.yml`, permanently.
@@ -276,3 +278,39 @@ jobs:
             exit 1
           fi
           echo "$TAG published (publish-existing: success)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # Finals only, to the self-hosted downloads site (#355): .github/workflows/publish-downloads.yml reads the
+  # binaries release-npm.yml uploaded in THIS run. Dormant: without vars.DOWNLOADS_URL both jobs are skipped, so a
+  # repo with no site set up is never red. A final reaches npm by one of two jobs, so there is one chained job
+  # after each; they cannot both fire for one tag (existing-tag skips the tag this run finalized).
+  downloads-final:
+    name: Publish the final to the downloads site
+    needs: [release, publish-final]
+    if: >-
+      always() && vars.DOWNLOADS_URL != ''
+      && needs.release.outputs.final-tag != '' && needs.publish-final.result == 'success'
+      && !contains(needs.release.outputs.final-tag, '-')
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/publish-downloads.yml
+    with:
+      tag: ${{ needs.release.outputs.final-tag }}
+      runs-on: ${{ vars.DOWNLOADS_RUNS_ON || '["self-hosted","linux"]' }}
+    secrets: inherit
+
+  downloads-existing:
+    name: Publish the existing final to the downloads site
+    needs: [existing-tag, publish-existing]
+    if: >-
+      always() && vars.DOWNLOADS_URL != ''
+      && needs.existing-tag.outputs.tag != '' && needs.publish-existing.result == 'success'
+      && !contains(needs.existing-tag.outputs.tag, '-')
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/publish-downloads.yml
+    with:
+      tag: ${{ needs.existing-tag.outputs.tag }}
+      runs-on: ${{ vars.DOWNLOADS_RUNS_ON || '["self-hosted","linux"]' }}
+    secrets: inherit
