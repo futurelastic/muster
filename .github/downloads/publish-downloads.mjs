@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// colab-handbook: publish-downloads @ v1.17.0-rc.1
 // Publish one FINAL version's files to a self-hosted downloads site — TEMPLATE (colab-handbook #648).
 // Copy me into your repo beside the workflow (`colab template publish-downloads.mjs --dest
 // .github/downloads/publish-downloads.mjs`); from then on YOU OWN THIS FILE. Node >= 18, zero dependencies,
@@ -17,8 +18,8 @@
 //       - myapp-{v}.tgz
 //       - MyApp_{v}_aarch64.dmg
 //     optional: [MyApp_{v}_x64.msi]     # published when the Release has it (optional key)
-//     installers:                       # repo paths, uploaded to /<app>/ with @DOWNLOADS_URL@ stamped (optional key)
-//       - scripts/install.sh
+//     installers:                       # repo paths, uploaded to /<app>/ with @DOWNLOADS_URL@ and
+//       - scripts/install.sh            #   @DOWNLOADS_REQUIRES@ stamped (optional key)
 //     manifest: .github/downloads/manifest.json   # optional key, this is the default path
 //
 // Only that subset of YAML is read here (scalars, `- item` lists, `[a, b]` lists, comments): this script has no
@@ -32,6 +33,19 @@
 //   DOWNLOADS_KEY_FILE              the private key file the workflow wrote from DOWNLOADS_SSH_KEY
 //   DOWNLOADS_KNOWN_HOSTS_FILE      the known-hosts file the workflow wrote from DOWNLOADS_SSH_KNOWN_HOSTS
 //   DOWNLOADS_RESERVED              names the site keeps for itself, refused as an app slug (space/comma list)
+//
+// THE APPS IT REQUIRES (#653) come from manifest.json's optional `requires`: [{"slug": "<app>", "min": "X.Y.Z"}],
+// other apps on the same site that its installers install first. Before anything is sent, every slug must have a final
+// on the site at >= min, and following the site's manifests from them must never lead back here (a cycle). The list
+// is stamped into each installer as `slug:min slug:min` at @DOWNLOADS_REQUIRES@ — an installer of an app that requires
+// anything must carry that placeholder. The installer side (order, once per run, opt-out) is docs/downloads.md.
+//
+// WHAT A PORTAL SHOWS (#655) is manifest.json's optional description, icon, screenshots, examples, install.prompt,
+// install.handover and listed (docs/downloads.md). The icon and screenshot files are repo paths relative to the
+// manifest; they are checked (at most 1 MB each, their bytes the type their name says, a square icon) and published
+// INSIDE <X.Y.Z>/ next to the binaries — in its SHA256SUMS, so a version's images are as immutable as its files, but
+// not in latest.json's `files`, which lists what an installer downloads. The manifest the site gets names them as
+// `X.Y.Z/<name>` (relative to the app's folder) and has `<site>` replaced by the site root in every install text.
 //
 // THE ORDER ON THE SITE, which is what makes a half-finished run harmless:
 //   1. <X.Y.Z>/ with every file except SHA256SUMS        (rsync --ignore-existing: a published file is never replaced)
@@ -67,9 +81,18 @@ const FINAL_TAG = /^v(\d+\.\d+\.\d+)$/
 const SLUG = /^[a-z0-9][a-z0-9-]*$/
 const PLATFORMS = ['macos', 'windows', 'linux']
 export const PLACEHOLDER = '@DOWNLOADS_URL@'
+export const REQUIRES_PLACEHOLDER = '@DOWNLOADS_REQUIRES@'
+const VERSION = /^\d+\.\d+\.\d+$/
 export const DEFAULT_MANIFEST = '.github/downloads/manifest.json'
 /** Names the script itself writes at the app's root; an installer may not take one. */
 const ROOT_NAMES = new Set(['latest.json', 'manifest.json'])
+/** What the manifest's install texts write for the site root; replaced in the copy the site gets. */
+export const SITE_TOKEN = '<site>'
+const MANIFEST_KEYS = ['schema', 'name', 'summary', 'description', 'icon', 'screenshots', 'examples', 'install', 'requires', 'listed']
+export const LIMITS = { images: 6, examples: 6, imageBytes: 1024 * 1024, descriptionChars: 2000, outputLines: 10 }
+const IMAGE_TYPES = { png: 'png', jpg: 'jpeg', jpeg: 'jpeg', webp: 'webp', svg: 'svg' }
+const SCREENSHOT_EXT = ['png', 'jpg', 'jpeg', 'webp']
+const ICON_EXT = ['png', 'svg']
 
 /** The version of a final tag. A candidate (`vX.Y.Z-rc.N`) and anything else is refused. */
 export function finalVersion(tag) {
@@ -223,25 +246,91 @@ function isText(v, oneLine = false) {
   )
 }
 
+/** Problems with a `description` text: the Markdown subset docs/downloads.md gives, nothing heavier. */
+function markdownProblems(s, at) {
+  const out = []
+  if (s.length > LIMITS.descriptionChars) out.push(`${at}: longer than ${LIMITS.descriptionChars} characters`)
+  if (/<[A-Za-z/!?]/.test(s)) out.push(`${at}: raw HTML is not shown`)
+  if (/^ {0,3}#/m.test(s)) out.push(`${at}: no headings (#) — the portal titles the app itself`)
+  if (/!\[/.test(s)) out.push(`${at}: no inline images — use screenshots`)
+  if (/^ {0,3}(```|~~~)/m.test(s)) out.push(`${at}: no code blocks — use examples`)
+  for (const [, url] of s.matchAll(/\]\(([^)\s]*)/g))
+    if (!/^https:\/\/\S+$/.test(url)) out.push(`${at}: the link ${JSON.stringify(url)} is not an https address`)
+  return out
+}
+
+/** Problems with a manifest image path: relative to the manifest, inside the repo, a plain file name of a known type. */
+function imagePathProblems(p, at, exts) {
+  if (typeof p !== 'string' || p === '') return [`${at}: a file path, relative to manifest.json`]
+  if (p.startsWith('/') || p.includes('\\') || p.split('/').some((seg) => seg === '..' || seg === ''))
+    return [`${at}: ${JSON.stringify(p)} is not a path inside the repo, relative to manifest.json`]
+  const name = basename(p)
+  const ext = name.includes('.') ? name.slice(name.lastIndexOf('.') + 1).toLowerCase() : ''
+  if (name.startsWith('.') || name === 'SHA256SUMS' || !exts.includes(ext))
+    return [`${at}: ${JSON.stringify(name)} is not a ${exts.map((e) => `.${e}`).join(' / ')} file`]
+  return []
+}
+
 /** Throws naming every problem with a manifest object; returns it unchanged when valid. Fields: docs/downloads.md. */
 export function validateManifest(m) {
   const problems = []
   if (m === null || typeof m !== 'object' || Array.isArray(m)) throw new Error('manifest.json is not a JSON object')
-  for (const k of Object.keys(m))
-    if (!['schema', 'name', 'summary', 'install'].includes(k)) problems.push(`unknown field "${k}"`)
+  const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
+  for (const k of Object.keys(m)) if (!MANIFEST_KEYS.includes(k)) problems.push(`unknown field "${k}"`)
   if (m.schema !== undefined && m.schema !== 1) problems.push('schema must be 1')
   if (!isText(m.name, true)) problems.push('name: a one-line text is required')
   if (!isText(m.summary, true)) problems.push('summary: a one-line text is required')
+  if (m.description !== undefined) {
+    if (!isText(m.description)) problems.push('description: a text')
+    else
+      for (const [lang, s] of typeof m.description === 'string' ? [[null, m.description]] : Object.entries(m.description))
+        problems.push(...markdownProblems(s, lang ? `description.${lang}` : 'description'))
+  }
+  if (m.icon !== undefined) problems.push(...imagePathProblems(m.icon, 'icon', ICON_EXT))
+  if (m.screenshots !== undefined) {
+    if (!Array.isArray(m.screenshots) || m.screenshots.length > LIMITS.images)
+      problems.push(`screenshots: a list of at most ${LIMITS.images} {"file", "alt", "caption", "theme"}`)
+    else
+      m.screenshots.forEach((s, i) => {
+        const at = `screenshots[${i}]`
+        if (!isObject(s)) return problems.push(`${at}: an object {"file", "alt", "caption", "theme"}`)
+        for (const k of Object.keys(s)) if (!['file', 'alt', 'caption', 'theme'].includes(k)) problems.push(`${at}.${k}: unknown field`)
+        problems.push(...imagePathProblems(s.file, `${at}.file`, SCREENSHOT_EXT))
+        if (!isText(s.alt, true)) problems.push(`${at}.alt: a one-line text is required (what the image shows)`)
+        if (s.caption !== undefined && !isText(s.caption, true)) problems.push(`${at}.caption: a one-line text`)
+        if (s.theme !== undefined && !['light', 'dark'].includes(s.theme)) problems.push(`${at}.theme: "light" or "dark"`)
+      })
+  }
+  if (m.examples !== undefined) {
+    if (!Array.isArray(m.examples) || m.examples.length > LIMITS.examples)
+      problems.push(`examples: a list of at most ${LIMITS.examples} {"caption", "command", "output"}`)
+    else
+      m.examples.forEach((x, i) => {
+        const at = `examples[${i}]`
+        if (!isObject(x)) return problems.push(`${at}: an object {"caption", "command", "output"}`)
+        for (const k of Object.keys(x)) if (!['caption', 'command', 'output'].includes(k)) problems.push(`${at}.${k}: unknown field`)
+        if (!isText(x.caption, true)) problems.push(`${at}.caption: a one-line text is required`)
+        if (typeof x.command !== 'string' || x.command.trim() === '' || /[\r\n]/.test(x.command))
+          problems.push(`${at}.command: one line, the command as typed`)
+        if (x.output !== undefined) {
+          if (typeof x.output !== 'string') problems.push(`${at}.output: a plain text`)
+          else if (x.output.replace(/\r?\n$/, '').split(/\r?\n/).length > LIMITS.outputLines)
+            problems.push(`${at}.output: more than ${LIMITS.outputLines} lines — trim it to what shows the point`)
+        }
+      })
+  }
   const inst = m.install
-  if (inst === null || typeof inst !== 'object' || Array.isArray(inst) || Object.keys(inst).length === 0) {
+  const platforms = isObject(inst) ? Object.keys(inst).filter((k) => !['prompt', 'handover'].includes(k)) : []
+  if (!isObject(inst) || platforms.length === 0) {
     problems.push(`install: an object keyed by platform (${PLATFORMS.join(', ')}) is required`)
   } else {
-    for (const [os, how] of Object.entries(inst)) {
+    for (const os of platforms) {
+      const how = inst[os]
       if (!PLATFORMS.includes(os)) {
-        problems.push(`install.${os}: not a platform (${PLATFORMS.join(', ')})`)
+        problems.push(`install.${os}: not a platform (${PLATFORMS.join(', ')}) nor prompt / handover`)
         continue
       }
-      if (how === null || typeof how !== 'object' || Array.isArray(how)) {
+      if (!isObject(how)) {
         problems.push(`install.${os}: an object with steps (and optional prompts)`)
         continue
       }
@@ -252,8 +341,114 @@ export function validateManifest(m) {
       if (how.prompts !== undefined && (!Array.isArray(how.prompts) || !how.prompts.every((s) => isText(s))))
         problems.push(`install.${os}.prompts: a list of texts`)
     }
+    if (inst.prompt !== undefined && !isText(inst.prompt)) problems.push('install.prompt: a text (what a person pastes into an agent)')
+    if (inst.handover !== undefined && (!Array.isArray(inst.handover) || inst.handover.length === 0 || !inst.handover.every((s) => isText(s))))
+      problems.push('install.handover: a non-empty list of texts')
   }
+  if (m.requires !== undefined) {
+    if (!Array.isArray(m.requires)) problems.push('requires: a list of {"slug", "min"}')
+    else {
+      const seen = new Set()
+      m.requires.forEach((r, i) => {
+        const at = `requires[${i}]`
+        if (!isObject(r)) return problems.push(`${at}: an object {"slug", "min"}`)
+        for (const k of Object.keys(r)) if (!['slug', 'min'].includes(k)) problems.push(`${at}.${k}: unknown field`)
+        if (typeof r.slug !== 'string' || !SLUG.test(r.slug)) problems.push(`${at}.slug: an app slug, [a-z0-9][a-z0-9-]*`)
+        else if (seen.has(r.slug)) problems.push(`${at}.slug: ${r.slug} is listed twice`)
+        else seen.add(r.slug)
+        if (typeof r.min !== 'string' || !VERSION.test(r.min)) problems.push(`${at}.min: a version X.Y.Z`)
+      })
+    }
+  }
+  if (m.listed !== undefined && typeof m.listed !== 'boolean') problems.push('listed: true or false')
   if (problems.length) throw new Error(`manifest.json: ${problems.join('; ')}`)
+  return m
+}
+
+/** The manifest's `requires`, as given (an empty list when it declares none). */
+export const requiresOf = (manifest) => (Array.isArray(manifest?.requires) ? manifest.requires : [])
+
+/** What an installer's @DOWNLOADS_REQUIRES@ becomes: `slug:min slug:min`, in the manifest's order. */
+export const requiresStamp = (manifest) => requiresOf(manifest).map((r) => `${r.slug}:${r.min}`).join(' ')
+
+/** The manifest's image paths, in order: the icon first, then each screenshot. */
+export const imagesOf = (manifest) => [
+  ...(typeof manifest?.icon === 'string' ? [{ field: 'icon', path: manifest.icon }] : []),
+  ...(Array.isArray(manifest?.screenshots) ? manifest.screenshots : []).map((s, i) => ({ field: `screenshots[${i}].file`, path: s.file })),
+]
+
+/** The type a file's first bytes say it is (png, jpeg, webp, svg), or null. */
+export function sniffImage(bytes) {
+  const head = bytes.subarray(0, 12)
+  if (head.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'png'
+  if (head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) return 'jpeg'
+  if (head.subarray(0, 4).toString('latin1') === 'RIFF' && head.subarray(8, 12).toString('latin1') === 'WEBP') return 'webp'
+  if (/<svg[\s>]/.test(bytes.subarray(0, 4096).toString('utf8'))) return 'svg'
+  return null
+}
+
+/** An image's width and height when the file says so cheaply (a PNG's header, an SVG's viewBox), else null. */
+function imageSize(bytes, type) {
+  if (type === 'png' && bytes.length >= 24) return { w: bytes.readUInt32BE(16), h: bytes.readUInt32BE(20) }
+  if (type === 'svg') {
+    const vb = /<svg[^>]*\sviewBox\s*=\s*["']\s*[-\d.]+[\s,]+[-\d.]+[\s,]+([\d.]+)[\s,]+([\d.]+)\s*["']/.exec(bytes.toString('utf8'))
+    if (vb) return { w: Number(vb[1]), h: Number(vb[2]) }
+  }
+  return null
+}
+
+/**
+ * Checks the files behind the manifest's icon and screenshots — present, at most LIMITS.imageBytes, their bytes the
+ * type their name says, the icon square, no two published under one name — and returns them as `{ name, source }`.
+ * Paths are relative to the manifest file (`manifestPath`, itself relative to `root`).
+ */
+export function imageFiles(root, manifestPath, manifest) {
+  const dir = join(root, manifestPath, '..')
+  const out = []
+  const problems = []
+  for (const { field, path: p } of imagesOf(manifest)) {
+    const source = join(dir, p)
+    const name = basename(p)
+    const at = `${field} ${p}`
+    if (!existsSync(source) || !statSync(source).isFile()) {
+      problems.push(`${at}: no such file next to ${manifestPath}`)
+      continue
+    }
+    const size = statSync(source).size
+    if (size > LIMITS.imageBytes) problems.push(`${at}: ${size} bytes, over the ${LIMITS.imageBytes}-byte limit`)
+    const bytes = readFileSync(source)
+    const type = sniffImage(bytes)
+    const want = IMAGE_TYPES[name.slice(name.lastIndexOf('.') + 1).toLowerCase()]
+    if (type !== want) problems.push(`${at}: its bytes are ${type ? `a ${type}` : 'not an image'}, not the ${want} its name says`)
+    else if (field === 'icon') {
+      const dim = imageSize(bytes, type)
+      if (!dim) problems.push(`${at}: an SVG icon needs a viewBox, to be checked square`)
+      else if (dim.w !== dim.h) problems.push(`${at}: ${dim.w}×${dim.h}, an icon is square`)
+    }
+    const twin = out.find((o) => o.name === name)
+    if (twin && twin.source !== source) problems.push(`${at}: another image is also named ${name}, and both would be ${name} on the site`)
+    if (!twin) out.push({ name, source })
+  }
+  if (problems.length) throw new Error(`${manifestPath}: ${problems.join('; ')}`)
+  return out
+}
+
+function stampSite(v, base) {
+  if (typeof v === 'string') return v.split(SITE_TOKEN).join(base)
+  if (Array.isArray(v)) return v.map((x) => stampSite(x, base))
+  if (v !== null && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, stampSite(x, base)]))
+  return v
+}
+
+/**
+ * The manifest as the site gets it: the icon and screenshots named `X.Y.Z/<name>` (relative to the app's folder,
+ * where this version published them) and `<site>` replaced by the site root in every install text.
+ */
+export function publishedManifest(manifest, { version, base }) {
+  const m = { ...manifest }
+  if (typeof m.icon === 'string') m.icon = `${version}/${basename(m.icon)}`
+  if (Array.isArray(m.screenshots)) m.screenshots = m.screenshots.map((s) => ({ ...s, file: `${version}/${basename(s.file)}` }))
+  if (m.install !== undefined) m.install = stampSite(m.install, base)
   return m
 }
 
@@ -274,11 +469,18 @@ export function loadRepo(root, env = {}) {
     throw new Error(`${config.manifest} is not JSON: ${error.message}`)
   }
   validateManifest(manifest)
+  if (requiresOf(manifest).some((r) => r.slug === config.app))
+    throw new Error(`${config.manifest}: requires names ${config.app} itself`)
+  imageFiles(root, config.manifest, manifest)
   for (const p of config.installers) {
     const f = join(root, p)
     if (!existsSync(f)) throw new Error(`downloads.installers: ${p} does not exist`)
-    if (!readFileSync(f, 'utf8').includes(PLACEHOLDER))
-      throw new Error(`${p} has no ${PLACEHOLDER} to stamp the downloads address into`)
+    const text = readFileSync(f, 'utf8')
+    if (!text.includes(PLACEHOLDER)) throw new Error(`${p} has no ${PLACEHOLDER} to stamp the downloads address into`)
+    if (requiresOf(manifest).length > 0 && !text.includes(REQUIRES_PLACEHOLDER))
+      throw new Error(
+        `${p} has no ${REQUIRES_PLACEHOLDER}, so it would install ${config.app} without the apps its manifest requires — add the dependency step (docs/downloads.md)`,
+      )
   }
   return { config, manifest }
 }
@@ -325,28 +527,39 @@ export async function stage({ tag, assetsDir, outDir, baseUrl, root, config, man
     )
   }
   const names = [...namesFor(config.files, version), ...namesFor(config.optional, version).filter((n) => present.has(n))]
+  const images = imageFiles(root, config.manifest, manifest)
+  const clash = images.find((i) => names.includes(i.name))
+  if (clash) throw new Error(`${config.manifest}: the image ${clash.name} has the name of a file of this version; rename the image`)
   const folder = join(outDir, version)
   mkdirSync(folder, { recursive: true })
   const files = {}
+  const inFolder = {}
   for (const name of names) {
     copyFileSync(join(assetsDir, name), join(folder, name))
     files[name] = { sha256: await sha256File(join(folder, name)), size: statSync(join(folder, name)).size }
+    inFolder[name] = files[name]
   }
-  const sums = Object.keys(files)
+  // The images join the version folder and its SHA256SUMS, not latest.json's `files` (what an installer downloads).
+  for (const { name, source } of images) {
+    copyFileSync(source, join(folder, name))
+    inFolder[name] = { sha256: await sha256File(join(folder, name)), size: statSync(join(folder, name)).size }
+  }
+  const sums = Object.keys(inFolder)
     .sort()
-    .map((n) => `${files[n].sha256}  ${n}\n`)
+    .map((n) => `${inFolder[n].sha256}  ${n}\n`)
     .join('')
   writeFileSync(join(folder, 'SHA256SUMS'), sums)
   const rootFiles = []
   for (const p of config.installers) {
     const source = readFileSync(join(root, p), 'utf8')
-    writeFileSync(join(outDir, basename(p)), source.split(PLACEHOLDER).join(base))
+    const stamped = source.split(PLACEHOLDER).join(base).split(REQUIRES_PLACEHOLDER).join(requiresStamp(manifest))
+    writeFileSync(join(outDir, basename(p)), stamped)
     rootFiles.push(basename(p))
   }
-  writeFileSync(join(outDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`)
+  writeFileSync(join(outDir, 'manifest.json'), `${JSON.stringify(publishedManifest(manifest, { version, base }), null, 2)}\n`)
   rootFiles.push('manifest.json')
   writeFileSync(join(outDir, 'latest.json'), `${JSON.stringify({ version, files }, null, 2)}\n`)
-  return { version, files, sums, rootFiles }
+  return { version, files, images: images.map((i) => i.name), sums, rootFiles }
 }
 
 // ── the site ─────────────────────────────────────────────────────────────────────────────────────
@@ -405,6 +618,56 @@ export async function assertResolves(baseUrl, resolver = lookup) {
 }
 
 /**
+ * Checks, reading the site only, that every app `manifest` requires can be installed from it: each slug has a final
+ * (`latest.json`) at >= its min and a valid manifest, and following those manifests' own `requires` never leads back
+ * to `app` or round any other loop. Throws naming the slug and the reason; returns the slugs visited, in order.
+ */
+export async function checkRequires({ app, manifest, baseUrl, fetchImpl = fetch }) {
+  const base = siteRoot(baseUrl)
+  const visited = []
+  const done = new Set()
+  async function walk(requires, chain) {
+    for (const { slug, min } of requires) {
+      const via = chain.join(' → ')
+      if (chain.includes(slug)) throw new Error(`requires: a cycle — ${via} → ${slug}; nothing was published`)
+      const latest = await readBytes(fetchImpl, `${base}/${slug}/latest.json`)
+      if (latest === null) throw new Error(`requires: ${slug} (required by ${via}) has no final on the site — publish it first; nothing was published`)
+      let version = null
+      try {
+        version = JSON.parse(latest.toString('utf8')).version
+      } catch {
+        version = null
+      }
+      if (typeof version !== 'string' || !VERSION.test(version))
+        throw new Error(`requires: ${base}/${slug}/latest.json names no version; nothing was published`)
+      if (compareVersions(version, min) < 0)
+        throw new Error(`requires: ${via} needs ${slug} >= ${min}, and the site's newest final of it is ${version}; nothing was published`)
+      if (done.has(slug)) continue
+      done.add(slug)
+      visited.push(slug)
+      const raw = await readBytes(fetchImpl, `${base}/${slug}/manifest.json`)
+      if (raw === null) throw new Error(`requires: ${slug} has no manifest.json on the site; nothing was published`)
+      let theirs
+      try {
+        theirs = validateManifest(JSON.parse(raw.toString('utf8')))
+      } catch (error) {
+        throw new Error(`requires: ${slug}'s manifest.json on the site is not valid (${error.message}); nothing was published`)
+      }
+      await walk(requiresOf(theirs), [...chain, slug])
+    }
+  }
+  await walk(requiresOf(manifest), [app])
+  return visited
+}
+
+/** A SHA256SUMS file's lines as `{ <name>: { sha256 } }`. */
+export function parseSums(bytes) {
+  const out = {}
+  for (const line of bytes.toString('utf8').split('\n')) if (line.length > 66) out[line.slice(66)] = { sha256: line.slice(0, 64) }
+  return out
+}
+
+/**
  * Uploads a staged tree (see `stage`) in the order the header gives. `dest` is the rsync destination (`user@host:`
  * in production — the account's root is the app's folder), `sshArgs` the `-e` command line.
  */
@@ -421,18 +684,34 @@ export async function publish({
 }) {
   const root = `${siteRoot(baseUrl)}/${app}`
   const latestBytes = readFileSync(join(outDir, 'latest.json'))
-  const { version, files } = JSON.parse(latestBytes.toString('utf8'))
+  const { version } = JSON.parse(latestBytes.toString('utf8'))
   const localSums = readFileSync(join(outDir, version, 'SHA256SUMS'))
+  // Everything in the version folder — the files and the manifest's images — is what SHA256SUMS lists.
+  const files = parseSums(localSums)
   const rootFiles = readdirSync(outDir).filter((n) => n !== 'latest.json' && n !== version && n !== 'manifest.json')
   rootFiles.sort()
   rootFiles.push('manifest.json') // installers first, manifest after them, latest.json last
-  const out = { version, uploaded: [], unchanged: [], skippedLatest: false, dryRun }
+  const out = { version, uploaded: [], unchanged: [], skippedLatest: false, dryRun, requires: [] }
   const slash = /[/:]$/.test(dest) ? '' : '/'
+
+  // Every app this one requires must be installable from the site before anything of this one is on it.
+  const manifest = JSON.parse(readFileSync(join(outDir, 'manifest.json'), 'utf8'))
+  out.requires = await checkRequires({ app, manifest, baseUrl, fetchImpl })
+  if (out.requires.length) log(`requires: ${out.requires.join(', ')} — each on the site at the version needed`)
 
   const remoteSums = await readBytes(fetchImpl, `${root}/${version}/SHA256SUMS`)
   if (remoteSums !== null && !remoteSums.equals(localSums)) {
+    const theirs = parseSums(remoteSums)
+    const differ = [...new Set([...Object.keys(files), ...Object.keys(theirs)])]
+      .filter((n) => files[n]?.sha256 !== theirs[n]?.sha256)
+      .sort()
+    const images = new Set(imagesOf(manifest).map((i) => basename(i.path)))
+    const hint =
+      differ.length > 0 && differ.every((n) => images.has(n))
+        ? ' — only images differ: publish from the tag\'s own commit (run the workflow from the tag), whose images this version carries'
+        : '; publish a new version instead'
     throw new Error(
-      `${version} is already published and its SHA256SUMS differs from this build's — versions are immutable, nothing was changed; publish a new version instead`,
+      `${version} is already published and its SHA256SUMS differs from this build's (${differ.join(', ') || 'its bytes'}) — versions are immutable, nothing was changed${hint}`,
     )
   }
   log(remoteSums === null ? `${version}: not complete on the site yet` : `${version}: complete on the site — verifying only`)
@@ -534,7 +813,10 @@ async function main(argv, env) {
   if (!['check', 'names', 'publish'].includes(command)) throw new Error(usage)
   const { config, manifest } = loadRepo(root, env)
   if (command === 'check') {
-    console.log(`downloads: ${config.app} — ${config.files.length} file(s), ${config.optional.length} optional, ${config.installers.length} installer(s), manifest ${config.manifest} valid`)
+    const req = requiresOf(manifest).length ? `, requires ${requiresStamp(manifest)}` : ''
+    const img = imagesOf(manifest).length ? `, ${imagesOf(manifest).length} image(s)` : ''
+    const unlisted = manifest.listed === false ? ', unlisted' : ''
+    console.log(`downloads: ${config.app} — ${config.files.length} file(s), ${config.optional.length} optional, ${config.installers.length} installer(s), manifest ${config.manifest} valid${img}${req}${unlisted}`)
     return 0
   }
   if (command === 'names') {
@@ -547,7 +829,7 @@ async function main(argv, env) {
   const baseUrl = env.DOWNLOADS_URL
   const outDir = mkdtempSync(join(tmpdir(), 'publish-downloads-'))
   const staged = await stage({ tag, assetsDir, outDir, baseUrl, root, config, manifest })
-  console.log(`Staged ${config.app} ${staged.version}: ${Object.keys(staged.files).join(', ')}`)
+  console.log(`Staged ${config.app} ${staged.version}: ${[...Object.keys(staged.files), ...staged.images].join(', ')}`)
   await assertResolves(baseUrl)
   const target = dryRun ? { dest: 'DRY-RUN:', sshArgs: undefined } : sshCommand(env)
   const result = await publish({ outDir, app: config.app, ...target, baseUrl, dryRun })

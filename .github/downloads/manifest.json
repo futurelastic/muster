@@ -4,6 +4,10 @@
   "summary": {
     "en": "A machine-local service that owns session agents across a fleet, and the peer federation that makes two of them look like one."
   },
+  "description": {
+    "en": "muster is a service that runs on one machine and owns the session agents there: it starts them, keeps their state, and lets a caller read and send to them over a local interface. Two machines can be joined as peers so that their sessions look like one set. It is a background component that other apps install automatically as a dependency, so a person normally has no reason to install it by hand."
+  },
+  "listed": false,
   "install": {
     "macos": {
       "steps": [
