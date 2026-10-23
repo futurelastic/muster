@@ -113,6 +113,10 @@ type listOutcome struct {
 	stateDir string
 	self     fleet.MachineId
 
+	// rawHash identifies the file contents this outcome was read from (or why it
+	// could not be read), so a live reload can tell a changed list from the one it
+	// already looked at (muster #354).
+	rawHash  string
 	verified *machinelist.Verified
 	// principals are the list's machines as principals, grants already checked.
 	principals []service.Principal
@@ -152,9 +156,11 @@ func loadMachineList(cfg *fileConfig, stateDir string, self fleet.MachineId) lis
 	}
 	raw, err := os.ReadFile(ml.Path)
 	if err != nil {
+		o.rawHash = "unreadable:" + err.Error()
 		o.err = fmt.Errorf("machine list: %w", err)
 		return o
 	}
+	o.rawHash = contentHash(raw)
 	v, err := machinelist.Verify(raw, machinelist.Verifier{Fleet: ml.Fleet, Signers: pins, MinSeq: minSeq})
 	if err != nil {
 		o.err = err

@@ -1,17 +1,22 @@
 package main
 
 import (
+	"crypto/ed25519"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	fleet "github.com/futurelastic/muster"
 	"github.com/futurelastic/muster/internal/drivers/stub"
+	"github.com/futurelastic/muster/internal/machinelist"
+	"github.com/futurelastic/muster/internal/peerkey"
 	"github.com/futurelastic/muster/internal/service"
 )
 
@@ -41,7 +46,13 @@ func putCfg(t *testing.T, path string, doc map[string]any) {
 // reloader main wires up (but driven by the test, not by a ticker).
 func newReloadRig(t *testing.T, doc map[string]any) *reloadRig {
 	t.Helper()
-	dir := t.TempDir()
+	return newReloadRigIn(t, t.TempDir(), doc)
+}
+
+// newReloadRigIn is newReloadRig in a directory the test has already put files
+// in, such as a machine list the config points at.
+func newReloadRigIn(t *testing.T, dir string, doc map[string]any) *reloadRig {
+	t.Helper()
 	path := filepath.Join(dir, "fleet.json")
 	putCfg(t, path, doc)
 	cfg, raw, err := loadConfigRaw(path)
@@ -56,18 +67,28 @@ func newReloadRig(t *testing.T, doc map[string]any) *reloadRig {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Startup, as main does it: hand-written peers, the machine list over them.
+	handPeers, err := resolvePeers("", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listOut := loadMachineList(cfg, dir, "test-machine")
+	if err := listOut.fatal(); err != nil {
+		t.Fatal(err)
+	}
+	if err := listOut.commit(); err != nil {
+		t.Fatal(err)
+	}
+	principals = listOut.principalsFor(principals, handPeers)
 	table := service.NewPrincipalTable(principals)
 	rl := &reloader{
 		path: path, getenv: func(string) string { return "" }, self: "test-machine",
-		svc: svc, table: table,
+		svc: svc, table: table, listOut: listOut,
 		builder:   &peerBuilder{self: "test-machine", stateDir: dir, selfBuild: fleet.SelfBuild()},
 		statusDir: dir, applied: cfg, lastHash: contentHash(raw),
 		peers: map[fleet.MachineId]appliedPeer{},
 	}
-	peers, err := resolvePeers("", cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
+	peers := listOut.peers(handPeers)
 	if err := rl.startPeers(peers, cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -253,4 +274,255 @@ func TestReloadStatus_DoctorSkipsWithoutStateDir(t *testing.T) {
 	if row := checkReloadStatus("", "x"); row.Status != statusSkip {
 		t.Errorf("row = %+v, want skip", row)
 	}
+}
+
+// --- the owner-signed machine list on a running service (muster #354) ---------
+
+type liveList struct {
+	owner ed25519.PrivateKey
+	path  string
+}
+
+// put signs and writes a list naming the given machines (id -> address) at seq.
+func (l liveList) put(t *testing.T, seq uint64, machines map[string]string) []byte {
+	t.Helper()
+	doc := machinelist.Document{
+		Fleet: "fleet-1", Seq: seq, Signers: []string{listPub(l.owner)},
+		Machines: []machinelist.Machine{}, Issuers: []machinelist.Issuer{},
+	}
+	var ids []string
+	for id := range machines {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for i, id := range ids {
+		doc.Machines = append(doc.Machines, machinelist.Machine{
+			ID: id, PublicKey: listPub(listKey(byte(0x40 + i))),
+			Addresses: []string{machines[id]}, Grants: []string{"read"},
+		})
+	}
+	raw, err := machinelist.Sign(doc, l.owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := putFileAtomic(l.path, raw); err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func putFileAtomic(path string, raw []byte) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+func newListRig(t *testing.T, mode string, firstSeq uint64, first map[string]string) (*reloadRig, liveList) {
+	t.Helper()
+	dir := t.TempDir()
+	l := liveList{owner: listKey(0x01), path: filepath.Join(dir, "machines.json")}
+	l.put(t, firstSeq, first)
+	// Peers from a list authenticate by key, so this machine needs its own.
+	if _, priv, err := peerkey.Generate(); err != nil {
+		t.Fatal(err)
+	} else if err := peerkey.SavePrivate(filepath.Join(dir, machineKeyFile), priv); err != nil {
+		t.Fatal(err)
+	}
+	doc := rlDoc(rlPrincipal("op", "tok-op", "read"))
+	doc["machineList"] = map[string]any{"mode": mode, "path": l.path, "fleet": "fleet-1", "signer": listPub(l.owner)}
+	return newReloadRigIn(t, dir, doc), l
+}
+
+func liveMachinesBody(r *reloadRig) string {
+	_, body := r.get("/v1/machines", "tok-op")
+	return body
+}
+
+func liveHasPrincipal(r *reloadRig, name string) bool {
+	for _, p := range r.rl.table.Snapshot() {
+		if p.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// A newer signed list adds one machine and retires another on a running
+// service, and a stream open the whole time is not touched.
+func TestReloadList_NewerListAddsAndRemovesAPeer(t *testing.T) {
+	r, l := newListRig(t, "only", 1, map[string]string{"m-a": "http://127.0.0.1:1", "m-b": "http://127.0.0.1:2"})
+	stream := r.stream("tok-op")
+	if b := liveMachinesBody(r); !strings.Contains(b, `"m-a"`) || !strings.Contains(b, `"m-b"`) {
+		t.Fatalf("the start did not apply the list: %s", b)
+	}
+
+	l.put(t, 2, map[string]string{"m-a": "http://127.0.0.1:1", "m-c": "http://127.0.0.1:3"})
+	r.rl.check("test")
+
+	b := liveMachinesBody(r)
+	if !strings.Contains(b, `"m-c"`) {
+		t.Errorf("the machine the new list adds is missing: %s", b)
+	}
+	if strings.Contains(b, `"m-b"`) {
+		t.Errorf("the machine the new list retires is still listed: %s", b)
+	}
+	if !liveHasPrincipal(r, "m-c") || liveHasPrincipal(r, "m-b") {
+		t.Errorf("the principal table does not follow the list: %+v", r.rl.table.Snapshot())
+	}
+	if rlEnds(stream, 300*time.Millisecond) {
+		t.Error("an unrelated stream was closed by the list reload")
+	}
+	if row := checkReloadStatus(r.dir, r.path); row.Status != statusPass {
+		t.Errorf("doctor row after a good list = %+v, want pass", row)
+	}
+	if seq, _ := machinelist.ReadSeq(r.dir); seq != 2 {
+		t.Errorf("the highest accepted sequence = %d, want 2 (the rollback guard moved)", seq)
+	}
+}
+
+// A list that does not verify, and an older genuine one, are each refused as a
+// whole: the last good list stays and doctor says why.
+func TestReloadList_TamperedAndRollbackAreRefusedLastGoodKept(t *testing.T) {
+	r, l := newListRig(t, "only", 5, map[string]string{"m-a": "http://127.0.0.1:1"})
+	raw := l.put(t, 6, map[string]string{"m-a": "http://127.0.0.1:1", "m-b": "http://127.0.0.1:2"})
+	r.rl.check("test")
+	if !strings.Contains(liveMachinesBody(r), `"m-b"`) {
+		t.Fatal("the good list was not applied")
+	}
+
+	good := map[string]string{"m-a": "http://127.0.0.1:1", "m-b": "http://127.0.0.1:2"}
+	cases := map[string]func(){
+		"tampered": func() {
+			// The payload is signed; swap in a different, validly encoded one.
+			var env machinelist.Envelope
+			if err := json.Unmarshal(raw, &env); err != nil {
+				t.Fatal(err)
+			}
+			other := liveList{owner: l.owner, path: filepath.Join(r.dir, "other.json")}
+			var env2 machinelist.Envelope
+			if err := json.Unmarshal(other.put(t, 6, map[string]string{"m-z": "http://127.0.0.1:7"}), &env2); err != nil {
+				t.Fatal(err)
+			}
+			env.Payload = env2.Payload
+			bad, err := json.Marshal(env)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := putFileAtomic(l.path, bad); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"rollback":                      func() { l.put(t, 3, map[string]string{"m-z": "http://127.0.0.1:7"}) },
+		"same sequence, different list": func() { l.put(t, 6, map[string]string{"m-z": "http://127.0.0.1:7"}) },
+		"signed by a stranger": func() {
+			l2 := liveList{owner: listKey(0x77), path: l.path}
+			l2.put(t, 9, map[string]string{"m-z": "http://127.0.0.1:7"})
+		},
+		"not json": func() { _ = putFileAtomic(l.path, []byte("{nope")) },
+	}
+	names := make([]string, 0, len(cases))
+	for n := range cases {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		cases[name]()
+		r.rl.check("test")
+		b := liveMachinesBody(r)
+		if !strings.Contains(b, `"m-a"`) || !strings.Contains(b, `"m-b"`) || strings.Contains(b, `"m-z"`) {
+			t.Errorf("%s: the last good list did not stay: %s", name, b)
+		}
+		if seq, _ := machinelist.ReadSeq(r.dir); seq != 6 {
+			t.Errorf("%s: the accepted sequence moved to %d", name, seq)
+		}
+		row := checkReloadStatus(r.dir, r.path)
+		if row.Status != statusWarn || !strings.Contains(row.Summary, "machine list") || row.Detail == "" {
+			t.Errorf("%s: doctor row = %+v, want a warn naming the list", name, row)
+		}
+		if code, _ := r.get("/v1/health", "tok-op"); code != 200 {
+			t.Errorf("%s: the operator = %d, want 200", name, code)
+		}
+	}
+
+	// The owner signs a good, higher list: it applies and the warning clears.
+	l.put(t, 7, good)
+	r.rl.check("test")
+	if row := checkReloadStatus(r.dir, r.path); row.Status != statusPass {
+		t.Errorf("doctor row after a good list = %+v, want pass", row)
+	}
+}
+
+// A list that was already looked at is not applied again, and a list change
+// leaves the config's own record alone.
+func TestReloadList_UnchangedListIsNotReapplied(t *testing.T) {
+	r, l := newListRig(t, "only", 1, map[string]string{"m-a": "http://127.0.0.1:1"})
+	r.rl.check("test")
+	statusPath := filepath.Join(r.dir, reloadStatusFile)
+	if _, err := os.Stat(statusPath); !os.IsNotExist(err) {
+		t.Fatal("an unchanged list and config wrote a status")
+	}
+	l.put(t, 2, map[string]string{"m-a": "http://127.0.0.1:1", "m-b": "http://127.0.0.1:2"})
+	r.rl.check("test")
+	st := r.rl.readStatus()
+	if st.ListAppliedSeq != 2 || st.AppliedHash != contentHash(liveMustRead(t, r.path)) {
+		t.Errorf("status after a list change = %+v", st)
+	}
+	before, _ := os.ReadFile(statusPath)
+	peerBefore := r.rl.peers["m-b"].drv
+	r.rl.check("test")
+	after, _ := os.ReadFile(statusPath)
+	if string(before) != string(after) {
+		t.Error("an unchanged list rewrote the status")
+	}
+	if r.rl.peers["m-b"].drv != peerBefore {
+		t.Error("an unchanged list rebuilt a peer")
+	}
+}
+
+// A refused list does not hold back an unrelated edit to the config, and the
+// config edit is applied over the list in force.
+func TestReloadList_RefusedListDoesNotBlockAConfigEdit(t *testing.T) {
+	r, l := newListRig(t, "only", 4, map[string]string{"m-a": "http://127.0.0.1:1"})
+	l.put(t, 2, map[string]string{"m-z": "http://127.0.0.1:7"}) // a rollback
+	doc := rlDoc(rlPrincipal("op", "tok-op", "read"), rlPrincipal("new", "tok-new", "read"))
+	doc["machineList"] = map[string]any{"mode": "only", "path": l.path, "fleet": "fleet-1", "signer": listPub(l.owner)}
+	putCfg(t, r.path, doc)
+	r.rl.check("test")
+
+	if code, _ := r.get("/v1/health", "tok-new"); code != 200 {
+		t.Errorf("the config edit = %d, want 200", code)
+	}
+	if b := liveMachinesBody(r); !strings.Contains(b, `"m-a"`) || strings.Contains(b, `"m-z"`) {
+		t.Errorf("the list in force changed: %s", b)
+	}
+	row := checkReloadStatus(r.dir, r.path)
+	if row.Status != statusWarn || !strings.Contains(row.Detail, "older") {
+		t.Errorf("doctor row = %+v, want a warn naming the older list", row)
+	}
+}
+
+// Where the list is, who signs it and what mode it is in are still read once.
+func TestReloadList_ThePathAndPinsStayRestartOnly(t *testing.T) {
+	r, l := newListRig(t, "only", 1, map[string]string{"m-a": "http://127.0.0.1:1"})
+	doc := rlDoc(rlPrincipal("op", "tok-op", "read"), rlPrincipal("new", "tok-new", "read"))
+	doc["machineList"] = map[string]any{"mode": "only", "path": l.path + ".other", "fleet": "fleet-1", "signer": listPub(l.owner)}
+	putCfg(t, r.path, doc)
+	r.rl.check("test")
+	if code, _ := r.get("/v1/health", "tok-new"); code != 401 {
+		t.Errorf("an edit that moves the list = %d, want 401 (refused whole)", code)
+	}
+	if row := checkReloadStatus(r.dir, r.path); !strings.Contains(row.Detail, "machineList") {
+		t.Errorf("refusal %q does not name machineList", row.Detail)
+	}
+}
+
+func liveMustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
 }

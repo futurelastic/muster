@@ -46,6 +46,10 @@ import (
 //     directory come from the environment, which an edit to this file cannot
 //     change at all.
 //   - A revoked credential loses its open streams and nobody else does.
+//   - The owner-signed machine list is watched too (muster #354), by its own
+//     contents. A list replaces the one in force only if it verifies and its
+//     sequence is higher; any other list is refused as a whole and the last good
+//     one stays. Where the list is and who signs it stay restart-only.
 //
 // The trigger is the file itself, polled by content (so an atomic replace that
 // keeps the modification time is still seen), plus SIGHUP for an operator who
@@ -72,6 +76,18 @@ type reloadStatus struct {
 	RefusedHash string `json:"refusedHash,omitempty"`
 	RefusedAt   string `json:"refusedAt,omitempty"`
 	Error       string `json:"error,omitempty"`
+
+	// The owner-signed machine list is watched on its own (muster #354): a new
+	// list can be applied, or refused, while the config file is untouched.
+	// ListAppliedHash identifies the list file the service is running on.
+	ListAppliedHash string `json:"listAppliedHash,omitempty"`
+	ListAppliedSeq  uint64 `json:"listAppliedSeq,omitempty"`
+	ListAppliedAt   string `json:"listAppliedAt,omitempty"`
+	// ListRefusedHash identifies the list last refused, with ListError saying why.
+	// The last good list stays in force. Empty when the list on disk is the one in use.
+	ListRefusedHash string `json:"listRefusedHash,omitempty"`
+	ListRefusedAt   string `json:"listRefusedAt,omitempty"`
+	ListError       string `json:"listError,omitempty"`
 }
 
 func contentHash(raw []byte) string {
@@ -197,17 +213,24 @@ type reloader struct {
 	builder *peerBuilder
 	// token is FLEET_TOKEN, which decides the service's own peer credential.
 	token string
-	// listOut is the machine list as it was read at startup. A list is a signed
-	// document with its own anti-rollback sequence, so it is read once, at a
-	// start; a reload re-applies it over the new hand-written peers.
+	// listOut is the machine list in force: the one read at startup, then the last
+	// one a reload verified and applied. A list is a signed document with its own
+	// anti-rollback sequence, so a reload replaces it only with a list that
+	// verifies and carries a higher sequence (muster #354).
 	listOut listOutcome
+	// seenList identifies the list file contents already looked at, applied or
+	// refused. Empty means "the one listOut was read from".
+	seenList string
 	// statusDir is where the status file goes; empty means none is written.
 	statusDir string
 
 	mu       sync.Mutex
 	applied  *fileConfig
 	lastHash string
-	peers    map[fleet.MachineId]appliedPeer
+	// appliedHash is the hash of the config contents in force; lastHash also moves
+	// when a file is refused.
+	appliedHash string
+	peers       map[fleet.MachineId]appliedPeer
 }
 
 // setPeers registers the peers a start (or a reload) resolved, building every
@@ -331,12 +354,36 @@ func principalDiff(before, after []service.Principal) (added, removed, changed [
 	return
 }
 
-// check reads the file and, if its contents differ from the last it looked at,
-// tries to apply it. reason is for the log ("poll" is quiet unless something
-// happens).
+// listFileHash identifies the machine list file as it is on disk now, or "" when
+// the running config does not use a list (mode off, or no block).
+func (rl *reloader) listFileHash() string {
+	ml := rl.applied.MachineList
+	if ml == nil || ml.mode() == listModeOff || ml.Path == "" {
+		return ""
+	}
+	raw, err := os.ReadFile(ml.Path)
+	if err != nil {
+		return "unreadable:" + err.Error()
+	}
+	return contentHash(raw)
+}
+
+func (rl *reloader) seenListHash() string {
+	if rl.seenList != "" {
+		return rl.seenList
+	}
+	return rl.listOut.rawHash
+}
+
+// check reads the config file and the machine list file and, if either differs
+// from the last it looked at, tries to apply it. reason is for the log ("poll"
+// is quiet unless something happens).
 func (rl *reloader) check(reason string) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
+	if rl.appliedHash == "" {
+		rl.appliedHash = rl.lastHash
+	}
 
 	raw, err := os.ReadFile(rl.path)
 	if err != nil {
@@ -350,7 +397,10 @@ func (rl *reloader) check(reason string) {
 		return
 	}
 	hash := contentHash(raw)
-	if hash == rl.lastHash {
+	cfgChanged := hash != rl.lastHash
+	listHash := rl.listFileHash()
+	listChanged := listHash != rl.seenListHash()
+	if !cfgChanged && !listChanged {
 		if reason == "SIGHUP" {
 			log.Printf("muster: config reload (%s): the file is unchanged", reason)
 		}
@@ -358,7 +408,7 @@ func (rl *reloader) check(reason string) {
 	}
 	rl.lastHash = hash
 
-	if err := rl.apply(raw, hash, reason); err != nil {
+	if err := rl.apply(raw, hash, reason, cfgChanged, listHash); err != nil {
 		rl.refuse(hash, err, reason)
 	}
 }
@@ -370,17 +420,42 @@ func (rl *reloader) refuse(hash string, err error, reason string) {
 	rl.writeStatus(st)
 }
 
-func (rl *reloader) apply(raw []byte, hash, reason string) error {
-	next, err := parseConfig(rl.path, raw)
-	if err != nil {
-		return redactErr(err, rl.path)
+// candidateList reads and verifies the list file now on disk against the
+// pinned signer and the highest sequence accepted. A list is replaced only by a
+// list with a HIGHER sequence than the one in force: an equal sequence with
+// different bytes is refused too, since two documents cannot both be "the list
+// at seq N" (muster #354).
+func (rl *reloader) candidateList(cfg *fileConfig) (listOutcome, error) {
+	cand := loadMachineList(cfg, rl.statusDir, rl.self)
+	if cand.err != nil {
+		return cand, redactErr(cand.err, cfg.MachineList.Path)
 	}
-	if names := restartOnly(rl.applied, next); len(names) > 0 {
-		return fmt.Errorf("the file changes %s, which only a restart applies; "+
-			"nothing from this edit was applied, including its principals and peers",
-			strings.Join(names, ", "))
+	if cur := rl.listOut.verified; cur != nil && cand.verified.Document.Seq <= cur.Document.Seq {
+		return cand, fmt.Errorf("machine list: sequence %d is not higher than the list in force (%d); a rollback or a re-sign at the same sequence is refused",
+			cand.verified.Document.Seq, cur.Document.Seq)
 	}
-	principals, err := next.principals()
+	return cand, nil
+}
+
+// apply applies the config (when cfgChanged) and the machine list (when it
+// changed) to the running service. The error it returns refuses the config as a
+// whole; a machine list that is refused is recorded on its own and the last
+// good list stays, so a bad list never blocks an unrelated principal edit.
+func (rl *reloader) apply(raw []byte, hash, reason string, cfgChanged bool, listHash string) error {
+	next := rl.applied
+	if cfgChanged {
+		var err error
+		next, err = parseConfig(rl.path, raw)
+		if err != nil {
+			return redactErr(err, rl.path)
+		}
+		if names := restartOnly(rl.applied, next); len(names) > 0 {
+			return fmt.Errorf("the file changes %s, which only a restart applies; "+
+				"nothing from this edit was applied, including its principals and peers",
+				strings.Join(names, ", "))
+		}
+	}
+	basePrincipals, err := next.principals()
 	if err != nil {
 		return err
 	}
@@ -388,15 +463,53 @@ func (rl *reloader) apply(raw []byte, hash, reason string) error {
 	if err != nil {
 		return fmt.Errorf("bad peer list: %w", err)
 	}
-	principals = rl.listOut.principalsFor(principals, handPeers)
-	peerList := rl.listOut.peers(handPeers)
 
-	build, keep, err := rl.planPeers(peerList, next)
+	// The list: a candidate if the file changed, else the one in force. Anything
+	// wrong with a candidate falls back to the list in force and is reported as
+	// the list's own refusal.
+	listOut := rl.listOut
+	listChanged := listHash != rl.seenListHash()
+	var listRefusal error
+	if listChanged {
+		cand, lerr := rl.candidateList(next)
+		if lerr != nil {
+			listRefusal = lerr
+		} else {
+			listOut = cand
+		}
+	}
+	plan := func(lo listOutcome) (map[fleet.MachineId]appliedPeer, map[fleet.MachineId]bool, error) {
+		return rl.planPeers(lo.peers(handPeers), next)
+	}
+	build, keep, err := plan(listOut)
+	if err != nil && listOut.verified != rl.listOut.verified {
+		// The new list's peers cannot be built (say, a key peer with no signing
+		// key here): the list is refused, and the config edit still applies over
+		// the list in force.
+		listRefusal = fmt.Errorf("machine list: %w", err)
+		listOut = rl.listOut
+		build, keep, err = plan(listOut)
+	}
 	if err != nil {
 		return err
 	}
+	if listChanged && listRefusal == nil {
+		// The sequence is recorded as the last step that can fail, so a list that
+		// was going to be refused never moves the rollback guard.
+		if cerr := listOut.commit(); cerr != nil {
+			listRefusal = fmt.Errorf("recording the machine list sequence: %w", cerr)
+			for _, made := range build {
+				made.drv.Shutdown()
+			}
+			listOut = rl.listOut
+			if build, keep, err = plan(listOut); err != nil {
+				return err
+			}
+		}
+	}
 
 	// Everything that can fail has passed: from here on nothing refuses.
+	principals := listOut.principalsFor(basePrincipals, handPeers)
 	before := rl.table.Snapshot()
 	oldCred := peerCredential(rl.token, rl.applied, rl.self)
 	newCred := peerCredential(rl.token, next, rl.self)
@@ -415,6 +528,10 @@ func (rl *reloader) apply(raw []byte, hash, reason string) error {
 		rl.svc.PeersChanged()
 	}
 	rl.applied = next
+	rl.listOut = listOut
+	if listChanged {
+		rl.seenList = listHash
+	}
 
 	pAdded, pRemoved, pChanged := principalDiff(before, principals)
 	log.Printf("muster: config reloaded (%s): principals +%v -%v ~%v; peers +%v -%v ~%v",
@@ -422,7 +539,35 @@ func (rl *reloader) apply(raw []byte, hash, reason string) error {
 	for name, n := range closed {
 		log.Printf("muster:   closed %d open stream(s) of %q: its credential is no longer accepted", n, name)
 	}
-	rl.writeStatus(reloadStatus{AppliedHash: hash, AppliedAt: time.Now().UTC().Format(time.RFC3339)})
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	st := rl.readStatus()
+	if cfgChanged {
+		rl.appliedHash = hash
+		st.AppliedHash, st.AppliedAt = hash, now
+		st.RefusedHash, st.RefusedAt, st.Error = "", "", ""
+	}
+	switch {
+	case listRefusal != nil:
+		log.Printf("muster: machine list reload (%s) REFUSED, keeping the last good list: %v", reason, listRefusal)
+		st.ListRefusedHash, st.ListRefusedAt, st.ListError = listHash, now, listRefusal.Error()
+	case listChanged:
+		log.Printf("muster: machine list reloaded (%s): %s", reason, listOut.describe())
+		if listOut.mode == listModeShadow {
+			for _, line := range listOut.shadowDiff(handPeers) {
+				log.Printf("muster:   (shadow, not applied) %s", line)
+			}
+		}
+		st.ListAppliedHash, st.ListAppliedAt = listHash, now
+		if listOut.verified != nil {
+			st.ListAppliedSeq = listOut.verified.Document.Seq
+		}
+		st.ListRefusedHash, st.ListRefusedAt, st.ListError = "", "", ""
+	}
+	if listChanged && listRefusal != nil {
+		rl.seenList = listHash
+	}
+	rl.writeStatus(st)
 	return nil
 }
 
@@ -446,8 +591,9 @@ func (rl *reloader) writeStatus(st reloadStatus) {
 		return
 	}
 	if st.AppliedHash == "" {
-		st.AppliedHash = rl.readStatus().AppliedHash
-		st.AppliedAt = rl.readStatus().AppliedAt
+		// The first record a service writes may be about the list or a refusal,
+		// before any config edit was applied: the config in force is still known.
+		st.AppliedHash, st.AppliedAt = rl.appliedHash, time.Now().UTC().Format(time.RFC3339)
 	}
 	if err := writeJSONAtomic(filepath.Join(rl.statusDir, reloadStatusFile), st); err != nil {
 		log.Printf("muster: recording the reload status: %v", err)
@@ -515,6 +661,26 @@ func checkReloadStatus(stateDir, cfgPath string) doctorRow {
 		row.Summary = "the config on disk is not the one the running service applied"
 		row.Detail = "the service checks every " + reloadPollInterval.String() +
 			"; if it has been longer, it is not running, or it was started before live reload (restart it once)"
+	}
+
+	// The machine list is watched on its own (muster #354): a list the service
+	// refused is a warning even when the config itself was applied.
+	if cfg, perr := parseConfig(cfgPath, rawCfg); perr == nil && cfg.MachineList != nil && cfg.MachineList.mode() != listModeOff {
+		if rawList, lerr := os.ReadFile(cfg.MachineList.Path); lerr == nil &&
+			st.ListError != "" && contentHash(rawList) == st.ListRefusedHash {
+			detail := st.ListError + " (list refused " + st.ListRefusedAt + "; the last good list stays"
+			if st.ListAppliedSeq > 0 {
+				detail += fmt.Sprintf(", seq %d", st.ListAppliedSeq)
+			}
+			detail += ")"
+			if row.Status == statusPass {
+				row.Status = statusWarn
+				row.Summary = "the running service refused the machine list on disk and keeps the last good list"
+				row.Detail = detail
+			} else {
+				row.Detail += "; " + detail
+			}
+		}
 	}
 	return row
 }

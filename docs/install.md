@@ -366,9 +366,25 @@ to it.
   principals and peers included — is applied until the service restarts. The
   bind addresses and the state directory come from the environment, so no edit
   to this file can change them.
-- A peer that comes from the owner-signed machine list is not re-read on a
-  reload: that list has its own rollback guard and is read at start. The
-  hand-written peers are re-resolved and the list is laid over them as before.
+- The owner-signed machine list is re-read too (#354). The service watches the
+  list file as well as the config, and applies a new list the same way it applies
+  a peer edit: build every new peer, then swap. A list replaces the one in force
+  only if it verifies against the pinned signer **and** carries a higher sequence
+  than the list in force; the peers and the machine principals it implies follow
+  it, and only a revoked or replaced machine credential loses its open streams.
+  A list that does not verify, an older genuine one replayed, or one re-signed at
+  the same sequence is **refused as a whole**: the last good list stays, the
+  reason is logged, and `config.reload` goes to `warn` with it (the config itself
+  may have been applied in the same pass — a bad list never holds back an
+  unrelated principal edit). An unchanged list is not re-applied. Signing the next
+  list clears the warning.
+- The `machineList` block itself — its `mode`, `path`, `fleet` and pinned
+  `signer` — stays **restart-only**. The path and the pin say what the service
+  trusts, and an edit to a trust root takes effect only when a person restarts the
+  service, like `trustRoots`. What a reload picks up is a new list *at the same
+  path*, so the usual routine is: sign the new list, write it over the old one
+  atomically (write beside it, then rename), and within a poll interval the
+  running service has it.
 - `config.reload` reads a status file the service writes in `FLEET_STATE_DIR`.
   With no state directory the reload still works; the row says it cannot compare.
 
