@@ -70,6 +70,64 @@ Not covered, and continuing in the manual procedure: peers (steps 5-6 of it, the
 two-sided enrolment), inbox delivery (step 7), tmux 3.7 or newer (step 8), and
 Windows ([its own section](#windows)). The command prints these when it finishes.
 
+## From a downloads site: `install.sh`
+
+Where a self-hosted downloads site carries muster (every final is published to it,
+[below](#publishing-a-final-to-the-downloads-site)), one command installs the build
+for the machine, with no Node and no npm:
+
+```sh
+curl -fsSL <site>/muster/install.sh | sh                          # the newest final
+curl -fsSL <site>/muster/install.sh | MUSTER_VERSION=0.5.0 sh     # an exact version
+muster --version                                                  # muster v0.5.0 (...)
+```
+
+`<site>` is the site's root address; the copy of `install.sh` on the site already
+has it written in. The script picks the macOS or Linux build for `arm64` or
+`amd64`, downloads that version's `SHA256SUMS` and the binary, checks the binary
+against it, runs the binary's own `--version` and checks it names the version
+asked for, and only then puts it at `~/.local/bin/muster` (`MUSTER_INSTALL_DIR`
+changes the directory), replacing an installed one atomically. **Any failed step
+installs nothing** and leaves an installed `muster` as it was.
+
+`MUSTER_DOWNLOADS_URL` replaces the site address, to try the script against
+another site. The installer only places the binary: the service is
+[`muster service install`](#the-short-way-muster-service-install), which an
+npm install and this one share. A program that needs muster reads the installed
+version from `muster --version` (`muster vX.Y.Z (...)`) and compares it with the
+minimum it needs. There is no Windows installer yet: it follows the Windows
+build ([Windows](#windows)).
+
+### Publishing a final to the downloads site
+
+Only finals are published; a candidate never is. `release-auto.yml` calls
+`publish-downloads.yml` after the npm publish of a final, on both routes a final
+takes to npm (the run that cut it, and the existing-tag publish a hand-cut final
+goes through). The job is **dormant until the repository variable `DOWNLOADS_URL`
+is set**: without it the jobs are skipped and nothing goes red. The workflow is
+the handbook's `publish-downloads` template, copy-and-own, with one change: this
+repository makes no GitHub Release, so it reads the binaries from the artifact
+`muster-binaries-<tag>` that `release-npm.yml` uploaded in the run that
+published the tag, not from a Release. What is published is declared in the
+`downloads:` block of `.github/project.yml` (the four unix binaries, `install.sh`,
+`manifest.json`, and a `SHA256SUMS` the publisher computes).
+
+Set up once, per repository: the variable `DOWNLOADS_URL` (the site root,
+`https`), the secrets `DOWNLOADS_SSH_HOST`, `DOWNLOADS_SSH_PORT`,
+`DOWNLOADS_SSH_USER`, `DOWNLOADS_SSH_KEY`, `DOWNLOADS_SSH_KNOWN_HOSTS` (an upload
+account that can write only this app's folder and cannot delete), and, if the site
+is reachable only from a private network, the variable `DOWNLOADS_RUNS_ON` (a
+JSON list of labels of a runner that can reach it; default
+`["self-hosted","linux"]`).
+
+A published version is immutable and a re-run is a verified no-op. To retry a
+publish that failed, re-run the failed job in its run; the artifact lives 7 days.
+By hand: Actions → Publish downloads → `tag` and the `run_id` of the run that
+published it (`dry_run` stages and lists, and uploads nothing). Past 7 days the
+files are gone: publish the tag again with Release (auto) → `publish-tag`, which
+builds it again; a build whose checksums differ from the published ones is
+refused rather than replacing them.
+
 ## What a working installation is
 
 Every row below is something an installation can be missing and still start.

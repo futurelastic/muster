@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "name": "muster",
+  "summary": {
+    "en": "A machine-local service that owns session agents across a fleet, and the peer federation that makes two of them look like one."
+  },
+  "install": {
+    "macos": {
+      "steps": [
+        "curl -fsSL <site>/muster/install.sh | sh",
+        "muster --version"
+      ],
+      "prompts": [
+        "\"muster: command not found\": add ~/.local/bin to PATH, or set MUSTER_INSTALL_DIR to a directory already on it",
+        "An exact version: curl -fsSL <site>/muster/install.sh | MUSTER_VERSION=X.Y.Z sh"
+      ]
+    },
+    "linux": {
+      "steps": [
+        "curl -fsSL <site>/muster/install.sh | sh",
+        "muster --version"
+      ],
+      "prompts": [
+        "\"muster: command not found\": add ~/.local/bin to PATH, or set MUSTER_INSTALL_DIR to a directory already on it",
+        "An exact version: curl -fsSL <site>/muster/install.sh | MUSTER_VERSION=X.Y.Z sh"
+      ]
+    }
+  }
+}
