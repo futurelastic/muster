@@ -115,6 +115,21 @@ func TestDownloadsConfigurationPassesThePublishersCheck(t *testing.T) {
 	}
 }
 
+// muster is installed by other apps as a dependency, not offered to a person as an app (#356): the manifest
+// marks it unlisted, and the publisher's check reports it, so a regression to a listed app is caught here.
+func TestDownloadsManifestMarksMusterAsAnUnlistedComponent(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not available")
+	}
+	out, err := exec.Command("node", ".github/downloads/publish-downloads.mjs", "check").CombinedOutput()
+	if err != nil {
+		t.Fatalf("publish-downloads.mjs check: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "unlisted") {
+		t.Errorf("the manifest no longer sets listed: false; check said: %s", out)
+	}
+}
+
 // ---- install.sh -------------------------------------------------------------------------------
 
 type fakeSite struct {
