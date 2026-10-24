@@ -142,10 +142,6 @@ and every release carries npm provenance. Release candidates publish under the
 tested by every release but not published to npm yet and has no
 interactive-terminal driver — see [`docs/install.md`](docs/install.md#windows).
 
-Without Node: where a downloads site carries muster, `curl -fsSL <site>/muster/install.sh | sh`
-installs the build for the machine after checking it against its `SHA256SUMS`
-([`docs/install.md`](docs/install.md#from-a-downloads-site-installsh)).
-
 Configure it with the `FLEET_*` environment the [Quickstart](#quickstart) shows
 and start it with `muster serve`. A service that survives a reboot is
 [`docs/install.md`](docs/install.md). Build from source only to hack on it.

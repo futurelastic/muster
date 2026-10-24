@@ -47,19 +47,3 @@ release:
   # handbook permits the npm publish on `public-tool` alone, and npm is how this repo ships.
   # `deploy: none` stays: a merge reaches the fleet machines through the fleet updater
   # following trunk (not a tag), and no workflow, script or LaunchAgent acts on an `-rc` tag.
-
-downloads:
-  # (2026-10-23, #355) Each FINAL is published to a self-hosted downloads site by
-  # .github/workflows/publish-downloads.yml, chained after the npm publish in release-auto.yml.
-  # Dormant until the repo variable DOWNLOADS_URL is set. The binaries are the workflow artifact of the run
-  # that published the tag (no GitHub Release exists here). Windows builds are not published until #303
-  # ships a supported Windows build with its own installer.
-  app: muster
-  files:
-    - muster-v{v}-darwin-arm64
-    - muster-v{v}-darwin-amd64
-    - muster-v{v}-linux-amd64
-    - muster-v{v}-linux-arm64
-  installers:
-    - .github/downloads/install.sh
-  manifest: .github/downloads/manifest.json
