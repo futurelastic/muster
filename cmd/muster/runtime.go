@@ -5,6 +5,8 @@ import (
 	"runtime"
 
 	fleet "github.com/futurelastic/muster"
+	"github.com/futurelastic/muster/internal/drivers/opencode"
+	"github.com/futurelastic/muster/internal/drivers/tmux"
 )
 
 // The local runtime choice (FLEET_RUNTIME), as a pure decision so a test can
@@ -68,6 +70,44 @@ func checkRuntimeName(goos, name string) error {
 	default:
 		return fmt.Errorf("unknown FLEET_RUNTIME %q (want tmux, stub or none)", name)
 	}
+}
+
+// primaryRuntime is the local runtime FLEET_RUNTIME names for a start in this
+// environment, as main.go reads it: the variable, else the build's default. ok is
+// false when it is not a runtime this build can run at all.
+func primaryRuntime(getenv func(string) string) (name string, ok bool) {
+	name = getenv("FLEET_RUNTIME")
+	if name == "" {
+		name = defaultRuntime()
+	}
+	return name, checkRuntimeName(hostOS(), name) == nil
+}
+
+// enabledLocalRuntimes is the runtimes a start with this environment will run, or
+// at least try to: the primary one FLEET_RUNTIME names (none registers nothing)
+// and opencode when FLEET_RUNTIME_OPENCODE is 1. It is the part of "does this
+// machine run that runtime" the environment can answer; whether an enabled
+// runtime's driver is up at that moment (opencode installed, its probe answered
+// in time) only the running process can, and stays at the start (muster #374).
+//
+// ok is false when FLEET_RUNTIME is not a runtime this build can run at all. The
+// start stops on that before it reaches any default runtime, and the runtime row
+// of `muster doctor` is where it is said, so it is not said a second time here.
+func enabledLocalRuntimes(getenv func(string) string) (ids []fleet.RuntimeId, ok bool) {
+	name, ok := primaryRuntime(getenv)
+	if !ok {
+		return nil, false
+	}
+	switch name {
+	case runtimeTmux:
+		ids = append(ids, tmux.DefaultRuntime)
+	case runtimeStub:
+		ids = append(ids, "stub")
+	}
+	if getenv("FLEET_RUNTIME_OPENCODE") == "1" {
+		ids = append(ids, opencode.DefaultRuntime)
+	}
+	return ids, true
 }
 
 // compatRefusal is why `muster compat` cannot run on goos, or "". The checks
