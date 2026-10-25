@@ -364,6 +364,13 @@ to it.
   `inputAuditRetentionDays` and `machineList` are read at start, so an edit that
   changes one of them is **refused whole**, naming it, and none of that edit —
   principals and peers included — is applied until the service restarts. The
+  refusal also says whether the restart it points to would work: it runs the same
+  file checks as `muster doctor`'s `config.load` row (the principal table, trust
+  roots, `sessionEnv`, the peer list), and ends either "the file passes start-up
+  validation" or "a restart would fail: <the start-up error>". Read that before
+  restarting a service that a process manager keeps alive: a file that does not
+  start is restarted again every few seconds. It is the file's answer only; a
+  `defaultRuntime` the machine does not run is still found out at the start. The
   bind addresses and the state directory come from the environment, so no edit
   to this file can change them.
 - The owner-signed machine list is re-read too (#354). The service watches the
@@ -387,6 +394,9 @@ to it.
   running service has it.
 - `config.reload` reads a status file the service writes in `FLEET_STATE_DIR`.
   With no state directory the reload still works; the row says it cannot compare.
+  The service rewrites that file whole when it starts (`appliedReason: "start"`),
+  naming the file it started with and the machine list it loaded, so a restart
+  clears a refusal the restart resolved; a reload after that moves it on.
 
 ## Windows
 

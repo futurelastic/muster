@@ -703,6 +703,10 @@ func (s *Service) publishLabels(machine fleet.MachineId, sess fleet.Session) {
 	if ref.Machine == "" {
 		ref.Machine = machine
 	}
+	// The labels frame names the session and not its directory, and can be
+	// published before the driver's own session.created arrives. This is a
+	// whole session, so say where it is.
+	s.events.observeSessions(machine, []fleet.Session{sess})
 	s.events.publish(fleet.Event{
 		Machine: machine,
 		Kind:    fleet.EventSessionLabels,
@@ -732,6 +736,10 @@ func (s *Service) callList(ctx context.Context, req fleet.Request, machine fleet
 	now := time.Now()
 
 	if err == nil {
+		// Every listing is a sighting of (machine, id, cwd), whatever filter it
+		// was asked with; the event plane needs the directory to apply a
+		// cwdPrefix to frames that do not carry one (cwdindex.go).
+		s.events.observeSessions(machine, col.Items())
 		if len(col.Sources()) > 0 {
 			return col.Items(), col.Sources()
 		}
