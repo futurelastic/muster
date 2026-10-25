@@ -232,7 +232,10 @@ func TestStartupChecks_DoctorAndReloadAgreeOnAMachineListThatMustVerify(t *testi
 	r.rl.check("test")
 
 	refusal := checkReloadStatus(r.dir, r.path)
-	for _, want := range []string{"machineList", "a restart would fail", "does not verify", "no such file"} {
+	// The reason is the list file that is not there, named by its file name: the
+	// operating system's own wording for a missing file differs by platform.
+	gone := filepath.Base(l.path) + ".gone"
+	for _, want := range []string{"machineList", "a restart would fail", "does not verify", gone} {
 		if !strings.Contains(refusal.Detail, want) {
 			t.Errorf("the refusal %q does not say %q", refusal.Detail, want)
 		}
@@ -241,7 +244,7 @@ func TestStartupChecks_DoctorAndReloadAgreeOnAMachineListThatMustVerify(t *testi
 	rows := runChecks(context.Background(), testDoctorEnv(map[string]string{
 		"FLEET_CONFIG": r.path, "FLEET_RUNTIME": "stub", "FLEET_STATE_DIR": r.dir}))
 	row := rowByID(t, rows, "config.load")
-	if row.Status != statusFail || !strings.Contains(row.Detail, "does not verify") || !strings.Contains(row.Detail, "no such file") {
+	if row.Status != statusFail || !strings.Contains(row.Detail, "does not verify") || !strings.Contains(row.Detail, gone) {
 		t.Errorf("config.load = %+v, want a fail naming the list", row)
 	}
 }
