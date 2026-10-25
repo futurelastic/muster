@@ -431,6 +431,18 @@ func (d *peerFeedDriver) Subscribe(context.Context, fleet.Request, driver.Subscr
 	return &feedStream{events: d.feed}, nil
 }
 
+// attachedFilters is the filter of every subscriber currently attached to h — on
+// a peer, one per stream a machine asked it for.
+func attachedFilters(h *hub) []driver.SubscribeFilter {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]driver.SubscribeFilter, 0, len(h.subs))
+	for _, s := range h.subs {
+		out = append(out, s.filter)
+	}
+	return out
+}
+
 // sseFrames reads the data frames of an event stream off the wire.
 func sseFrames(t *testing.T, resp *http.Response) <-chan fleet.Event {
 	t.Helper()
@@ -525,13 +537,26 @@ func TestCwdPrefixOverARealPeerHop(t *testing.T) {
 	prefixed := open("?cwdPrefix=" + prefixDir)
 	everything := open("")
 
-	// Both streams attached here, and this side's pump attached to the peer.
+	// Both streams attached here, and this side's pump attached to the peer —
+	// the pump the two of them need TOGETHER. The unfiltered stream widens what
+	// the peer is asked for, which replaces the pump the first one started: the
+	// peer is first asked for the prefix, then for everything, and a frame it
+	// publishes while the old subscription is going and the wide one is not yet
+	// there reaches nobody (it is not replayed to a subscription that opens
+	// later). So "some subscriber is attached on the peer" is not enough; the
+	// only one left must be the wide one.
+	settled := func() bool {
+		f := attachedFilters(peerSvc.events)
+		return svc.events.subscriberCount() == 2 &&
+			len(f) == 1 && f[0].CwdPrefix == "" && len(f[0].Sessions) == 0
+	}
 	deadline := time.Now().Add(5 * time.Second)
-	for (svc.events.subscriberCount() < 2 || peerSvc.events.subscriberCount() == 0) && time.Now().Before(deadline) {
+	for !settled() && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if svc.events.subscriberCount() < 2 || peerSvc.events.subscriberCount() == 0 {
-		t.Fatal("the streams did not attach in time")
+	if !settled() {
+		t.Fatalf("the streams did not attach in time: %d here, peer holds %+v",
+			svc.events.subscriberCount(), attachedFilters(peerSvc.events))
 	}
 
 	for _, ev := range []fleet.Event{
