@@ -31,7 +31,8 @@ import (
 // passes Agent on every message it sends (the runtime chooses the agent per
 // message, so the create body alone pins nothing — muster #362) and refuses one
 // the runtime does not list; it carries Model in the create body and reports it
-// unresolved; and it REFUSES rather than silently drops Effort, McpConfig,
+// unresolved until a turn's own record names the model it ran on (muster #373);
+// and it REFUSES rather than silently drops Effort, McpConfig,
 // Settings (muster #247), Resume and ConversationId (muster #224) — none of which
 // this substrate has an honest mechanism for. ContextRef is honoured (muster
 // #371): the file is read here, before anything starts, and its text rides on
@@ -68,7 +69,7 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 				SessionRef: ref, Cwd: spec.Cwd, Agent: fleet.AgentId(info.agent),
 				// By now a turn may have run; its record is the one thing that can
 				// resolve the agent pin (muster #362).
-				Pins: pinOutcomeForAgent(spec, d.agentEvidenceFor(ctx, info, ref.ID, string(spec.Agent))),
+				Pins: pinOutcomeForAgent(spec, d.turnEvidenceFor(ctx, info, ref.ID, spec)),
 			}, nil
 		}
 		wait, leader := d.idemBegin(key)
@@ -254,7 +255,7 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 	// No turn has run yet, so there is nothing to resolve the agent pin from.
 	return fleet.Session{
 		SessionRef: ref, Cwd: spec.Cwd, Agent: fleet.AgentId(sess.Agent),
-		Pins: pinOutcomeForAgent(spec, agentEvidence{}),
+		Pins: pinOutcomeForAgent(spec, turnEvidence{}),
 	}, nil
 }
 
@@ -392,21 +393,22 @@ func (d *Driver) idemEnd(key string) {
 // pinOutcomeForAgent reports what this driver actually knows about the two
 // pins it accepts (muster #84).
 //
-// Agent is resolved only from the runtime's own record of a turn that ran
-// (muster #362; agents.go). The create response is NOT that record: the runtime
-// echoes back whatever name it was given, listed or not, and a message sent
-// without an agent runs as the default one — so an echo that matched the request
-// proved nothing, and reading it as "honoured" was the defect this replaced.
-// Until a turn's record names the agent the pin is unresolved, with the reason;
-// once it does, honoured says whether the turn ran as the agent that was asked
-// for, and applied names the one it did run as.
+// Both are resolved only from the runtime's own record of a turn that ran
+// (muster #362 for the agent, #373 for the model; agents.go). The create response
+// is NOT that record: the runtime echoes back whatever agent name it was given,
+// listed or not, and a message sent without an agent runs as the default one — so
+// an echo that matched the request proved nothing, and reading it as "honoured"
+// was the defect this replaced. The same response names no model at all. Until a
+// turn's record names the agent (or the model) the pin is unresolved, with the
+// reason; once it does, honoured says whether the turn ran as the agent that was
+// asked for (or on the model that was), and applied names the one it did run as —
+// the model as "provider/model", the spelling a create asks for.
 //
-// A requested model is still reported unresolved: nothing in the create
-// response names it, and this driver does not yet read it back from the same
-// turn record (those messages do carry the model a turn ran on — muster #373),
-// so it asserts no match it never confirmed. Effort refuses at Create rather than
-// reaching here at all (§2.1), so it never appears.
-func pinOutcomeForAgent(spec fleet.SessionSpec, ev agentEvidence) *fleet.PinOutcome {
+// The two resolve apart: an assistant message that names the model and not the
+// agent resolves the model pin and leaves the agent pin unresolved, and the other
+// way round. Effort refuses at Create rather than reaching here at all (§2.1), so
+// it never appears.
+func pinOutcomeForAgent(spec fleet.SessionSpec, ev turnEvidence) *fleet.PinOutcome {
 	out := &fleet.PinOutcome{}
 	if spec.Agent != "" {
 		if ev.ran {
@@ -417,8 +419,12 @@ func pinOutcomeForAgent(spec fleet.SessionSpec, ev agentEvidence) *fleet.PinOutc
 		}
 	}
 	if spec.Model != "" {
-		out.Model = fleet.PinUnresolved(spec.Model,
-			"this driver's create response does not name which model the runtime is using")
+		if ev.modelRan {
+			out.Model = fleet.PinResolved(spec.Model, ev.modelUsed, spec.Model == ev.modelUsed, fleet.PinObserved,
+				"the runtime's own record of the session's newest assistant message names the provider and model that turn ran on")
+		} else {
+			out.Model = fleet.PinUnresolved(spec.Model, pinModelUnresolvedEvidence)
+		}
 	}
 	if out.Agent == nil && out.Model == nil {
 		return nil

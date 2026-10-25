@@ -805,6 +805,17 @@ repeat of the same create (same `Idempotency-Key`) after a turn has run, read
 from the runtime's own record of its newest assistant message: `false` is a turn
 that ran as another agent — the default one — and is never reported as honoured.
 
+**The `model` pin on `opencode` resolves the same way** (muster #373). The model
+is carried in the create body and applies to every turn, but the create response
+never names the model in use, so `pins.model.honoured` is `null` on the create
+response, with the reason. After a turn has run, a repeat of the same create reads
+the same newest assistant message: `honoured` is `true` when that turn ran on the
+model you asked for and `false` when it ran on another one (a fallback to the
+runtime's default is never reported as honoured), `applied` names it as
+`provider/model` — the spelling a create asks for — and `source` is `"observed"`.
+A record that names only one half of a model, or no model at all, leaves the pin
+`null`. The `agent` and `model` pins resolve independently of each other.
+
 **The `Idempotency-Key` header is required**, and a create without one is
 rejected with `invalid` before any driver is consulted. A federated create that
 times out and gets retried without one produces two agents in the same working
