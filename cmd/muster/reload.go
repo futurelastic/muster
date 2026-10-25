@@ -584,12 +584,13 @@ func (rl *reloader) apply(raw []byte, hash, reason string, cfgChanged bool, list
 
 // startupCheck is what a restart onto cfg would meet in the file itself: the
 // checks `muster doctor`'s config.load row runs (the principal table, then
-// validateConfigExtras — trust roots and sessionEnv) and the peer list, each of
-// which is a log.Fatalf at start. cfg has already been through parseConfig.
+// validateConfigExtras — every start-up check that needs only the file and the
+// environment, which main.go calls too) and the peer list, each of which stops
+// the start. cfg has already been through parseConfig.
 //
 // It is the doctor's answer, not a second opinion: settings that only the
-// running process can judge (is defaultRuntime a driver this machine enabled)
-// are not in it, and neither does doctor claim them.
+// running process can judge (is the default runtime's driver registered right
+// now) are not in it, and neither does doctor claim them (muster #374).
 func startupCheck(cfg *fileConfig, getenv func(string) string) error {
 	if _, err := cfg.principals(); err != nil {
 		return err
