@@ -1,6 +1,7 @@
 package opencode
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -171,6 +172,15 @@ func runFakeOpencode(args []string) {
 			_ = os.Remove(storeFile)
 			writeJSON(w, true)
 		case path == "/session/"+sessionID+"/prompt_async":
+			// Every body is kept, one per line, so a test can read what a session
+			// sent — in particular which agent a message named (muster #362).
+			if raw, err := io.ReadAll(r.Body); err == nil {
+				if f, err := os.OpenFile(os.Getenv("XDG_DATA_HOME")+"/fake-prompts.jsonl",
+					os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
+					_, _ = f.Write(append(bytes.TrimSpace(raw), '\n'))
+					_ = f.Close()
+				}
+			}
 			w.WriteHeader(http.StatusNoContent)
 		case path == "/session/"+sessionID+"/abort":
 			writeJSON(w, true)

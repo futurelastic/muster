@@ -790,6 +790,21 @@ on most drivers today is never — a driver that passes a pin on a command line
 has no channel back from the runtime to confirm it, so `honoured: null` is
 the honest, standing answer, not a sign of anything wrong).
 
+**On the `opencode` runtime the `agent` pin is applied per message, and it is
+checked** (muster #362). That runtime chooses the agent for each message, not
+for the session, and its create response echoes whatever name it was given —
+listed or not — so neither the echo nor a `201` says which agent runs. The
+driver therefore names the session's agent on every message it sends (the opening
+prompt and each `input`), and refuses an `agent` the runtime does not list
+(`invalid`, naming the closest listed ones) the way it refuses a `model` outside
+the catalog. The list is read for the session's own working directory, so a
+project agent defined under it counts. `pins.agent.honoured` is `null` on the
+create response, with the reason. It becomes `true` or `false`
+(`source: "observed"`, `applied` naming the agent the turn ran as) only on a
+repeat of the same create (same `Idempotency-Key`) after a turn has run, read
+from the runtime's own record of its newest assistant message: `false` is a turn
+that ran as another agent — the default one — and is never reported as honoured.
+
 **The `Idempotency-Key` header is required**, and a create without one is
 rejected with `invalid` before any driver is consulted. A federated create that
 times out and gets retried without one produces two agents in the same working

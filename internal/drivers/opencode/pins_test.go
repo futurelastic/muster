@@ -7,11 +7,12 @@ import (
 	fleet "github.com/futurelastic/muster"
 )
 
-// muster #84: unlike the tmux driver, this substrate's own create
-// response names the agent it started with, so a requested agent is
-// genuinely observable rather than only assumed — and Session.Agent
-// reports that observed value, never an echo of the request.
-func TestCreate_PinsReportsObservedAgent(t *testing.T) {
+// muster #84, #362: this substrate's create response echoes the agent name it
+// was given, listed or not, and a message sent without an agent runs as the
+// default one — so the echo is not evidence of anything. A create that asked
+// for an agent is therefore reported unresolved, with the reason, and never
+// honoured on the strength of the echo alone.
+func TestCreate_PinsAgentIsUnresolvedUntilATurnShowsIt(t *testing.T) {
 	f := newFakeServer(t)
 	d := newTestDriver(t, f)
 
@@ -27,17 +28,14 @@ func TestCreate_PinsReportsObservedAgent(t *testing.T) {
 	if a.Requested != "coder" {
 		t.Errorf("Requested = %q, want coder", a.Requested)
 	}
-	if a.Honoured == nil || !*a.Honoured {
-		t.Errorf("Honoured = %v, want true — the fake server echoes the same agent back", a.Honoured)
+	if a.Honoured != nil {
+		t.Errorf("Honoured = %v, want nil — the fake server echoes the same agent back, which proves nothing", *a.Honoured)
 	}
-	if a.Source != fleet.PinObserved {
-		t.Errorf("Source = %q, want observed", a.Source)
+	if a.Source != "" || a.Applied != "" {
+		t.Errorf("Source = %q, Applied = %q, want both empty while unresolved", a.Source, a.Applied)
 	}
-	if a.Applied != "coder" {
-		t.Errorf("Applied = %q, want coder", a.Applied)
-	}
-	if sess.Agent != "coder" {
-		t.Errorf("Session.Agent = %q, want the observed applied value coder", sess.Agent)
+	if a.Evidence == "" {
+		t.Error("Evidence is empty; an unresolved pin must say why")
 	}
 }
 

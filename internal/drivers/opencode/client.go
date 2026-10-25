@@ -96,6 +96,14 @@ type wireMessageInfo struct {
 	ProviderID string `json:"providerID"`
 	ModelID    string `json:"modelID"`
 
+	// Agent is the agent a message was handled by, as the runtime resolved it
+	// (muster #362). On an assistant message it is the agent the turn RAN as —
+	// the only record of that this substrate keeps, and so the only evidence an
+	// agent pin was honoured: the create response echoes whatever name it was
+	// given, and a message sent without an agent runs as the default one.
+	// Empty is a runtime that does not name it, which is "no evidence", not "none".
+	Agent string `json:"agent"`
+
 	// Cost and Tokens are the runtime's own account of what the message spent
 	// (muster #285). Pointers: absent on the wire is "the runtime said nothing",
 	// which usage.go keeps apart from a reported zero. For a message that took

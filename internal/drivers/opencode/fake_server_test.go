@@ -72,6 +72,21 @@ type fakeServer struct {
 
 	requests []recordedRequest
 
+	// agents are the agents GET /agent lists on every request; projectAgents are
+	// the ones it adds only when the request names that directory, the way the
+	// runtime lists a project's own agents (muster #362). Both nil makes the
+	// endpoint 404, like a runtime without it. agentsStatus, when set, makes it
+	// answer that status instead, and agentsBody, when set, is served as the 200
+	// body instead of the list.
+	agents        []string
+	projectAgents map[string][]string
+	agentsStatus  int
+	agentsBody    string
+
+	// prompts records every prompt_async that reached the runtime, in order
+	// (muster #362): which agent each one named, if any.
+	prompts []recordedPrompt
+
 	// bus is the GET /event side (muster #284): the open connections, so a
 	// test can publish to all of them or cut them, and a status that makes the
 	// endpoint answer something other than a stream.
@@ -87,7 +102,17 @@ type busConn struct {
 }
 
 type recordedRequest struct {
-	method, path string
+	method, path, query string
+}
+
+// recordedPrompt is one prompt_async the fake received: the session it was for,
+// the agent it named (hasAgent tells an absent field from an empty one) and its
+// text.
+type recordedPrompt struct {
+	session  string
+	agent    string
+	hasAgent bool
+	text     string
 }
 
 // recordedReply is one permission reply the fake received: the ask it named and
@@ -116,7 +141,7 @@ func (f *fakeServer) baseURL() string { return f.srv.URL }
 
 func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
-	f.requests = append(f.requests, recordedRequest{r.Method, r.URL.Path})
+	f.requests = append(f.requests, recordedRequest{method: r.Method, path: r.URL.Path, query: r.URL.RawQuery})
 	f.mu.Unlock()
 
 	user, pass, ok := r.BasicAuth()
@@ -134,6 +159,8 @@ func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 		f.handleCreate(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/config/providers":
 		f.handleProviders(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/agent":
+		f.handleAgents(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/permission":
 		f.handlePermission(w, r)
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/permission/") && strings.HasSuffix(r.URL.Path, "/reply"):
@@ -339,14 +366,74 @@ func (f *fakeServer) handleDelete(w http.ResponseWriter, r *http.Request) {
 
 func (f *fakeServer) handlePromptAsync(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/session/"), "/prompt_async")
+	var body struct {
+		Agent *string `json:"agent"`
+		Parts []struct {
+			Text string `json:"text"`
+		} `json:"parts"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
 	f.mu.Lock()
 	_, ok := f.sessions[id]
+	if ok {
+		p := recordedPrompt{session: id, hasAgent: body.Agent != nil}
+		if body.Agent != nil {
+			p.agent = *body.Agent
+		}
+		if len(body.Parts) > 0 {
+			p.text = body.Parts[0].Text
+		}
+		f.prompts = append(f.prompts, p)
+	}
 	f.mu.Unlock()
 	if !ok {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// promptsSnapshot is the prompts the fake has received, in order.
+func (f *fakeServer) promptsSnapshot() []recordedPrompt {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]recordedPrompt(nil), f.prompts...)
+}
+
+// handleAgents serves GET /agent in the runtime's shape: a list of objects, each
+// with at least a name. The project's own agents are listed only for a request
+// that names the project's directory, as the runtime does — measured: an
+// undirected listing leaves them out.
+func (f *fakeServer) handleAgents(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	status, body := f.agentsStatus, f.agentsBody
+	names := append([]string(nil), f.agents...)
+	project := f.projectAgents[r.URL.Query().Get("directory")]
+	none := f.agents == nil && f.projectAgents == nil
+	f.mu.Unlock()
+	if status != 0 {
+		http.Error(w, "forced", status)
+		return
+	}
+	if body != "" {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+		return
+	}
+	if none {
+		http.NotFound(w, r)
+		return
+	}
+	type agent struct {
+		Name string `json:"name"`
+		Mode string `json:"mode"`
+	}
+	out := []agent{}
+	for _, n := range append(names, project...) {
+		out = append(out, agent{Name: n, Mode: "primary"})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
 }
 
 func (f *fakeServer) handleAbort(w http.ResponseWriter, r *http.Request) {
