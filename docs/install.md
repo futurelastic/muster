@@ -365,14 +365,19 @@ to it.
   changes one of them is **refused whole**, naming it, and none of that edit —
   principals and peers included — is applied until the service restarts. The
   refusal also says whether the restart it points to would work: it runs the same
-  file checks as `muster doctor`'s `config.load` row (the principal table, trust
-  roots, `sessionEnv`, the peer list), and ends either "the file passes start-up
+  file checks as `muster doctor`'s `config.load` row and as the start itself (the
+  principal table, trust roots, `sessionEnv`, a `defaultRuntime` the machine does
+  not run, `maxInputBytes`, the retention days, a `machineList` in mode `only`
+  that does not verify, the peer list), and ends either "the file passes start-up
   validation" or "a restart would fail: <the start-up error>". Read that before
   restarting a service that a process manager keeps alive: a file that does not
-  start is restarted again every few seconds. It is the file's answer only; a
-  `defaultRuntime` the machine does not run is still found out at the start. The
-  bind addresses and the state directory come from the environment, so no edit
-  to this file can change them.
+  start is restarted again every few seconds. The three read one function, so
+  they cannot disagree about a setting they all check (#374). It is the file's
+  answer (and the environment's) only: whether the default runtime's driver is
+  up at that moment (opencode enabled but its binary missing, say) only the
+  running process can say, and is still found out at the start. The bind
+  addresses and the state directory come from the environment, so no edit to
+  this file can change them.
 - The owner-signed machine list is re-read too (#354). The service watches the
   list file as well as the config, and applies a new list the same way it applies
   a peer edit: build every new peer, then swap. A list replaces the one in force

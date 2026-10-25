@@ -423,6 +423,17 @@ func main() {
 		log.Fatal("muster: FLEET_TOKEN must be set — there is no unauthenticated mode (api-http.md §5)")
 	}
 
+	// Every start-up check that depends only on the file and the environment, in
+	// the one function `muster doctor` and a reload's restart-only refusal call
+	// too (muster #374), so the three cannot disagree about whether this file
+	// starts: trust roots, sessionEnv, defaultRuntime naming a runtime this machine
+	// runs, maxInputBytes, the retention days, a machine list that must verify.
+	// What only the running process can judge (is the default runtime's driver
+	// registered right now) stays below, where the drivers are.
+	if err := validateConfigExtras(cfgFile, os.Getenv); err != nil {
+		log.Fatalf("muster: %v", err)
+	}
+
 	// Durable state (§7.3, §10, §12). Nil is a valid configuration; a
 	// configured directory that cannot be opened is not, because starting
 	// anyway would silently be the in-memory behaviour this replaces.
@@ -454,10 +465,7 @@ func main() {
 	// multiplexer driver and, since #280, the opencode driver).
 	var sessionEnvEntries []sessionenv.Entry
 	if cfgFile != nil && len(cfgFile.SessionEnv) > 0 {
-		sessionEnvEntries = cfgFile.sessionEnv()
-		if err := sessionenv.Validate(sessionEnvEntries, knownRuntimeIDs()); err != nil {
-			log.Fatalf("muster: %v", err)
-		}
+		sessionEnvEntries = cfgFile.sessionEnv() // validated by validateConfigExtras above
 	}
 
 	// --- local runtime -------------------------------------------------
@@ -560,11 +568,7 @@ func main() {
 		if cfgFile != nil && len(trustRoots) == 0 {
 			trustRoots = cfgFile.TrustRoots
 		}
-		for _, r := range trustRoots {
-			if !filepath.IsAbs(r) {
-				log.Fatalf("muster: trust root %q must be an absolute path", r)
-			}
-		}
+		// Each root is absolute: validateConfigExtras refused the start otherwise.
 		if len(trustRoots) > 0 {
 			trustStatePath := os.Getenv("FLEET_TRUST_STATE_PATH")
 			home, homeErr := os.UserHomeDir()
@@ -789,17 +793,13 @@ func main() {
 	if err := svc.SetDeliveryModuleRoutes(deliveryModules.Enabled); err != nil {
 		log.Fatalf("muster: %v", err)
 	}
+	// A negative number of days was refused above (validateConfigExtras); zero is
+	// "not set" and leaves the default in force.
 	if cfgFile != nil && cfgFile.ClosedRetentionDays != 0 {
-		if cfgFile.ClosedRetentionDays < 0 {
-			log.Fatalf("muster: closedRetentionDays must be positive, got %d", cfgFile.ClosedRetentionDays)
-		}
 		svc.SetClosedRetention(time.Duration(cfgFile.ClosedRetentionDays) * 24 * time.Hour)
 		log.Printf("muster: closed-session records kept %d days (#179)", cfgFile.ClosedRetentionDays)
 	}
 	if cfgFile != nil && cfgFile.InputAuditRetentionDays != 0 {
-		if cfgFile.InputAuditRetentionDays < 0 {
-			log.Fatalf("muster: inputAuditRetentionDays must be positive, got %d", cfgFile.InputAuditRetentionDays)
-		}
 		svc.SetInputAuditRetention(time.Duration(cfgFile.InputAuditRetentionDays) * 24 * time.Hour)
 		log.Printf("muster: input audit records kept %d days (#330)", cfgFile.InputAuditRetentionDays)
 	}
@@ -826,6 +826,10 @@ func main() {
 			}
 		}
 	}
+	// validateConfigExtras already refused a list that must verify and does not.
+	// This outcome is a second read of the same file, kept because the peers below
+	// are built from it; it differs from the first only if the file changed
+	// between the two, and then it is this one the service would run on.
 	if err := listOut.fatal(); err != nil {
 		log.Fatalf("muster: %v", err)
 	}

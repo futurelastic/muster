@@ -496,6 +496,21 @@ const maxInputBytesCeiling = 1 << 20 // 1 MiB
 // bound it broke, following this repo's posture of refusing loudly rather
 // than substituting a default (#114's own rationale for the limit itself).
 func (s *Service) SetMaxInputBytes(n int) error {
+	if err := ValidateMaxInputBytes(n); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.maxInputBytes = n
+	s.mu.Unlock()
+	return nil
+}
+
+// ValidateMaxInputBytes is the range SetMaxInputBytes enforces, on its own: what
+// a file that sets maxInputBytes is checked against without a Service to set it
+// on. `muster doctor` and a live reload's restart-only refusal call it so they
+// say what the start will say (muster #374); SetMaxInputBytes calls it too, so
+// there is one rule and not a copy of it.
+func ValidateMaxInputBytes(n int) error {
 	if n <= 0 {
 		return fmt.Errorf("service: maxInputBytes must be positive, got %d (#130)", n)
 	}
@@ -505,9 +520,6 @@ func (s *Service) SetMaxInputBytes(n int) error {
 				"detailed content belongs in a file the agent reads deliberately (#128), not a composer",
 			n, maxInputBytesCeiling)
 	}
-	s.mu.Lock()
-	s.maxInputBytes = n
-	s.mu.Unlock()
 	return nil
 }
 

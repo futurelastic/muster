@@ -562,17 +562,40 @@ func (c *checker) add(r doctorRow) {
 
 func (c *checker) last() doctorRow { return c.rows[len(c.rows)-1] }
 
-// validateConfigExtras repeats the startup checks main.go makes on the rest of
-// the file — each of them a log.Fatalf there, so each a fail here.
+// validateConfigExtras is every start-up check that depends only on the file and
+// the environment, apart from the two that already have a function of their own
+// (cfg.principals and resolvePeers). Each is a refusal to start in main.go, so
+// each is a fail in `muster doctor`'s config.load row and a "a restart would
+// fail" in a reload's restart-only refusal.
+//
+// It is ONE function that all three call (muster #374). The checks used to be
+// written out in main.go and repeated here, and the copies drifted: a file with
+// closedRetentionDays: -1 passed config.load and the restart then stopped on it.
+// Adding a start-up check means adding it here, not beside the code that uses
+// the setting.
+//
+// What it does not answer is what only the running process can: whether the
+// default runtime's driver is registered right now (opencode enabled but its
+// binary missing, say). That stays at the start, in SetDefaultRuntime, and
+// docs/install.md says so. cfg may be nil (no FLEET_CONFIG): the environment's
+// own settings are still checked. The error is safe to show: a sessionEnv
+// fromFile path is replaced.
 func validateConfigExtras(cfg *fileConfig, getenv func(string) string) error {
-	roots := splitList(getenv("FLEET_TRUST_ROOTS"))
-	if len(roots) == 0 {
-		roots = cfg.TrustRoots
-	}
-	for _, r := range roots {
-		if !filepath.IsAbs(r) {
-			return errors.New("a trust root is not an absolute path")
+	// Trust roots are the tmux driver's: a start with another primary runtime does
+	// not read them, and so does not stop on one that is not absolute.
+	if name, ok := primaryRuntime(getenv); ok && name == runtimeTmux {
+		roots := splitList(getenv("FLEET_TRUST_ROOTS"))
+		if len(roots) == 0 && cfg != nil {
+			roots = cfg.TrustRoots
 		}
+		for _, r := range roots {
+			if !filepath.IsAbs(r) {
+				return fmt.Errorf("trust root %q must be an absolute path", r)
+			}
+		}
+	}
+	if cfg == nil {
+		return nil
 	}
 	if len(cfg.SessionEnv) > 0 {
 		entries := cfg.sessionEnv()
@@ -584,7 +607,50 @@ func validateConfigExtras(cfg *fileConfig, getenv func(string) string) error {
 			return errors.New(msg)
 		}
 	}
-	return nil
+	// The default runtime must be one this machine runs. Whether its driver is up
+	// is the start's to say (above).
+	if cfg.DefaultRuntime != "" {
+		if ids, ok := enabledLocalRuntimes(getenv); ok && !containsRuntime(ids, fleet.RuntimeId(cfg.DefaultRuntime)) {
+			have := make([]string, len(ids))
+			for i, id := range ids {
+				have[i] = string(id)
+			}
+			if len(have) == 0 {
+				have = []string{"none"}
+			}
+			return fmt.Errorf("defaultRuntime %q is not a runtime this machine runs (it runs: %s)",
+				cfg.DefaultRuntime, strings.Join(have, ", "))
+		}
+	}
+	// Zero is "not set"; the setter's own range decides anything else.
+	if cfg.MaxInputBytes != 0 {
+		if err := service.ValidateMaxInputBytes(cfg.MaxInputBytes); err != nil {
+			return err
+		}
+	}
+	if cfg.ClosedRetentionDays < 0 {
+		return fmt.Errorf("closedRetentionDays must be positive, got %d", cfg.ClosedRetentionDays)
+	}
+	if cfg.InputAuditRetentionDays < 0 {
+		return fmt.Errorf("inputAuditRetentionDays must be positive, got %d", cfg.InputAuditRetentionDays)
+	}
+	// A machine list that is the only source of peers and does not verify stops
+	// the start. In prefer and shadow mode it is reported and the start goes on, so
+	// it is not a failure here (the machine-list row says it).
+	self := fleet.MachineId(getenv("FLEET_MACHINE"))
+	if self == "" {
+		self = "local"
+	}
+	return loadMachineList(cfg, getenv("FLEET_STATE_DIR"), self).fatal()
+}
+
+func containsRuntime(ids []fleet.RuntimeId, id fleet.RuntimeId) bool {
+	for _, have := range ids {
+		if have == id {
+			return true
+		}
+	}
+	return false
 }
 
 type doctorPeer struct {
