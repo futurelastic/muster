@@ -73,6 +73,34 @@ func TestContextRef_RidesOnTheOpeningPromptAndOnEveryLaterOne(t *testing.T) {
 	}
 }
 
+// The agent pin (muster #362) and the context (muster #371) are both per-prompt
+// fields on the same call; neither may displace the other.
+func TestContextRef_AndAnAgentPinRideTogetherOnEveryPrompt(t *testing.T) {
+	f := newFakeServer(t)
+	f.agents = []string{"build", "coder"}
+	d := newTestDriver(t, f)
+	sess, err := createWith(t, d, "k1", fleet.SessionSpec{
+		Name: "both", Agent: "coder", Prompt: "first", ContextRef: writeBrief(t, briefText),
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	send(t, d, sess.SessionRef, "second")
+
+	got := f.promptsFor(sess.ID)
+	if len(got) != 2 {
+		t.Fatalf("the runtime received %d prompts, want 2", len(got))
+	}
+	for i, p := range got {
+		if !p.hasAgent || p.agent != "coder" {
+			t.Errorf("prompt %d: agent = %q (present %v), want coder", i, p.agent, p.hasAgent)
+		}
+		if !p.hasSystem || p.system != briefText {
+			t.Errorf("prompt %d: system = %q (present %v), want the file's text", i, p.system, p.hasSystem)
+		}
+	}
+}
+
 func TestContextRef_AbsentMeansNoSystemField(t *testing.T) {
 	f := newFakeServer(t)
 	d := newTestDriver(t, f)
