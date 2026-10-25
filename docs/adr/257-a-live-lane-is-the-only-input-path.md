@@ -6,6 +6,8 @@ routing table and `TerminalFromAuto` paragraph in ADR 185. Resolves ADR 185's
 "needs ratification" items on the inbox order and on a human relay crossing a
 peer.
 
+> Amended by [368](368-the-launch-prompt-follows-a-live-lane.md): the create-time prompt below is still exempt from `LiveLaneOnly`, but its first attempt is now `auto` and goes through a live lane instead of the terminal.
+
 ## Context
 
 A caller sent `POST …/input` with no `route` and no `submit` to a session whose
@@ -50,7 +52,9 @@ Five rulings, two from the maintainer (direction) and three technical.
   lives in the driver. Which calls are a caller\'s `/input` is known only to the
   service, so it sets `driver.SendOptions.LiveLaneOnly` on every `/input`, never
   from a body and never forwarded to a peer. The create-time prompt, the title
-  sync, `/discard`, `/keys` and `/respond` leave it false and keep the terminal.
+  sync, `/discard`, `/keys` and `/respond` leave it false. Since #368 the
+  create-time prompt is sent as `auto` and a live lane carries it; the others keep
+  the terminal.
 - With `LiveLaneOnly` and a live lane, `route: "terminal"` (from anyone),
   `submit: false`, `resumeIfStranded` and `replaceIfStranded` are refused before
   any write, with a reason naming the lane. Text this driver itself left stranded

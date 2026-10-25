@@ -2394,15 +2394,20 @@ func (d *Driver) State(ctx context.Context, req fleet.Request, ref fleet.Session
 // message containing something like "C-c" is a live hazard; the paste
 // buffer takes bytes and interprets none of them.
 func (d *Driver) Send(ctx context.Context, req fleet.Request, ref fleet.SessionRef, text string, opts driver.SendOptions) (fleet.DeliveryReceipt, error) {
-	receipt, err := d.send(ctx, req, ref, text, opts)
+	var note routeNote
+	receipt, err := d.send(ctx, req, ref, text, opts, &note)
 	// #184: every Send is counted under route.* exactly once, whichever return
 	// below produced it.
 	d.observeRoute(opts.Route, receipt, err)
+	// #368: and logged once, naming its session, so a fallback to the built-in
+	// path can be traced to the session whose send it was.
+	d.logSend(ref, opts.Route, receipt, err, &note)
 	return receipt, err
 }
 
-// send is Send's body; Send only adds the route counters around it.
-func (d *Driver) send(ctx context.Context, req fleet.Request, ref fleet.SessionRef, text string, opts driver.SendOptions) (fleet.DeliveryReceipt, error) {
+// send is Send's body; Send only adds the route counters and the per-send log
+// line around it. note collects why the send took the path it took (#368).
+func (d *Driver) send(ctx context.Context, req fleet.Request, ref fleet.SessionRef, text string, opts driver.SendOptions, note *routeNote) (fleet.DeliveryReceipt, error) {
 	// Terminal path v2 / D4: every composer-touching operation on this
 	// session id is serialised through one lock, acquired before anything
 	// else runs and released on every return from here on
@@ -2626,9 +2631,11 @@ func (d *Driver) send(ctx context.Context, req fleet.Request, ref fleet.SessionR
 	// been written when it hands the send back, so the built-in module below
 	// carries it — for `auto` only; a forced module route is refused instead.
 	if forced, ok := d.moduleRouteChoice(route, opts); ok {
-		if receipt, handled := d.sendViaModule(ctx, req, ref, text, labelled, opts, forced, pinned); handled {
+		if receipt, handled := d.sendViaModule(ctx, req, ref, text, labelled, opts, forced, pinned, note); handled {
 			return receipt, nil
 		}
+	} else {
+		note.path(d.moduleSkipReason(route, opts))
 	}
 
 	// #180: everything above decides about the REQUEST; how the text reaches
@@ -5862,6 +5869,30 @@ func (d *Driver) settleNewSession(req fleet.Request, ref fleet.SessionRef, spec 
 // clearing every strand on retry still shows up in the count — that rate is
 // the load signal, not something to launder away by only counting failures.
 //
+// # Which path carries the first attempt (#368)
+//
+// The first attempt is `auto`: while the session's delivery lane is live at the
+// moment of sending, the lane carries the launch prompt, and the terminal
+// carries it only when the lane is not up. Until #368 both attempts were pinned
+// to the terminal (#184), on the strength of two reasons, and neither survives
+// #257. The prompt is a user turn on the lane exactly as it is in the composer,
+// so authority is not a reason; and `auto` no longer tries the inbox, which is
+// the path whose peer-message authority and unconfirmable write the pin kept
+// the creator's instruction away from. Measured with the pin still in place: the
+// lane read live about a second after create, the prompt was typed into the
+// composer anyway, stranded there, and a person had to discard it and send it
+// again three minutes later.
+//
+// What the pin also bought was a retry that cannot deliver the text twice, and
+// that is kept in two places instead of one. The retry is still pinned to the
+// terminal and still a resume, so it can only finish what the terminal's own
+// stranded record holds. And an attempt the lane carried is never retried at
+// all: if the lane wrote it and could not confirm it, the module ledger already
+// holds that text and would answer a retry "not sent again" without writing
+// anything, so retrying could only restate the first answer. The prompt is
+// resolved unknown with the lane's own reason instead, for a person to read
+// the session's transcript.
+//
 // # What still reaches #11 unchanged, and what does not
 //
 // noteStranded's record lives in d.stranded, which #11 already tracks as
@@ -5894,12 +5925,12 @@ func (d *Driver) settleNewSession(req fleet.Request, ref fleet.SessionRef, spec 
 // afterwards "did this happen, how often" — which is exactly the shape #9
 // describes wanting and not having.
 func (d *Driver) deliverInitialPrompt(ctx context.Context, req fleet.Request, ref fleet.SessionRef, prompt string) {
-	// #184: the create-time prompt is the creator's launch instruction, not a
-	// peer's message, so it is pinned to the terminal — on the first attempt
-	// AND the retry. That is also what makes the retry below safe: it can only
-	// resume something the terminal path itself stranded, never re-send text the
-	// inbox already put in front of the receiver.
-	receipt, err := d.Send(ctx, req, ref, prompt, driver.SendOptions{Submit: true, Route: fleet.RouteTerminal})
+	// #368: `auto`, so a lane that is live right now carries the launch prompt
+	// and the terminal does only when it is not (see "Which path carries the
+	// first attempt" above). LiveLaneOnly stays false on purpose (#257): a lane
+	// that declines before it wrote anything hands the prompt to the terminal
+	// rather than refusing a creator's launch instruction.
+	receipt, err := d.Send(ctx, req, ref, prompt, driver.SendOptions{Submit: true, Route: fleet.RouteAuto})
 	if err != nil {
 		// A transport-level error Send itself already wraps and named. #86:
 		// resolved as unknown, not refused — nothing declined this delivery,
@@ -5920,7 +5951,23 @@ func (d *Driver) deliverInitialPrompt(ctx context.Context, req fleet.Request, re
 		return
 	}
 
+	if module := receipt.ModuleOf(); module != "" {
+		// #368: the lane wrote the prompt and could not confirm it. Nothing is
+		// in the composer to resume, and the module ledger holds this text, so a
+		// second Send would write nothing and answer what this one already did.
+		// Resolve it with the lane's own words and stop — never a retry that
+		// could be read as a second delivery.
+		d.counters.incr(counterInitialPromptLaneUnconfirmed)
+		log.Printf("tmux: initial prompt written to delivery module %q's lane and not confirmed session=%s machine=%s",
+			module, ref.ID, d.machine)
+		d.notePromptDelivered(ref.ID, fleet.OutcomeUnknown, receipt.Reason)
+		return
+	}
+
 	d.counters.incr(counterInitialPromptRetried)
+	// The retry is pinned to the terminal, and is a resume: composer-shaped, so
+	// no lane is ever offered it, and it can only finish what the terminal's own
+	// stranded record holds (#184's reason for the pin, kept here).
 	retry, err := d.Send(ctx, req, ref, prompt, driver.SendOptions{Submit: true, ResumeIfStranded: true, Route: fleet.RouteTerminal})
 	// #101: the resume path used to report `submitted` unconditionally, which
 	// is why this compared against it. It now confirms the submit the same

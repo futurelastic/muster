@@ -1,6 +1,8 @@
 # 184 — route a send by who is sending it, and never let two paths carry one message
 
 > Superseded in part by [257](257-a-live-lane-is-the-only-input-path.md): a human relay's `auto` is no longer rewritten to `terminal` on the entering machine, and `auto` no longer tries the inbox.
+>
+> Superseded in part by [368](368-the-launch-prompt-follows-a-live-lane.md): the create-time prompt is no longer pinned to the terminal on its first attempt (it is `auto`, so a live delivery lane carries it); its retry is still pinned, and a launch prompt a lane carried is never retried.
 
 **Issue:** #184
 **Status:** decided and ratified (#193, 2026-09-24); each of the six choices that

@@ -332,11 +332,25 @@ func (d *Driver) moduleRouteChoice(route fleet.Route, opts driver.SendOptions) (
 	return "", route == fleet.RouteAuto && composerFree
 }
 
+// moduleSkipReason says why a send was not offered to a module at all (#368): the
+// reason the per-send log gives for a built-in path that was never a fallback.
+// It mirrors moduleRouteChoice, case for case.
+func (d *Driver) moduleSkipReason(route fleet.Route, opts driver.SendOptions) string {
+	switch {
+	case d.mods == nil:
+		return "no delivery module is enabled on this machine"
+	case route != fleet.RouteAuto:
+		return fmt.Sprintf("route %q was requested, and only auto is offered to a lane", string(route))
+	default:
+		return "the send names the composer (submit:false, resumeIfStranded or replaceIfStranded), which a lane does not have"
+	}
+}
+
 // sendViaModule is Send's module step, run after the inbox and before the
 // built-in path. handled=false means the built-in path carries this send:
 // nothing was written. text is the caller's sanitised text (the ledger's key is
 // computed from it, as the inbox's is); labelled is what the module receives.
-func (d *Driver) sendViaModule(ctx context.Context, req fleet.Request, ref fleet.SessionRef, text, labelled string, opts driver.SendOptions, forced, pinned string) (fleet.DeliveryReceipt, bool) {
+func (d *Driver) sendViaModule(ctx context.Context, req fleet.Request, ref fleet.SessionRef, text, labelled string, opts driver.SendOptions, forced, pinned string, note *routeNote) (fleet.DeliveryReceipt, bool) {
 	h := d.mods
 	refuse := func(module, why string) fleet.DeliveryReceipt {
 		return fleet.DeliveryReceipt{
@@ -368,6 +382,7 @@ func (d *Driver) sendViaModule(ctx context.Context, req fleet.Request, ref fleet
 					"through the lane. Clear the composer with discard (expect) and send again. Nothing was written", pinned),
 			}, true
 		}
+		note.fellBack("an earlier terminal delivery of this same text is unconfirmed and still in the session's composer, so the lane was not also used")
 		return fleet.DeliveryReceipt{}, false
 	}
 
@@ -377,6 +392,7 @@ func (d *Driver) sendViaModule(ctx context.Context, req fleet.Request, ref fleet
 		if name == "" {
 			// No lane was ever offered to this session: the built-in path is
 			// its only path, and that is not a fallback.
+			note.path("this session was never offered a delivery lane")
 			return fleet.DeliveryReceipt{}, false
 		}
 	}
@@ -388,6 +404,7 @@ func (d *Driver) sendViaModule(ctx context.Context, req fleet.Request, ref fleet
 		if pinned != "" {
 			return laneLost(d, pinned, "the lane returned an error"), true
 		}
+		note.fellBack(fmt.Sprintf("module %q returned an error before it wrote anything: %s", name, sanitizeModuleText(err.Error(), 120)))
 		return fleet.DeliveryReceipt{}, false
 	}
 	if res.Declined != "" {
@@ -400,6 +417,10 @@ func (d *Driver) sendViaModule(ctx context.Context, req fleet.Request, ref fleet
 			return laneLost(d, pinned, sanitizeModuleText(res.Declined, 240)), true
 		}
 		h.count(name, "fallback_to_builtin")
+		// #368: the counter above says THAT a send fell back; the note is how the
+		// per-send log says which session's, and why. The decline reason is the
+		// module's own (module not live, lane degraded, a version it cannot take).
+		note.fellBack(fmt.Sprintf("module %q declined and wrote nothing: %s", name, sanitizeModuleText(res.Declined, 160)))
 		return fleet.DeliveryReceipt{}, false
 	}
 	delivery.Observe(d.counters.incr, name, res)
