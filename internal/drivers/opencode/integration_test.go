@@ -4,10 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -372,6 +376,131 @@ func TestIntegration_ExternalDirectoryRulesAreWhatTheRuntimeResolves(t *testing.
 	} {
 		if got := evaluate(resolved, askFor(c.path, false)); got != c.want {
 			t.Errorf("%s (%s): the runtime resolves %s, want %s", c.name, c.path, got, c.want)
+		}
+	}
+}
+
+// muster #371, measured on the real runtime: a context file named by contextRef
+// reaches the MODEL as a system message, on the opening prompt and on a later
+// Send, and never as something the user said. The model is a local stand-in that
+// speaks the OpenAI-compatible wire the runtime is configured to use and records
+// the request it was sent, so what is asserted is what the runtime really put on
+// the wire, with no credential and no cost.
+func TestIntegration_ContextRefReachesTheModelAsSystemContext(t *testing.T) {
+	requireOpencodeIntegration(t)
+
+	var mu sync.Mutex
+	var requests []struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content any    `json:"content"`
+		} `json:"messages"`
+	}
+	model := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var body struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content any    `json:"content"`
+			} `json:"messages"`
+		}
+		// Only the session's own turns: the runtime may make other model calls (a
+		// title, say) that are not the subject here.
+		if json.Unmarshal(raw, &body) == nil && strings.Contains(string(raw), "USER-TEXT-") {
+			mu.Lock()
+			requests = append(requests, body)
+			mu.Unlock()
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		chunk := `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":null}]}`
+		done := `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`
+		_, _ = io.WriteString(w, "data: "+chunk+"\n\ndata: "+done+"\n\ndata: [DONE]\n\n")
+	}))
+	defer model.Close()
+
+	dir := t.TempDir()
+	config := `{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "standin": {
+      "npm": "@ai-sdk/openai-compatible",
+      "options": { "baseURL": "` + model.URL + `/v1", "apiKey": "not-a-real-key" },
+      "models": { "m": { "name": "M" } }
+    }
+  }
+}`
+	if err := os.WriteFile(filepath.Join(dir, "opencode.json"), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	brief := filepath.Join(t.TempDir(), "brief.md")
+	const marker = "BRIEF-MARKER-end-every-reply-with-PINEAPPLE"
+	if err := os.WriteFile(brief, []byte(marker), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	req := fleet.RequestFrom(fleet.Caller{Principal: "integration-test"})
+	d, err := New(ctx, "test-machine", WithSessionRoot(t.TempDir()))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer d.Shutdown()
+
+	sess, err := d.Create(ctx, req, "k-ctx", fleet.SessionSpec{
+		Cwd: fleet.AbsolutePath(dir), Name: "ctx", Model: "standin/m", Prompt: "USER-TEXT-ONE",
+		ContextRef: fleet.AbsolutePath(brief),
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	defer d.Close(ctx, req, sess.SessionRef)
+
+	waitFor := func(n int) {
+		t.Helper()
+		deadline := time.Now().Add(45 * time.Second)
+		for time.Now().Before(deadline) {
+			mu.Lock()
+			got := len(requests)
+			mu.Unlock()
+			if got >= n {
+				return
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+		t.Fatalf("the model received fewer than %d requests", n)
+	}
+	waitFor(1)
+	// Let the first turn finish before the next prompt is sent.
+	time.Sleep(2 * time.Second)
+	if _, err := d.Send(ctx, req, sess.SessionRef, "USER-TEXT-TWO", driver.SendOptions{Submit: true}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	waitFor(2)
+
+	mu.Lock()
+	defer mu.Unlock()
+	text := func(c any) string {
+		b, _ := json.Marshal(c)
+		return string(b)
+	}
+	for i, r := range requests[:2] {
+		var system, user bool
+		for _, m := range r.Messages {
+			switch {
+			case m.Role == "system" && strings.Contains(text(m.Content), marker):
+				system = true
+			case m.Role == "user" && strings.Contains(text(m.Content), marker):
+				t.Errorf("request %d: the context arrived as a user message", i+1)
+			case m.Role == "user":
+				user = true
+			}
+		}
+		if !system {
+			t.Errorf("request %d: no system message carries the context file's text", i+1)
+		}
+		if !user {
+			t.Errorf("request %d: no user message at all", i+1)
 		}
 	}
 }

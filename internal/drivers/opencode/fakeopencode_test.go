@@ -172,8 +172,10 @@ func runFakeOpencode(args []string) {
 			_ = os.Remove(storeFile)
 			writeJSON(w, true)
 		case path == "/session/"+sessionID+"/prompt_async":
-			// Every body is kept, one per line, so a test can read what a session
-			// sent — in particular which agent a message named (muster #362).
+			// Every prompt body is appended to a file in the session's own data
+			// directory, which outlives the process, so a test can read what a
+			// session sent — which agent a message named (muster #362) and what
+			// a relaunched session was sent (muster #371).
 			if raw, err := io.ReadAll(r.Body); err == nil {
 				if f, err := os.OpenFile(os.Getenv("XDG_DATA_HOME")+"/fake-prompts.jsonl",
 					os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
