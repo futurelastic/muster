@@ -81,11 +81,11 @@ func classify(present bool, st wireStatus) fleet.SessionState {
 // real server to return the TAIL of the conversation, not the head) —
 // constant cost regardless of how long the session's history is — and
 // never decodes "parts", the field carrying actual conversation content
-// (see wireMessageInfo). This is why State calls it and List does not:
+// (see wireMessageInfo). This is why State calls it, and List only when it
+// was asked about ONE session (ListFilter.ID, muster #363): an unfiltered
 // List already visits every known session once per call, and one extra
-// request per session there is a real, unbounded cost this function's
-// single-session caller does not have. Left as a deliberate gap, not an
-// oversight — worth its own issue if List needs the same honesty.
+// request per session there is a real, unbounded cost the single-session
+// callers do not have.
 func (d *Driver) lastTurnFailure(ctx context.Context, srv *server, id string) *fleet.TurnEnd {
 	var msgs []wireMessage
 	if err := d.do(ctx, srv, "GET", "/session/"+url.PathEscape(id)+"/message?limit=1", nil, &msgs); err != nil {
