@@ -28,8 +28,10 @@ import (
 // server: the second waits for the first and then replays its result (§10).
 //
 // Agent, Model and Effort are §2.1's "hints, not guarantees": this driver
-// genuinely honours Agent and Model (opencode's own create body carries
-// both) and REFUSES rather than silently drops Effort, ContextRef,
+// passes Agent on every message it sends (the runtime chooses the agent per
+// message, so the create body alone pins nothing — muster #362) and refuses one
+// the runtime does not list; it carries Model in the create body and reports it
+// unresolved; and it REFUSES rather than silently drops Effort, ContextRef,
 // McpConfig, Settings (muster #247), Resume and ConversationId (muster #224) —
 // none of which this substrate has an honest mechanism for. PermissionMode
 // "bypass" (muster #283) is honoured only together with a sandbox this driver
@@ -62,7 +64,9 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 			info, _ := d.wasSeen(ref.ID)
 			return fleet.Session{
 				SessionRef: ref, Cwd: spec.Cwd, Agent: fleet.AgentId(info.agent),
-				Pins: pinOutcomeForAgent(spec, info.agent),
+				// By now a turn may have run; its record is the one thing that can
+				// resolve the agent pin (muster #362).
+				Pins: pinOutcomeForAgent(spec, d.agentEvidenceFor(ctx, info, ref.ID, string(spec.Agent))),
 			}, nil
 		}
 		wait, leader := d.idemBegin(key)
@@ -170,6 +174,13 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 		d.discardServer(srv)
 		return fleet.Session{}, err
 	}
+	// muster #362: an agent the runtime does not list would be echoed back by the
+	// create and replaced by a default at the first turn. Refused here, on the same
+	// terms and at the same point as a model outside the catalog.
+	if err := d.checkAgent(ctx, srv, spec.Cwd, string(spec.Agent)); err != nil {
+		d.discardServer(srv)
+		return fleet.Session{}, err
+	}
 
 	var sess wireSession
 	path := "/session?directory=" + url.QueryEscape(string(spec.Cwd))
@@ -190,7 +201,9 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 	if cwd == "" {
 		cwd = spec.Cwd
 	}
-	created := knownSession{srv: srv, cwd: cwd, name: sess.Title, agent: sess.Agent, startedAt: startedAt}
+	created := knownSession{
+		srv: srv, cwd: cwd, name: sess.Title, agent: sess.Agent, specAgent: string(spec.Agent), startedAt: startedAt,
+	}
 	if d.store != nil && d.shared == nil {
 		// Before the session is announced or handed an id: a session the caller
 		// can see but a restart cannot find would make SupportsResume a lie.
@@ -217,7 +230,7 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 	d.announceCreated(srv, created, ref)
 
 	if spec.Prompt != "" {
-		if err := d.sendPrompt(ctx, srv, sess.ID, spec.Prompt); err != nil {
+		if err := d.sendPrompt(ctx, srv, sess.ID, spec.Prompt, string(spec.Agent)); err != nil {
 			// The session exists but could not be started. Reported as a
 			// failure of THIS create — a caller retrying with the same
 			// idempotency key gets the session back (see below) and may
@@ -227,9 +240,10 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 		}
 	}
 	d.idemStore(key, ref)
+	// No turn has run yet, so there is nothing to resolve the agent pin from.
 	return fleet.Session{
 		SessionRef: ref, Cwd: spec.Cwd, Agent: fleet.AgentId(sess.Agent),
-		Pins: pinOutcomeForAgent(spec, sess.Agent),
+		Pins: pinOutcomeForAgent(spec, agentEvidence{}),
 	}, nil
 }
 
@@ -365,20 +379,31 @@ func (d *Driver) idemEnd(key string) {
 }
 
 // pinOutcomeForAgent reports what this driver actually knows about the two
-// pins it accepts (muster #84): agent is genuinely observable, because
-// opencode's own create response — and the cache markSeen keeps of it —
-// names the agent the runtime started with, so a request that reached this
-// point (a rejected model shape refuses before ever calling the runtime;
-// see Create) either matches or does not, and this driver can say which.
-// Model has no such echo anywhere in this substrate's responses, so a
-// requested model is reported unresolved rather than asserting a match this
-// driver never actually confirmed. Effort refuses at Create rather than
+// pins it accepts (muster #84).
+//
+// Agent is resolved only from the runtime's own record of a turn that ran
+// (muster #362; agents.go). The create response is NOT that record: the runtime
+// echoes back whatever name it was given, listed or not, and a message sent
+// without an agent runs as the default one — so an echo that matched the request
+// proved nothing, and reading it as "honoured" was the defect this replaced.
+// Until a turn's record names the agent the pin is unresolved, with the reason;
+// once it does, honoured says whether the turn ran as the agent that was asked
+// for, and applied names the one it did run as.
+//
+// A requested model is still reported unresolved: nothing in the create
+// response names it, and this driver does not yet read it back from the same
+// turn record (those messages do carry the model a turn ran on — muster #373),
+// so it asserts no match it never confirmed. Effort refuses at Create rather than
 // reaching here at all (§2.1), so it never appears.
-func pinOutcomeForAgent(spec fleet.SessionSpec, appliedAgent string) *fleet.PinOutcome {
+func pinOutcomeForAgent(spec fleet.SessionSpec, ev agentEvidence) *fleet.PinOutcome {
 	out := &fleet.PinOutcome{}
 	if spec.Agent != "" {
-		out.Agent = fleet.PinResolved(string(spec.Agent), appliedAgent, string(spec.Agent) == appliedAgent,
-			fleet.PinObserved, "opencode's own create response names the agent it started with")
+		if ev.ran {
+			out.Agent = fleet.PinResolved(string(spec.Agent), ev.agent, string(spec.Agent) == ev.agent, fleet.PinObserved,
+				"the runtime's own record of the session's newest assistant message names the agent that turn ran as")
+		} else {
+			out.Agent = fleet.PinUnresolved(string(spec.Agent), pinAgentUnresolvedEvidence)
+		}
 	}
 	if spec.Model != "" {
 		out.Model = fleet.PinUnresolved(spec.Model,
@@ -392,9 +417,18 @@ func pinOutcomeForAgent(spec fleet.SessionSpec, appliedAgent string) *fleet.PinO
 
 // sendPrompt is the shared body of Create's optional opening message and
 // Send's ordinary delivery.
-func (d *Driver) sendPrompt(ctx context.Context, srv *server, id, text string) error {
+//
+// agent is the session's requested agent, or empty for none. It rides on EVERY
+// message (muster #362): in this runtime the agent is chosen per message, and one
+// sent without it runs as the default agent whatever the session was created
+// with. Empty is the session that never asked for one, which runs as the default
+// by its own choice.
+func (d *Driver) sendPrompt(ctx context.Context, srv *server, id, text, agent string) error {
 	body := map[string]any{
 		"parts": []map[string]string{{"type": "text", "text": text}},
+	}
+	if agent != "" {
+		body["agent"] = agent
 	}
 	path := "/session/" + url.PathEscape(id) + "/prompt_async"
 	return d.do(ctx, srv, "POST", path, body, nil)
@@ -444,7 +478,7 @@ func (d *Driver) Send(ctx context.Context, req fleet.Request, ref fleet.SessionR
 	ctx, cancel := d.bounded(ctx)
 	defer cancel()
 
-	if err := d.sendPrompt(ctx, known.srv, ref.ID, text); err != nil {
+	if err := d.sendPrompt(ctx, known.srv, ref.ID, text, known.specAgent); err != nil {
 		if isNotFound(err) {
 			return fleet.DeliveryReceipt{}, fmt.Errorf("%w: %q", fleet.ErrNoSuchSession, ref.ID)
 		}

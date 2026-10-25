@@ -269,10 +269,17 @@ type Driver struct {
 type knownSession struct {
 	// srv is the server this session lives on: the routing table for every
 	// call about it. Its own process in isolated mode, d.shared in shared mode.
-	srv       *server
-	cwd       fleet.AbsolutePath
-	name      string
-	agent     string
+	srv  *server
+	cwd  fleet.AbsolutePath
+	name string
+	// agent is the agent name the runtime's session record carries. It is the
+	// runtime's own report, and for a name the create gave it is only an echo —
+	// see specAgent for what the session's messages are sent as.
+	agent string
+	// specAgent is the agent the create asked for: the one every message Send
+	// delivers is sent as (muster #362), kept across a restart in the session's
+	// record. Empty is a session that asked for none.
+	specAgent string
 	startedAt time.Time
 
 	// dir is the session's scoped directory, kept for a session with no server

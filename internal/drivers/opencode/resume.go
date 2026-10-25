@@ -70,7 +70,7 @@ func (d *Driver) resumeOne(ctx context.Context, it loaded) {
 	}
 	rec := it.rec
 	base := knownSession{
-		cwd: fleet.AbsolutePath(rec.Cwd), name: rec.Name, agent: rec.Agent,
+		cwd: fleet.AbsolutePath(rec.Cwd), name: rec.Name, agent: rec.Agent, specAgent: rec.SpecAgent,
 		startedAt: time.UnixMilli(rec.StartedAtMs),
 	}
 	if d.ownsDir(rec.Dir) {
