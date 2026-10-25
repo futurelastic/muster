@@ -130,6 +130,15 @@ type hub struct {
 	linger       time.Duration
 	lingerTimer  *time.Timer
 
+	// ensure serialises the whole of ensureStreamForce: reading what the lanes
+	// are doing, deciding, and recording the lanes it starts. mu alone cannot do
+	// that — it is released between the read and the record, which is how two
+	// subscribers arriving together each saw a cold stream and each started one,
+	// the second overwriting the first's cancel (#375). Taken before mu, never
+	// after, and never held across anything but short bookkeeping: the pumps it
+	// starts run under `go`.
+	ensure sync.Mutex
+
 	// rename is muster #103's own bookkeeping — see
 	// rename_corroboration.go. A separate lock from mu above, deliberately:
 	// resolving a pending rename recurses into publish (to announce the
@@ -557,8 +566,22 @@ func (s *Service) ensureStream(ctx context.Context) { s.ensureStreamForce(ctx, f
 //     restarts it: a pump that is wider than needed is still correct, because
 //     the hub filters per subscriber, and a departing subscriber is the common
 //     case. It narrows again the next time the lane starts.
+//
+// # One caller at a time
+//
+// The whole function runs under h.ensure, from the read of what the lanes are
+// doing to the record of what it started. Callers that arrive together queue:
+// the first starts the lanes, the next sees them running and, finding its
+// filter already covered, leaves them alone. Without that, each of them read a
+// cold stream, each started its own pumps — the driver subscribed to two or
+// three times, every event published once per lane — and the later record of a
+// lane replaced the earlier one's cancel, so the earlier lane could never be
+// stopped again (#375). The wait is short: the pumps start under `go`.
 func (s *Service) ensureStreamForce(ctx context.Context, force bool) {
 	h := s.events
+	h.ensure.Lock()
+	defer h.ensure.Unlock()
+
 	wantLocal, wantPeer := h.streamFilters()
 	listeners := h.subscriberCount()
 
