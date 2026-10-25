@@ -843,6 +843,17 @@ is up; you do not need to wait and send it yourself. A question the runtime
 puts up on the way there **delays** that delivery, it does not cancel it: the
 service keeps waiting, and the prompt goes in once the session is receptive.
 
+**Which path carries the `prompt` (#368).** If the session's delivery lane is
+live at the moment the service sends it, the lane carries the prompt, as it does
+any `input`; only when the lane is not up (none was offered, it is degraded, or
+the module declined before writing) is it typed into the composer. Nothing in the
+request changes, and `promptDelivery` reads the same either way. Two differences
+are worth knowing. A prompt the lane wrote and could not confirm resolves
+`unknown` after **one** attempt, with the lane's reason in `evidence`, and is not
+retried: nothing is waiting in the composer to finish, and writing it again is the
+double delivery the lane's ledger refuses. And a prompt typed into the composer
+that strands is still retried once, as before.
+
 **Prefer `contextRef` to a long `prompt` — the composer is the fragile
 surface, not a load-bearing one.** `prompt` is capped by this machine's
 `maxInputBytes` (1024 bytes by default; over it the create is refused

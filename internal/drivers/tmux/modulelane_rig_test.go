@@ -50,6 +50,9 @@ type rigOptions struct {
 	storeDir string
 	// tune adjusts the modules config before the driver is built.
 	tune func(*ModulesConfig)
+	// mux replaces the rig's fake multiplexer, for a test that has to wrap its
+	// exec (swallowFirstSubmitOnly) before the driver is built.
+	mux *fakeMux
 	// realPath runs a REAL child process (a modtest.Install wrapper) through the
 	// real launcher instead of the in-process fake.
 	realPath string
@@ -77,6 +80,9 @@ func reserving(b modtest.Behaviour) modtest.Behaviour {
 func newModRig(t *testing.T, o rigOptions) *modRig {
 	t.Helper()
 	r := &modRig{t: t, mux: twoSessions(), fake: modtest.NewFake(o.behaviour), pids: 5000}
+	if o.mux != nil {
+		r.mux = o.mux
+	}
 	r.dir = o.storeDir
 	if r.dir == "" {
 		r.dir = t.TempDir()
