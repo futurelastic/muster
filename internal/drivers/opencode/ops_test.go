@@ -545,6 +545,154 @@ func TestList_StatusReadFailureReportsUnknown_NeverIdle(t *testing.T) {
 	}
 }
 
+// --- List by id: the same lastTurn State reports (muster #363) ---------------
+
+// messageReads counts the GET /session/{id}/message requests the fake saw.
+func messageReads(f *fakeServer) int {
+	n := 0
+	for _, r := range f.requestsSnapshot() {
+		if r.method == "GET" && strings.HasSuffix(r.path, "/message") {
+			n++
+		}
+	}
+	return n
+}
+
+func listOne(t *testing.T, d *Driver, id string) []fleet.Session {
+	t.Helper()
+	col, err := d.List(context.Background(), fleet.RequestFrom(fleet.Caller{}), driver.ListFilter{ID: id})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	return col.Items()
+}
+
+func abortedReply() wireMessage {
+	return wireMessage{Info: wireMessageInfo{
+		Role:  "assistant",
+		Error: &wireAssistantError{Name: "MessageAbortedError"},
+	}}
+}
+
+// The defect: a polling supervisor reads one session and the turn the event
+// stream reported as failed read idle with no lastTurn. The read narrowed to
+// one id must say what State says.
+func TestList_ByIDReportsTheFailedTurnTheStreamReported(t *testing.T) {
+	f := newFakeServer(t)
+	d := newTestDriver(t, f)
+	ref := createOne(t, d, "/work/x", "key-1")
+	f.setLastMessage(ref.ID, abortedReply())
+
+	got := listOne(t, d, ref.ID)
+	if len(got) != 1 || got[0].ID != ref.ID {
+		t.Fatalf("List by id = %+v, want exactly the one session", got)
+	}
+	st := got[0].State
+	if st.Status != fleet.StatusIdle {
+		t.Errorf("Status = %q, want idle — the session is alive and can take more work", st.Status)
+	}
+	if st.LastTurn == nil || st.LastTurn.Outcome != "failed" {
+		t.Fatalf("LastTurn = %+v; a failed turn must not read like one that finished", st.LastTurn)
+	}
+	if !strings.Contains(st.LastTurn.Reason, "MessageAbortedError") {
+		t.Errorf("Reason = %q, must carry the runtime's own error name", st.LastTurn.Reason)
+	}
+
+	// The two reads a supervisor can make agree.
+	want, err := d.State(context.Background(), fleet.RequestFrom(fleet.Caller{}), fleet.SessionRef{ID: ref.ID})
+	if err != nil {
+		t.Fatalf("State: %v", err)
+	}
+	if want.LastTurn == nil || *want.LastTurn != *st.LastTurn {
+		t.Errorf("List by id lastTurn = %+v, State lastTurn = %+v; they must agree", st.LastTurn, want.LastTurn)
+	}
+}
+
+func TestList_ByIDOfAFinishedTurnReportsNoLastTurn(t *testing.T) {
+	f := newFakeServer(t)
+	d := newTestDriver(t, f)
+	ref := createOne(t, d, "/work/x", "key-1")
+	f.setLastMessage(ref.ID, wireMessage{Info: wireMessageInfo{Role: "assistant"}})
+
+	got := listOne(t, d, ref.ID)
+	if len(got) != 1 {
+		t.Fatalf("got %d sessions, want 1", len(got))
+	}
+	if got[0].State.LastTurn != nil {
+		t.Errorf("LastTurn = %+v, want nil for a turn that ended without an error", got[0].State.LastTurn)
+	}
+}
+
+// The runtime's record decides when it has something to say; the interrupted
+// turn this driver remembers is the fallback, in the order State uses.
+func TestList_ByIDKeepsTheInterruptedTurnUnlessTheRecordHasAFailure(t *testing.T) {
+	f := newFakeServer(t)
+	d := newTestDriver(t, f)
+	ref := createOne(t, d, "/work/x", "key-1")
+	d.mu.Lock()
+	k := d.seen[ref.ID]
+	k.interrupted = &fleet.TurnEnd{Outcome: "interrupted", Retryable: true}
+	d.seen[ref.ID] = k
+	d.mu.Unlock()
+
+	got := listOne(t, d, ref.ID)
+	if len(got) != 1 || got[0].State.LastTurn == nil || got[0].State.LastTurn.Outcome != "interrupted" {
+		t.Fatalf("no failure in the record: LastTurn = %+v, want the remembered interrupted turn", got)
+	}
+
+	f.setLastMessage(ref.ID, abortedReply())
+	got = listOne(t, d, ref.ID)
+	if len(got) != 1 || got[0].State.LastTurn == nil || got[0].State.LastTurn.Outcome != "failed" {
+		t.Fatalf("a failure in the record: LastTurn = %+v, want it to win, as it does in State", got)
+	}
+}
+
+// What the extra read is NOT: an unfiltered listing keeps its constant cost,
+// and a session that is not idle has no turn to report on yet.
+func TestList_ByIDCostsOneMessageReadOnlyForAnIdleSession(t *testing.T) {
+	f := newFakeServer(t)
+	d := newTestDriver(t, f)
+	idle := createOne(t, d, "/work/a", "key-1")
+	busy := createOne(t, d, "/work/b", "key-2")
+	f.setBusy(busy.ID)
+	f.setLastMessage(idle.ID, abortedReply())
+	f.setLastMessage(busy.ID, abortedReply())
+
+	if _, err := d.List(context.Background(), fleet.RequestFrom(fleet.Caller{}), driver.ListFilter{}); err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if n := messageReads(f); n != 0 {
+		t.Errorf("an unfiltered listing made %d message reads, want 0 — its cost must not grow with the session count", n)
+	}
+
+	got := listOne(t, d, busy.ID)
+	if len(got) != 1 || got[0].State.Status != fleet.StatusWorking || got[0].State.LastTurn != nil {
+		t.Errorf("busy session by id = %+v, want working with no lastTurn", got)
+	}
+	if n := messageReads(f); n != 0 {
+		t.Errorf("a busy session cost %d message reads, want 0", n)
+	}
+
+	listOne(t, d, idle.ID)
+	if n := messageReads(f); n != 1 {
+		t.Errorf("an idle session by id cost %d message reads, want exactly 1", n)
+	}
+}
+
+func TestList_ByIDOfAnUnknownSessionIsEmptyAndCostsNoMessageRead(t *testing.T) {
+	f := newFakeServer(t)
+	d := newTestDriver(t, f)
+	ref := createOne(t, d, "/work/x", "key-1")
+	f.setLastMessage(ref.ID, abortedReply())
+
+	if got := listOne(t, d, "ses_nobody"); len(got) != 0 {
+		t.Errorf("List by an unknown id = %+v, want empty", got)
+	}
+	if n := messageReads(f); n != 0 {
+		t.Errorf("an unknown id cost %d message reads, want 0", n)
+	}
+}
+
 // --- Close: corroboration -----------------------------------------------
 
 func TestClose_SucceedsAndDeletesTheSession(t *testing.T) {

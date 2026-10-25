@@ -738,11 +738,31 @@ func (d *Driver) Rename(ctx context.Context, req fleet.Request, ref fleet.Sessio
 // map — until a direct State() call on it discovers the 404 and reclassifies
 // it as dead. This is the same class of staleness SupportsResume: false
 // already declares, not a new one, and is stated here rather than hidden.
+//
+// # One id: the same honesty State has (muster #363)
+//
+// A listing does not ask the runtime how a session's newest turn ended: it
+// would be one extra request per idle session on every call, and the answer
+// a supervisor polls for one session would read idle with no lastTurn after a
+// turn the event stream had reported as failed. With filter.ID set the call
+// is about ONE session, so two things change, and only for that call:
+// the status read is made for that session's server alone, and a session
+// confirmed idle gets the single ?limit=1 message read State makes
+// (lastTurnFailure). An unfiltered listing keeps its constant cost.
 func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.ListFilter) (fleet.Collection[fleet.Session], error) {
 	ctx, cancel := d.bounded(ctx)
 	defer cancel()
 
 	known := d.knownIDs()
+	if filter.ID != "" {
+		// muster #363: a caller that wants one session is not served by
+		// reading the status of every server this driver runs.
+		only := make(map[string]knownSession, 1)
+		if info, ok := known[filter.ID]; ok {
+			only[filter.ID] = info
+		}
+		known = only
+	}
 	now := d.now()
 	sourceStatus := fleet.SourceOK
 
@@ -803,8 +823,17 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 				// parked ask must not show as working in a listing either (#283).
 				st = d.withPermission(ctx, info.srv, id, st)
 			}
-			if !present && info.interrupted != nil {
-				st.LastTurn = info.interrupted // muster #282
+			if !present {
+				// muster #363: absent from the status map is idle, and idle
+				// alone is not how the last turn ended. State reads the
+				// runtime's newest message to say so; a read about ONE session
+				// can afford the same single request, a whole listing cannot.
+				if filter.ID != "" {
+					st.LastTurn = d.lastTurnFailure(ctx, info.srv, id)
+				}
+				if st.LastTurn == nil {
+					st.LastTurn = info.interrupted // muster #282
+				}
 			}
 		}
 
