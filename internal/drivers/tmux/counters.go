@@ -66,6 +66,11 @@ const (
 	// enough and the prompt was still unsent when deliverInitialPrompt gave
 	// up on it — the case that used to reach nobody at all.
 	counterInitialPromptStranded = "initial_prompt.delivery_stranded"
+	// counterInitialPromptLaneUnconfirmed counts every time the session's
+	// delivery lane wrote the create-time prompt and could not confirm it (#368).
+	// There is no retry for it, so it is neither retried nor stranded; the
+	// prompt is resolved unknown with the lane's own reason.
+	counterInitialPromptLaneUnconfirmed = "initial_prompt.delivery_lane_unconfirmed"
 	// counterInitialPromptSessionGone counts every time settleNewSession gave
 	// up because the session itself was confirmed gone (muster #125),
 	// never because a timer expired — there is no timer any more. A nonzero

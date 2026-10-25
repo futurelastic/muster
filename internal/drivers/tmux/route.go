@@ -31,6 +31,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"time"
 
 	fleet "github.com/futurelastic/muster"
@@ -326,4 +327,97 @@ func (d *Driver) observeRoute(requested fleet.Route, r fleet.DeliveryReceipt, er
 	if err == nil && r.Delivery != nil && r.Outcome != "" {
 		d.counters.incr("route.outcome." + taken + "." + string(r.Outcome))
 	}
+}
+
+// routeNote carries what a Send decided about its path that the receipt does
+// not say (#368). Send allocates one per call and the routing steps fill it in;
+// logSend reads it once the call has finished. It exists because the reason a
+// send took the built-in path lives where the decision is made — a lane that
+// declined, a shape no lane can take — and the receipt of a send the built-in
+// path then carried names the path, not why the lane did not. The zero value
+// says nothing, and every method is safe on a nil note, so a path that does not
+// care never has to check.
+type routeNote struct {
+	// reason is why the send took the path it took, in a sentence a person
+	// reading a log can act on. Empty means the receipt says it all.
+	reason string
+	// fallback is true when a lane was offered to this session and the send was
+	// handed back to the built-in path with nothing written — the case a
+	// per-send record exists to make traceable (#368). A session that never had a
+	// lane, or a send whose shape no lane can take, is not a fallback.
+	fallback bool
+}
+
+// path records why the send is not on a lane. It is not a fallback.
+func (n *routeNote) path(reason string) {
+	if n != nil {
+		n.reason = reason
+	}
+}
+
+// fellBack records that the lane was offered, handed the send back with nothing
+// written, and the built-in path carried it instead.
+func (n *routeNote) fellBack(reason string) {
+	if n != nil {
+		n.reason, n.fallback = reason, true
+	}
+}
+
+// sendLogReasonMax bounds the reason and the detail in a per-send log line. A
+// refusal carries a paragraph of advice meant for a caller; a log line needs
+// only enough to find the cause.
+const sendLogReasonMax = 200
+
+// logSend writes one line for a finished Send: which session, which path it
+// asked for, which path it took, what came of it, and why (#368). It is the
+// per-send half of what observeRoute counts in total — the counters say how
+// many sends fell back, this line says which session's did.
+//
+// `reason` is why the send was on this path. `detail` is added only when the
+// send did not end well (refused, or unknown) and is the receipt's own words,
+// so a refusal and the path that was never taken are both readable from the
+// line. The text of the message is never logged, and neither is who sent it:
+// the line is about the path, and a log is read by more people than a receipt is.
+func (d *Driver) logSend(ref fleet.SessionRef, requested fleet.Route, r fleet.DeliveryReceipt, err error, n *routeNote) {
+	if requested == "" {
+		requested = fleet.RouteAuto
+	}
+	taken := string(r.RouteOf())
+	if m := r.ModuleOf(); m != "" {
+		taken = string(fleet.RouteModule) + "/" + m
+	}
+	outcome := string(r.Outcome)
+	var note routeNote
+	if n != nil {
+		note = *n
+	}
+	reason, detail := note.reason, ""
+	switch {
+	case err != nil:
+		taken, outcome = "error", "error"
+		detail = err.Error()
+	case taken == "":
+		taken = "none"
+	}
+	if err == nil && (r.Outcome == fleet.OutcomeRefused || r.Outcome == fleet.OutcomeUnknown) {
+		detail = r.Reason
+	}
+	if reason == "" {
+		switch {
+		case r.ModuleOf() != "":
+			reason = "the session's delivery lane was live"
+		case r.RouteOf() == fleet.RouteTerminal:
+			reason = "the built-in path carried it"
+		case r.RouteOf() == fleet.RouteInbox:
+			reason = "the inbox route was named"
+		default:
+			reason = "no path was taken"
+		}
+	}
+	line := fmt.Sprintf("tmux: send session=%s machine=%s requested=%s route=%s outcome=%s fallback=%t reason=%q",
+		ref.ID, d.machine, requested, taken, outcome, note.fallback, sanitizeModuleText(reason, sendLogReasonMax))
+	if detail != "" {
+		line += fmt.Sprintf(" detail=%q", sanitizeModuleText(detail, sendLogReasonMax))
+	}
+	log.Print(line)
 }

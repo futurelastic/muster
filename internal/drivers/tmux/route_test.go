@@ -402,9 +402,11 @@ func TestSend_InboxPartialWrite_UnknownNoPane(t *testing.T) {
 }
 
 // The create-time prompt is the creator's launch instruction, not a peer's
-// message: it is pinned to the terminal on the first attempt AND the retry, so
-// it never consults the inbox, and the retry — which is a terminal resume — can
-// never re-send text an inbox already put in front of the receiver.
+// message: it never consults the inbox, whatever the inbox could do. Since #368
+// its first attempt is `auto` (a live delivery lane carries it; with none, the
+// terminal does) and since #257 `auto` does not try the inbox. The retry stays
+// pinned to the terminal, so it can never re-send text an inbox already put in
+// front of the receiver.
 func TestDeliverInitialPrompt_NeverConsultsTheInbox(t *testing.T) {
 	rcv := newInboxReceiver(t)
 	resolverCalled := false
@@ -422,7 +424,7 @@ func TestDeliverInitialPrompt_NeverConsultsTheInbox(t *testing.T) {
 	if !paneTouched(f) {
 		t.Fatal("the create-time prompt never reached the terminal")
 	}
-	if c := d.Counters(); c["route.decided.terminal.terminal"] < 1 {
-		t.Errorf("the prompt was not sent as an explicit terminal route: %v", c)
+	if c := d.Counters(); c["route.decided.auto.terminal"] < 1 {
+		t.Errorf("the prompt was not sent as auto and carried by the terminal (no lane here): %v", c)
 	}
 }

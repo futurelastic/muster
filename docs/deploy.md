@@ -170,6 +170,15 @@ apply to a **named** inbox send.
   `route.decided.auto.module` against `route.decided.auto.terminal` — the share
   of `auto` sends the lane carries (it should approach the share of sessions
   holding a live lane); and `route.auto_fallback`, which no longer exists.
+  Since #368 a new session's launch prompt is one of the `auto` sends the lane
+  carries, and `initial_prompt.delivery_lane_unconfirmed` counts launch prompts a
+  lane wrote and could not confirm (resolved `unknown`, not retried).
+- **The per-send line (#368).** Every send writes one line to the service log:
+  `tmux: send session=<id> machine=<m> requested=<route> route=<terminal|inbox|module/<name>|none|error> outcome=<o> fallback=<bool> reason="…"`,
+  with `detail="…"` added when the send was refused or unknown. The counters say
+  how many `auto` sends fell back to the terminal; `grep 'fallback=true'` says
+  which sessions, and the `reason` is the module's own decline text. The message
+  text and the sender are never in it.
 
 **Turning the inbox route on (muster #184) — what has to be true first, in
 this order.** Since #184 a send with no `route` is `auto`: anyone who does not
