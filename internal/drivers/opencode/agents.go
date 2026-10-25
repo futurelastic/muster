@@ -9,7 +9,9 @@ import (
 	fleet "github.com/futurelastic/muster"
 )
 
-// This file is everything the driver knows about the AGENT pin (muster #362).
+// This file is everything the driver knows about the AGENT pin (muster #362), and
+// the one record both pins are read from: the model pin (muster #373) resolves from
+// the same newest assistant message (turnEvidence), so it is read here too.
 //
 // In this runtime the agent is chosen per MESSAGE, not per session. The session
 // record carries an agent name, but the runtime echoes whatever name the create
@@ -24,7 +26,7 @@ import (
 //     same way a model outside the catalog is, instead of being accepted and then
 //     replaced by a default at the first turn;
 //   - a pin is reported honoured only from the runtime's own record of a turn
-//     that ran (agentEvidence), never from the create response.
+//     that ran (turnEvidence), never from the create response.
 
 // wireAgent is the subset of one GET /agent entry this driver reads. The
 // runtime lists its built-in agents, the operator's configured ones and, when
@@ -98,56 +100,71 @@ func (d *Driver) checkAgent(ctx context.Context, srv *server, cwd fleet.Absolute
 	return &fleet.Error{Kind: fleet.ErrorInvalid, Message: msg, Machine: d.machine}
 }
 
-// agentEvidence is what the runtime's own message records say about the agent a
-// session's turns ran as.
-type agentEvidence struct {
+// turnEvidence is what the runtime's own message records say about the agent and
+// the model a session's turns ran as. The two are read from the same message but
+// stand apart: a record can name one and not the other, and each pin resolves, or
+// stays unresolved, on its own half.
+type turnEvidence struct {
 	// ran is true when the newest assistant message in the session's history
 	// names the agent it was handled by; agent is that name.
 	ran   bool
 	agent string
+
+	// modelRan is true when that message names both the provider and the model it
+	// ran on (muster #373); modelUsed is "provider/model", the same spelling a
+	// create asks for, so the two compare directly.
+	modelRan  bool
+	modelUsed string
 }
 
-// agentEvidenceTail is how many of the newest messages are read. A turn is one
+// turnEvidenceTail is how many of the newest messages are read. A turn is one
 // user message and the assistant message(s) that answer it, so a handful is
 // enough to reach the newest assistant message; the whole history is never read.
-const agentEvidenceTail = 8
+const turnEvidenceTail = 8
 
-// observedAgent reads the agent the session's newest assistant message ran as.
+// observedTurn reads the agent and model the session's newest assistant message
+// ran as.
 //
 // An assistant message exists only once the runtime has started a turn, and it
-// names the agent that turn resolved to — the runtime's own record, which is
-// what a fallback to the default agent shows up in. A user message is not used:
-// it records what was asked for. Nothing found, an unreadable history, or an
-// assistant message that names no agent is "no evidence" (the zero value), never
-// a claim in either direction.
-func (d *Driver) observedAgent(ctx context.Context, srv *server, id string) agentEvidence {
+// names the agent and the model that turn resolved to — the runtime's own record,
+// which is what a fallback to the default agent, or to the default model, shows
+// up in. A user message is not used: it records what was asked for. Nothing
+// found, an unreadable history, or an assistant message that names neither is "no
+// evidence" (the zero value), never a claim in either direction. A model counts
+// only when the record names both halves of it; one half alone is not a model.
+func (d *Driver) observedTurn(ctx context.Context, srv *server, id string) turnEvidence {
 	var msgs []wireMessage
-	path := fmt.Sprintf("/session/%s/message?limit=%d", url.PathEscape(id), agentEvidenceTail)
+	path := fmt.Sprintf("/session/%s/message?limit=%d", url.PathEscape(id), turnEvidenceTail)
 	if err := d.do(ctx, srv, "GET", path, nil, &msgs); err != nil {
-		return agentEvidence{}
+		return turnEvidence{}
 	}
 	for i := len(msgs) - 1; i >= 0; i-- {
 		info := msgs[i].Info
 		if info.Role != "assistant" {
 			continue
 		}
-		if info.Agent == "" {
-			return agentEvidence{}
+		var ev turnEvidence
+		if info.Agent != "" {
+			ev.ran, ev.agent = true, info.Agent
 		}
-		return agentEvidence{ran: true, agent: info.Agent}
+		if info.ProviderID != "" && info.ModelID != "" {
+			ev.modelRan, ev.modelUsed = true, info.ProviderID+"/"+info.ModelID
+		}
+		return ev
 	}
-	return agentEvidence{}
+	return turnEvidence{}
 }
 
-// agentEvidenceFor reads the evidence for a session that asked for an agent, and
-// reads nothing for one that did not or whose runtime is not running.
-func (d *Driver) agentEvidenceFor(ctx context.Context, known knownSession, id, requested string) agentEvidence {
-	if requested == "" || known.srv == nil {
-		return agentEvidence{}
+// turnEvidenceFor reads the evidence for a session that pinned an agent or a
+// model, and reads nothing for one that pinned neither or whose runtime is not
+// running.
+func (d *Driver) turnEvidenceFor(ctx context.Context, known knownSession, id string, spec fleet.SessionSpec) turnEvidence {
+	if (spec.Agent == "" && spec.Model == "") || known.srv == nil {
+		return turnEvidence{}
 	}
 	ctx, cancel := d.bounded(ctx)
 	defer cancel()
-	return d.observedAgent(ctx, known.srv, id)
+	return d.observedTurn(ctx, known.srv, id)
 }
 
 // pinAgentUnresolvedEvidence is the standing reason an agent pin is not resolved:
@@ -155,3 +172,9 @@ func (d *Driver) agentEvidenceFor(ctx context.Context, known knownSession, id, r
 // which agent it ran as.
 const pinAgentUnresolvedEvidence = "every message this driver sends names the agent, but the runtime's create response " +
 	"only echoes the name it was given; no turn has run yet whose own record shows which agent it ran as"
+
+// pinModelUnresolvedEvidence is the standing reason a model pin is not resolved:
+// the create response does not name the model the runtime is using, and no turn
+// has run yet whose record shows which one it ran on.
+const pinModelUnresolvedEvidence = "the model is sent in the create body, but the runtime's create response does not name " +
+	"which model it is using; no turn has run yet whose own record shows which model it ran on"
