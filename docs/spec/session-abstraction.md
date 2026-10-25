@@ -2190,6 +2190,26 @@ script, an agent tidying up after itself — can match a session whose argv
 merely *contains* the string it was hunting for, and terminate it. Passing
 context by file removes the session from that namespace entirely.
 
+**What honouring it means.** The file's text becomes *system context* for the
+whole session — standing instructions the agent has from its first turn, not a
+turn a person typed. A driver that cannot give a file that meaning refuses
+`unsupported` rather than drop it (§2.1). Each driver does it with what its
+substrate offers:
+
+- The terminal driver hands the path to the agent's own command line as an
+  appended system prompt file; the agent reads it.
+- The opencode driver (muster #371) reads the file itself, at create, and sends
+  its text as the runtime's `system` field on **every** prompt it sends the
+  session — the create's opening prompt and each later `send`. It has to be every
+  one: the runtime applies `system` to the single prompt that carries it, so a
+  follow-up sent without it would run without the context. The user part carries
+  only the prompt's own text. The path must be absolute and name a regular,
+  readable UTF-8 file of at most 1 MiB; anything else is refused `invalid` before
+  a process is started. The session record keeps the **path**, never the text, so
+  a restart reads the file again; if the file has gone by then the session is
+  listed `unknown` with that reason instead of being relaunched without its
+  context.
+
 ### 5.4 Ids are recyclable; require consensus before destruction
 
 Before any destructive operation, a driver must confirm that the session at an

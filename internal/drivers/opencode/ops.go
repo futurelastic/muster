@@ -31,9 +31,11 @@ import (
 // passes Agent on every message it sends (the runtime chooses the agent per
 // message, so the create body alone pins nothing — muster #362) and refuses one
 // the runtime does not list; it carries Model in the create body and reports it
-// unresolved; and it REFUSES rather than silently drops Effort, ContextRef,
-// McpConfig, Settings (muster #247), Resume and ConversationId (muster #224) —
-// none of which this substrate has an honest mechanism for. PermissionMode
+// unresolved; and it REFUSES rather than silently drops Effort, McpConfig,
+// Settings (muster #247), Resume and ConversationId (muster #224) — none of which
+// this substrate has an honest mechanism for. ContextRef is honoured (muster
+// #371): the file is read here, before anything starts, and its text rides on
+// every prompt as the runtime's system field (context.go). PermissionMode
 // "bypass" (muster #283) is honoured only together with a sandbox this driver
 // enforces, and refused `unsupported` otherwise (permission.go). Env is honoured
 // (muster #280) by building the session's environment; it is refused only in
@@ -84,9 +86,8 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 		return fleet.Session{}, &fleet.Error{Kind: fleet.ErrorInvalid, Message: "create: cwd is required", Machine: d.machine}
 	}
 	refused := map[string]bool{
-		"effort":     spec.Effort != "",
-		"contextRef": spec.ContextRef != "",
-		"mcpConfig":  len(spec.McpConfig) > 0,
+		"effort":    spec.Effort != "",
+		"mcpConfig": len(spec.McpConfig) > 0,
 		// muster #247: launch-time CLI settings have no meaning for a runtime
 		// with no CLI to hand them to.
 		"settings": len(spec.Settings) > 0,
@@ -126,6 +127,13 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 				Machine: d.machine,
 			}
 		}
+	}
+
+	// muster #371: the brief is read and validated before a process exists, so an
+	// unreadable one costs nothing.
+	contextText, err := d.readContext(spec.ContextRef)
+	if err != nil {
+		return fleet.Session{}, err
 	}
 
 	body := map[string]any{}
@@ -203,6 +211,7 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 	}
 	created := knownSession{
 		srv: srv, cwd: cwd, name: sess.Title, agent: sess.Agent, specAgent: string(spec.Agent), startedAt: startedAt,
+		contextRef: spec.ContextRef, context: contextText,
 	}
 	if d.store != nil && d.shared == nil {
 		// Before the session is announced or handed an id: a session the caller
@@ -212,6 +221,8 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 			SpecAgent: string(spec.Agent), SpecMarker: spec.Marker,
 			StartedAtMs: sess.Time.Created, Dir: srv.dir, EnvNames: callerEnvNames,
 			Sandbox: spec.Sandbox, PermissionMode: spec.PermissionMode,
+			// The path, never the text: a restart reads the file again (muster #371).
+			ContextRef: string(spec.ContextRef),
 		}
 		if srv.sandbox != nil && srv.sandbox.PackageCache != nil {
 			rec.CacheCopy = srv.sandbox.PackageCache.Copy
@@ -230,7 +241,7 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 	d.announceCreated(srv, created, ref)
 
 	if spec.Prompt != "" {
-		if err := d.sendPrompt(ctx, srv, sess.ID, spec.Prompt, string(spec.Agent)); err != nil {
+		if err := d.sendPrompt(ctx, srv, sess.ID, spec.Prompt, string(spec.Agent), contextText); err != nil {
 			// The session exists but could not be started. Reported as a
 			// failure of THIS create — a caller retrying with the same
 			// idempotency key gets the session back (see below) and may
@@ -423,12 +434,20 @@ func pinOutcomeForAgent(spec fleet.SessionSpec, ev agentEvidence) *fleet.PinOutc
 // sent without it runs as the default agent whatever the session was created
 // with. Empty is the session that never asked for one, which runs as the default
 // by its own choice.
-func (d *Driver) sendPrompt(ctx context.Context, srv *server, id, text, agent string) error {
+//
+// system is the session's context (muster #371), or empty for a session with
+// none. It rides on EVERY prompt as the runtime's own system field and never in
+// the user part: the field applies to the one prompt that carries it, so a prompt
+// sent without it runs without the context (context.go has the measurement).
+func (d *Driver) sendPrompt(ctx context.Context, srv *server, id, text, agent, system string) error {
 	body := map[string]any{
 		"parts": []map[string]string{{"type": "text", "text": text}},
 	}
 	if agent != "" {
 		body["agent"] = agent
+	}
+	if system != "" {
+		body["system"] = system
 	}
 	path := "/session/" + url.PathEscape(id) + "/prompt_async"
 	return d.do(ctx, srv, "POST", path, body, nil)
@@ -478,7 +497,7 @@ func (d *Driver) Send(ctx context.Context, req fleet.Request, ref fleet.SessionR
 	ctx, cancel := d.bounded(ctx)
 	defer cancel()
 
-	if err := d.sendPrompt(ctx, known.srv, ref.ID, text, known.specAgent); err != nil {
+	if err := d.sendPrompt(ctx, known.srv, ref.ID, text, known.specAgent, known.context); err != nil {
 		if isNotFound(err) {
 			return fleet.DeliveryReceipt{}, fmt.Errorf("%w: %q", fleet.ErrNoSuchSession, ref.ID)
 		}

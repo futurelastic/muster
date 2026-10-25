@@ -26,8 +26,9 @@ import (
 //     (read fresh, as at create) and the sandbox profile the create asked for. A
 //     by-id read then confirms the runtime found the session in its store.
 //   - unknown, "needs re-creation": the create carried caller-supplied environment
-//     values, which this driver never kept. Relaunching it with less than it was
-//     created with would be a different session wearing the same id.
+//     values, which this driver never kept, or named a context file (muster #371)
+//     that can no longer be read. Relaunching it with less than it was created with
+//     would be a different session wearing the same id.
 //   - unknown, with the reason it could not be relaunched: the sandbox can no longer
 //     be enforced, a required sessionEnv file is gone, the directory is missing, the
 //     runtime would not start, the runtime no longer has the session. The record and
@@ -80,6 +81,22 @@ func (d *Driver) resumeOne(ctx context.Context, it loaded) {
 		base.unknown = why
 		d.markSeen(rec.ID, base)
 		return
+	}
+	// muster #371: the context is read again, from the path the record kept, before
+	// anything is started. A session relaunched without the brief it was created
+	// with would answer as a different session wearing the same id, so a file that
+	// has gone or can no longer be used is a session listed unknown, not one
+	// quietly relaunched with less.
+	if rec.ContextRef != "" {
+		base.contextRef = fleet.AbsolutePath(rec.ContextRef)
+		text, err := d.readContext(base.contextRef)
+		if err != nil {
+			base.unknown = "the session could not be relaunched after the restart: its context file can no longer be used, " +
+				"and a session is not relaunched without the context it was created with (" + describeCreateError(err) + "); it needs re-creation"
+			d.markSeen(rec.ID, base)
+			return
+		}
+		base.context = text
 	}
 	rctx, cancel := d.bounded(ctx)
 	defer cancel()
@@ -170,6 +187,16 @@ func (d *Driver) stampProcess(rec *sessionRecord, srv *server) {
 	if _, port, ok := strings.Cut(strings.TrimPrefix(srv.baseURL, "http://"), ":"); ok {
 		rec.Port, _ = strconv.Atoi(port)
 	}
+}
+
+// describeCreateError is a create-time refusal's own words without its "create: "
+// prefix, for a sentence that is about a restart rather than a create.
+func describeCreateError(err error) string {
+	msg := err.Error()
+	if fe, ok := err.(*fleet.Error); ok {
+		msg = fe.Message
+	}
+	return strings.TrimPrefix(msg, "create: ")
 }
 
 // requireLive refuses an operation on a session that is listed but not running.

@@ -291,6 +291,13 @@ type knownSession struct {
 	// interrupted is set on a relaunched session whose last turn did not finish
 	// before the service stopped. A new turn (Send) clears it.
 	interrupted *fleet.TurnEnd
+
+	// contextRef is the file the create named as the session's context, and
+	// context the text it held when this driver read it (muster #371). The path is
+	// what a restart finds again; the text is what every prompt carries as the
+	// runtime's system field. Both empty for a session created without one.
+	contextRef fleet.AbsolutePath
+	context    string
 }
 
 type idemEntry struct {

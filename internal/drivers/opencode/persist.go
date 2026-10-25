@@ -66,6 +66,10 @@ type sessionRecord struct {
 	// PermissionMode is the posture the create asked for ("bypass" or empty), so
 	// a relaunch writes the same configuration and starts with the same argument.
 	PermissionMode string `json:"permissionMode,omitempty"`
+	// ContextRef is the PATH of the context file the create named (muster #371),
+	// never its text: a restart reads the file again, so the record holds nothing
+	// a brief might contain.
+	ContextRef string `json:"contextRef,omitempty"`
 	// CacheCopy says how a private package cache in Dir was made, so a relaunch
 	// reuses it instead of copying again.
 	CacheCopy string `json:"cacheCopy,omitempty"`
