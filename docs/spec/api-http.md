@@ -1746,8 +1746,7 @@ the mitigation #112 already verified end to end.
 `confirmsDelivery: true` on `/v1/runtimes` would return here — but no driver
 in this fleet currently declares that capability, so `input` cannot actually
 produce it today; a confirmed submission reports `queued` instead. api.md's
-known-gaps section tracks this alongside the equivalent, opposite-direction
-gap already recorded for `respond`.
+known-gaps section tracks this.
 
 **A refusal is `200`, not an HTTP error.** Refusal is an expected domain
 outcome carrying structured information, not a fault. Mapping it to 4xx would
@@ -1774,10 +1773,30 @@ POST /v1/machines/{machine}/sessions/{id}/respond?runtime=
                          //    freeText: type the text into the free-text row and confirm it
                          //    (with "choices" too, on a multiSelect prompt)
 
-→ 200 { "outcome": "queued" | "refused", "reason": "..." }
+→ 200 { "outcome": "submitted" | "refused" | "unknown", "reason": "..." }
 → 400 invalid   // choices empty, repeated, < 1, or combined with choice/cancel;
                 // text empty or blank, over the input byte limit, or combined with choice/cancel
 ```
+
+The set is the same three outcomes `keys` reports, and the meanings match:
+
+- `submitted` — the answer was delivered and the driver saw it take effect: the
+  prompt left the screen, or the runtime confirmed it processed the reply. This is
+  evidence `input` never has (its own confirmation is the composer emptying), which
+  is why `submitted` is reachable here and `queued` is not.
+- `refused` — nothing was sent. The session is not at a prompt, the `nonce` no
+  longer matches, the choice names no option, or the prompt's kind does not take
+  that form of answer. `reason` says which.
+- `unknown` — the answer was sent, once, and the driver could not confirm it: the
+  prompt is still on screen afterwards, the key landed in the composer instead of
+  the prompt, or the runtime reported it did not process the reply. It is **not**
+  sent again. Read the session's state before answering again, because the prompt
+  may already be answered; `reason` names what was seen.
+
+`queued` is never an outcome of `respond`: it means a send was accepted and its
+submission is unconfirmed (`input`'s receipt), and an answer to a prompt is either seen to
+take effect or is not. A relay to a peer returns the peer's receipt unchanged, so a
+client sees exactly the set above through either machine.
 
 `state.waitingOn` discriminates `waiting_input`, which carries two situations
 needing opposite handling: `prompt` (answer it) and `unsent-input` (do not send
