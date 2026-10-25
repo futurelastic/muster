@@ -259,6 +259,222 @@ func TestReload_RestartOnlySettingIsNamedAndRefused(t *testing.T) {
 	}
 }
 
+// sessionEnvDoc is a valid config plus a "new" principal and the given sessionEnv,
+// so a refused file can be told apart from an applied one by the new token.
+func sessionEnvDoc(env ...map[string]any) map[string]any {
+	doc := rlDoc(rlPrincipal("old", "tok-old", "read"), rlPrincipal("new", "tok-new", "read"))
+	var es []any
+	for _, e := range env {
+		es = append(es, e)
+	}
+	doc["sessionEnv"] = es
+	return doc
+}
+
+// #366: a reload refused because a restart-only section changed says whether the
+// file would start. "Only a restart applies" read as "a restart will apply it",
+// and a restart onto a file that does not start is a crash-loop.
+func TestReload_RestartOnlyRefusalSaysARestartWouldFail(t *testing.T) {
+	cases := []struct {
+		name string
+		env  []map[string]any
+		want string // the start-up error the refusal must carry
+	}{
+		{"duplicate name",
+			[]map[string]any{
+				{"name": "GH_TOKEN", "fromSession": "id"},
+				{"name": "GH_TOKEN", "fromSession": "id"},
+			},
+			`"GH_TOKEN" is declared more than once`},
+		{"relative fromFile",
+			[]map[string]any{{"name": "GH_TOKEN", "fromFile": "secrets/gh-token"}},
+			"must be an absolute path"},
+		{"unknown runtime id",
+			[]map[string]any{{"name": "GH_TOKEN", "fromSession": "id",
+				"appliesTo": map[string]any{"runtimes": []string{"opencod"}}}},
+			`"opencod"`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := newReloadRig(t, rlDoc(rlPrincipal("old", "tok-old", "read")))
+			putCfg(t, r.path, sessionEnvDoc(c.env...))
+			r.rl.check("test")
+
+			row := checkReloadStatus(r.dir, r.path)
+			if row.Status != statusWarn {
+				t.Fatalf("doctor row = %+v, want a warn naming the refusal", row)
+			}
+			for _, want := range []string{"sessionEnv", "only a restart applies", "a restart would fail", c.want} {
+				if !strings.Contains(row.Detail, want) {
+					t.Errorf("the refusal %q does not say %q", row.Detail, want)
+				}
+			}
+			if strings.Contains(row.Detail, "passes start-up validation") {
+				t.Errorf("a file that would not start was called valid: %q", row.Detail)
+			}
+			// A refused reload still applies nothing, including the file's principals.
+			if code, _ := r.get("/v1/health", "tok-new"); code != 401 {
+				t.Errorf("a principal from the refused file = %d, want 401", code)
+			}
+			if code, _ := r.get("/v1/health", "tok-old"); code != 200 {
+				t.Errorf("the last good principal = %d, want 200", code)
+			}
+		})
+	}
+}
+
+// #366: the same refusal for a restart-only change that WOULD start says so, so
+// the operator can restart knowing the file is the one the service will accept.
+func TestReload_RestartOnlyRefusalSaysTheFilePassesStartup(t *testing.T) {
+	r := newReloadRig(t, rlDoc(rlPrincipal("old", "tok-old", "read")))
+	putCfg(t, r.path, sessionEnvDoc(map[string]any{"name": "GH_TOKEN", "fromSession": "id"}))
+	r.rl.check("test")
+
+	row := checkReloadStatus(r.dir, r.path)
+	if row.Status != statusWarn {
+		t.Fatalf("doctor row = %+v, want a warn naming the refusal", row)
+	}
+	for _, want := range []string{"sessionEnv", "only a restart applies", "the file passes start-up validation", "nothing from this edit was applied"} {
+		if !strings.Contains(row.Detail, want) {
+			t.Errorf("the refusal %q does not say %q", row.Detail, want)
+		}
+	}
+	if strings.Contains(row.Detail, "would fail") {
+		t.Errorf("a file that starts was reported as failing: %q", row.Detail)
+	}
+	if code, _ := r.get("/v1/health", "tok-new"); code != 401 {
+		t.Errorf("a principal from the refused file = %d, want 401", code)
+	}
+}
+
+// #366: the verdict is the one `muster doctor` gives the same file, because both
+// are the same checks. A fix to either surface that the other lacked would show here.
+func TestReload_RestartOnlyVerdictMatchesDoctorConfigLoad(t *testing.T) {
+	r := newReloadRig(t, rlDoc(rlPrincipal("old", "tok-old", "read")))
+	putCfg(t, r.path, sessionEnvDoc(
+		map[string]any{"name": "GH_TOKEN", "fromSession": "id"},
+		map[string]any{"name": "GH_TOKEN", "fromSession": "id"},
+	))
+	r.rl.check("test")
+
+	cfg, err := loadConfig(r.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doctorErr := validateConfigExtras(cfg, func(string) string { return "" })
+	if doctorErr == nil {
+		t.Fatal("doctor's check accepted a file with a duplicate sessionEnv name")
+	}
+	if row := checkReloadStatus(r.dir, r.path); !strings.Contains(row.Detail, doctorErr.Error()) {
+		t.Errorf("the refusal %q does not carry doctor's error %q", row.Detail, doctorErr)
+	}
+}
+
+// #370: a restart that loads a new file rewrites the record, so the refusal the
+// restart already resolved is not reported by doctor afterwards.
+func TestReloadStart_RestartClearsAnEarlierRefusal(t *testing.T) {
+	r := newReloadRig(t, rlDoc(rlPrincipal("old", "tok-old", "read")))
+	good := sessionEnvDoc(map[string]any{"name": "GH_TOKEN", "fromSession": "id"})
+	putCfg(t, r.path, good)
+	r.rl.check("test")
+	if row := checkReloadStatus(r.dir, r.path); row.Status != statusWarn || !strings.Contains(row.Summary, "refused") {
+		t.Fatalf("setup: doctor row = %+v, want the restart-only refusal", row)
+	}
+
+	// The restart: a new process, over the same state directory, loading the file.
+	r2 := newReloadRigIn(t, r.dir, good)
+	r2.rl.recordStart()
+
+	st := r2.rl.readStatus()
+	raw, _ := os.ReadFile(r2.path)
+	if st.AppliedHash != contentHash(raw) {
+		t.Errorf("appliedHash = %q, want the started file's %q", st.AppliedHash, contentHash(raw))
+	}
+	if st.AppliedReason != "start" || st.AppliedAt == "" {
+		t.Errorf("appliedReason/appliedAt = %q / %q, want start and a time", st.AppliedReason, st.AppliedAt)
+	}
+	if st.RefusedHash != "" || st.RefusedAt != "" || st.Error != "" {
+		t.Errorf("the refusal survived the restart: %+v", st)
+	}
+	if row := checkReloadStatus(r2.dir, r2.path); row.Status != statusPass {
+		t.Errorf("doctor row right after the restart = %+v, want pass", row)
+	}
+}
+
+// #370: the record is replaced, not merged. A previous process's applied hash and
+// time, and whatever it said about the machine list, are not believed after a start.
+func TestReloadStart_ReplacesWhatThePreviousProcessRecorded(t *testing.T) {
+	r := newReloadRig(t, rlDoc(rlPrincipal("old", "tok-old", "read")))
+	stale := reloadStatus{
+		AppliedHash: "0000000000000000", AppliedAt: "2026-01-01T00:00:00Z",
+		RefusedHash: "1111111111111111", RefusedAt: "2026-01-01T01:00:00Z", Error: "an old refusal",
+		ListRefusedHash: "2222222222222222", ListRefusedAt: "2026-01-01T01:00:00Z", ListError: "an old list refusal",
+		ListAppliedHash: "3333333333333333", ListAppliedSeq: 9, ListAppliedAt: "2026-01-01T00:00:00Z",
+	}
+	if err := writeJSONAtomic(filepath.Join(r.dir, reloadStatusFile), stale); err != nil {
+		t.Fatal(err)
+	}
+
+	r.rl.recordStart()
+
+	raw, _ := os.ReadFile(r.path)
+	want := reloadStatus{AppliedHash: contentHash(raw), AppliedReason: "start"}
+	got := r.rl.readStatus()
+	if got.AppliedAt == "" || got.AppliedAt == stale.AppliedAt {
+		t.Errorf("appliedAt = %q, want the start time", got.AppliedAt)
+	}
+	got.AppliedAt = ""
+	if got != want {
+		t.Errorf("status after a start = %+v, want %+v", got, want)
+	}
+}
+
+// #370: a start on a verified machine list records that list as the one in force,
+// and a refusal of a previous list is not carried over. Not a hash of the config
+// alone: doctor's list warning keys on the list file's own hash.
+func TestReloadStart_RecordsTheMachineListItLoaded(t *testing.T) {
+	r, l := newListRig(t, "only", 4, map[string]string{"m-a": "http://127.0.0.1:1"})
+	// A previous process refused a list; the file on disk has since been replaced by a good one.
+	if err := writeJSONAtomic(filepath.Join(r.dir, reloadStatusFile), reloadStatus{
+		AppliedHash: "0000000000000000", ListRefusedHash: "2222222222222222", ListError: "an old list refusal",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	r.rl.recordStart()
+
+	rawList, _ := os.ReadFile(l.path)
+	st := r.rl.readStatus()
+	if st.ListAppliedHash != contentHash(rawList) || st.ListAppliedSeq != 4 || st.ListAppliedAt == "" {
+		t.Errorf("list applied = %q seq %d at %q, want the started list's %q seq 4", st.ListAppliedHash, st.ListAppliedSeq, st.ListAppliedAt, contentHash(rawList))
+	}
+	if st.ListRefusedHash != "" || st.ListRefusedAt != "" || st.ListError != "" {
+		t.Errorf("the list refusal survived the restart: %+v", st)
+	}
+	if row := checkReloadStatus(r.dir, r.path); row.Status != statusPass {
+		t.Errorf("doctor row right after the restart = %+v, want pass", row)
+	}
+}
+
+// #370: after a start, a reload still works from that record: the next edit is
+// applied and the record moves on from "start".
+func TestReloadStart_ALaterReloadMovesTheRecordOn(t *testing.T) {
+	r := newReloadRig(t, rlDoc(rlPrincipal("old", "tok-old", "read")))
+	r.rl.recordStart()
+
+	putCfg(t, r.path, rlDoc(rlPrincipal("old", "tok-old", "read"), rlPrincipal("new", "tok-new", "read")))
+	r.rl.check("SIGHUP")
+
+	raw, _ := os.ReadFile(r.path)
+	st := r.rl.readStatus()
+	if st.AppliedHash != contentHash(raw) || st.AppliedReason != "SIGHUP" {
+		t.Errorf("status after a reload = %+v, want the new hash applied by SIGHUP", st)
+	}
+	if code, _ := r.get("/v1/health", "tok-new"); code != 200 {
+		t.Errorf("the reloaded principal = %d, want 200", code)
+	}
+}
+
 // Nothing happens when the file did not change, and nothing is logged for it.
 func TestReload_UnchangedFileIsNotReapplied(t *testing.T) {
 	r := newReloadRig(t, rlDoc(rlPrincipal("old", "tok-old", "read")))

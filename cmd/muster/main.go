@@ -967,6 +967,9 @@ func main() {
 	if rl.table != nil {
 		reloadCtx, stopReload := context.WithCancel(context.Background())
 		defer stopReload()
+		// The service is up on this file: say so before the first poll can say
+		// anything else, and drop what the previous process recorded (#370).
+		rl.recordStart()
 		go rl.run(reloadCtx, reloadPollInterval)
 		log.Printf("muster: watching the config file for principal and peer changes (SIGHUP applies it now)")
 	}
