@@ -560,3 +560,88 @@ func TestCwdPrefixOverARealPeerHop(t *testing.T) {
 		t.Errorf("unfiltered stream = %v, want all 8 frames", got)
 	}
 }
+
+// The measurement from #372, end to end: with only a cwdPrefix subscriber here,
+// the peer is asked for that directory, so a session outside it never crosses
+// the wire — it is not relayed here and discarded, it is not relayed. The
+// frames of a session whose directory only the peer can place are filtered by
+// the peer's own hub, which is why pushing the prefix there is safe.
+func TestPrefixIsPushedDownSoTheOutsideFramesNeverCrossThePeerHop(t *testing.T) {
+	peerSvc := New("peerbox")
+	pd := &peerFeedDriver{
+		listCountingDriver: listCountingDriver{sessions: []fleet.Session{
+			{SessionRef: fleet.SessionRef{Machine: "peerbox", ID: "pre-in"}, Runtime: "fake",
+				Cwd: fleet.AbsolutePath(insideDir), State: fleet.InferredState(fleet.StatusIdle, "test", nil)},
+			{SessionRef: fleet.SessionRef{Machine: "peerbox", ID: "pre-out"}, Runtime: "fake",
+				Cwd: fleet.AbsolutePath(outsideDir), State: fleet.InferredState(fleet.StatusIdle, "test", nil)},
+		}},
+		feed: make(chan fleet.Event, 64),
+	}
+	pd.DeadlineMs = 2000
+	if err := peerSvc.RegisterLocalDriver("fake", pd); err != nil {
+		t.Fatal(err)
+	}
+	peerSrv := httptest.NewServer(NewMux(peerSvc, Config{Principals: []Principal{
+		{Name: "entrybox", Token: "peer-token", Grants: []Grant{GrantRead}},
+	}}))
+	t.Cleanup(peerSrv.Close)
+
+	svc := New("entrybox")
+	svc.events.linger = 0
+	if err := svc.RegisterPeerDriver("peerbox",
+		remote.New("peerbox", peerSrv.URL, remote.WithIdentity("peer-token"), remote.WithSelf("entrybox"))); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptestServer(t, svc)
+
+	req := authedRequest(t, http.MethodGet, srv.URL+"/v1/events?cwdPrefix="+prefixDir, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	resp, err := http.DefaultClient.Do(req.WithContext(ctx))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	prefixed := sseFrames(t, resp)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for (svc.events.subscriberCount() < 1 || peerSvc.events.subscriberCount() == 0) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if svc.events.subscriberCount() < 1 || peerSvc.events.subscriberCount() == 0 {
+		t.Fatal("the stream did not attach in time")
+	}
+
+	for _, ev := range []fleet.Event{
+		createdEvent("peerbox", "in1", insideDir),
+		createdEvent("peerbox", "out1", outsideDir),
+		stateEventOn("peerbox", fleet.EventSessionState, "in1"),
+		stateEventOn("peerbox", fleet.EventSessionState, "out1"),
+		stateEventOn("peerbox", fleet.EventSessionState, "pre-in"),
+		stateEventOn("peerbox", fleet.EventSessionState, "pre-out"),
+		stateEventOn("peerbox", fleet.EventSessionClosed, "in1"),
+		stateEventOn("peerbox", fleet.EventSessionClosed, "out1"),
+	} {
+		pd.feed <- ev
+	}
+
+	wantInside := []string{
+		"session.created:in1", "session.state:in1", "session.state:pre-in", "session.closed:in1",
+	}
+	if got := sessionFrames(prefixed, len(wantInside), 5*time.Second); !sameStrings(got, wantInside) {
+		t.Errorf("cwdPrefix stream = %v, want %v", got, wantInside)
+	}
+
+	// What this service's own hub was handed, not what its subscriber got.
+	svc.events.mu.Lock()
+	var relayed []string
+	for _, ev := range svc.events.ring {
+		if id, _ := eventTarget(ev); id != "" {
+			relayed = append(relayed, string(ev.Kind)+":"+id)
+		}
+	}
+	svc.events.mu.Unlock()
+	if !sameStrings(relayed, wantInside) {
+		t.Errorf("the peer relayed %v to this service's hub, want only %v: the prefix must have been pushed to the peer", relayed, wantInside)
+	}
+}

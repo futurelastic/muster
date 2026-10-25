@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,18 +33,29 @@ import (
 //
 // # Watching costs what the subscribers asked for
 //
-// The hub keeps ONE driver subscription, not one per client — two streams over
-// the same driver would produce two events for one change, with different
-// cursors, and deliver both to everyone.
+// The hub keeps ONE driver subscription per driver, not one per client — two
+// streams over the same driver would produce two events for one change, with
+// different cursors, and deliver both to everyone. The subscription has two
+// lanes, because the two kinds of driver cannot be asked the same question: the
+// local lane (this machine's drivers) and the peer lane (one stream to each
+// peer).
 //
-// Its filter is the union of the active clients' filters, recomputed whenever
-// a client arrives or leaves. That is D4's lesson applied one level up: if
-// every client names the sessions it cares about, the union names them too and
-// the driver attaches one connection per named session. If any client asks
-// descriptively — a directory prefix, or nothing at all — the union widens to
-// everything, because there is no honest way to serve a description for less.
-// The cost of a vague subscriber is paid by the machine it subscribes to, and
-// that is worth knowing rather than hiding.
+// Each lane's filter is the union of the active clients' filters, recomputed
+// whenever a client arrives or leaves. That is D4's lesson applied one level
+// up: if every client names the sessions it cares about, the union names them
+// too and a driver attaches one connection per named session.
+//
+// The local lane widens to everything as soon as one client names no sessions:
+// a local driver applies Matches itself, to frames whose directory it may not
+// know, and a prefix pushed down to it could drop one the hub would have
+// delivered (#361). The peer lane is computed per dimension instead, over the
+// clients that can receive a peer's frames at all (scope=fleet): the sessions
+// when every one of them names some, the longest common directory prefix when
+// every one of them has one. A peer serves the filter through its own hub, which
+// delivers a frame whose directory it cannot place, so the prefix is safe to send
+// and the peer's whole fleet is not streamed here just to be discarded (#372).
+// Either way a lane's filter only has to cover every client; the hub's
+// per-subscriber filtering stays the exact answer.
 
 const defaultRetention = 512
 
@@ -106,10 +118,15 @@ type hub struct {
 	persist func(int64)
 
 	// driver-side stream, kept alive while somebody is listening and for
-	// linger after the last of them leaves.
+	// linger after the last of them leaves. The local lane's state is the
+	// stream* fields; the peer lane has its own so a change that only concerns
+	// one lane restarts only that one (see ensureStreamForce).
 	streamCancel context.CancelFunc
 	streamFilter driver.SubscribeFilter
 	streamOn     bool
+	peerCancel   context.CancelFunc
+	peerFilter   driver.SubscribeFilter
+	peerOn       bool
 	linger       time.Duration
 	lingerTimer  *time.Timer
 
@@ -301,12 +318,27 @@ func (h *hub) armLinger() {
 	// Linger disabled: tear down on the spot, which is what this did before
 	// the window existed. Tests set it to zero to keep that behaviour
 	// observable rather than having to wait a minute for it.
-	cancel := h.streamCancel
-	h.streamOn, h.streamCancel = false, nil
+	cancels := h.stopLanesLocked()
 	h.mu.Unlock()
-	if cancel != nil {
+	for _, cancel := range cancels {
 		cancel()
 	}
+}
+
+// stopLanesLocked marks both lanes stopped and returns their cancels for the
+// caller to run once it has released h.mu. A lane that was never started
+// contributes none.
+func (h *hub) stopLanesLocked() []context.CancelFunc {
+	var cancels []context.CancelFunc
+	if h.streamCancel != nil {
+		cancels = append(cancels, h.streamCancel)
+	}
+	if h.peerCancel != nil {
+		cancels = append(cancels, h.peerCancel)
+	}
+	h.streamOn, h.streamCancel = false, nil
+	h.peerOn, h.peerCancel = false, nil
+	return cancels
 }
 
 func (h *hub) lingerExpired() {
@@ -318,10 +350,9 @@ func (h *hub) lingerExpired() {
 		h.mu.Unlock()
 		return
 	}
-	cancel := h.streamCancel
-	h.streamOn, h.streamCancel = false, nil
+	cancels := h.stopLanesLocked()
 	h.mu.Unlock()
-	if cancel != nil {
+	for _, cancel := range cancels {
 		cancel()
 	}
 }
@@ -350,20 +381,42 @@ func (h *hub) wantsPeers() bool {
 	return false
 }
 
-// unionFilter computes what the driver must watch to satisfy everyone.
+// streamFilters computes what each lane of the driver-side stream must watch
+// to satisfy everyone who can receive from it.
 //
-// If every active subscriber names sessions, the union names them and the
-// driver watches exactly those. One subscriber that asks descriptively widens
-// the union to everything, because a description cannot be served for less.
-func (h *hub) unionFilter() driver.SubscribeFilter {
+// local is the sessions' union and nothing else: if every subscriber names
+// sessions the drivers watch exactly those, and one that asks descriptively —
+// a directory prefix, or nothing — widens it to everything (see the file
+// comment for why a prefix is not pushed to a local driver).
+//
+// peer is computed over the fleet-scoped subscribers only, since a
+// local-scoped one is never sent a peer's frames, and per dimension: Sessions
+// is the union of the named ids when every one of them names some, CwdPrefix is
+// the longest common prefix when every one of them has one. A dimension some
+// subscriber leaves open stays open. Each dimension over-approximates every
+// member, so the hub's per-subscriber filtering is still what decides.
+func (h *hub) streamFilters() (local, peer driver.SubscribeFilter) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
+	local.Sessions = unionSessions(h.subs, func(*subscriber) bool { return true })
+	fleetSubs := func(s *subscriber) bool { return s.scope == ScopeFleet }
+	peer.Sessions = unionSessions(h.subs, fleetSubs)
+	peer.CwdPrefix = commonCwdPrefix(h.subs, fleetSubs)
+	return local, peer
+}
+
+// unionSessions is the union of the sessions the selected subscribers name, or
+// nil when any of them names none (or none is selected).
+func unionSessions(subs map[int]*subscriber, selected func(*subscriber) bool) []string {
 	seen := map[string]bool{}
 	var ids []string
-	for _, s := range h.subs {
+	for _, s := range subs {
+		if !selected(s) {
+			continue
+		}
 		if len(s.filter.Sessions) == 0 {
-			return driver.SubscribeFilter{} // somebody wants everything
+			return nil // somebody wants every session
 		}
 		for _, id := range s.filter.Sessions {
 			if !seen[id] {
@@ -372,7 +425,33 @@ func (h *hub) unionFilter() driver.SubscribeFilter {
 			}
 		}
 	}
-	return driver.SubscribeFilter{Sessions: ids}
+	return ids
+}
+
+// commonCwdPrefix is the longest string prefix shared by the prefixes of the
+// selected subscribers, or "" when any of them has none (or none is selected).
+// It is a string prefix, not a path one, because that is what Matches tests.
+func commonCwdPrefix(subs map[int]*subscriber, selected func(*subscriber) bool) string {
+	common, any := "", false
+	for _, s := range subs {
+		if !selected(s) {
+			continue
+		}
+		p := s.filter.CwdPrefix
+		if p == "" {
+			return "" // somebody wants every directory
+		}
+		if !any {
+			common, any = p, true
+			continue
+		}
+		n := 0
+		for n < len(common) && n < len(p) && common[n] == p[n] {
+			n++
+		}
+		common = common[:n]
+	}
+	return common
 }
 
 // matchesEvent applies a subscriber's filter to an event on what its payload
@@ -447,8 +526,8 @@ func eventSubject(ev fleet.Event) (id, cwd string, hasCwd bool) {
 	return "", "", false
 }
 
-// ensureStream starts, restarts or stops the single driver-side subscription
-// so that it watches exactly the union of what subscribers want.
+// ensureStream starts, restarts or stops the driver-side subscription so that
+// it watches exactly the union of what subscribers want.
 //
 // Restarting on every filter change is deliberate crudeness: the alternative
 // is mutating a live subscription's filter, which the Driver interface does
@@ -461,13 +540,31 @@ func (s *Service) ensureStream(ctx context.Context) { s.ensureStreamForce(ctx, f
 // peers needs that: the peer pumps are started with the stream, so a stream
 // already running would otherwise never hear from a peer added after it began
 // (muster #347). Subscribers keep their connections; only the pumps restart.
+//
+// # Two lanes, restarted separately
+//
+// A restart takes a fresh baseline, which can absorb a change that happened in
+// between (see defaultLinger), so a restart is worth avoiding for a pump whose
+// filter did not change. The local and peer pumps therefore run under separate
+// contexts and each decides for itself:
+//
+//   - The local lane restarts when its filter changes, as the whole stream did
+//     before. A subscriber that only differs by directory never changes it.
+//   - The peer lane restarts when the peers must be reached afresh (force), when
+//     it is not running and somebody wants the fleet, or when the filter it runs
+//     with no longer COVERS what is wanted (see covers) — a new subscriber
+//     needs frames the stream was opened to leave out. A narrowing never
+//     restarts it: a pump that is wider than needed is still correct, because
+//     the hub filters per subscriber, and a departing subscriber is the common
+//     case. It narrows again the next time the lane starts.
 func (s *Service) ensureStreamForce(ctx context.Context, force bool) {
 	h := s.events
-	want := h.unionFilter()
+	wantLocal, wantPeer := h.streamFilters()
 	listeners := h.subscriberCount()
 
 	h.mu.Lock()
 	on, cur, cancel := h.streamOn, h.streamFilter, h.streamCancel
+	peerOn, peerCur, peerCancel := h.peerOn, h.peerFilter, h.peerCancel
 	h.mu.Unlock()
 
 	switch {
@@ -484,30 +581,43 @@ func (s *Service) ensureStreamForce(ctx context.Context, force bool) {
 	// Somebody is listening again; any pending teardown is off.
 	h.disarmLinger()
 
-	switch {
-	case on && !force && sameFilter(cur, want):
-		return
-	case on:
-		cancel()
+	if !on || force || !sameFilter(cur, wantLocal) {
+		if on {
+			cancel()
+		}
+		streamCtx, newCancel := context.WithCancel(context.WithoutCancel(ctx))
+		h.mu.Lock()
+		h.streamOn, h.streamFilter, h.streamCancel = true, wantLocal, newCancel
+		h.mu.Unlock()
+
+		for _, d := range s.localDrivers() {
+			go s.pump(streamCtx, s.self, d, fleet.SystemRequest(), wantLocal)
+		}
 	}
 
-	streamCtx, streamCancel := context.WithCancel(context.WithoutCancel(ctx))
-	h.mu.Lock()
-	h.streamOn, h.streamFilter, h.streamCancel = true, want, streamCancel
-	h.mu.Unlock()
-
-	for _, d := range s.localDrivers() {
-		go s.pump(streamCtx, s.self, d, fleet.SystemRequest(), want)
-	}
 	// Peers only when somebody actually asked for the fleet. See
 	// subscriber.scope: a peer's own scope=local subscription must not make
 	// us open streams back to our peers (§13.1).
-	if h.wantsPeers() {
-		for m, d := range s.peerDrivers() {
-			// Peers need an authority a local driver does not: see
-			// Service.peerCredential for why this is the service's own and
-			// not some subscriber's.
-			go s.pump(streamCtx, m, d, s.peerRequest(), want)
+	wantPeers := h.wantsPeers()
+	if force || (wantPeers && (!peerOn || !covers(peerCur, wantPeer))) {
+		if peerOn {
+			peerCancel()
+			h.mu.Lock()
+			h.peerOn, h.peerCancel = false, nil
+			h.mu.Unlock()
+		}
+		if wantPeers {
+			peerCtx, newCancel := context.WithCancel(context.WithoutCancel(ctx))
+			h.mu.Lock()
+			h.peerOn, h.peerFilter, h.peerCancel = true, wantPeer, newCancel
+			h.mu.Unlock()
+
+			for m, d := range s.peerDrivers() {
+				// Peers need an authority a local driver does not: see
+				// Service.peerCredential for why this is the service's own and
+				// not some subscriber's.
+				go s.pump(peerCtx, m, d, s.peerRequest(), wantPeer)
+			}
 		}
 	}
 }
@@ -701,6 +811,34 @@ func sameFilter(a, b driver.SubscribeFilter) bool {
 	}
 	for _, y := range b.Sessions {
 		if !seen[y] {
+			return false
+		}
+	}
+	return true
+}
+
+// covers reports whether a stream opened with have delivers every frame one
+// opened with want would, so that keeping it running loses nothing for the
+// subscribers want was computed from. Each dimension is checked on its own, which
+// is sufficient for the AND the two selectors compose with (it is not necessary:
+// two narrower dimensions can be disjoint, and then the answer is a harmless
+// "no").
+func covers(have, want driver.SubscribeFilter) bool {
+	if have.CwdPrefix != "" && !strings.HasPrefix(want.CwdPrefix, have.CwdPrefix) {
+		return false
+	}
+	if len(have.Sessions) == 0 {
+		return true
+	}
+	if len(want.Sessions) == 0 {
+		return false
+	}
+	held := make(map[string]bool, len(have.Sessions))
+	for _, id := range have.Sessions {
+		held[id] = true
+	}
+	for _, id := range want.Sessions {
+		if !held[id] {
 			return false
 		}
 	}

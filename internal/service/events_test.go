@@ -112,21 +112,100 @@ func TestUnionOfNamedFiltersStaysNarrow(t *testing.T) {
 	h := newHub("testbox", "e")
 	h.add(ScopeFleet, driver.SubscribeFilter{Sessions: []string{"a", "b"}}, 0, "")
 	h.add(ScopeFleet, driver.SubscribeFilter{Sessions: []string{"b", "c"}}, 0, "")
-	u := h.unionFilter()
-	if len(u.Sessions) != 3 {
-		t.Errorf("union = %v, want a+b+c deduplicated", u.Sessions)
+	local, peer := h.streamFilters()
+	if len(local.Sessions) != 3 {
+		t.Errorf("local union = %v, want a+b+c deduplicated", local.Sessions)
+	}
+	if len(peer.Sessions) != 3 {
+		t.Errorf("peer union = %v, want a+b+c deduplicated", peer.Sessions)
 	}
 }
 
-// One descriptive subscriber widens the union to everything, because a
-// description cannot be served for less. Stated as a test so the cost is a
-// known property rather than a surprise.
-func TestOneDescriptiveSubscriberWidensTheUnion(t *testing.T) {
+// A subscriber that names no sessions widens the LOCAL lane to everything: a
+// local driver applies Matches to frames whose directory it may not know, so a
+// description is not pushed down to it (#361), and it cannot be served for less.
+func TestOneDescriptiveSubscriberWidensTheLocalUnion(t *testing.T) {
 	h := newHub("testbox", "e")
 	h.add(ScopeFleet, driver.SubscribeFilter{Sessions: []string{"a"}}, 0, "")
 	h.add(ScopeFleet, driver.SubscribeFilter{CwdPrefix: "/work"}, 0, "")
-	if u := h.unionFilter(); len(u.Sessions) != 0 {
-		t.Errorf("union = %v; a descriptive subscriber must widen it to everything", u.Sessions)
+	local, _ := h.streamFilters()
+	if len(local.Sessions) != 0 || local.CwdPrefix != "" {
+		t.Errorf("local union = %+v; a descriptive subscriber must widen it to everything", local)
+	}
+}
+
+// The peer lane is computed per dimension (#372): a directory-only subscriber
+// no longer widens it to the peer's whole fleet.
+func TestPeerUnionIsComputedPerDimension(t *testing.T) {
+	cases := []struct {
+		name     string
+		subs     []driver.SubscribeFilter
+		sessions int
+		prefix   string
+	}{
+		{"one prefix", []driver.SubscribeFilter{{CwdPrefix: "/work/a"}}, 0, "/work/a"},
+		{"longest common prefix", []driver.SubscribeFilter{{CwdPrefix: "/work/app"}, {CwdPrefix: "/work/api"}}, 0, "/work/ap"},
+		{"a shared leading slash is still a common prefix", []driver.SubscribeFilter{{CwdPrefix: "/a"}, {CwdPrefix: "/b"}}, 0, "/"},
+		{"nothing in common", []driver.SubscribeFilter{{CwdPrefix: "/a"}, {CwdPrefix: "~/b"}}, 0, ""},
+		{"one without a prefix leaves it open", []driver.SubscribeFilter{{CwdPrefix: "/work", Sessions: []string{"x"}}, {Sessions: []string{"y"}}}, 2, ""},
+		{"sessions and prefix are independent", []driver.SubscribeFilter{
+			{Sessions: []string{"x"}, CwdPrefix: "/work/a"}, {Sessions: []string{"y"}, CwdPrefix: "/work/b"}}, 2, "/work/"},
+		{"one without sessions leaves them open", []driver.SubscribeFilter{{Sessions: []string{"x"}}, {CwdPrefix: "/work"}}, 0, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHub("testbox", "e")
+			for _, f := range c.subs {
+				h.add(ScopeFleet, f, 0, "")
+			}
+			_, peer := h.streamFilters()
+			if len(peer.Sessions) != c.sessions || peer.CwdPrefix != c.prefix {
+				t.Errorf("peer filter = %+v, want %d sessions and prefix %q", peer, c.sessions, c.prefix)
+			}
+		})
+	}
+}
+
+// Only a fleet-scoped subscriber can be sent a peer's frames, so a local-scoped
+// one that wants everything must not widen what the peers are asked for.
+func TestLocalScopedSubscriberDoesNotWidenThePeerFilter(t *testing.T) {
+	h := newHub("testbox", "e")
+	h.add(ScopeFleet, driver.SubscribeFilter{CwdPrefix: "/work"}, 0, "")
+	h.add(ScopeLocal, driver.SubscribeFilter{}, 0, "")
+	local, peer := h.streamFilters()
+	if peer.CwdPrefix != "/work" {
+		t.Errorf("peer prefix = %q, want /work", peer.CwdPrefix)
+	}
+	if local.CwdPrefix != "" || len(local.Sessions) != 0 {
+		t.Errorf("local filter = %+v, want everything", local)
+	}
+}
+
+// covers is what lets a departure or a covered arrival skip a restart; a filter
+// that fails it must lose nothing for the subscribers it was computed from.
+func TestCoversMeansNothingWantedIsLeftOut(t *testing.T) {
+	f := func(prefix string, ids ...string) driver.SubscribeFilter {
+		return driver.SubscribeFilter{CwdPrefix: prefix, Sessions: ids}
+	}
+	cases := []struct {
+		name       string
+		have, want driver.SubscribeFilter
+		covers     bool
+	}{
+		{"identical", f("/a", "x"), f("/a", "x"), true},
+		{"open covers anything", f(""), f("/a", "x"), true},
+		{"narrower prefix", f("/a"), f("/a/b"), true},
+		{"wider prefix is not covered", f("/a/b"), f("/a"), false},
+		{"disjoint prefix", f("/a"), f("/b"), false},
+		{"a prefix does not cover a wish for every directory", f("/a"), f(""), false},
+		{"named sessions cover a subset", f("", "x", "y"), f("", "y"), true},
+		{"named sessions do not cover a new one", f("", "x"), f("", "x", "z"), false},
+		{"named sessions do not cover every session", f("", "x"), f(""), false},
+	}
+	for _, c := range cases {
+		if got := covers(c.have, c.want); got != c.covers {
+			t.Errorf("%s: covers(%+v, %+v) = %v, want %v", c.name, c.have, c.want, got, c.covers)
+		}
 	}
 }
 
