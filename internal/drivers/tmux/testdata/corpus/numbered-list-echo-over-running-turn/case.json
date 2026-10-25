@@ -1,0 +1,11 @@
+{
+  "name": "numbered-list-echo-over-running-turn",
+  "for": "A person's own plain message written as a numbered list is echoed in the scrollback with the same ❯ leader a menu's highlighted option uses, and the turn it started is still running. The echo is a highlighted-looking row followed by contiguous numbered rows, which is exactly the structural shape parsePrompt accepts as a selection menu, so a session mid-turn read as blocked on a prompt: waiting_input / prompt, confidence inferred, its options the person's own lines and its question the previous reply's turn-complete footer. A client trusting that state showed an answer card, and every answer sent to it went to a session that was working (one of them interrupted the turn). A real selection menu REPLACES the composer; this screen has a live fenced composer below the numbered rows and a running status line between them, so it is transcript, not a dialog. This case pins that the screen is working, never waiting_input, at the first look and once it has sat unchanged past spinnerPaintGrace, and that no prompt is reported at all. See TestEchoedNumberedListIsNotAPrompt for the same shape pinned directly against parsePrompt.",
+  "source": "#358",
+  "redactedFrom": "synthetic: composed from the shape the report in #358 described (a numbered-list message echoed above a running turn, the previous reply's turn-complete footer above it, the live composer below), then run through corpus-redact. No raw capture was kept, because a person's message is exactly what the redactor discards.",
+  "alive": true,
+  "observations": [
+    { "afterSeconds": 0, "young": false, "want": "working", "wantKind": "none" },
+    { "afterSeconds": 5, "young": false, "want": "working", "wantKind": "none" }
+  ]
+}

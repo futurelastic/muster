@@ -1,0 +1,11 @@
+{
+  "name": "numbered-list-echo-after-interrupt",
+  "for": "The same numbered-list user message echoed with the ❯ leader as numbered-list-echo-over-running-turn, but the turn was interrupted: the echo is followed by the runtime's interrupt notice and then the empty composer, with no status line running. Nothing animates on this screen, so it sits unchanged and the unrecognised-prompt hold in resolveUnrecognisedPrompt, which exists to let a moving screen prove it is not a menu, promoted it to a confident waiting_input / prompt after spinnerPaintGrace and left it there for as long as the echo was the last thing on screen. The session is idle: the previous turn's footer is a finished status line and the composer is empty. This case pins idle at the first look and past the grace, with no prompt reported.",
+  "source": "#358",
+  "redactedFrom": "synthetic: composed from the shape the report in #358 described (the same echo after an interrupted turn, the interrupt notice under it, the empty composer below), then run through corpus-redact. The notice's wording is discarded by the redactor, so the committed screen carries only its position.",
+  "alive": true,
+  "observations": [
+    { "afterSeconds": 0, "young": false, "want": "idle", "wantKind": "none" },
+    { "afterSeconds": 5, "young": false, "want": "idle", "wantKind": "none" }
+  ]
+}
