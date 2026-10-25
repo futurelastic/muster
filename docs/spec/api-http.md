@@ -2321,6 +2321,19 @@ compose with AND. Naming is not sugar over `cwdPrefix`: a substrate may charge
 per watched session, in which case a caller that can only describe what it
 wants pays for every match (§5.5).
 
+Both selectors apply to every frame that is about one session —
+`session.created`, `session.state`, `session.closed`, `session.labels` — whether
+that session runs on this machine or the frame was relayed from a peer. Only
+`session.created` carries the session's working directory, so a service
+remembers the directory it has seen for each session (from created frames and
+from its own listings, and by asking the source when a frame names a session it
+has never seen) and applies `cwdPrefix` to the frames that name the session
+alone. A frame for a session whose directory the service cannot learn is
+delivered, not dropped: an extra frame is recoverable, a silent hole is not
+(§7.3). Frames that are not about one session — `source.status`,
+`machine.quota`, `machine.account`, `control.resync`, and `session.renamed` —
+are never narrowed by either selector.
+
 Server-sent events. Every event carries `cursor`, `epoch`, and the `machine` it
 originated from — including events proxied from peers (§13).
 

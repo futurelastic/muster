@@ -85,8 +85,20 @@ type hub struct {
 	mu     sync.Mutex
 	cursor int64
 	ring   []fleet.Event
-	subs   map[int]*subscriber
-	nextID int
+	// ringFacts runs parallel to ring: what each retained event was about, as
+	// resolved when it was published. A backlog replay filters on these, not
+	// on a fresh lookup, so a session that closed since (and left the index)
+	// is still replayed to a cwdPrefix subscriber exactly as it was delivered
+	// live.
+	ringFacts []eventFact
+	subs      map[int]*subscriber
+	nextID    int
+
+	// cwds is the one place a state, close or labels frame can learn which
+	// directory its session runs in: those payloads name the session and
+	// nothing else. See cwdindex.go.
+	cwds     map[sessionKey]string
+	cwdTried map[sessionKey]time.Time
 
 	// persist records the cursor high-water mark so a restart continues the
 	// sequence rather than reusing numbers (§7.3). Called under the lock and
@@ -130,6 +142,8 @@ func newHub(self fleet.MachineId, epoch string) *hub {
 		retention: defaultRetention,
 		linger:    defaultLinger,
 		subs:      map[int]*subscriber{},
+		cwds:      map[sessionKey]string{},
+		cwdTried:  map[sessionKey]time.Time{},
 		rename:    newRenamePlane(),
 	}
 }
@@ -146,9 +160,12 @@ func (h *hub) publish(ev fleet.Event) {
 		h.persist(h.cursor)
 	}
 
+	fact := h.factFor(ev)
 	h.ring = append(h.ring, ev)
+	h.ringFacts = append(h.ringFacts, fact)
 	if len(h.ring) > h.retention {
 		h.ring = h.ring[len(h.ring)-h.retention:]
+		h.ringFacts = h.ringFacts[len(h.ringFacts)-h.retention:]
 	}
 
 	for _, s := range h.subs {
@@ -159,7 +176,7 @@ func (h *hub) publish(ev fleet.Event) {
 		if s.scope == ScopeLocal && ev.Machine != "" && ev.Machine != h.self {
 			continue
 		}
-		if !matchesEvent(s.filter, ev) {
+		if !matchesFact(s.filter, ev, fact) {
 			continue
 		}
 		select {
@@ -174,6 +191,9 @@ func (h *hub) publish(ev fleet.Event) {
 		}
 	}
 
+	// After the fan-out, never before: the close frame itself must still be
+	// matched against the cwd this session is leaving the index with.
+	h.forget(ev)
 	h.mu.Unlock()
 
 	// Deliberately unlocked above rather than deferred: muster #103's
@@ -220,8 +240,8 @@ func (h *hub) add(scope Scope, filter driver.SubscribeFilter, fromCursor int64, 
 	if fromCursor < oldest-1 {
 		return s, nil, true // fell off the retained window
 	}
-	for _, ev := range h.ring {
-		if ev.Cursor > fromCursor && matchesEvent(filter, ev) {
+	for i, ev := range h.ring {
+		if ev.Cursor > fromCursor && matchesFact(filter, ev, h.ringFacts[i]) {
 			backlog = append(backlog, ev)
 		}
 	}
@@ -355,31 +375,76 @@ func (h *hub) unionFilter() driver.SubscribeFilter {
 	return driver.SubscribeFilter{Sessions: ids}
 }
 
-// matchesEvent applies a subscriber's filter to an already-stamped event.
+// matchesEvent applies a subscriber's filter to an event on what its payload
+// alone says. The hub itself uses matchesFact with the cwd it resolved when the
+// event was published (cwdindex.go); this is the same rule without that index.
 func matchesEvent(f driver.SubscribeFilter, ev fleet.Event) bool {
+	id, cwd, has := eventSubject(ev)
+	return matchesFact(f, ev, eventFact{id: id, cwd: cwd, cwdKnown: has})
+}
+
+// matchesFact applies a subscriber's filter to an event about the session
+// fact describes.
+func matchesFact(f driver.SubscribeFilter, ev fleet.Event, fact eventFact) bool {
 	// Control events are never filtered out by session: a subscriber that
 	// filtered away its own resync notice would be told nothing precisely
 	// when it most needs telling.
 	if ev.Kind == fleet.EventControlResync || ev.Kind == fleet.EventSourceStatus {
 		return true
 	}
-	id, cwd := eventTarget(ev)
-	if id == "" {
-		return true
+	if fact.id == "" {
+		return true // not about one session: machine.*, session.renamed
 	}
-	return f.Matches(id, cwd)
+	if fact.cwdKnown {
+		return f.Matches(fact.id, fact.cwd)
+	}
+	// The session's directory is not known. A cwdPrefix cannot be applied to
+	// it, and dropping the frame would be the silent hole §7.3 forbids: a
+	// subscriber that never sees its session go idle has no way to tell that
+	// from the session staying busy. An extra frame is recoverable — the
+	// client can ignore an id it does not recognise. So the id test alone
+	// decides. (The service asks the source for the directory before it
+	// publishes — resolveCwd — so this is the residue, not the rule.)
+	f.CwdPrefix = ""
+	return f.Matches(fact.id, "")
 }
 
+// eventTarget reports which session an event is about and the directory its
+// payload carries, if any.
 func eventTarget(ev fleet.Event) (id, cwd string) {
+	id, cwd, _ = eventSubject(ev)
+	return id, cwd
+}
+
+// eventSubject reads the session an event is about out of its payload, and the
+// session's directory when the payload carries one — only a whole session does.
+//
+// A frame relayed from a peer has been through JSON, and its Payload is the
+// generic map that decoding into `any` produces, not the Go type the peer's
+// driver published. It has to be read as such: an id of "" admits the frame to
+// every subscriber, which is how cwdPrefix came to pass a peer's entire fleet
+// through (#361).
+func eventSubject(ev fleet.Event) (id, cwd string, hasCwd bool) {
 	switch p := ev.Payload.(type) {
 	case fleet.Session:
-		return p.ID, string(p.Cwd)
+		return p.ID, string(p.Cwd), true
 	case fleet.SessionStatePayload:
-		return p.Ref.ID, ""
+		return p.Ref.ID, "", false
 	case fleet.SessionLabelsPayload:
-		return p.Ref.ID, ""
+		return p.Ref.ID, "", false
+	case map[string]any:
+		switch ev.Kind {
+		case fleet.EventSessionCreated:
+			id, _ = p["id"].(string)
+			cwd, hasCwd = p["cwd"].(string)
+			return id, cwd, hasCwd && id != ""
+		case fleet.EventSessionState, fleet.EventSessionClosed, fleet.EventSessionLabels:
+			ref, _ := p["ref"].(map[string]any)
+			id, _ = ref["id"].(string)
+			return id, "", false
+		}
 	}
-	return "", ""
+	return "", "", false
 }
 
 // ensureStream starts, restarts or stops the single driver-side subscription
@@ -509,7 +574,9 @@ func (s *Service) pump(ctx context.Context, machine fleet.MachineId, d driver.Dr
 		}
 		backoff = pumpBackoffMin
 
-		err = s.drainStream(ctx, stream)
+		err = s.drainStream(ctx, stream, func(ev fleet.Event) {
+			s.resolveCwd(ctx, machine, d, req, ev)
+		})
 		_ = stream.Close()
 		if ctx.Err() != nil {
 			return
@@ -528,13 +595,16 @@ func (s *Service) pump(ctx context.Context, machine fleet.MachineId, d driver.Dr
 	}
 }
 
-// drainStream forwards a live stream into the hub until it ends.
-func (s *Service) drainStream(ctx context.Context, stream driver.EventStream) error {
+// drainStream forwards a live stream into the hub until it ends. resolve is
+// given each event before it is published, and may learn what the hub needs to
+// filter it (resolveCwd).
+func (s *Service) drainStream(ctx context.Context, stream driver.EventStream, resolve func(fleet.Event)) error {
 	for {
 		ev, err := stream.Next(ctx)
 		if err != nil {
 			return err
 		}
+		resolve(ev)
 		// A LOCAL driver's session.created carries no labels — the driver
 		// never sees them (muster #153). Attach whatever this service
 		// already holds. A create's own labels may land a moment after this
