@@ -71,6 +71,9 @@ type reloadStatus struct {
 	// AppliedHash identifies the file contents the service is running on.
 	AppliedHash string `json:"appliedHash"`
 	AppliedAt   string `json:"appliedAt"`
+	// AppliedReason is what applied it: "start" when the service came up on this
+	// file (muster #370), otherwise the reload's trigger ("file changed", "SIGHUP").
+	AppliedReason string `json:"appliedReason,omitempty"`
 	// RefusedHash identifies the contents last refused, with Error saying why.
 	// Empty when the file on disk is the applied one.
 	RefusedHash string `json:"refusedHash,omitempty"`
@@ -450,9 +453,17 @@ func (rl *reloader) apply(raw []byte, hash, reason string, cfgChanged bool, list
 			return redactErr(err, rl.path)
 		}
 		if names := restartOnly(rl.applied, next); len(names) > 0 {
-			return fmt.Errorf("the file changes %s, which only a restart applies; "+
+			// "Only a restart applies" reads as "a restart will apply it". Say whether
+			// that is true: the refusal is the message the operator reads before
+			// restarting, and a restart onto a file that does not start is a
+			// crash-loop under a process manager (muster #366).
+			verdict := "; the file passes start-up validation"
+			if serr := startupCheck(next, rl.getenv); serr != nil {
+				verdict = ", and a restart would fail: " + redactErr(serr, rl.path).Error()
+			}
+			return fmt.Errorf("the file changes %s, which only a restart applies%s; "+
 				"nothing from this edit was applied, including its principals and peers",
-				strings.Join(names, ", "))
+				strings.Join(names, ", "), verdict)
 		}
 	}
 	basePrincipals, err := next.principals()
@@ -544,7 +555,7 @@ func (rl *reloader) apply(raw []byte, hash, reason string, cfgChanged bool, list
 	st := rl.readStatus()
 	if cfgChanged {
 		rl.appliedHash = hash
-		st.AppliedHash, st.AppliedAt = hash, now
+		st.AppliedHash, st.AppliedAt, st.AppliedReason = hash, now, reason
 		st.RefusedHash, st.RefusedAt, st.Error = "", "", ""
 	}
 	switch {
@@ -569,6 +580,56 @@ func (rl *reloader) apply(raw []byte, hash, reason string, cfgChanged bool, list
 	}
 	rl.writeStatus(st)
 	return nil
+}
+
+// startupCheck is what a restart onto cfg would meet in the file itself: the
+// checks `muster doctor`'s config.load row runs (the principal table, then
+// validateConfigExtras — trust roots and sessionEnv) and the peer list, each of
+// which is a log.Fatalf at start. cfg has already been through parseConfig.
+//
+// It is the doctor's answer, not a second opinion: settings that only the
+// running process can judge (is defaultRuntime a driver this machine enabled)
+// are not in it, and neither does doctor claim them.
+func startupCheck(cfg *fileConfig, getenv func(string) string) error {
+	if _, err := cfg.principals(); err != nil {
+		return err
+	}
+	if err := validateConfigExtras(cfg, getenv); err != nil {
+		return err
+	}
+	if _, err := resolvePeers(getenv("FLEET_PEERS"), cfg); err != nil {
+		return fmt.Errorf("bad peer list: %w", err)
+	}
+	return nil
+}
+
+// recordStart writes the status as the service starts: it is running on the file
+// it loaded, from now, because it was started rather than reloaded (muster #370).
+//
+// A restart is how a restart-only edit finally takes effect, and how a refusal is
+// resolved; without this the record kept the previous process's applied hash and
+// any refusal it had made, and `muster doctor` reported a refusal the restart
+// had already answered. The record is written whole, not merged into the old one,
+// so nothing the previous process said survives to be believed.
+//
+// The machine list is recorded the way the start found it: the list it verified
+// is the one in force, and one that did not verify (a mode that carries on
+// without it) is a refusal, exactly as a reload would have recorded it.
+func (rl *reloader) recordStart() {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	now := time.Now().UTC().Format(time.RFC3339)
+	rl.appliedHash = rl.lastHash
+	st := reloadStatus{AppliedHash: rl.appliedHash, AppliedAt: now, AppliedReason: "start"}
+	if lo := rl.listOut; lo.mode != listModeOff {
+		switch {
+		case lo.verified != nil:
+			st.ListAppliedHash, st.ListAppliedSeq, st.ListAppliedAt = lo.rawHash, lo.verified.Document.Seq, now
+		case lo.err != nil:
+			st.ListRefusedHash, st.ListRefusedAt, st.ListError = lo.rawHash, now, lo.err.Error()
+		}
+	}
+	rl.writeStatus(st)
 }
 
 func redactErr(err error, path string) error {
