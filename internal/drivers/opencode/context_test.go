@@ -3,6 +3,7 @@ package opencode
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -204,8 +205,14 @@ func TestContextRef_TheRecordHoldsThePathNotTheText(t *testing.T) {
 	if err != nil {
 		t.Fatalf("no record: %v", err)
 	}
-	if !strings.Contains(string(raw), string(ref)) {
-		t.Error("the record does not carry the context file's path")
+	// Decoded rather than searched: a Windows path is stored with its backslashes
+	// escaped, so the raw bytes never contain it verbatim.
+	var rec sessionRecord
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		t.Fatalf("the record is not JSON: %v", err)
+	}
+	if rec.ContextRef != string(ref) {
+		t.Errorf("record ContextRef = %q, want the context file's path %q", rec.ContextRef, ref)
 	}
 	if strings.Contains(string(raw), "d41d8cd98f00b204") {
 		t.Error("the record holds the brief's text")
