@@ -1501,9 +1501,6 @@ with the implementation is worse than one that admits where it does.
 - **`GET /v1/sessions?machine=`** appears in the specification. The filter has no
   such field; the parameter is silently ignored. Use `scope` and filter
   client-side.
-- **`respond`'s outcome vocabulary** is documented in the specification as
-  `queued | refused`. It shares its type with `input` and can also return
-  `submitted` or `unknown`.
 - **`input`'s outcome vocabulary** is documented in the specification as
   including `submitted`, and the type genuinely allows it — but no driver in
   this fleet currently reports `confirmsDelivery: true`, so `input` cannot
