@@ -1282,7 +1282,10 @@ Accept: text/event-stream
 ```
 
 Filters: `session` (repeatable), `cwdPrefix`, plus `cursor` and `epoch` to
-resume.
+resume. `cwdPrefix` narrows every frame about a session — its state changes and
+its close as well as its creation — including frames relayed from peers. A frame
+for a session whose directory the service cannot learn is delivered rather than
+dropped, so ignore ids you do not recognise.
 
 ```
 id: 41
