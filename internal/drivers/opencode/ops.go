@@ -390,9 +390,10 @@ func (d *Driver) idemEnd(key string) {
 // once it does, honoured says whether the turn ran as the agent that was asked
 // for, and applied names the one it did run as.
 //
-// Model has no such record anywhere in this substrate's responses, so a
-// requested model is reported unresolved rather than asserting a match this
-// driver never actually confirmed. Effort refuses at Create rather than
+// A requested model is still reported unresolved: nothing in the create
+// response names it, and this driver does not yet read it back from the same
+// turn record (those messages do carry the model a turn ran on — muster #373),
+// so it asserts no match it never confirmed. Effort refuses at Create rather than
 // reaching here at all (§2.1), so it never appears.
 func pinOutcomeForAgent(spec fleet.SessionSpec, ev agentEvidence) *fleet.PinOutcome {
 	out := &fleet.PinOutcome{}
