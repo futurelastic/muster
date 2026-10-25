@@ -83,9 +83,10 @@ func (h *compatHarness) renameInto(ctx context.Context) error {
 		offset = fi.Size()
 	}
 
-	// Sanitize-clean by construction (lowercase, digits and hyphens only —
-	// naming.go's nameBody): the fix on #223 refuses a `to` sanitizeName
-	// would change, and this probe measures the title half, not that refusal.
+	// Sanitize-clean by construction (lowercase, digits and hyphens only,
+	// so sanitizeName leaves it unchanged and decoration finds no marker in
+	// it): the fix on #223 refuses a `to` sanitizeName would change, and this
+	// probe measures the title half, not that refusal.
 	to := h.world.label + "-renamed"
 	r.to = to
 	r.ran = true

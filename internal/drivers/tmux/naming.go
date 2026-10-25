@@ -4,6 +4,7 @@ import (
 	"context"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // Session naming, owned by this driver.
@@ -32,12 +33,42 @@ import (
 // from a remote client while still looking healthy locally, and it is not
 // something a caller can repair afterwards.
 
-// nameBody is the alphabet a sanitized name is built from. It is deliberately
-// the LOWERCASE ASCII set plus three separators: not because other characters
-// are rejected, but because this set defines what counts as decoration below.
-const nameBody = "abcdefghijklmnopqrstuvwxyz0123456789._-"
+// isNameBody reports whether r belongs to the body of a name, as opposed to
+// the decoration trailing it: a letter or a number in ANY script, or one of the
+// separators '.', '_' and '-'.
+//
+// Not an ASCII set. A name is typed by a person, in the language they work in,
+// so its last character is as likely to be 'ý', 'ь' or '章' as 'h'. Treating
+// every non-ASCII rune as decoration read such a name as already marked: the
+// caller's marker was silently dropped, and a counter was inserted inside the
+// last word (#360). Markers are symbols and emoji, which are neither letters
+// nor numbers, so they stay decoration.
+//
+// This classifies a single rune. A combining mark (accent, variation selector)
+// has no class of its own; see bodyAt.
+func isNameBody(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsNumber(r) || r == '.' || r == '_' || r == '-'
+}
 
-func isNameBody(r rune) bool { return strings.ContainsRune(nameBody, r) }
+// bodyAt reports whether runes[i] belongs to the name body, with a combining
+// mark taking the class of the rune it follows.
+//
+// A mark is neither a letter nor a number, so isNameBody alone would split the
+// two halves of a character that is one unit to the eye. Both ways of getting
+// it wrong are real: an accent written as base letter plus U+0301 (the form
+// text copied from a file path often arrives in) must stay with its letter, and
+// the emoji variation selector U+FE0F must stay with the symbol it selects the
+// presentation of, so that a marker like "⚙️" is carried whole and not split
+// with its selector left behind in the body.
+//
+// A mark with no base in front of it (the start of the string) has nothing to
+// follow and counts as decoration.
+func bodyAt(runes []rune, i int) bool {
+	for i > 0 && unicode.IsMark(runes[i]) {
+		i--
+	}
+	return !unicode.IsMark(runes[i]) && isNameBody(runes[i])
+}
 
 // sanitizeName removes what the multiplexer cannot hold, and nothing else.
 //
@@ -74,9 +105,9 @@ func sanitizeName(raw string) string {
 	return strings.TrimLeft(b.String(), "-")
 }
 
-// decoration returns the trailing run of characters a sanitized name would
-// never be built from — the session-type marker, or a suffix some other tool
-// wrote.
+// decoration returns the trailing run of characters that are not part of a
+// name's body (isNameBody, bodyAt) — the session-type marker, or a suffix some
+// other tool wrote.
 //
 // Stated structurally, WITHOUT naming any particular marker. Hardcoding a set
 // of glyphs here would move the coupling rather than remove it, and a new
@@ -86,10 +117,10 @@ func sanitizeName(raw string) string {
 func decoration(name string) string {
 	runes := []rune(name)
 	i := len(runes)
-	for i > 0 && !isNameBody(runes[i-1]) {
+	for i > 0 && !bodyAt(runes, i-1) {
 		i--
 	}
-	// A name that is ENTIRELY outside the body alphabet is not a decorated
+	// A name that is ENTIRELY decoration is not a decorated
 	// name, it is just a name. Requiring at least one body rune in front is
 	// what keeps "everything is decoration" from being the answer.
 	if i == 0 {
@@ -138,8 +169,8 @@ const (
 // trailing decoration from an earlier type. Both conditions are "carry,
 // never stack": the first catches a marker drawn only from the same
 // alphabet as the name body, which decoration() alone cannot see; the
-// second preserves the older rule that a name already outside the nameBody
-// alphabet is left alone. This is the ambiguous case #90 could not close
+// second preserves the older rule that a name already ending in decoration
+// is left alone. This is the ambiguous case #90 could not close
 // from the string alone (see numberedName's own comment) — a record
 // resolves it exactly instead; see markerState.
 func applyMarker(name, marker string, known markerState) string {
