@@ -882,6 +882,10 @@ func parseMenuShape(s screen) (p *fleet.SessionPrompt, shape menuShape) {
 	// the last option or description row and the row being read (muster#324).
 	var descs []string
 	labelCol, gap := 0, false
+	// lastOptionRow is the screen row of the last numbered option read, or -1.
+	// It is what a live composer below the options is measured against (see the
+	// check before `structural`, muster#358).
+	lastOptionRow := -1
 	ruleSeen := from > 0 && isRule(s.lines[from-1])
 	// autoDeny is the seconds left on the unattended-session countdown, or -1
 	// when the dialog shows none (muster#353).
@@ -986,6 +990,7 @@ func parseMenuShape(s screen) (p *fleet.SessionPrompt, shape menuShape) {
 				// A menu with more options than this is not a menu.
 				continue
 			}
+			lastOptionRow = idx
 			for len(p.Options) < n-1 {
 				// A gap means a line did not parse; keep indices honest
 				// rather than silently renumbering what a caller will
@@ -1090,6 +1095,41 @@ func parseMenuShape(s screen) (p *fleet.SessionPrompt, shape menuShape) {
 			menu.Nonce = promptNonce(menu)
 			return menu, menuShape{unnumbered: true}
 		}
+		return nil, menuShape{}
+	}
+	// A numbered run standing ABOVE a live composer is transcript, not a menu
+	// (muster#358).
+	//
+	// A person's own message written as a numbered list is echoed in the
+	// scrollback with the same ❯ leader a menu's highlighted option uses:
+	//
+	//	❯ 1. two years
+	//	  2. not yet
+	//	  3. wildcard
+	//
+	// That is a run of contiguous numbers with one marked, which is all the
+	// structural test below asks for, so the echo was read as a menu for as long
+	// as it was the last list on screen: while the turn it started ran, and after
+	// that turn was interrupted. A client trusting it showed an answer card, and
+	// the keys that answered it went to a session that was working.
+	//
+	// What the echo does not have is what makes a dialog a dialog. A selection
+	// menu REPLACES the composer (composerSpan's own account of the shape, and
+	// muster#58's original finding), so a fenced composer that opens BELOW the
+	// last numbered row means the rows above it are history. Both the running
+	// turn (its status line, then the composer) and the interrupted one (its
+	// notice, then the composer) draw one; no menu on any corpus screen does.
+	//
+	// The dialog's own footer wins over this. It is the corroboration a menu
+	// carries and an echo cannot (it is chrome, not something a person types), so
+	// a screen that shows one is believed whatever sits below it. A preview pane
+	// is left alone as well: composerSpan reads a pane's bottom border as a rule
+	// (see maskComposer), so it cannot be trusted to find a composer there.
+	//
+	// Deliberately NOT covered: a composer this driver could not read in full
+	// (composerClipped). The check needs the composer's opening row, and a clipped
+	// one does not have a position to compare.
+	if !footer && !hasPane && lastOptionRow >= 0 && composerScan == composerFound && promptRow > lastOptionRow {
 		return nil, menuShape{}
 	}
 	structural := len(p.Options) >= 2 && p.Selected > 0 && optionsAreContiguous(p.Options)
