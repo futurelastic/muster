@@ -833,7 +833,11 @@ See `Fleet-Runtime` above for the same fact carried on every other
 session-addressed call, not only `create`.
 
 `contextRef` is a path. Inline context is not accepted, and context never
-reaches a command line (§5.3).
+reaches a command line (§5.3). The file's text is the session's system context
+for its whole life, on every runtime that accepts the field; one that cannot
+honour it refuses `unsupported`. A path that is not absolute is refused
+`invalid` before anything starts, and so is one a driver that reads the file
+itself (the opencode driver, session-abstraction.md §5.3) cannot use.
 
 **`name` is a request, not the id.** The driver owns the naming rules
 (session-abstraction.md §2.1) and may sanitize the name, number it against

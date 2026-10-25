@@ -74,6 +74,37 @@ func TestPeerSubscriptionAsksForLocalScopeOnly(t *testing.T) {
 	t.Fatal("peer was never asked")
 }
 
+// The hub pushes a directory prefix down to a peer stream (#372); the driver is
+// the last hop that has to put it on the wire, or the peer streams its whole
+// fleet regardless.
+func TestPeerSubscriptionForwardsTheDirectoryPrefix(t *testing.T) {
+	var q atomic.Value
+	srv := ssePeer(t, nil, &q, true)
+	d := New("peerbox", srv.URL)
+
+	s, err := d.Subscribe(context.Background(), caller,
+		driver.SubscribeFilter{CwdPrefix: "/work/app"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if v, ok := q.Load().(string); ok && v != "" {
+			if !strings.Contains(v, "cwdPrefix=%2Fwork%2Fapp") {
+				t.Errorf("query = %q, must forward the directory prefix", v)
+			}
+			if strings.Contains(v, "session=") {
+				t.Errorf("query = %q, names sessions nobody asked for", v)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("the peer was never asked")
+}
+
 // The approved semantics: a relayed event keeps the peer's coordinates as
 // provenance and leaves ours unset for the local hub to stamp.
 func TestRelayedEventCarriesOriginAndDefersLocalStamping(t *testing.T) {

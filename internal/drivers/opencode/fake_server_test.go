@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -84,7 +85,8 @@ type fakeServer struct {
 	agentsBody    string
 
 	// prompts records every prompt_async that reached the runtime, in order
-	// (muster #362): which agent each one named, if any.
+	// (muster #362, #371): which agent each one named, what its system field
+	// carried and its parts.
 	prompts []recordedPrompt
 
 	// bus is the GET /event side (muster #284): the open connections, so a
@@ -105,14 +107,58 @@ type recordedRequest struct {
 	method, path, query string
 }
 
-// recordedPrompt is one prompt_async the fake received: the session it was for,
-// the agent it named (hasAgent tells an absent field from an empty one) and its
-// text.
+// recordedPrompt is one prompt_async body the fake received: the session it was
+// for, the agent it named (hasAgent tells an absent field from an empty one,
+// muster #362), its system field (absent is empty, with hasSystem false, muster
+// #371), the text of each of its parts, and the first of those as text.
 type recordedPrompt struct {
-	session  string
-	agent    string
-	hasAgent bool
-	text     string
+	session   string
+	agent     string
+	hasAgent  bool
+	system    string
+	hasSystem bool
+	text      string
+	parts     []string
+}
+
+// promptsFor returns the prompts the fake received for one session.
+func (f *fakeServer) promptsFor(id string) []recordedPrompt {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []recordedPrompt
+	for _, p := range f.prompts {
+		if p.session == id {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// decodePrompt reads a prompt_async body the way the runtime does: a `system`
+// string and a list of parts.
+func decodePrompt(session string, raw []byte) recordedPrompt {
+	var body struct {
+		Agent  *string `json:"agent"`
+		System *string `json:"system"`
+		Parts  []struct {
+			Text string `json:"text"`
+		} `json:"parts"`
+	}
+	_ = json.Unmarshal(raw, &body)
+	p := recordedPrompt{session: session}
+	if body.Agent != nil {
+		p.agent, p.hasAgent = *body.Agent, true
+	}
+	if body.System != nil {
+		p.system, p.hasSystem = *body.System, true
+	}
+	for _, part := range body.Parts {
+		p.parts = append(p.parts, part.Text)
+	}
+	if len(p.parts) > 0 {
+		p.text = p.parts[0]
+	}
+	return p
 }
 
 // recordedReply is one permission reply the fake received: the ask it named and
@@ -366,24 +412,11 @@ func (f *fakeServer) handleDelete(w http.ResponseWriter, r *http.Request) {
 
 func (f *fakeServer) handlePromptAsync(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/session/"), "/prompt_async")
-	var body struct {
-		Agent *string `json:"agent"`
-		Parts []struct {
-			Text string `json:"text"`
-		} `json:"parts"`
-	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	raw, _ := io.ReadAll(r.Body)
 	f.mu.Lock()
 	_, ok := f.sessions[id]
 	if ok {
-		p := recordedPrompt{session: id, hasAgent: body.Agent != nil}
-		if body.Agent != nil {
-			p.agent = *body.Agent
-		}
-		if len(body.Parts) > 0 {
-			p.text = body.Parts[0].Text
-		}
-		f.prompts = append(f.prompts, p)
+		f.prompts = append(f.prompts, decodePrompt(id, raw))
 	}
 	f.mu.Unlock()
 	if !ok {
