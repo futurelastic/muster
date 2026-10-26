@@ -69,7 +69,8 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 				SessionRef: ref, Cwd: spec.Cwd, Agent: fleet.AgentId(info.agent),
 				// By now a turn may have run; its record is the one thing that can
 				// resolve the agent pin (muster #362).
-				Pins: pinOutcomeForAgent(spec, d.turnEvidenceFor(ctx, info, ref.ID, spec)),
+				Pins:         pinOutcomeForAgent(spec, d.turnEvidenceFor(ctx, info, ref.ID, spec)),
+				Conversation: info.conversationRef(),
 			}, nil
 		}
 		wait, leader := d.idemBegin(key)
@@ -213,6 +214,8 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 	created := knownSession{
 		srv: srv, cwd: cwd, name: sess.Title, agent: sess.Agent, specAgent: string(spec.Agent), startedAt: startedAt,
 		contextRef: spec.ContextRef, context: contextText,
+		// muster #378: the runtime named this session's id in its create response.
+		conversation: capturedAtCreate(sess.ID),
 	}
 	if d.store != nil && d.shared == nil {
 		// Before the session is announced or handed an id: a session the caller
@@ -255,7 +258,8 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 	// No turn has run yet, so there is nothing to resolve the agent pin from.
 	return fleet.Session{
 		SessionRef: ref, Cwd: spec.Cwd, Agent: fleet.AgentId(sess.Agent),
-		Pins: pinOutcomeForAgent(spec, turnEvidence{}),
+		Pins:         pinOutcomeForAgent(spec, turnEvidence{}),
+		Conversation: created.conversationRef(),
 	}, nil
 }
 
@@ -911,6 +915,8 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 			Cwd:        info.cwd,
 			Agent:      fleet.AgentId(info.agent),
 			State:      st,
+			// muster #378: the session's own id, captured at create.
+			Conversation: info.conversationRef(),
 		}
 		if matchesFilter(sess, filter) {
 			out = append(out, sess)

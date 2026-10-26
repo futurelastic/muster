@@ -191,6 +191,25 @@ const (
 	PromptFeedbackReview PromptKind = "feedback-review"
 )
 
+// PromptKinds returns every kind this package defines, in declaration order, as
+// a fresh slice (a caller that appends or sorts cannot disturb the next one).
+//
+// It exists so a driver that answers EVERY prompt it reports can declare that
+// as DriverCapabilities.Respond without keeping a second copy of the list that
+// the next added kind would silently leave stale (muster #379). A driver that
+// refuses some kind must list the ones it answers instead of calling this.
+func PromptKinds() []PromptKind {
+	return []PromptKind{
+		PromptResumeChooser,
+		PromptFolderTrust,
+		PromptExternalImports,
+		PromptSettingsTrust,
+		PromptToolPermission,
+		PromptBypassAcceptance,
+		PromptFeedbackReview,
+	}
+}
+
 // # A known gap: the tool-server ("MCP") trust dialog has no kind yet
 //
 // Passing SessionSpec.McpConfig at creation can raise a boot question of its

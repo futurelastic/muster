@@ -159,6 +159,11 @@ GET /v1/runtimes
                                        "validatesModel": true,
                                        "remoteControl": { "toggle": true,
                                                           "off": true },
+                                       "readsTurns": true,          ← these four are absent when the runtime
+                                       "reportsConversation": true,    did not declare them: NOT DECLARED,
+                                       "respond": { "kinds": ["tool-permission"],   never "cannot" (#379)
+                                                    "unclassified": false },
+                                       "permissionModeChange": { "live": false },
                                        "source": "observed",
                                        "observedAt": "..." },
                      "posture": { "unattended": true, "files": true,   ← what `posture` can ask of it (#344);

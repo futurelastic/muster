@@ -746,6 +746,8 @@ func (d *Driver) announceCreated(srv *server, info knownSession, ref fleet.Sessi
 		Cwd:        info.cwd,
 		Agent:      fleet.AgentId(info.agent),
 		State:      classify(false, wireStatus{}),
+		// muster #378.
+		Conversation: info.conversationRef(),
 	}
 	sess.State.Sandbox = srv.sandbox
 	for _, s := range subs {

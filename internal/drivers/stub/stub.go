@@ -43,8 +43,14 @@ func (d *Driver) Capabilities() fleet.DriverCapabilities {
 		ConfirmsDelivery: false,
 		SupportsResume:   false,
 		SupportsPin:      fleet.PinSupport{},
-		DeadlineMs:       deadline,
-		Source:           fleet.CapabilitiesObserved,
+		// muster #379: this driver supports no operation, and says so — the
+		// declared "cannot" form of each person-facing capability.
+		ReadsTurns:           fleet.Declared(false),
+		ReportsConversation:  fleet.Declared(false),
+		Respond:              &fleet.RespondSupport{},
+		PermissionModeChange: &fleet.PermissionModeChangeSupport{},
+		DeadlineMs:           deadline,
+		Source:               fleet.CapabilitiesObserved,
 	}
 }
 

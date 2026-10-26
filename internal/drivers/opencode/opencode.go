@@ -298,6 +298,12 @@ type knownSession struct {
 	// runtime's system field. Both empty for a session created without one.
 	contextRef fleet.AbsolutePath
 	context    string
+
+	// conversation is what this driver reports as the session's conversation
+	// (muster #378, spec §2.9): captured at create, confirmed after a restart,
+	// or unknown with the reason. Always set for a session this driver created
+	// or relaunched; see conversation.go.
+	conversation *fleet.ConversationRef
 }
 
 type idemEntry struct {
@@ -619,7 +625,22 @@ func (d *Driver) Capabilities() fleet.DriverCapabilities {
 		// muster #285: tokens and cost are read from the runtime's own message
 		// record, summed over every step.
 		ReportsUsage: true,
-		DeadlineMs:   d.deadline.Milliseconds(),
+		// muster #379, declared (never derived): see DriverCapabilities.
+		//
+		// turns: GET …/turns reads the runtime's own message record (#369).
+		ReadsTurns: fleet.Declared(true),
+		// conversation: every session carries the runtime's own id, captured at
+		// create (#378, conversation.go).
+		ReportsConversation: fleet.Declared(true),
+		// respond: a tool-permission ask only. A runtime question is never
+		// reported as a prompt and respond answers it `unsupported` (permission.go),
+		// and an ask carries a kind, so nothing unclassified is answered.
+		Respond: &fleet.RespondSupport{Kinds: []fleet.PromptKind{fleet.PromptToolPermission}},
+		// A running session's mode cannot change: the posture is written into the
+		// session's configuration at create and there are no raw keys to change it
+		// with. CreatePermissionModes above is the only way to choose one.
+		PermissionModeChange: &fleet.PermissionModeChangeSupport{Live: false},
+		DeadlineMs:           d.deadline.Milliseconds(),
 		// A local driver is describing itself — no network between the
 		// claim and its subject (same reasoning as the tmux driver's
 		// Capabilities).

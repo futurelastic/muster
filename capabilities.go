@@ -82,6 +82,64 @@ type RemoteControlSupport struct {
 	Off bool `json:"off"`
 }
 
+// RespondSupport is what a driver declares about the prompts POST …/respond
+// answers (muster #379).
+//
+// A client that shows a person a prompt needs to know, before it draws a
+// control, whether answering it can work. Today it learns that only by trying
+// and being refused.
+//
+// A prompt is answerable when its Kind is listed in Kinds, or when it carries
+// no kind at all and Unclassified is true. That mirrors SessionPrompt exactly,
+// so a client's test is mechanical: an agent's own question with options is
+// reported with no kind (§2.7), and Unclassified is the one declaration that
+// covers it. Both fields are always present on a declared value; "this driver
+// answers nothing" is {"kinds":[],"unclassified":false}, not an absent object,
+// because absence means "not declared".
+//
+// Kinds is an open set. A kind a newer peer lists that this build does not
+// define decodes unchanged (PromptKind has no strict decoder), so a client
+// compares strings and never assumes the list is one it knows.
+type RespondSupport struct {
+	Kinds        []PromptKind `json:"kinds"`
+	Unclassified bool         `json:"unclassified"`
+}
+
+// MarshalJSON writes a nil Kinds as [] — a declared value is never
+// "kinds":null, which a client would have to read as a third state.
+func (r RespondSupport) MarshalJSON() ([]byte, error) {
+	type plain RespondSupport
+	if r.Kinds == nil {
+		r.Kinds = []PromptKind{}
+	}
+	return json.Marshal(plain(r))
+}
+
+// PermissionModeChangeVia values name HOW a running session's permission mode
+// is changed. An open set: a later verb adds a member without a wire break.
+const (
+	// PermissionModeChangeViaKeys: through the `keys` verb — one BTab press
+	// advances the mode, and the result is read back from
+	// SessionState.PermissionMode. Requires DeliversRawKeys and
+	// ObservesPermissionMode.
+	PermissionModeChangeViaKeys = "keys"
+)
+
+// PermissionModeChangeSupport is what a driver declares about changing the
+// permission mode of a session that is already running (muster #379).
+//
+// Live false means the mode is fixed at create: choose it from
+// CreatePermissionModes and recreate to change it. Live true names the
+// mechanism in Via. Via is present exactly when Live is.
+type PermissionModeChangeSupport struct {
+	Live bool   `json:"live"`
+	Via  string `json:"via,omitempty"`
+}
+
+// Declared returns a pointer to v, for the tri-state flags on
+// DriverCapabilities whose absence means "not declared" (muster #379).
+func Declared(v bool) *bool { return &v }
+
 // DriverCapabilities is what a driver declares about itself (§4.3). Callers
 // must consult this (GET /v1/runtimes, api-http.md §3.1) and degrade rather
 // than assume (§5.6) — a driver never silently emulates a capability it
@@ -241,6 +299,48 @@ type DriverCapabilities struct {
 	// cannot — and, like every flag in this block, an unreached peer reports it
 	// under source: assumed rather than as that peer's confirmed answer.
 	RemoteControl *RemoteControlSupport `json:"remoteControl,omitempty"`
+
+	// The next four fields are what a person-facing client — one that shows a
+	// session and lets a person type into it — needs to know before it offers a
+	// control (muster #379). They follow a rule the plain booleans above cannot:
+	//
+	//	absent        NOT DECLARED. A peer built before these fields, an
+	//	              unreached peer's floor, a driver that did not say. A client
+	//	              offers nothing on this and does not read it as "cannot".
+	//	declared no   the driver SAID it cannot. A client does not offer the
+	//	              control, and need not try.
+	//	declared yes  the driver can.
+	//
+	// A plain bool cannot carry that: it decodes to false from a peer that never
+	// sent the key, under source: observed, and "never asked" becomes "cannot" —
+	// §5.7 one level down from the place Source solved it. These are therefore
+	// pointers with omitempty. The booleans above keep their meaning (they
+	// predate the rule); remoteControl and sandbox are absent-means-cannot for
+	// the same reason.
+	//
+	// All four are per RUNTIME, not per session: nothing differs between the
+	// sessions of one runtime on one machine, and where one session cannot take
+	// part its own state and conversation already say so.
+
+	// ReadsTurns reports whether GET …/turns reads this runtime's assistant
+	// turns (muster #258, #369). false means every call is unsupported; true
+	// does not promise any one session can be read (404 retryable, 409).
+	//
+	// It is declared, not derived from driver.TurnReader: a remote driver always
+	// implements that interface as a relay, and a terminal driver implements it
+	// even where no record root is configured and every call would fail.
+	ReadsTurns *bool `json:"readsTurns,omitempty"`
+	// ReportsConversation reports whether this driver looks for the record the
+	// runtime keeps of a session's conversation (Session.Conversation, §2.9).
+	// false means an absent conversation will never arrive; true means the
+	// driver looks, so an absent one is "not yet", and a present one — known or
+	// not — is an answer.
+	ReportsConversation *bool `json:"reportsConversation,omitempty"`
+	// Respond declares which prompts POST …/respond answers.
+	Respond *RespondSupport `json:"respond,omitempty"`
+	// PermissionModeChange declares whether a RUNNING session's permission mode
+	// can be changed, and how.
+	PermissionModeChange *PermissionModeChangeSupport `json:"permissionModeChange,omitempty"`
 
 	// DeliveryModules reports the optional external delivery modules this
 	// machine's driver has enabled and how each is wired (#185; see

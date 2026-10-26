@@ -638,6 +638,12 @@ type EnvironmentReporter interface {
 // A relaying driver forwards the query and the corroboration to the machine that
 // owns the session; that machine's service applies its own authorization to the
 // asserted caller (§13).
+//
+// Implementing this does not say a runtime can be read: a relaying driver always
+// implements it, and a terminal driver implements it even where no record store
+// is configured. What a client learns is DriverCapabilities.ReadsTurns, which a
+// driver declares for itself (muster #379); a driver that declares it true must
+// implement this.
 type TurnReader interface {
 	Turns(ctx context.Context, req fleet.Request, ref fleet.SessionRef, q fleet.TurnsQuery) (fleet.TurnsPage, error)
 }

@@ -291,6 +291,27 @@ this before offering the control. Like every capability it comes with `source`:
 an unreached peer reports it `assumed` and absent, which says nobody has
 answered, not that the peer cannot.
 
+**What a client that shows a session and lets a person type into it needs
+(#379).** Four capabilities, each per runtime, each **absent when not declared**:
+
+| `capabilities.…` | declared yes | declared no |
+|---|---|---|
+| `readsTurns` | `true`: `GET …/turns` reads this runtime's turns (a given session can still be `404` retryable or `409`) | `false`: every call is `501` |
+| `reportsConversation` | `true`: the driver looks, so `conversation` is an answer when it arrives | `false`: `conversation` will never be set |
+| `respond` | `{"kinds": ["tool-permission"], "unclassified": false}`: `…/respond` answers a prompt whose `kind` is listed, or one with no `kind` when `unclassified` is `true` | `{"kinds": [], "unclassified": false}` |
+| `permissionModeChange` | `{"live": true, "via": "keys"}`: a running session's mode changes through `POST …/keys` `BTab`, read back in `state.permissionMode` | `{"live": false}`: the mode is fixed at create; choose it from `createPermissionModes` |
+
+The terminal runtime, with its record root configured, declares all four yes
+(`respond` lists every kind and `unclassified: true`; `permissionModeChange` is
+`keys`). `opencode` declares `readsTurns` and `reportsConversation` yes, `respond`
+`["tool-permission"]` with `unclassified: false` (its own structured question is
+never offered as a prompt), and `permissionModeChange: {"live": false}`.
+
+**Absent is not `false`.** A peer on a build from before these fields sends none
+of them, and a missing key means *nobody said* — offer nothing on it, and do not
+read it as "cannot". A `false` is the runtime saying it cannot. `kinds` and `via`
+are open sets: compare strings, and ignore a value you do not know.
+
 ### `GET /v1/sessions`
 
 Filters: `status`, `agent`, `cwdPrefix`, `label`, and `scope`.
@@ -470,7 +491,9 @@ read, and `next` does not move past it meanwhile. A session whose last turn was 
 off shows nothing past it until its next turn; `state.lastTurn` says it was cut
 off. `pending` is terminal-runtime only (there is no screen to read it from), and
 `since` on `opencode` is `409` when the message it names has been deleted or
-reverted, as well as when it was issued for another session.
+reverted, as well as when it was issued for another session. Read
+`capabilities.readsTurns` in `/v1/runtimes` to know whether a runtime answers
+before offering the control (#379).
 
 **`pending` — the text above an open prompt (muster #266).** A message that holds
 prose and then an open question is written to the record only once the question
@@ -719,6 +742,15 @@ started — the same rule `labels` follows one paragraph up. If a later read's
 own resolution disagrees with the id that was requested, `conversation` flips
 to a named mismatch (`known: false`) rather than silently keeping either
 answer.
+
+**On `opencode`, `conversation` is the runtime's own session id** (#378): every
+`201` carries `known: true`, `source: "captured"` and `id` equal to the session's
+`id`, because the runtime filed its record under the id its create response
+named. The same value is on every listing, on `session.created`, and on a
+replayed create. After a service restart it is kept only for a session the
+relaunched runtime answers a read for by that id; one that could not be
+relaunched reports `known: false` with the reason in `evidence`, never the
+remembered id. `capabilities.reportsConversation` says whether a runtime looks.
 
 ### `POST …/{id}/input` — send text
 
@@ -1097,6 +1129,10 @@ allowed, and every other path is denied. A deny is an error the model reads and
 the turn continues; the session never reads `waiting_input` for it. Without
 `bypass` nothing changes, and an ask there still reads as blocked, below.
 
+Which prompts a runtime answers is `capabilities.respond` in `/v1/runtimes`
+(#379): a prompt is answerable when its `kind` is in `kinds`, or when it has no
+`kind` and `unclassified` is `true`.
+
 **A tool-permission ask on an opencode session** (#296). A session parked on one
 reads `waiting_input` with `prompt.kind: "tool-permission"`, and answering it is
 the same call, sent to the runtime's own permission-reply endpoint:
@@ -1161,6 +1197,10 @@ deliberately **no separate grant** for it, and none that tells escalating from
 de-escalating: `keys` is the whole permission. Grant `keys` only to a principal
 you would trust to loosen any session it can reach — over a peer relay that is
 the principal holding `keys` on the machine that runs the session.
+
+Whether a running session's mode can be changed at all, and by what, is
+`capabilities.permissionModeChange` in `/v1/runtimes` (#379): `{"live": true,
+"via": "keys"}` here, `{"live": false}` on a runtime that fixes the mode at create.
 
 What to expect from a `BTab`, since it is not a dialog key:
 

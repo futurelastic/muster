@@ -159,6 +159,17 @@ conservative floor for a peer that has not answered yet, not that peer's real
 answer. Treating `assumed` as fact is how a briefly unreachable machine becomes
 a permanently incapable one in your UI.
 
+**A viewer that lets a person type into a session reads four more**, and they
+behave differently from the booleans above: each is **absent when the runtime did
+not declare it**, and absent is *not* `false`. `readsTurns` (does `…/turns`
+work), `reportsConversation` (will `conversation` ever be set), `respond`
+(`{kinds, unclassified}`: which prompts `…/respond` answers) and
+`permissionModeChange` (`{live, via}`: can a running session's mode change, and
+through which verb). Offer a control only on a declared yes; hide it on a declared
+no; on absent, offer nothing and do not conclude the runtime cannot. This is
+what lets you add a runtime without keeping a table of runtime names. Detail:
+`docs/api.md`, `GET /v1/runtimes`.
+
 **A fourth endpoint answers a question about yourself, not the fleet:**
 
 ```
