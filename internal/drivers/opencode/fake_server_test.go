@@ -27,9 +27,9 @@ type fakeServer struct {
 
 	username, password string
 
-	sessions map[string]wireSession   // id -> session
-	statuses statusMap                // id -> status, present only when non-idle
-	messages map[string][]wireMessage // id -> messages, newest last
+	sessions map[string]wireSession       // id -> session
+	statuses statusMap                    // id -> status, present only when non-idle
+	messages map[string][]json.RawMessage // id -> messages as the runtime would send them, newest last
 
 	// unauthorized, when true, makes every request fail Basic auth
 	// regardless of what was sent — simulates a credential mismatch.
@@ -175,7 +175,7 @@ func newFakeServer(t *testing.T) *fakeServer {
 		password: "test-credential-do-not-log",
 		sessions: map[string]wireSession{},
 		statuses: statusMap{},
-		messages: map[string][]wireMessage{},
+		messages: map[string][]json.RawMessage{},
 		bus:      map[int]*busConn{},
 	}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.handle))
@@ -490,7 +490,7 @@ func (f *fakeServer) handleAbort(w http.ResponseWriter, r *http.Request) {
 func (f *fakeServer) handleMessages(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/session/"), "/message")
 	f.mu.Lock()
-	all := append([]wireMessage(nil), f.messages[id]...)
+	all := append([]json.RawMessage(nil), f.messages[id]...)
 	f.mu.Unlock()
 
 	if raw := r.URL.Query().Get("limit"); raw != "" {
@@ -508,9 +508,40 @@ func (f *fakeServer) handleMessages(w http.ResponseWriter, r *http.Request) {
 // this to put a specific newest message (an assistant reply, with or
 // without an error) in place before reading state.
 func (f *fakeServer) setLastMessage(id string, msg wireMessage) {
+	f.addMessage(id, msg)
+}
+
+// addMessage appends one message of any shape to id's scripted history. The
+// production wire types deliberately cannot carry a part's text (client.go), so
+// a test that needs text, a synthetic flag or a tool part scripts the message as
+// the runtime would send it.
+func (f *fakeServer) addMessage(id string, msg any) {
+	raw, err := json.Marshal(msg)
+	if err != nil {
+		f.t.Fatalf("addMessage: %v", err)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.messages[id] = append(f.messages[id], msg)
+	f.messages[id] = append(f.messages[id], raw)
+}
+
+// deleteMessage removes one message from id's history, the way an undo does.
+func (f *fakeServer) deleteMessage(id, messageID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	kept := f.messages[id][:0:0]
+	for _, raw := range f.messages[id] {
+		var m struct {
+			Info struct {
+				ID string `json:"id"`
+			} `json:"info"`
+		}
+		_ = json.Unmarshal(raw, &m)
+		if m.Info.ID != messageID {
+			kept = append(kept, raw)
+		}
+	}
+	f.messages[id] = kept
 }
 
 // setBusy / setRetry / setIdle script the status map directly, bypassing

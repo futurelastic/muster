@@ -2316,7 +2316,10 @@ failure to observe will report its ignorance as the world's.*
 > agent said, and whether the session finished is still what the runtime
 > reports about itself. The premises below were not outweighed; the thing they
 > were applied to was narrowed. Full argument and what it costs:
-> `docs/adr/258-assistant-turns-read.md`.
+> `docs/adr/258-assistant-turns-read.md`. The route is implemented per driver
+> (`driver.TurnReader`): the terminal runtime and `opencode` (muster #369) do, each
+> enforcing the allow-list at the point it reads its own record, and a driver that
+> does not answers `unsupported` (§5.6).
 
 **The boundary this API draws around content is provenance, not
 sensitivity.** A field may carry the runtime's own words about itself —

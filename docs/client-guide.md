@@ -1310,6 +1310,11 @@ What you get, and what you do not:
   rows of a paragraph are separate lines in it.
 - **A page can be empty while `next` still moves** when a long stretch of the
   record held no agent text; call again until `next` stops moving.
+- **One turn is one entry of the runtime's record, not one reply to your prompt.**
+  On `opencode` an agent that runs a tool answers in two messages, so one prompt
+  can produce two turns; read the last one for its conclusion, or take every turn
+  after the `next` you held when you sent the prompt. A reply still being written
+  is not in the page yet — poll `state` for `idle`, then read.
 
 ## 8. Events — subscribe, do not poll
 
