@@ -1087,15 +1087,33 @@ func parseMenuShape(s screen) (p *fleet.SessionPrompt, shape menuShape) {
 	// deliberately NOT held to the contiguity rule above — see
 	// TestMenuWithScrolledOffMarkerStillCounts — because the footer is
 	// itself the corroboration this branch has instead.
-	if len(p.Options) == 0 && footer {
-		// No numbered option anywhere in the window, but a runtime footer
-		// is. That is the one situation an unnumbered menu can be in, and
-		// the footer is what licenses looking for one (muster#171).
+	if footer {
+		// A runtime footer is on screen, and what stands directly above it is the
+		// menu it belongs to: the footer is what licenses looking for an
+		// unnumbered one (muster#171).
+		//
+		// That block is asked about whether or not a numbered row was read higher
+		// up (muster#380). A numbered row anywhere in the window is accumulated
+		// into p.Options above, and an unnumbered dialog has nothing to reset it:
+		// #322's reset needs a LATER numbered row. So a numbered list in the
+		// session's own transcript, above a dialog whose options carry no
+		// numbers, was returned as the dialog's options by the footer branch
+		// below — measured with the remote-control dialog, which a switch-off
+		// then refused on every retry because the transcript did not change.
+		//
+		// This cannot take a numbered dialog away from its own path:
+		// unnumberedMenu refuses a block that holds a numbered row ("the numbered
+		// path owns this shape") and one without a single marker row, and a
+		// numbered menu's highlight is always on a numbered row.
 		if menu := unnumberedMenu(s.lines[from:]); menu != nil {
 			menu.Nonce = promptNonce(menu)
 			return menu, menuShape{unnumbered: true}
 		}
-		return nil, menuShape{}
+		if len(p.Options) == 0 {
+			// No numbered option anywhere in the window and no menu above the
+			// footer: nothing to read.
+			return nil, menuShape{}
+		}
 	}
 	// A numbered run standing ABOVE a live composer is transcript, not a menu
 	// (muster#358).

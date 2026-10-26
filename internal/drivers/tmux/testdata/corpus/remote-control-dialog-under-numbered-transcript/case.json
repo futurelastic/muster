@@ -1,0 +1,16 @@
+{
+  "name": "remote-control-dialog-under-numbered-transcript",
+  "for": "The runtime's remote-control dialog (opened by /remote-control on a session whose remote control is on) drawn under a transcript that holds a numbered list. The dialog's own options carry no numbers, so the numbered rows above it were accumulated as options and, with the dialog's footer on screen, returned as the prompt: a switch-off then looked for its Disconnect option in the transcript's lines, found none, dismissed the real dialog and refused, on every retry because the transcript did not change. This case pins that the prompt is the block directly above the footer — three unnumbered options, the last highlighted — and not the numbered rows higher up. Option text is redacted here (it is not in the closed vocabulary the redactor keeps), so the options read as the redactor's placeholders; remotecontrol_dialog_test.go pins the Disconnect option itself, by text, on screens built from the dialog's unredacted frame. The numbered rows above the dialog are the transcript; see TestToggleOff_FindsTheDialogWhateverTheTranscriptAboveIt.",
+  "source": "#380",
+  "redactedFrom": "real capture of the dialog on runtime 2.1.310 through the service's own driver, with an invented numbered list above it, redacted by corpus-redact; the dialog's rows are all redacted, its footer and layout are kept",
+  "alive": true,
+  "observations": [
+    {
+      "afterSeconds": 0,
+      "young": false,
+      "want": "waiting_input",
+      "wantFreeText": false,
+      "wantOptions": ["[redacted]", "[redacted]", "<input>"]
+    }
+  ]
+}

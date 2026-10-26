@@ -1321,7 +1321,12 @@ confirmation is the session's `state.controlChannel` changing, delivered as a
 - **`409` (retryable) when it cannot act safely:** the channel's state could not
   be read, the session is not idle, a prompt is open, or the composer holds
   unsent text. Nothing was changed; read the session and try again. A dialog the
-  call opened is always dismissed before it returns.
+  call opened is always dismissed before it returns. The dialog is found by its
+  own footer, never by lines of the session's transcript above it. A prompt that
+  appears after the command but offers no *Disconnect this session* option is
+  not answered: the call keeps looking for the dialog for its whole window (six
+  seconds), then dismisses what still stands and answers `409` naming the option
+  labels it saw. A prompt that is gone again by then is left alone.
 - **`501` `unsupported`** from a runtime that does not declare
   `capabilities.remoteControl`, and for `enabled:false` where `off` is `false`.
   A peer built before the route answers the same way, never `404`.
