@@ -217,12 +217,22 @@ func (t rcToggler) rcEnable(ctx context.Context, req fleet.Request, ref fleet.Se
 
 // rcDisconnect sends the command, waits for the dialog, and answers it with the
 // Disconnect option, found by text.
+//
+// A prompt that offers no such option is not the dialog, so it is not answered —
+// and it is not dismissed the moment it is seen either (muster#380). The screen
+// can be read part way through a repaint, or a read can take rows that are not
+// the dialog's; either way the next read may be the dialog, and cancelling at
+// first sight turned one bad read into a refusal. So the window is spent
+// waiting, and a prompt without the option is only dismissed if it is still
+// what stands when the window ends.
 func (t rcToggler) rcDisconnect(ctx context.Context, req fleet.Request, ref fleet.SessionRef) error {
 	if err := t.rcSend(ctx, req, ref); err != nil {
 		return err
 	}
 	deadline := time.Now().Add(t.window)
-	var last *fleet.SessionPrompt
+	// stray is the newest prompt read that lacks the option. It is cleared when a
+	// read finds no prompt at all, so a dialog that went away is never cancelled.
+	var stray *fleet.SessionPrompt
 	for time.Now().Before(deadline) {
 		select {
 		case <-ctx.Done():
@@ -234,16 +244,13 @@ func (t rcToggler) rcDisconnect(ctx context.Context, req fleet.Request, ref flee
 			return err
 		}
 		if st.Prompt == nil {
+			stray = nil
 			continue
 		}
-		last = st.Prompt
 		idx := disconnectOption(st.Prompt)
 		if idx == 0 {
-			// Some other dialog got there first. Leave nothing open that we
-			// opened, and say what we saw.
-			t.rcCancel(req, ref, st.Prompt.Nonce)
-			return rcConflict("the runtime showed a dialog without a %q option (%q); it was dismissed and "+
-				"nothing was changed", "Disconnect this session", st.Prompt.Options)
+			stray = st.Prompt
+			continue
 		}
 		receipt, err := t.p.Respond(ctx, req, ref, fleet.Response{Choice: idx, Nonce: st.Prompt.Nonce})
 		if err != nil {
@@ -254,7 +261,15 @@ func (t rcToggler) rcDisconnect(ctx context.Context, req fleet.Request, ref flee
 		}
 		return nil
 	}
-	_ = last
+	if stray != nil {
+		// The session had no prompt when the command was sent, so this one opened
+		// after it: leave nothing open that this toggle may have opened, and say
+		// what was seen. Only the option labels are named — the dialog's own text
+		// carries the session's connection address, which belongs in no error.
+		t.rcCancel(req, ref, stray.Nonce)
+		return rcConflict("the runtime showed a dialog without a %q option for the whole %s (%q); it was "+
+			"dismissed and nothing was changed", "Disconnect this session", t.window, stray.Options)
+	}
 	// No dialog. The command may have done the opposite of what was wanted — on
 	// a channel that was not really on, it turns it ON — so this says so rather
 	// than reporting a failure that sounds harmless.
