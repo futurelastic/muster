@@ -459,6 +459,19 @@ whose conversation record cannot be identified yet is `404` with `retryable`,
 which is not the same as an agent that has said nothing (`200`, `turns: []`).
 A turn over 64 KiB is cut and marked `"truncated": true`.
 
+**Which runtimes answer, and what a turn is on each (muster #369).** The terminal
+runtime and `opencode` do; any other is `501`. A turn is one assistant entry of
+the runtime's own record: a line holding the agent's text on the terminal runtime,
+one assistant *message* on `opencode`. On `opencode` a prompt that uses a tool is
+answered by two messages (one per model round), so it yields two turns — the same
+two the terminal runtime returns — and the last one is the final report. A message
+the runtime is still writing is not in the page: it appears, whole, on a later
+read, and `next` does not move past it meanwhile. A session whose last turn was cut
+off shows nothing past it until its next turn; `state.lastTurn` says it was cut
+off. `pending` is terminal-runtime only (there is no screen to read it from), and
+`since` on `opencode` is `409` when the message it names has been deleted or
+reverted, as well as when it was issued for another session.
+
 **`pending` — the text above an open prompt (muster #266).** A message that holds
 prose and then an open question is written to the record only once the question
 is answered, so while the dialog is up `turns` holds neither. When a prompt is

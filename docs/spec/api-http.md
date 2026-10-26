@@ -1067,6 +1067,14 @@ GET /v1/machines/{machine}/sessions/{id}/turns?since=&limit=&startedAt=&runtime=
 → 501 unsupported    the runtime, or the peer's build, cannot read turns
 ```
 
+Implemented by the terminal runtime and by `opencode` (muster #369). The unit is
+one assistant entry of the runtime's own record — a line holding the agent's text
+for the terminal runtime, an assistant message for `opencode` — and `pending`
+exists only where there is a screen to read it from. A page from either is the
+same shape and the same boundary. Only `opencode` can answer `409` for a `since`
+whose message the record no longer holds, and `404 retryable` is the terminal
+runtime's alone.
+
 ```
 GET /v1/machines/{machine}/sessions/{id}/composer?startedAt=&runtime=
 → 200 { "text": "...", "composerDigest": "..." }   ← the unsent text, and the digest `discard` accepts for it

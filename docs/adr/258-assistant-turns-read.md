@@ -131,7 +131,8 @@ cursored.
   machine that withholds mutation. That is the legacy single-token model's
   documented shape (reads are broad, mutations are opt-in) and is stated here
   because it is the one place the new route is not gated on a mutation grant.
-- Only the terminal runtime driver implements it today; another runtime answers
+- Two runtime drivers implement it: the terminal runtime's and, since #369, the
+  `opencode` driver's (see the addendum). A runtime without one answers
   `unsupported`, and so does a peer on a build that predates the route.
 - The record is the runtime's, not this service's: its entry shape can change in a
   runtime release. The reader fails closed — an entry it does not recognise is
@@ -141,3 +142,43 @@ cursored.
 - The normative layer is amended to match: session-abstraction.md §5.8 and §7.6
   state the narrower boundary, and api-http.md §3.3 and §6 and `docs/api.md`
   stop promising that no endpoint returns session content.
+
+## Addendum — the `opencode` runtime (muster #369)
+
+The route, the grant, the wire type and the audit line are unchanged; what a
+second runtime has to supply is the allow-list and a cursor over *its* record.
+
+- **A turn is one assistant message of the runtime's record**, its text parts
+  joined by a blank line in the order written. That is this ADR's "top-level
+  assistant entry", read at the grain this runtime stores. It is not one turn per
+  user prompt: measured against a live runtime, a prompt that uses a tool is
+  answered by two assistant messages (one per model round), and each is a turn —
+  the same two turns the terminal driver returns for the same interaction. The
+  last turn is still the final report.
+- **The boundary** is the same shape: finished (completion time set), error-free,
+  top-level, from a real model, and not the runtime's own compaction summary;
+  only parts the runtime typed `text` and did not mark `synthetic` or `ignored`
+  contribute. Reasoning, tool calls and results, files, patches, snapshots, step
+  records and any part type not known today contribute nothing, and a message with
+  a part the reader cannot decode is left out whole. A message that ended in an
+  error is left out even if it holds partial prose: the failure is
+  `state.lastTurn`'s to report. The code that decodes a part's text lives in one
+  file, and the types the state and usage reads use still cannot.
+- **The cursor** is a position in the record, not an offset: the runtime pages
+  from the tail and has no "after", so `since` names the last message already
+  consumed, together with the session id and the session's own start time. A
+  cursor presented against another session or another incarnation of the id, or
+  whose message the record no longer holds (deleted, reverted), is `conflict`;
+  one that is not a cursor is `invalid`.
+- **A message still being written is never returned partial.** It is held: the
+  page ends before it and `next` does not move past it, so a later read returns it
+  once, whole. A remnant of a cut-off turn is passed over only when a later
+  assistant message exists, which means a session whose last turn was cut off
+  shows an empty page until its next turn — fail-closed, and `state.lastTurn`
+  already says the turn did not finish.
+- **No `pending`.** That field is text read off a screen (#266); this runtime has
+  none.
+- A session that is listed but not running answers `conflict` (the reason is the
+  runtime's, as for every other verb); one the runtime no longer holds is
+  `not_found`. There is no "record not identifiable yet" state here: the record is
+  the server's answer, and a session with no messages is `200`, `turns: []`.

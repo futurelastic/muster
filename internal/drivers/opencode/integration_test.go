@@ -504,3 +504,144 @@ func TestIntegration_ContextRefReachesTheModelAsSystemContext(t *testing.T) {
 		}
 	}
 }
+
+// What a REAL runtime records for a prompt that uses a tool, read back through
+// Turns (muster #369). The model is a local stand-in that speaks the
+// OpenAI-compatible wire: its first answer says something and calls the
+// runtime's read tool, its second (the request that carries the tool's result)
+// says something else. No credential and no cost, so it needs only the
+// integration opt-in.
+//
+// What is asserted is what was measured against a live runtime: the one prompt
+// is answered by TWO assistant messages, each is a turn, and the tool's output —
+// a sentinel in the file the tool read — never reaches a page, whichever way the
+// record is read.
+func TestIntegration_TurnsReadsWhatARealRuntimeRecorded(t *testing.T) {
+	requireOpencodeIntegration(t)
+
+	// The real path: a tool reading a file the runtime resolves outside the
+	// session's directory parks on a permission ask, and a symlinked temp
+	// directory is exactly that.
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sentinel = "TOOL-OUTPUT-SENTINEL-must-not-be-returned"
+	note := filepath.Join(dir, "note.txt")
+	if err := os.WriteFile(note, []byte(sentinel), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	model := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var body struct {
+			Messages []struct {
+				Role string `json:"role"`
+			} `json:"messages"`
+			Tools []json.RawMessage `json:"tools"`
+		}
+		_ = json.Unmarshal(raw, &body)
+		// The request that carries a tool's result ends on it; a new prompt after
+		// an earlier tool round does not, so each prompt gets its own tool round.
+		sawTool := len(body.Messages) > 0 && body.Messages[len(body.Messages)-1].Role == "tool"
+		chunk := func(delta, finish string) string {
+			return `data: {"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":` +
+				delta + `,"finish_reason":` + finish + `}]}` + "\n\n"
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		switch {
+		case len(body.Tools) == 0: // the runtime's own housekeeping call (a title), not the session's turn
+			_, _ = io.WriteString(w, chunk(`{"role":"assistant","content":"a title"}`, "null")+chunk(`{}`, `"stop"`)+"data: [DONE]\n\n")
+		case !sawTool:
+			args, _ := json.Marshal(map[string]string{"filePath": note})
+			call, _ := json.Marshal(map[string]any{"tool_calls": []any{map[string]any{
+				"index": 0, "id": "call_1", "type": "function",
+				"function": map[string]string{"name": "read", "arguments": string(args)},
+			}}})
+			_, _ = io.WriteString(w, chunk(`{"role":"assistant","content":"FIRST-ROUND-TEXT"}`, "null")+
+				chunk(string(call), "null")+chunk(`{}`, `"tool_calls"`)+"data: [DONE]\n\n")
+		default:
+			_, _ = io.WriteString(w, chunk(`{"role":"assistant","content":"SECOND-ROUND-TEXT"}`, "null")+
+				chunk(`{}`, `"stop"`)+"data: [DONE]\n\n")
+		}
+	}))
+	defer model.Close()
+
+	config := `{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "standin": {
+      "npm": "@ai-sdk/openai-compatible",
+      "options": { "baseURL": "` + model.URL + `/v1", "apiKey": "not-a-real-key" },
+      "models": { "m": { "name": "M" } }
+    }
+  }
+}`
+	if err := os.WriteFile(filepath.Join(dir, "opencode.json"), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	req := fleet.RequestFrom(fleet.Caller{Principal: "integration-test"})
+	d, err := New(ctx, "test-machine", WithSessionRoot(t.TempDir()))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer d.Shutdown()
+
+	sess, err := d.Create(ctx, req, "k-turns", fleet.SessionSpec{
+		Cwd: fleet.AbsolutePath(dir), Name: "turns", Model: "standin/m", Prompt: "read note.txt and tell me about it",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	defer d.Close(ctx, req, sess.SessionRef)
+
+	waitForTurns := func(since string, want int) fleet.TurnsPage {
+		t.Helper()
+		var got fleet.TurnsPage
+		deadline := time.Now().Add(60 * time.Second)
+		for time.Now().Before(deadline) {
+			p, err := d.Turns(ctx, req, sess.SessionRef, fleet.TurnsQuery{Since: since})
+			if err != nil {
+				t.Fatalf("Turns: %v", err)
+			}
+			got.Turns = append(got.Turns, p.Turns...)
+			got.Next = p.Next
+			if len(got.Turns) >= want {
+				return got
+			}
+			if since != "" {
+				since = p.Next
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		t.Fatalf("only %d of %d turns arrived: %+v", len(got.Turns), want, got.Turns)
+		return got
+	}
+
+	first := waitForTurns("", 2)
+	if got, want := texts(first), []string{"FIRST-ROUND-TEXT", "SECOND-ROUND-TEXT"}; !eqStrings(got, want) {
+		t.Fatalf("turns = %q, want %q (one per assistant message the runtime wrote, in order)", got, want)
+	}
+	for _, tr := range first.Turns {
+		if strings.Contains(tr.Text, sentinel) {
+			t.Fatalf("the tool's output reached a turn: %q", tr.Text)
+		}
+	}
+
+	// Reading on from `next` returns exactly what is new, and the stable record
+	// from the start returns the same two turns again.
+	if _, err := d.Send(ctx, req, sess.SessionRef, "and once more please", driver.SendOptions{Submit: true}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	more := waitForTurns(first.Next, 2)
+	if len(more.Turns) != 2 || more.Turns[0].Text != "FIRST-ROUND-TEXT" {
+		t.Fatalf("after a second prompt, since=next gave %q; want the second prompt's two turns only", texts(more))
+	}
+	all := getTurns(t, d, sess.SessionRef, "", 0)
+	if len(all.Turns) != 4 {
+		t.Fatalf("the whole record = %q, want four turns", texts(all))
+	}
+}
