@@ -1352,6 +1352,26 @@ carries a different start time is absence of evidence and never a change. The li
 answer established with no start time (from the name alone, while the record was unusable)
 was never tied to a process instant, and is left as it is.
 
+**Per driver: the opencode runtime captures, it does not match** (muster #378). Its
+sessions do not live in a pane that something else can replace; the runtime's own session
+IS the session, and the identifier the create call returns is the identifier the runtime
+files its record under. The driver therefore reports `known: true`, `id` the runtime's
+session id, `source: captured` from the create response onward, on every read — the
+create's answer and its idempotent replay, a listing, and the `session.created` event —
+with nothing to match and no title to compare. It declares `reportsConversation: true`
+(§4.3).
+
+That value is kept across a service restart only as far as it can be **confirmed**. The
+driver remembers every session it created and relaunches it at start (§12, muster #282); a
+session the relaunched runtime reads back by that same id keeps `known: true` /
+`captured`, the evidence saying it was confirmed after the restart. A session that cannot
+be relaunched, or whose id the runtime does not answer for, reports `known: false` with
+the reason in `evidence` — the remembered identifier is not served on its own, because
+"this driver wrote it down once" is not "this runtime still holds that record", and a
+guess shaped like a reading is the failure this section exists to prevent. Unlike the
+terminal runtime, a relaunch here continues the same runtime session, so the identifier
+does not change across it.
+
 ### 2.10 ResumeOutcome
 
 ```
@@ -1951,6 +1971,10 @@ DriverCapabilities {
   supportsPin     : { model: boolean, effort: boolean, agent: boolean }
   validatesModel  : boolean   // checks `model` against the runtime's own list at create and refuses an unknown id `invalid` (§4.3, muster #287)
   remoteControl?  : { toggle: boolean, off: boolean }   // can turn a RUNNING session's remote control on (and off); absent = cannot (muster #269)
+  readsTurns?     : boolean   // GET …/turns reads this runtime's assistant turns (§5.8, muster #258, #369); absent = NOT DECLARED (an older peer, or one not reached), never "cannot"; false = every call is `unsupported` (muster #379)
+  reportsConversation?: boolean // looks for the runtime's record of a session's conversation (`conversation`, §2.9); absent = not declared; false = an absent `conversation` will never arrive; true = the driver looks, so an absent one is "not yet" (muster #379)
+  respond?        : { kinds: PromptKind[], unclassified: boolean } // which prompts `respond` (§3) answers: one whose `kind` is listed, or one carrying NO kind when `unclassified` is true; absent = not declared; {kinds:[],unclassified:false} = answers none (muster #379)
+  permissionModeChange?: { live: boolean, via?: string } // whether a RUNNING session's permission mode can be changed: live false = fixed at create (choose it from `createPermissionModes`), live true names the mechanism in `via` (`keys` today: one BTab press advances the mode, read back from `permissionMode`); absent = not declared (muster #379)
   deliveryModules? : DeliveryModuleStatus[]   // optional external delivery modules enabled here (§2.15); absent = none
   serverContext?  : { service: string, server?: { pid?: number, context: string }, warning?: string }   // macOS terminal runtime only (muster #336): the security-session context this service and its session server run in; absent = not measured
   deadlineMs      : number    // declared upper bound on any single call
@@ -2067,6 +2091,43 @@ directory's `AGENTS.md` and `CLAUDE.md` (up to 64 KB each; `@path` imports are n
 the two harnesses measured). (4) The interpreters a session's tools use must be on a system or
 allow-listed directory — an interpreter under the user's home stops being readable once a sandbox
 confines the home.
+
+**`readsTurns`, `reportsConversation`, `respond` and `permissionModeChange` are what a person-facing
+client — one that shows a session and lets a person type into it — needs before it draws a control**
+(muster #379). Without them a client keeps a table of runtime names, which is wrong the day a
+runtime is added, or offers a control and shows a refusal. They follow a rule the plain booleans
+above cannot carry, and it is the reason they are written `?` in the block:
+
+| value | meaning |
+|---|---|
+| absent | **not declared** — a peer built before these fields, an unreached peer's floor, a driver that did not say. A client offers nothing on this and does not read it as "cannot". |
+| declared no | the driver said it cannot (`false`; `{"live":false}`; `{"kinds":[],"unclassified":false}`). Degrade, never emulate (§5.6): the client does not offer the control and need not try. |
+| declared yes | the driver can. |
+
+A plain boolean decodes to `false` from a peer that never sent the key, under `source: observed`,
+so "never asked" would become "cannot" — §5.7 one level down from the place `source` solved it. The
+fields that predate this rule keep their meaning: `remoteControl` and `sandbox` are
+absent-means-cannot. For the two object-valued fields "cannot" is the object's own negative form,
+not a bare `false`, so one type decodes both.
+
+All four are per **runtime**, not per session: nothing differs between the sessions of one runtime
+on one machine, and where one session cannot take part its own `state` and `conversation` already
+say so. A per-session declaration arrives the day something genuinely differs between sessions.
+
+- **`readsTurns`** is declared by the driver, not derived from whether it implements the optional
+  turns interface: a remote driver always implements that as a relay, and a terminal driver
+  implements it even where no record root is configured and every call would fail. `true` does not
+  promise any one session can be read (`404` retryable, `409`).
+- **`respond`** is a test, not a list of labels: a prompt is answerable when its `kind` (§2.7) is in
+  `kinds`, or when it has no kind and `unclassified` is true. An agent's own question with options
+  is reported with no kind, so `unclassified` is the declaration that covers it. `kinds` is an open
+  set — a kind a newer peer lists decodes unchanged.
+- **`permissionModeChange`** declares the mechanism that exists. On the terminal runtime a client
+  changes the mode through `keys` (`BTab`, one press per call) and confirms it in
+  `state.permissionMode`, which needs `deliversRawKeys` and `observesPermissionMode`; on the
+  opencode runtime `deliversRawKeys` is false and the mode is chosen at create from
+  `createPermissionModes`. `via` is an open set; a later verb adds a member without a wire break.
+- **`reportsConversation`**: see §2.9 for what a declared-yes driver reports.
 
 **`deliversToInbox` answers "is the inbox path even wired here", never "will
 this call use it"** (muster #119, #122). Send's own per-target capability

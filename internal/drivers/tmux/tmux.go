@@ -1036,7 +1036,23 @@ func (d *Driver) Capabilities() fleet.DriverCapabilities {
 		// off through the runtime's own slash command and its disconnect
 		// dialog (remotecontrol.go). Both halves measured live.
 		RemoteControl: &fleet.RemoteControlSupport{Toggle: true, Off: true},
-		DeadlineMs:    d.deadline.Milliseconds(),
+		// muster #379, declared (never derived): see DriverCapabilities.
+		//
+		// turns and conversation both read the runtime's own record store, which
+		// is wired only by WithRecordRoot: without it neither can resolve, so the
+		// honest answer is "cannot", not "not declared" — this driver is
+		// describing itself.
+		ReadsTurns:          fleet.Declared(d.conversations != nil),
+		ReportsConversation: fleet.Declared(d.conversations != nil),
+		// respond answers every prompt this driver reports, with or without a
+		// kind: it works from the screen's own option list, and refuses by the
+		// answer's shape rather than by what the prompt is. A kind this driver
+		// ever refuses must leave this list instead of riding PromptKinds().
+		Respond: &fleet.RespondSupport{Kinds: fleet.PromptKinds(), Unclassified: true},
+		// One BTab press advances the mode and the result is read back from
+		// state.permissionMode (ADR 188, 194) — both needs are declared above.
+		PermissionModeChange: &fleet.PermissionModeChangeSupport{Live: true, Via: fleet.PermissionModeChangeViaKeys},
+		DeadlineMs:           d.deadline.Milliseconds(),
 		// #185: the optional external delivery modules enabled here and how
 		// each is wired; absent when none is.
 		DeliveryModules: d.moduleStatuses(),

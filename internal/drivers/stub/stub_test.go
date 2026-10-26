@@ -2,7 +2,9 @@ package stub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	fleet "github.com/futurelastic/muster"
@@ -51,5 +53,35 @@ func TestDriver_EveryOperationReturnsUnsupported(t *testing.T) {
 	}
 	if _, err := d.Subscribe(ctx, testCaller, driver.SubscribeFilter{}); !errors.Is(err, driver.ErrUnsupported) {
 		t.Errorf("Subscribe err = %v, want ErrUnsupported", err)
+	}
+}
+
+// This driver supports no operation, and says so in the declared "cannot" form
+// of each person-facing capability (muster #379) rather than leaving them
+// undeclared: it is describing itself, so "not declared" would be a claim of
+// ignorance it does not have.
+func TestDriver_DeclaresItCannotDoWhatAPersonFacingClientNeeds(t *testing.T) {
+	c := (&Driver{}).Capabilities()
+	if c.ReadsTurns == nil || *c.ReadsTurns {
+		t.Errorf("ReadsTurns = %v, want declared false", c.ReadsTurns)
+	}
+	if _, ok := any(&Driver{}).(driver.TurnReader); ok {
+		t.Error("declares it cannot read turns but implements driver.TurnReader")
+	}
+	if c.ReportsConversation == nil || *c.ReportsConversation {
+		t.Errorf("ReportsConversation = %v, want declared false", c.ReportsConversation)
+	}
+	if c.Respond == nil || len(c.Respond.Kinds) != 0 || c.Respond.Unclassified {
+		t.Errorf("Respond = %+v, want declared and answering nothing", c.Respond)
+	}
+	if c.PermissionModeChange == nil || c.PermissionModeChange.Live {
+		t.Errorf("PermissionModeChange = %+v, want declared and not live", c.PermissionModeChange)
+	}
+	b, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"respond":{"kinds":[],"unclassified":false}`) {
+		t.Errorf("a declared empty kinds list must be [] on the wire, not null: %s", b)
 	}
 }

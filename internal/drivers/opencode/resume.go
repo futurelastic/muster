@@ -63,9 +63,8 @@ func (d *Driver) resumeOne(ctx context.Context, it loaded) {
 		// Unreadable: still a session somebody created. Its file name is its id.
 		id := strings.TrimSuffix(filepath.Base(it.file), ".json")
 		if safeID(id) {
-			d.markSeen(id, knownSession{
-				unknown: fmt.Sprintf("the stored record of this session could not be used (%v); it needs re-creation", it.err),
-			})
+			unknown := fmt.Sprintf("the stored record of this session could not be used (%v); it needs re-creation", it.err)
+			d.markSeen(id, knownSession{unknown: unknown, conversation: unconfirmed(unknown)})
 		}
 		return
 	}
@@ -79,6 +78,7 @@ func (d *Driver) resumeOne(ctx context.Context, it loaded) {
 	}
 	if why := rec.recreateReason(); why != "" {
 		base.unknown = why
+		base.conversation = unconfirmed(why)
 		d.markSeen(rec.ID, base)
 		return
 	}
@@ -93,6 +93,7 @@ func (d *Driver) resumeOne(ctx context.Context, it loaded) {
 		if err != nil {
 			base.unknown = "the session could not be relaunched after the restart: its context file can no longer be used, " +
 				"and a session is not relaunched without the context it was created with (" + describeCreateError(err) + "); it needs re-creation"
+			base.conversation = unconfirmed(base.unknown)
 			d.markSeen(rec.ID, base)
 			return
 		}
@@ -103,10 +104,13 @@ func (d *Driver) resumeOne(ctx context.Context, it loaded) {
 	srv, interrupted, err := d.relaunch(rctx, rec)
 	if err != nil {
 		base.unknown = "the session could not be relaunched after the restart: " + err.Error()
+		base.conversation = unconfirmed(base.unknown)
 		d.markSeen(rec.ID, base)
 		return
 	}
 	base.srv, base.interrupted = srv, interrupted
+	// relaunch read the session back by this id: the runtime still holds its record.
+	base.conversation = confirmedAfterRestart(rec.ID)
 	d.markSeen(rec.ID, base)
 }
 

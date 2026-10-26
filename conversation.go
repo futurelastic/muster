@@ -81,13 +81,15 @@ type ConversationRef struct {
 // strictly, for the same reason as Status and Confidence: an unrecognised
 // value must be an error rather than a silent default.
 //
-// # Why both members are named now, when only one is produced
+// # Why both members were named before both were produced
 //
-// Nothing writes ConversationCaptured today. It is defined anyway because this
-// service federates, peers have already been caught running different vintages
-// of this code, and a strict decoder makes a NEW member a wire break for
-// whichever peer is older — it would reject the whole session rather than one
-// field. Naming the second value now costs a line; naming it later costs the
+// Both are written now: the terminal driver derives (and captures, for a create
+// that dictates the id, muster #224), and the opencode driver captures from the
+// create response (muster #378). It was named before anything wrote it because
+// this service federates, peers have already been caught running different
+// vintages of this code, and a strict decoder makes a NEW member a wire break
+// for whichever peer is older — it would reject the whole session rather than
+// one field. Naming the second value early cost a line; naming it late costs the
 // incident that Build exists to prevent.
 type ConversationSource string
 
@@ -103,7 +105,9 @@ const (
 	// session was created, with nothing to match — first produced by a
 	// create carrying SessionSpec.ConversationId (muster #224): the
 	// driver told the runtime which id to start under, so there is nothing
-	// to derive and no title to match against.
+	// to derive and no title to match against. The opencode driver produces
+	// it for every session, from the id the runtime's create response names
+	// (muster #378).
 	ConversationCaptured ConversationSource = "captured"
 )
 
