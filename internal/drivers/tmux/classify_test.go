@@ -571,11 +571,16 @@ func TestYoungPaneWithNoInterfaceIsStartingNotUnknown(t *testing.T) {
 // out of it is untrusted input. Padding a slice up to a parsed index is
 // unbounded allocation: one transcript line hung the live service.
 func TestPromptParsingIsBoundedByHostileInput(t *testing.T) {
-	hostile := `  A question
+	// The hostile rows are transcript, so they stand above the dialog. Under a
+	// footer a numbered run is believed only when it is the block directly
+	// above it (muster#382): the same rows between the options and the footer
+	// would be a row the dialog does not own, and the screen would read as no
+	// menu. This test is about bounded work, not about where the rows sit.
+	hostile := `  1000000. absurd index from the transcript
+  99999999999999999999. and an overflowing one
+  A question
 ❯ 1. Real option
   2. Another
-  1000000. absurd index from the transcript
-  99999999999999999999. and an overflowing one
 Enter to confirm · Esc to cancel`
 	done := make(chan *fleet.SessionPrompt, 1)
 	go func() { done <- parsePrompt(newScreen(hostile)) }()
@@ -640,6 +645,93 @@ func TestTranscriptListIsNotAPrompt(t *testing.T) {
 ` + rule
 	if p := parsePrompt(newScreen(f)); p != nil {
 		t.Errorf("transcript list read as a prompt: %+v", p.Options)
+	}
+}
+
+// A runtime footer says that a dialog stands somewhere on the screen; it does not
+// say that the numbered run found in the window is that dialog (muster#382). #380
+// closed the instance the unnumbered reader could read. These are the dialogs it
+// cannot — a wrapped label, blank rows between options, a title row — drawn under
+// a transcript that holds a numbered list: the list used to come back as the
+// dialog's options, and an answer by index went to a question nobody asked.
+func TestFooterDoesNotLicenseANumberedRunThatIsNotTheBlockAboveIt(t *testing.T) {
+	const footer = "   Enter to select · Esc to cancel"
+	const transcript = "Here are the steps I would take:\n\n  1. read the config\n  2. change the port\n  3. restart the service\n\n"
+	cases := map[string]string{
+		"an unnumbered dialog with a wrapped label": transcript + ` Pick a deployment target
+
+   ❯ Staging environment, which is shared by
+       every team and is reset nightly
+     Production environment
+     Local only
+
+` + footer,
+		"an unnumbered dialog with blank rows between its options": transcript + ` Pick a deployment target
+
+   ❯ Staging environment
+
+     Production environment
+
+     Local only
+
+` + footer,
+		"the list echoed with the highlight leader": "❯ 1. read the config\n  2. change the port\n  3. restart the service\n\n" + ` Pick a deployment target
+
+   ❯ Staging environment
+
+     Production environment
+
+` + footer,
+		"a title row between the list and the footer": transcript + " Pick a deployment target\n" + footer,
+		"a run that begins under the footer":          footer + "\n\n  1. read the config\n  2. change the port\n",
+	}
+	for name, screen := range cases {
+		t.Run(name, func(t *testing.T) {
+			if p := parsePrompt(newScreen(screen)); p != nil {
+				t.Fatalf("a numbered run that is not directly above the footer was read as the dialog: options = %q", p.Options)
+			}
+			// Not idle either: the dialog replaces the composer, and a session
+			// with a footer on screen and nothing to answer is held, not sent to.
+			if st := classify(screen, true); st.Status == fleet.StatusIdle || st.Prompt != nil {
+				t.Fatalf("status %s prompt %+v, want neither idle nor an answerable prompt", st.Status, st.Prompt)
+			}
+		})
+	}
+}
+
+// ...and everything that may stand between a numbered run and its footer still
+// does: blank rows, a rule, a dashed divider, the options' own descriptions and a
+// label that wraps. The rule above refuses a row the run does not own; it must
+// not refuse the chrome a real dialog draws, because the cost of a refusal is a
+// session that cannot be answered.
+func TestFooterStillLicensesTheRunDirectlyAboveItWhateverChromeBetween(t *testing.T) {
+	const footer = "Enter to select · ↑/↓ to navigate · Esc to cancel"
+	cases := map[string]struct {
+		screen  string
+		options int
+	}{
+		"blank rows":                     {"Proceed?\n❯ 1. Yes\n  2. No\n\n\n" + footer, 2},
+		"a rule":                         {"Proceed?\n❯ 1. Yes\n  2. No\n" + rule + "\n" + footer, 2},
+		"a divider":                      {"Proceed?\n❯ 1. Yes\n  2. No\n╌╌╌╌╌╌╌╌\n" + footer, 2},
+		"descriptions under the options": {"Proceed?\n\n❯ 1. Yes\n     Do it now\n  2. No\n     Leave it\n\n" + footer, 2},
+		"a wrapped label":                {"Proceed?\n\n❯ 1. Yes, and keep going until\n     the work is done\n  2. No\n\n" + footer, 2},
+		"the permission dialog":          {fixturePermissionDialog, 3},
+		"a transcript list above a numbered dialog": {
+			"  1. the first thing\n  2. the second thing\n\nProceed?\n❯ 1. Yes\n  2. No\n\n" + footer, 2},
+		"a footer left in the history above a menu": {
+			footer + "\n\nProceed?\n❯ 1. Yes\n  2. No", 2},
+		"a scrolled-off marker": {"  4. Type something.\n  5. Chat about this\n" + footer, 5},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			p := parsePrompt(newScreen(c.screen))
+			if p == nil {
+				t.Fatalf("a run directly above its footer was not read as a menu:\n%s", c.screen)
+			}
+			if len(p.Options) != c.options {
+				t.Fatalf("options = %q, want %d", p.Options, c.options)
+			}
+		})
 	}
 }
 
