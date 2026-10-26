@@ -1,0 +1,21 @@
+{
+  "name": "numbered-transcript-over-blank-row-dialog",
+  "for": "A select dialog whose options carry no numbers and are separated by blank rows, drawn under a transcript that holds a numbered list. The unnumbered reader cuts its block at the first blank row above the footer, so it sees one row and refuses, and the dialog's footer licensed the numbered run higher up as the prompt (#380's flaw, a different dialog shape). The dialog's own title and options stand between the list and the footer, so the list is not the block above the footer and the screen reads as no prompt: unknown (held, nothing is sent to it), never idle, and never an answerable list.",
+  "source": "#382, remainder of #380",
+  "redactedFrom": "synthetic: composed from the shape #382 describes (an invented numbered list in the transcript above a footer-bearing dialog whose options carry no numbers and which the unnumbered reader refuses: blank-row dialog), then run through corpus-redact. Every row's wording is discarded by the redactor; the committed screen carries only layout and the dialog's footer. No such dialog has been captured from the runtime.",
+  "alive": true,
+  "observations": [
+    {
+      "afterSeconds": 0,
+      "young": false,
+      "want": "unknown",
+      "wantKind": "none"
+    },
+    {
+      "afterSeconds": 5,
+      "young": false,
+      "want": "unknown",
+      "wantKind": "none"
+    }
+  ]
+}

@@ -886,6 +886,14 @@ func parseMenuShape(s screen) (p *fleet.SessionPrompt, shape menuShape) {
 	// It is what a live composer below the options is measured against (see the
 	// check before `structural`, muster#358).
 	lastOptionRow := -1
+	// stray is whether a row that is neither part of the numbered run nor chrome
+	// has been read since the run's last option, and footerAdjacent and
+	// footerStray say what the last footer read found above it: the run with
+	// nothing but chrome between, or the run with something else between
+	// (muster#382). A footer says a dialog stands on the screen; these are how
+	// the footer branch below tells whether the run it would license is that
+	// dialog or something higher up.
+	stray, footerAdjacent, footerStray := false, false, false
 	ruleSeen := from > 0 && isRule(s.lines[from-1])
 	// autoDeny is the seconds left on the unattended-session countdown, or -1
 	// when the dialog shows none (muster#353).
@@ -980,6 +988,9 @@ func parseMenuShape(s screen) (p *fleet.SessionPrompt, shape menuShape) {
 				bodyStart, dividerSeen, ruleSeen = 0, false, false
 			}
 			lastNumber, since = n, nil
+			// A numbered row is the run itself, however it is bounded below, and
+			// a footer read before it is above the run, not under it.
+			stray, footerAdjacent, footerStray = false, false, false
 			if n > maxPromptOptions {
 				// Bounded on purpose. This parses a pane whose contents are
 				// written by an agent that can print anything, and padding
@@ -1013,6 +1024,7 @@ func parseMenuShape(s screen) (p *fleet.SessionPrompt, shape menuShape) {
 		if strings.Contains(line, selectFooter) || strings.Contains(line, confirmFooter) ||
 			strings.Contains(line, amendFooter) {
 			footer = true
+			footerAdjacent, footerStray = len(p.Options) > 0 && !stray, len(p.Options) > 0 && stray
 			continue
 		}
 		if len(p.Options) == 0 && (isDialogTabBar(line) || (wasRule && isDialogChip(line))) {
@@ -1028,8 +1040,10 @@ func parseMenuShape(s screen) (p *fleet.SessionPrompt, shape menuShape) {
 			bodyStart, dividerSeen, ruleSeen = 0, false, false
 			continue
 		}
+		described := false
 		if len(p.Options) > 0 && !hasPane && !wasGap && !isRule(line) && !isDialogDivider(line) &&
 			rowIndent(raw) >= labelCol && labelCol > 0 && p.Options[len(p.Options)-1] != "" {
+			described = true
 			// An unnumbered row indented to its label is the option's description
 			// (muster#324). It is still offered to since below: until the next
 			// option shows, it cannot be told from the question of a following
@@ -1063,6 +1077,10 @@ func parseMenuShape(s screen) (p *fleet.SessionPrompt, shape menuShape) {
 					question = append(question, row)
 				} else {
 					since = append(since, row)
+					// A row under the options that is not one's description is
+					// not the run's: whatever it belongs to, a footer below it
+					// is not directly under the run (muster#382).
+					stray = stray || !described
 				}
 			}
 		}
@@ -1114,6 +1132,33 @@ func parseMenuShape(s screen) (p *fleet.SessionPrompt, shape menuShape) {
 			// footer: nothing to read.
 			return nil, menuShape{}
 		}
+		if footerStray && !hasPane {
+			// A numbered run that does not stand directly above the footer is not
+			// the dialog the footer belongs to (muster#382).
+			//
+			// #380 closed the instance the unnumbered reader above could read. This
+			// is the rest: a footer-bearing dialog of a shape that reader refuses (a
+			// wrapped option label, options separated by blank rows, a layout not
+			// seen yet), drawn under a transcript holding a numbered list, would
+			// still be answered from the list — the footer only says that a dialog
+			// stands somewhere on the screen, and the licence below took any
+			// numbered run in the window as that dialog. Rows of the dialog itself
+			// sit between the list and the footer, which is what footerStray is: the
+			// run's last option (or its descriptions) was followed by a row that is
+			// neither blank, a rule, a divider nor a description before the footer.
+			//
+			// The cost is the pre-#171 behaviour, the same one unnumberedMenu names
+			// for a layout it refuses: no prompt recognised, never a guessed option
+			// list. Respond answers by index, and an index into a misread list is an
+			// answer to a question nobody asked. It is not the damaging direction:
+			// a dialog replaces the composer, so a screen with a footer and no
+			// composer reads as unknown (nothing is sent to it), never as idle.
+			// A genuine numbered dialog with a row of its own chrome between its
+			// options and its footer would read the same way, which is visible and
+			// recoverable where a wrong answer is neither; none of the corpus's
+			// screens or numbered fixtures has one.
+			return nil, menuShape{}
+		}
 	}
 	// A numbered run standing ABOVE a live composer is transcript, not a menu
 	// (muster#358).
@@ -1151,7 +1196,7 @@ func parseMenuShape(s screen) (p *fleet.SessionPrompt, shape menuShape) {
 		return nil, menuShape{}
 	}
 	structural := len(p.Options) >= 2 && p.Selected > 0 && optionsAreContiguous(p.Options)
-	if !structural && !(footer && len(p.Options) >= 1) {
+	if !structural && !(footer && len(p.Options) >= 1 && (hasPane || footerAdjacent)) {
 		return nil, menuShape{}
 	}
 	// Where the question starts decides how much of it is one.

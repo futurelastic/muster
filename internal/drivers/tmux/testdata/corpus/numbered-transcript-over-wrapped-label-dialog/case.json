@@ -1,0 +1,21 @@
+{
+  "name": "numbered-transcript-over-wrapped-label-dialog",
+  "for": "A select dialog whose options carry no numbers, drawn under a transcript that holds a numbered list, where one option's label wraps onto a second row indented deeper than the labels. The unnumbered reader refuses a block whose rows do not all line up on one column, so the dialog's footer still licensed the numbered run higher up as the prompt: the list was returned as the dialog's options, and an answer by index would have gone to a question nobody asked. This is #380's flaw with a dialog shape that reader cannot read. Nothing between the list and the footer is blank, a rule, a divider or the list's own description, so the list is not the block above the footer and the screen reads as no prompt. The dialog replaces the composer, so the session reads as unknown (held, nothing is sent to it), never idle, and never an answerable list.",
+  "source": "#382, remainder of #380",
+  "redactedFrom": "synthetic: composed from the shape #382 describes (an invented numbered list in the transcript above a footer-bearing dialog whose options carry no numbers and which the unnumbered reader refuses: wrapped-label dialog), then run through corpus-redact. Every row's wording is discarded by the redactor; the committed screen carries only layout and the dialog's footer. No such dialog has been captured from the runtime.",
+  "alive": true,
+  "observations": [
+    {
+      "afterSeconds": 0,
+      "young": false,
+      "want": "unknown",
+      "wantKind": "none"
+    },
+    {
+      "afterSeconds": 5,
+      "young": false,
+      "want": "unknown",
+      "wantKind": "none"
+    }
+  ]
+}
