@@ -34,6 +34,13 @@ name: Release (auto)
 # publish-tag=v0.3.0`). The tag must exist on origin and be reachable from main;
 # an rc goes to `next`, a final to `latest`; a version already on npm is skipped.
 #
+# THE RELEASE HOST (#383). A final is published to the company release host as well as npm. That publish cannot
+# happen in this run: the host accepts a publish only from a run AT the final tag, and this one runs on main. So the
+# `dispatch-downloads` job starts publish-downloads.yml at the tag, from the same three paths that publish a final to
+# npm (the final this run tagged, `publish-tag`, the daily catch-up). The catch-up asks the host's own record, not
+# npm: a final with no successful publish run is started again, and the host answers "already published" to a repeat.
+# Off unless the repository variable PUBLISH_ORIGIN is set. npm is untouched by any of it.
+#
 # IT NEVER WRITES A COMMIT. The only refs pushed are the annotated tags
 # `colab release cut` / `finalize` create.
 
@@ -276,3 +283,46 @@ jobs:
             exit 1
           fi
           echo "$TAG published (publish-existing: success)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # Hands each final to the release host (#383): starts publish-downloads.yml AT the tag, because the host takes a
+  # publish only from a run whose ref is the final tag. Independent of npm on purpose (always()): a failed npm
+  # publish must not hold the host back, nor the reverse. scripts/release-downloads-guard.sh holds the decisions.
+  dispatch-downloads:
+    name: Hand the final to the release host
+    needs: release
+    # Off until the repository says where the host is. A cut-only run (a candidate) has nothing to hand over.
+    if: >-
+      always() && !cancelled() && vars.PUBLISH_ORIGIN != ''
+      && (needs.release.outputs.final-tag != '' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write # start publish-downloads.yml (a workflow_dispatch with GITHUB_TOKEN is allowed to start a run)
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      JUST_FINALIZED: ${{ needs.release.outputs.final-tag }}
+      PUBLISH_TAG: ${{ inputs.publish-tag }} # caller-controlled text: through env, never into a script
+      # The catch-up (the newest final with no successful publish) runs daily and on a plain dispatch; a dispatch that
+      # names a tag means exactly that tag.
+      CATCH_UP: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.publish-tag == '')) && '1' || '0' }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: main
+          fetch-depth: 0 # tags, and whether a tag's commit is reachable from main
+          persist-credentials: false
+
+      - name: Dispatch
+        run: |
+          set -uo pipefail
+          TAGS="$(scripts/release-downloads-guard.sh tags)" || exit 1
+          if [ -z "$TAGS" ]; then
+            echo "Release host: no final to hand over." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          status=0
+          for tag in $TAGS; do
+            scripts/release-downloads-guard.sh dispatch "$tag" | tee -a "$GITHUB_STEP_SUMMARY" || status=1
+          done
+          exit "$status"

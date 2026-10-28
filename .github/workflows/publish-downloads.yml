@@ -1,0 +1,169 @@
+name: Publish downloads
+run-name: ${{ inputs.dry_run && format('Publish {0} (dry run)', inputs.tag) || format('Publish {0}', inputs.tag) }}
+
+# Publishes a FINAL release to the company release host (#383), next to npm. npm stays: release-npm.yml is untouched.
+#
+#   build     GitHub-hosted, no secrets. Builds the tag with scripts/build-release.sh, keeps the four unix binaries
+#             and writes their SHA256SUMS (.github/downloads/publish.mjs stage), hands them on as a workflow artifact.
+#   publish   the publish runner, environment `release`. Signs the sums with the key only that environment holds and
+#             uploads through the host's CI publish API (GitHub OIDC; .github/downloads/publish.mjs publish).
+#
+# WHY THIS RUNS AT THE TAG. The host accepts a publish only from a run whose ref is `refs/tags/vX.Y.Z` and whose
+# workflow is `<repo>/<this file>@<that ref>`. release-auto.yml runs on main, so it cannot publish; it DISPATCHES this
+# workflow at the tag (scripts/release-downloads-guard.sh) from the same paths that publish a final to npm: the run
+# that tags a final, `publish-tag`, and the daily catch-up. By hand: Actions -> Publish downloads -> Run workflow, with
+# "Use workflow from" set to the final TAG (not a branch), or
+#     gh workflow run publish-downloads.yml --ref vX.Y.Z -f tag=vX.Y.Z
+# It follows that a final cut before this file merged cannot be published: the file is not in its tree.
+#
+# A DRY RUN (`dry_run: true`) builds, stages, signs and checks the files, then stops before any network call to the
+# host. It may be started from any ref (build tooling comes from that ref, the source from `tag`), so it is how the
+# environment, the runner and the key are proven without a new final.
+#
+# CONFIGURATION lives in repository settings, never in this file: variables PUBLISH_ORIGIN (the host's exact address,
+# also the token's audience), PUBLISH_RUNNER (the publish runner's labels as a JSON array) and optionally PUBLISH_SLUG
+# (default `muster`); the secret PUBLISH_SIGNING_KEY in the `release` environment only. Unset PUBLISH_ORIGIN and
+# release-auto.yml does not dispatch this workflow at all. Setup, binding and key rotation: docs/install.md.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing FINAL tag to publish (vX.Y.Z). A real publish also needs this run to be AT that tag.
+        required: true
+        type: string
+      dry_run:
+        description: Build, stage, sign and check; send nothing to the host.
+        required: false
+        type: boolean
+        default: false
+
+permissions: {}
+
+# One publish per tag at a time; never cancelled part-way (an upload resumes, but a cancel mid-complete is untidy).
+concurrency:
+  group: publish-downloads-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and stage
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      runner: ${{ steps.config.outputs.runner }}
+    env:
+      # Through env, never interpolated into a script: an input is caller-controlled text.
+      TAG: ${{ inputs.tag }}
+      DRY_RUN: ${{ inputs.dry_run }}
+      PUBLISH_ORIGIN: ${{ vars.PUBLISH_ORIGIN }}
+      PUBLISH_RUNNER: ${{ vars.PUBLISH_RUNNER }}
+    steps:
+      - name: Check the tag and the ref
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::'$TAG' is not a final tag (vMAJOR.MINOR.PATCH): only finals are published"; exit 1; }
+          if [ "$DRY_RUN" != "true" ] && [ "$GITHUB_REF" != "refs/tags/$TAG" ]; then
+            echo "::error::this run is at $GITHUB_REF, not refs/tags/$TAG: the host accepts a publish only from a run at the final tag itself. Start it with --ref $TAG (or let release-auto.yml dispatch it)."
+            exit 1
+          fi
+
+      - name: Check the configuration
+        id: config
+        run: |
+          set -euo pipefail
+          [ -n "$PUBLISH_ORIGIN" ] || { echo "::error::the repository variable PUBLISH_ORIGIN is not set"; exit 1; }
+          [ -n "$PUBLISH_RUNNER" ] || { echo "::error::the repository variable PUBLISH_RUNNER is not set (the publish runner's labels, as a JSON array)"; exit 1; }
+          RUNNER_JSON="$(node -e 'const a = JSON.parse(process.argv[1]); if (!Array.isArray(a) || !a.length || !a.every((s) => typeof s === "string" && s)) process.exit(1); process.stdout.write(JSON.stringify(a))' "$PUBLISH_RUNNER")" \
+            || { echo "::error::PUBLISH_RUNNER is not a JSON array of label strings"; exit 1; }
+          echo "runner=$RUNNER_JSON" >> "$GITHUB_OUTPUT"
+
+      # The tooling: this run's own ref (the tag, on a real publish).
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          path: tooling
+          persist-credentials: false
+
+      # The source being released, with its history so `git describe` can see the tag it is checked out at.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          fetch-depth: 0
+          path: src
+          persist-credentials: false
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: src/go.mod
+
+      - name: Build
+        working-directory: src
+        run: ../tooling/scripts/build-release.sh "$RUNNER_TEMP/dist" "$TAG"
+
+      - name: Verify what was built
+        working-directory: ${{ runner.temp }}/dist
+        run: |
+          set -euo pipefail
+          sha256sum -c SHA256SUMS
+          ./muster-"$TAG"-linux-amd64 --version | tee /dev/stderr | grep -qF "muster $TAG "
+
+      # Exactly the files that are published, and their SHA256SUMS: the publish job signs these bytes.
+      - name: Stage the published files
+        run: node tooling/.github/downloads/publish.mjs stage "$RUNNER_TEMP/dist" "$RUNNER_TEMP/stage" "$TAG"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-files-${{ inputs.tag }}
+          path: ${{ runner.temp }}/stage/*
+          if-no-files-found: error
+          retention-days: 3
+
+  publish:
+    name: Sign and publish
+    needs: build
+    # The publish runner's labels come from a repository variable: they name infrastructure, which this public
+    # repository does not.
+    runs-on: ${{ fromJSON(needs.build.outputs.runner) }}
+    environment: release # holds PUBLISH_SIGNING_KEY; the host binds this name too
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write # the OIDC token the host verifies
+    env:
+      TAG: ${{ inputs.tag }}
+      DRY_RUN: ${{ inputs.dry_run }}
+      PUBLISH_ORIGIN: ${{ vars.PUBLISH_ORIGIN }}
+      PUBLISH_SLUG: ${{ vars.PUBLISH_SLUG }}
+      PUBLISH_SIGNING_KEY: ${{ secrets.PUBLISH_SIGNING_KEY }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0 # the guard asks whether the tag's commit is reachable from main
+          persist-credentials: false # nothing here pushes
+
+      # A final on origin that main reaches. Nobody can publish a tag cut on a side branch.
+      - name: The tag is a final that main reaches
+        run: |
+          set -euo pipefail
+          DIST="$(scripts/release-npm-guard.sh check-tag "$TAG")"
+          [ "$DIST" = "latest" ] || { echo "::error::$TAG is not a final (dist-tag '$DIST')"; exit 1; }
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 22
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-files-${{ inputs.tag }}
+          path: ${{ runner.temp }}/stage
+
+      - name: Sign and publish
+        run: |
+          set -uo pipefail
+          FLAG=""; [ "$DRY_RUN" = "true" ] && FLAG="--dry-run"
+          # The script's own status is kept: a `{ ...; echo; } | tee` group would end on the echo and go green.
+          status=0
+          { echo "### Publish downloads: $TAG"; echo; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          node .github/downloads/publish.mjs publish "$RUNNER_TEMP/stage" "$TAG" $FLAG 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || status=$?
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"

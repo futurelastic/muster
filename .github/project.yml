@@ -42,6 +42,8 @@ release:
   # No manifest carries a version (npm/**/package.json hold 0.0.0): the tag is the version and
   # scripts/assemble-npm.mjs stamps it at publish time.
   version-source: tag
+  # (2026-10-28, #383) A final is also published to the company release host, next to npm: publish-downloads.yml,
+  # dispatched at the tag by release-auto.yml (off until the repository variable PUBLISH_ORIGIN is set). docs/release-host.md.
   # Route choice (#251): `public-tool`, not `rapid-app`. Their policy was identical when this
   # was chosen (automatic candidate per green trunk head, 3d test period, automatic final), but the
   # handbook permits the npm publish on `public-tool` alone, and npm is how this repo ships.

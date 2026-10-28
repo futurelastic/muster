@@ -70,6 +70,23 @@ Not covered, and continuing in the manual procedure: peers (steps 5-6 of it, the
 two-sided enrolment), inbox delivery (step 7), tmux 3.7 or newer (step 8), and
 Windows ([its own section](#windows)). The command prints these when it finishes.
 
+## From the release host
+
+On a machine that installs and updates its apps from the company release host, muster comes from there too, as a
+final release only. Needs `curl` or `wget`, `sha256sum` or `shasum`, and tmux (the service needs it):
+
+```sh
+curl -fsSL <host>/muster/install.sh | sh                  # the newest final
+curl -fsSL <host>/muster/install.sh | sh -s -- 0.4.0      # an exact version
+```
+
+It checks the download against the version's `SHA256SUMS`, then runs that binary's
+[`muster service install`](#the-short-way-muster-service-install), so what is above applies unchanged: a new machine
+gets a service, an existing one keeps its configuration and gets the new binary and a restart, and the command ends
+by asking the service whether it is healthy. If the new version does not come up, the previous one is put back and
+the installer exits 1. npm remains the other way in; [`release-host.md`](release-host.md) says how a final reaches
+the host.
+
 ## What a working installation is
 
 Every row below is something an installation can be missing and still start.
