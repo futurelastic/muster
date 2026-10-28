@@ -205,8 +205,9 @@ func leadingCommand(text string) string {
 // the command at a keyboard is). Every other caller holding only `send` is
 // refused, with a reason that names both grants so an operator knows what to
 // add. With the gate off it never refuses: that is the behaviour before #272,
-// kept for one release so a caller still typing the command through `input`
-// has time to move to POST …/remote-control.
+// which the service no longer defaults to (#275 flipped the default after the
+// one-release notice) and which an operator keeps only by setting
+// gateRemoteControlInput to false.
 //
 // text is the same already-sanitised text refuseAsRuntimeSyntax judges, for
 // the same reason: a control byte the sanitiser drops must not be able to hide

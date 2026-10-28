@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	fleet "github.com/futurelastic/muster"
 	"github.com/futurelastic/muster/internal/driver"
@@ -77,6 +78,43 @@ func TestSendGatesRemoteControlCommand(t *testing.T) {
 			}
 		} else if got.Outcome == fleet.OutcomeRefused && strings.Contains(got.Reason, "remote-control grant") {
 			t.Errorf("%s: refused by the gate: %s", tc.name, got.Reason)
+		}
+	}
+}
+
+// #275: the option the service passes is what turns the gate on, and a driver
+// built without it keeps the gate off (its zero value is the pre-#272
+// behaviour; the service's default-on lives in cmd/muster, which always passes
+// the option unless the operator opted out). Through New and Send, not by
+// setting the field, so a rename of the option or of what it sets fails here.
+func TestWithRemoteControlInputGateTurnsTheGateOn(t *testing.T) {
+	ref := fleet.SessionRef{Machine: "testbox", ID: "alpha💬"}
+	for _, tc := range []struct {
+		name    string
+		opts    []Option
+		send    driver.SendOptions
+		refused bool
+	}{
+		{"option on, send only", []Option{WithRemoteControlInputGate(true)}, driver.SendOptions{Submit: true}, true},
+		{"option on, remote-control", []Option{WithRemoteControlInputGate(true)}, driver.SendOptions{Submit: true, RemoteControl: true}, false},
+		{"option on, human-relay", []Option{WithRemoteControlInputGate(true)}, driver.SendOptions{Submit: true, HumanRelay: true}, false},
+		{"option off, send only", []Option{WithRemoteControlInputGate(false)}, driver.SendOptions{Submit: true}, false},
+		{"no option, send only", nil, driver.SendOptions{Submit: true}, false},
+	} {
+		f := twoSessions()
+		all := append([]Option{
+			withExec(f.exec),
+			withNonce(func() string { return testNonce }),
+			withClock(func() time.Time { return time.Unix(1785760000, 0) }),
+		}, tc.opts...)
+		d := New("testbox", all...)
+		got, err := d.Send(context.Background(), testCaller, ref, "/rc", tc.send)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		gated := got.Outcome == fleet.OutcomeRefused && strings.Contains(got.Reason, "remote-control grant")
+		if gated != tc.refused {
+			t.Errorf("%s: gated = %v (outcome %s: %s), want %v", tc.name, gated, got.Outcome, got.Reason, tc.refused)
 		}
 	}
 }

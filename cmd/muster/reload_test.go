@@ -259,6 +259,32 @@ func TestReload_RestartOnlySettingIsNamedAndRefused(t *testing.T) {
 	}
 }
 
+// #275: gateRemoteControlInput's absent key and its explicit true are the same
+// gate now, so writing or dropping the key must not read as a change that needs
+// a restart; flipping to false (the opt-out) does, and names the setting.
+func TestRestartOnlyComparesTheGateByMeaning(t *testing.T) {
+	off, on := false, true
+	for _, tc := range []struct {
+		name          string
+		running, next *fileConfig
+		restart       bool
+	}{
+		{"absent to explicit true", &fileConfig{}, &fileConfig{GateRemoteControlInput: &on}, false},
+		{"explicit true to absent", &fileConfig{GateRemoteControlInput: &on}, &fileConfig{}, false},
+		{"absent to false", &fileConfig{}, &fileConfig{GateRemoteControlInput: &off}, true},
+		{"false to absent", &fileConfig{GateRemoteControlInput: &off}, &fileConfig{}, true},
+		{"false to false", &fileConfig{GateRemoteControlInput: &off}, &fileConfig{GateRemoteControlInput: &off}, false},
+	} {
+		names := restartOnly(tc.running, tc.next)
+		if got := len(names) > 0; got != tc.restart {
+			t.Errorf("%s: restartOnly = %v, want restart=%v", tc.name, names, tc.restart)
+		}
+		if tc.restart && names[0] != "gateRemoteControlInput" {
+			t.Errorf("%s: named %v, want gateRemoteControlInput", tc.name, names)
+		}
+	}
+}
+
 // sessionEnvDoc is a valid config plus a "new" principal and the given sessionEnv,
 // so a refused file can be told apart from an applied one by the new token.
 func sessionEnvDoc(env ...map[string]any) map[string]any {

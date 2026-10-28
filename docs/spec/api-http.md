@@ -1605,18 +1605,18 @@ on a build without the route answers with its router's bare `404`; a relaying
 service **must** report that as `unsupported`, never as `not_found`.
 
 The runtime's own slash command (`/rc`, `/remote-control`) is the same act typed
-instead of requested, and `input` delivers it for any caller holding `send`
-(§3.3, the session-management commands). A machine closes that door with the
-`gateRemoteControlInput` setting (muster #272): with it on, `input` delivers
-those two commands only to a caller holding `remote-control` or `human-relay`,
-and the refusal names both grants. The setting is **off by default for one
-release** — the earlier behaviour — so existing callers have a release to move
-to this verb, after which the default flips; until a machine sets it, the grant
-governs this verb and not the older door. The verb's own command is not subject
-to the setting. A relayed `input` carries the fact that the original caller held
-`remote-control` as an assertion the owning machine honours only from a
-configured peer that itself holds `remote-control`; the peer's own grant never
-stands in for the caller's.
+instead of requested, so `input` closes that door too. The
+`gateRemoteControlInput` setting (muster #272) governs it: with it on, `input`
+delivers those two commands only to a caller holding `remote-control` or
+`human-relay`, and the refusal names both grants. The setting is **on by
+default** (muster #275): the key absent from the config file, or no config file
+at all, means on, and only an explicit `false` is the opt-out. #272 shipped it off for one release so existing callers had time to
+move to this verb; the default flipped after that notice. On a machine that has
+opted out, the grant governs this verb and not the older door. The verb's own
+command is not subject to the setting. A relayed `input` carries the fact that
+the original caller held `remote-control` as an assertion the owning machine
+honours only from a configured peer that itself holds `remote-control`; the
+peer's own grant never stands in for the caller's.
 
 `runtime` is an **optional** query parameter on every single-session endpoint
 (`GET`, `input`, `respond`, `discard`, `rename`, `labels`, `keys`, `interrupt`,
@@ -2579,8 +2579,9 @@ ordering is wrong rather than handing you a cursor that would skip.
   person's own message, so `route: auto` carries it through the session's live
   lane or else the terminal, unlabelled, arriving as the user's own turn, and
   it may send a leading `/` — including `/rc` and `/remote-control`, which with
-  `gateRemoteControlInput` on (§3.3 `remote-control`, muster #272) are
-  otherwise delivered only to a `remote-control` holder.
+  `gateRemoteControlInput` on (§3.3 `remote-control`, muster #272; on unless the
+  machine sets it to `false`, muster #275) are otherwise delivered only to a
+  `remote-control` holder.
   Nothing else confers this — no header, no `from`, no `relayOfHuman` — and it
   crosses a peer relay only as an assertion the owning machine honours from one
   of its configured peers (or from anyone, on a machine with no principal table:

@@ -120,12 +120,12 @@ const (
 	//
 	// The runtime's own slash command (/rc, /remote-control) is the same act
 	// typed instead of requested. Since #272 a machine can close that door with
-	// the gateRemoteControlInput setting: `input` then delivers the command only
-	// to a caller holding this grant or GrantHumanRelay (a person's own message).
-	// ⚠️ The setting is off by default for ONE release, so a caller holding only
-	// `send` can still do it on a machine that has not turned it on; the
-	// following release flips the default. Absent means denied, like every other
-	// grant.
+	// the gateRemoteControlInput setting, and since #275 the door is closed by
+	// default: `input` delivers the command only to a caller holding this grant
+	// or GrantHumanRelay (a person's own message).
+	// ⚠️ A machine whose config sets gateRemoteControlInput to false has opted
+	// back out, and there a caller holding only `send` can still do it. Absent
+	// means denied, like every other grant.
 	GrantRemoteControl Grant = "remote-control"
 	GrantRelay         Grant = "relay" // have mutations proxied to peers
 	// GrantHumanRelay marks a principal as a HUMAN relay (muster round-3

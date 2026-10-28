@@ -359,8 +359,10 @@ type Driver struct {
 
 	// gateRemoteControlInput is #272's setting: when true, `input` delivers
 	// /rc and /remote-control only for a caller holding the remote-control or
-	// human-relay grant. Off by default for one release (the behaviour before
-	// #272), then the default flips — see WithRemoteControlInputGate.
+	// human-relay grant. This zero value is off — the behaviour before #272 —
+	// but the service's default is on since #275: the composition root
+	// (cmd/muster) switches the gate on unless the operator opted out. See
+	// WithRemoteControlInputGate.
 	gateRemoteControlInput bool
 
 	mu sync.Mutex
@@ -1115,10 +1117,12 @@ func WithCounterSource(src func() map[string]int64) Option {
 // so the grant means what it says. Off keeps the behaviour from before #272,
 // where anyone holding send could turn remote control on by typing the command.
 //
-// Off is the default for ONE release, so a client still typing the command
-// through `input` has a release to move to POST …/remote-control; the release
-// after flips the default. The driver does not choose: the composition root
-// passes what the operator set.
+// #272 shipped it off for ONE release so a client still typing the command
+// through `input` had time to move to POST …/remote-control; #275 flipped the
+// service's default to on after that notice period, and an operator who must
+// keep the old behaviour sets gateRemoteControlInput to false. The driver does
+// not choose: a Driver built without this option has the gate off, and the
+// composition root (cmd/muster) passes what the operator's setting resolves to.
 func WithRemoteControlInputGate(on bool) Option {
 	return func(d *Driver) { d.gateRemoteControlInput = on }
 }

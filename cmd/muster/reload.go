@@ -321,7 +321,10 @@ func restartOnly(running, next *fileConfig) []string {
 	check("defaultRuntime", running.DefaultRuntime, next.DefaultRuntime)
 	check("sessionEnv", running.SessionEnv, next.SessionEnv)
 	check("maxInputBytes", running.MaxInputBytes, next.MaxInputBytes)
-	check("gateRemoteControlInput", running.GateRemoteControlInput, next.GateRemoteControlInput)
+	// Compare what the setting MEANS, not what the file wrote: an absent key and an
+	// explicit true are the same gate (#275), so adding or dropping the key must
+	// not read as a change that needs a restart.
+	check("gateRemoteControlInput", running.gatesRemoteControlInput(), next.gatesRemoteControlInput())
 	check("closedRetentionDays", running.ClosedRetentionDays, next.ClosedRetentionDays)
 	check("inputAuditRetentionDays", running.InputAuditRetentionDays, next.InputAuditRetentionDays)
 	check("machineList", running.MachineList, next.MachineList)
