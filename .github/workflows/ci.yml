@@ -177,6 +177,10 @@ jobs:
           echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" >> "$GITHUB_ENV"
       - name: install, status, second install, upgrade, uninstall
         run: ./scripts/e2e-service.sh full "$RUNNER_TEMP/muster"
+      # The release host's installer (#383) against the same real service manager: a clean install, an upgrade, a
+      # repeat, and a refused checksum. After the step above, which ends with --purge.
+      - name: install.sh, fresh and over an existing install
+        run: ./scripts/e2e-installer.sh
       - name: The service's log, on failure
         if: failure()
         run: journalctl --user -u muster.service --no-pager -n 100 || true

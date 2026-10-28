@@ -141,6 +141,8 @@ and every release carries npm provenance. Release candidates publish under the
 `next` dist-tag; `latest` only moves to a final release. Windows is built and
 tested by every release but not published to npm yet and has no
 interactive-terminal driver — see [`docs/install.md`](docs/install.md#windows).
+Every final is also published to the company release host, which installs and
+updates a machine's apps: [`docs/install.md`](docs/install.md#from-the-release-host).
 
 Configure it with the `FLEET_*` environment the [Quickstart](#quickstart) shows
 and start it with `muster serve`. A service that survives a reboot is
@@ -227,6 +229,7 @@ Which of these you are building decides where to start in
 | Set up two machines | [`docs/multi-machine.md`](docs/multi-machine.md) — credentials, bind address, peer list, verify; then [`docs/driving-a-machine.md`](docs/driving-a-machine.md) for what a caller can do across the hop |
 | Install it on a new machine | [`docs/install.md`](docs/install.md) — from nothing to a running service, ending with `muster doctor` |
 | Deploy it | [`docs/deploy.md`](docs/deploy.md) — from a merged commit to a service that already runs |
+| Release it | [`docs/release-host.md`](docs/release-host.md) — how a final reaches the release host as well as npm, and the one-time setup |
 | Declare a machine-wide session identity | [`docs/session-identity.md`](docs/session-identity.md) — `sessionEnv`, precedence against a caller, verification |
 | See what this is positioned against | [`docs/positioning.md`](docs/positioning.md) — a survey of comparable projects: category, what turned out rare, trajectory |
 

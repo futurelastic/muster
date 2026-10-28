@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "name": "Muster",
+  "summary": "The service that owns session agents on one machine, and the federation that makes two of them look like one.",
+  "description": "Muster runs as a per-user service on loopback and owns the sessions an agent works in, so a client can create, watch, answer and close them over one small HTTP API. It is a component: other apps list it under `requires`, and the installer sets up the user service and checks that it is healthy.",
+  "listed": false,
+  "install": {
+    "macos": {
+      "steps": [
+        "Make sure tmux is installed (brew install tmux).",
+        "In Terminal, run the installer from the host: curl -fsSL <site>/muster/install.sh | sh",
+        "Check it: muster service status"
+      ],
+      "prompts": [
+        "\"muster: command not found\": add ~/.local/bin to your PATH (the installer says when it is missing)."
+      ]
+    },
+    "linux": {
+      "steps": [
+        "Make sure tmux is installed.",
+        "Run the installer from the host: curl -fsSL <site>/muster/install.sh | sh",
+        "Check it: muster service status"
+      ],
+      "prompts": [
+        "\"muster: command not found\": add ~/.local/bin to your PATH (the installer says when it is missing).",
+        "The service stops when you log out: run loginctl enable-linger once (the installer prints this)."
+      ]
+    }
+  }
+}
