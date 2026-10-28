@@ -491,13 +491,9 @@ func main() {
 		// here fails only under remote invocation, which is precisely how
 		// this service gets deployed.
 		opts := []tmux.Option{tmux.WithState(store)}
-		// #272: opt in to requiring the remote-control (or human-relay) grant
-		// for /rc and /remote-control typed through `input`. Off by default for
-		// one release; see fileConfig.GateRemoteControlInput.
-		if cfgFile != nil && cfgFile.GateRemoteControlInput {
-			opts = append(opts, tmux.WithRemoteControlInputGate(true))
-			log.Printf("muster: input gate on — /rc and /remote-control need the remote-control or human-relay grant (#272)")
-		}
+		// #272/#275: the remote-control (or human-relay) grant for /rc and
+		// /remote-control typed through `input`; see remoteControlInputGateOptions.
+		opts = append(opts, remoteControlInputGateOptions(cfgFile)...)
 		if bin := os.Getenv("FLEET_TMUX_BIN"); bin != "" {
 			opts = append(opts, tmux.WithBinary(bin))
 		}
@@ -1010,6 +1006,24 @@ func getenv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// remoteControlInputGateOptions is the tmux driver option for #272's gate:
+// require the remote-control or human-relay grant for /rc and /remote-control
+// typed through `input`. The gate is ON unless the config file sets
+// gateRemoteControlInput to false (muster #275, the flip #272 promised after
+// one release), and on when there is no config file at all — a nil cfgFile is
+// "no file", which gatesRemoteControlInput reads as the default, not as "off".
+// The driver's own zero value is off, so the gate is switched on here rather
+// than left to it, and the opt-out is logged so an operator reading the log
+// can see which way this machine came up.
+func remoteControlInputGateOptions(cfgFile *fileConfig) []tmux.Option {
+	if !cfgFile.gatesRemoteControlInput() {
+		log.Printf("muster: input gate OFF — gateRemoteControlInput is false in the config file, so a caller holding only send can turn remote control on through input (#272, #275)")
+		return nil
+	}
+	log.Printf("muster: input gate on — /rc and /remote-control need the remote-control or human-relay grant (#272)")
+	return []tmux.Option{tmux.WithRemoteControlInputGate(true)}
 }
 
 // requireToken reports whether the absence of FLEET_TOKEN is fatal, given

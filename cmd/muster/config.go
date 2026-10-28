@@ -144,18 +144,21 @@ type fileConfig struct {
 
 	// GateRemoteControlInput makes `input` deliver the runtime's /rc and
 	// /remote-control commands only to a caller holding the remote-control or
-	// human-relay grant (muster #272). Absent or false keeps the behaviour from
-	// before #272, where a caller holding only send could turn a session's
-	// remote control on by typing the command — the one door the
-	// remote-control grant did not close.
+	// human-relay grant (muster #272). Absent means ON (muster #275): a caller
+	// holding only send cannot turn a session's remote control on by typing the
+	// command — the one door the remote-control grant did not close until #272.
+	// An explicit false is the operator's opt-out and keeps the behaviour from
+	// before #272, where send alone was enough.
 	//
-	// False is the default for ONE release, so a client still typing the
-	// command through `input` has a release to move to POST …/remote-control;
-	// the release notes name this setting, and the release after flips the
-	// default. Config-file-only and per machine, like the settings above: the
-	// gate is applied by the machine that owns the session. Changing it needs a
-	// restart.
-	GateRemoteControlInput bool `json:"gateRemoteControlInput,omitempty"`
+	// #272 shipped this off, so a client still typing the command through
+	// `input` had a release to move to POST …/remote-control; #275 flipped the
+	// default after that notice period. It is a pointer for exactly that reason:
+	// absent and false mean different things now, and a plain bool with
+	// omitempty cannot say which one the file wrote. Read it through
+	// gatesRemoteControlInput, never directly. Config-file-only and per machine,
+	// like the settings above: the gate is applied by the machine that owns the
+	// session. Changing it needs a restart.
+	GateRemoteControlInput *bool `json:"gateRemoteControlInput,omitempty"`
 
 	// ClosedRetentionDays is how long this machine keeps its record of each
 	// session that ended (muster #179, GET /v1/sessions/closed). Absent
@@ -260,6 +263,15 @@ func (c *fileConfig) principals() ([]service.Principal, error) {
 		out = append(out, pr)
 	}
 	return out, nil
+}
+
+// gatesRemoteControlInput is whether `input` requires the remote-control or
+// human-relay grant for /rc and /remote-control (muster #272, default flipped
+// by #275). It is on unless the file sets gateRemoteControlInput to false —
+// and a machine with no config file at all is on too, which is why a nil
+// receiver answers true rather than panicking: main passes nil for "no file".
+func (c *fileConfig) gatesRemoteControlInput() bool {
+	return c == nil || c.GateRemoteControlInput == nil || *c.GateRemoteControlInput
 }
 
 // sessionEnv converts the wire shape into internal/sessionenv's own type,

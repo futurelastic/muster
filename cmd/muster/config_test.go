@@ -123,13 +123,15 @@ func TestLoadConfigWithoutMaxInputBytesLeavesItZero(t *testing.T) {
 	}
 }
 
-// muster #272: gateRemoteControlInput is a plain optional boolean; absent
-// means the behaviour from before #272 (the gate is off for one release).
+// muster #272/#275: gateRemoteControlInput is an optional boolean whose ABSENCE
+// means on — #272 shipped it off for one release and #275 flipped the default.
+// Only an explicit false is the opt-out, so the file's three states must stay
+// apart: a plain bool with omitempty would read "absent" and "false" as one.
 func TestLoadConfigReadsGateRemoteControlInput(t *testing.T) {
 	for body, want := range map[string]bool{
 		`{"principals": [{"name": "op", "token": "tok"}], "gateRemoteControlInput": true}`:  true,
 		`{"principals": [{"name": "op", "token": "tok"}], "gateRemoteControlInput": false}`: false,
-		`{"principals": [{"name": "op", "token": "tok"}]}`:                                  false,
+		`{"principals": [{"name": "op", "token": "tok"}]}`:                                  true,
 	} {
 		path := filepath.Join(t.TempDir(), "config.json")
 		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
@@ -139,8 +141,39 @@ func TestLoadConfigReadsGateRemoteControlInput(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if cfg.GateRemoteControlInput != want {
-			t.Errorf("%s: GateRemoteControlInput = %v, want %v", body, cfg.GateRemoteControlInput, want)
+		if got := cfg.gatesRemoteControlInput(); got != want {
+			t.Errorf("%s: gatesRemoteControlInput = %v, want %v", body, got, want)
+		}
+	}
+}
+
+// #275: a machine with no config file at all is the same default — on. main
+// passes a nil *fileConfig for "no file", and the old `cfgFile != nil && ...`
+// check read that as off.
+func TestNoConfigFileGatesRemoteControlInput(t *testing.T) {
+	var none *fileConfig
+	if !none.gatesRemoteControlInput() {
+		t.Error("a nil config (no config file) must gate /rc and /remote-control: the default is on (#275)")
+	}
+}
+
+// #275: the option main hands the tmux driver follows the same three states,
+// and a missing file is on. An off gate hands the driver nothing — its own zero
+// value is off.
+func TestRemoteControlInputGateOptions(t *testing.T) {
+	off, on := false, true
+	for _, tc := range []struct {
+		name string
+		cfg  *fileConfig
+		want int // options handed to the driver
+	}{
+		{"no config file", nil, 1},
+		{"key absent", &fileConfig{}, 1},
+		{"explicit true", &fileConfig{GateRemoteControlInput: &on}, 1},
+		{"explicit false opts out", &fileConfig{GateRemoteControlInput: &off}, 0},
+	} {
+		if got := len(remoteControlInputGateOptions(tc.cfg)); got != tc.want {
+			t.Errorf("%s: %d options, want %d", tc.name, got, tc.want)
 		}
 	}
 }

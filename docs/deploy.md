@@ -180,6 +180,28 @@ apply to a **named** inbox send.
   which sessions, and the `reason` is the module's own decline text. The message
   text and the sender are never in it.
 
+**Rolling out the remote-control input gate (muster #272, #275) — the release
+notes for the release that carries #275 state this flip.** `input` no longer
+delivers the runtime's `/rc` and `/remote-control` to a caller holding only
+`send`: it needs `remote-control` or `human-relay`, and the refusal names both.
+#272 shipped the gate behind `gateRemoteControlInput`, **off**, for one release;
+that setting now defaults to **on**. A config file without the key, and a machine
+with no config file, are on.
+
+- **Before this reaches a machine:** find the callers that toggle a session's
+  remote control by typing `/rc` or `/remote-control` through `input`, and move
+  them to `POST …/remote-control` with a principal that holds the
+  `remote-control` grant. A client shared by people and automation must not be
+  given `human-relay` for this.
+- **To keep the old behaviour on one machine,** set
+  `"gateRemoteControlInput": false` in its config file and restart (the setting
+  is read at start; a reload refuses the edit and names it). The start logs
+  `input gate OFF` for a machine that came up that way and `input gate on`
+  otherwise. Opting out makes the `remote-control` grant advisory there again.
+- **A machine with no principal table** (one shared token) is unaffected in
+  practice: the shared token counts as holding the grant, so the gate has
+  nothing to refuse.
+
 **Turning the inbox route on (muster #184) — what has to be true first, in
 this order.** Since #184 a send with no `route` is `auto`: anyone who does not
 hold the `human-relay` grant goes through the inbox whenever the session can take
