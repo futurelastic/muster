@@ -182,6 +182,13 @@ const (
 	defaultDeadlineMs = 30000
 	readyTimeout      = 10 * time.Second
 	readyPollInterval = 100 * time.Millisecond
+
+	// How long a create waits for the runtime's model list to settle before it
+	// refuses a model the first answer did not list, and how often it asks again
+	// meanwhile (muster #384; catalog.go says why). With readyTimeout this stays
+	// well inside defaultDeadlineMs, so waiting here cannot be what ends a create.
+	defaultCatalogSettle = 8 * time.Second
+	defaultCatalogPoll   = 500 * time.Millisecond
 )
 
 // DefaultDeadlineMs is the deadline a driver built without WithDeadline
@@ -206,6 +213,12 @@ type Driver struct {
 	now          func() time.Time
 	username     string
 	client       *http.Client
+
+	// catalogSettle and catalogPoll bound the re-read of the runtime's model list
+	// before a model is refused as unlisted (muster #384). Fields, not constants,
+	// so a test does not spend seconds on every refusal.
+	catalogSettle time.Duration
+	catalogPoll   time.Duration
 
 	// sessionEnv is this machine's declared identity for its sessions (#94);
 	// sessionRoot is where session-scoped directories are made (the OS temp
@@ -460,6 +473,7 @@ func New(ctx context.Context, machine fleet.MachineId, opts ...Option) (*Driver,
 		idem:         make(map[string]idemEntry),
 		inflight:     make(map[string]chan struct{}),
 	}
+	d.catalogSettle, d.catalogPoll = defaultCatalogSettle, defaultCatalogPoll
 	for _, o := range opts {
 		o(d)
 	}

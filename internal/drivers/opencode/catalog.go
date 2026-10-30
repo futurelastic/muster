@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	fleet "github.com/futurelastic/muster"
 )
@@ -34,6 +35,18 @@ func (c modelCatalog) has(id string) bool {
 		}
 	}
 	return false
+}
+
+// union returns the entries of both, each once, sorted.
+func (c modelCatalog) union(other modelCatalog) modelCatalog {
+	out := append(modelCatalog(nil), c...)
+	for _, id := range other {
+		if !out.has(id) {
+			out = append(out, id)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // closest returns up to n catalog ids nearest to want, nearest first, and none
@@ -173,6 +186,16 @@ func (c modelCatalog) within(p providerPolicy) modelCatalog {
 //
 // model may be empty: the session then runs on whatever the runtime picks from
 // what is usable, which is exactly why "nothing usable" has to be a refusal.
+//
+// A model the first answer does not list is not refused on that answer alone
+// (muster #384). A freshly started server answers with the model list built
+// into the binary until it has downloaded a newer one, and the two lists can
+// disagree about a provider so that no id is in both; a refusal on the first
+// answer would then refuse whatever an operator configured, some of the time.
+// So the list is read again, for up to catalogSettle, and the model is accepted
+// if any answer lists it. Only an id that no answer in the window listed is
+// refused, with the nearest ids from every answer it saw — each of which this
+// check would accept.
 func (d *Driver) checkProviders(ctx context.Context, srv *server, model string) error {
 	cat, read, err := d.readCatalog(ctx, srv)
 	if err != nil {
@@ -191,11 +214,59 @@ func (d *Driver) checkProviders(ctx context.Context, srv *server, model string) 
 	if model == "" || usable.has(model) {
 		return nil
 	}
+	seen, err := d.settleModel(ctx, srv, model, usable)
+	if err != nil {
+		return err
+	}
+	if seen.has(model) {
+		return nil
+	}
 	msg := fmt.Sprintf("create: model %q is not in the runtime's own catalog", model)
-	if near := usable.closest(model, 3); len(near) > 0 {
+	if near := seen.closest(model, 3); len(near) > 0 {
 		msg += "; closest: " + strings.Join(quoteAll(near), ", ")
 	}
 	return &fleet.Error{Kind: fleet.ErrorInvalid, Message: msg, Machine: d.machine}
+}
+
+// settleModel asks the runtime for its catalog again, every catalogPoll for up
+// to catalogSettle, until an answer lists model. first is what the answer that
+// did not list it contained (already within the provider policy). It returns
+// every id any answer listed, so the caller can both accept a model one of them
+// listed and suggest from all of them.
+//
+// An answer that is not a listing (the endpoint failed, or listed nothing) adds
+// nothing and is waited out like any other; the one error it returns is a server
+// that stopped answering, which the create would fail on anyway, or the
+// caller's own context ending, which must not read as a model refusal.
+func (d *Driver) settleModel(ctx context.Context, srv *server, model string, first modelCatalog) (modelCatalog, error) {
+	seen := first
+	window := time.NewTimer(d.catalogSettle)
+	defer window.Stop()
+	tick := time.NewTicker(d.catalogPoll)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-window.C:
+			return seen, nil
+		case <-tick.C:
+		}
+		cat, read, err := d.readCatalog(ctx, srv)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, err
+		}
+		if read != catalogListed {
+			continue
+		}
+		seen = seen.union(cat.within(d.providers))
+		if seen.has(model) {
+			return seen, nil
+		}
+	}
 }
 
 // noUsableProvider is the refusal for a runtime that offers nothing the policy

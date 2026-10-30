@@ -2033,7 +2033,11 @@ different ids on different runtimes, so a wrong spelling is otherwise accepted a
 reads as healthy until it is given work. `true` means the driver reads the runtime's own list of
 usable models on every create, never a list compiled into this service (catalogs change with
 runtime releases and with the credentials a session was given), and refuses an id that is not on it
-as `invalid`, naming the id and, when something on the list is a near spelling, the closest ids. The
+as `invalid`, naming the id and, when something on the list is a near spelling, the closest ids. A
+freshly started runtime may answer with the list built into its binary until it has fetched a newer
+one, and the two can disagree, so an id the first answer does not list is looked for again for a
+bounded time (eight seconds by default) and accepted if any answer lists it; only an id no answer
+listed is refused, after that wait and not at once (muster #384). The
 refusal comes before any session exists: nothing is left behind and the process started for it is
 stopped. `false` means a wrong id is accepted and fails later, as before. Two limits: a runtime
 that returns no usable list (an older release without the endpoint, an error, or an empty list)
