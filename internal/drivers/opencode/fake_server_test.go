@@ -44,6 +44,11 @@ type fakeServer struct {
 	// catalogStatus, when set, makes the endpoint answer that status instead.
 	catalog       map[string][]string
 	catalogStatus int
+	// catalogSeq, when non-empty, is what GET /config/providers serves instead of
+	// catalog: one entry per read, the last repeated for every read after — a
+	// runtime that answers with the list built into its binary and later with
+	// the one it downloaded (muster #384).
+	catalogSeq []map[string][]string
 
 	// permissions are the asks GET /permission lists (muster #283);
 	// permissionStatus, when set, makes the endpoint answer that status instead
@@ -596,7 +601,13 @@ func newDriverWithOptions(t *testing.T, f *fakeServer, extra ...Option) (*Driver
 		WithCredential(f.username, f.password),
 		WithHTTPClient(f.srv.Client()),
 	}, extra...)
-	return New(context.Background(), "test-machine", opts...)
+	d, err := New(context.Background(), "test-machine", opts...)
+	if d != nil {
+		// A model refusal waits out the runtime's settle window (muster #384); a
+		// test that expects one should not spend seconds on it.
+		d.catalogSettle, d.catalogPoll = 100*time.Millisecond, 5*time.Millisecond
+	}
+	return d, err
 }
 
 // handleEvent serves GET /event as the runtime does: a text/event-stream whose
@@ -683,6 +694,12 @@ func (f *fakeServer) busConns() int {
 func (f *fakeServer) handleProviders(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	catalog, status := f.catalog, f.catalogStatus
+	if len(f.catalogSeq) > 0 {
+		catalog = f.catalogSeq[0]
+		if len(f.catalogSeq) > 1 {
+			f.catalogSeq = f.catalogSeq[1:]
+		}
+	}
 	f.mu.Unlock()
 	if status != 0 {
 		w.WriteHeader(status)

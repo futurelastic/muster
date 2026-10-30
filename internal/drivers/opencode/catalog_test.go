@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	fleet "github.com/futurelastic/muster"
 )
@@ -247,5 +248,130 @@ func TestCatalogIsReadPerCreate(t *testing.T) {
 	f.mu.Unlock()
 	if _, err := createWithModel(t, d, "p/b"); err != nil {
 		t.Fatalf("p/b refused after the runtime lists it: %v (a compiled-in or cached list)", err)
+	}
+}
+
+// muster #384: a freshly started server answers with the model list built into
+// the binary until it has downloaded a newer one, and for one provider the two
+// lists share no id. The answers below are the two lists measured on a real
+// runtime, asked about the same provider.
+var (
+	builtInModels  = map[string][]string{"deepseek": {"deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner"}}
+	refreshedModel = map[string][]string{"deepseek": {"deepseek-flash", "deepseek-v4-pro"}}
+)
+
+func providerReads(f *fakeServer) int {
+	n := 0
+	for _, r := range f.requestsSnapshot() {
+		if r.method == "GET" && r.path == "/config/providers" {
+			n++
+		}
+	}
+	return n
+}
+
+func TestCreate_ModelOnlyInTheRefreshedListIsNotRefusedForAnsweringBeforeTheRefresh(t *testing.T) {
+	f := newFakeServer(t)
+	f.catalogSeq = []map[string][]string{builtInModels, refreshedModel}
+	d := newTestDriver(t, f)
+
+	if _, err := createWithModel(t, d, "deepseek/deepseek-flash"); err != nil {
+		t.Fatalf("a model in the refreshed list was refused because the first answer was the built-in one: %v", err)
+	}
+	if got := providerReads(f); got != 2 {
+		t.Errorf("catalog reads = %d, want 2 (the first answer did not list it, the second did)", got)
+	}
+}
+
+func TestCreate_RefreshArrivingAfterSeveralAnswersStillCreates(t *testing.T) {
+	f := newFakeServer(t)
+	f.catalogSeq = []map[string][]string{builtInModels, builtInModels, builtInModels, refreshedModel}
+	d := newTestDriver(t, f)
+
+	if _, err := createWithModel(t, d, "deepseek/deepseek-v4-pro"); err != nil {
+		t.Fatalf("a model listed by the fourth answer was refused: %v", err)
+	}
+}
+
+// Either list is valid: a model the first answer lists is accepted on it, with
+// no wait and no second read.
+func TestCreate_ModelInTheBuiltInListCreatesOnTheFirstAnswer(t *testing.T) {
+	f := newFakeServer(t)
+	f.catalogSeq = []map[string][]string{builtInModels, refreshedModel}
+	d := newTestDriver(t, f)
+
+	if _, err := createWithModel(t, d, "deepseek/deepseek-v4-flash"); err != nil {
+		t.Fatalf("a model in the built-in list was refused: %v", err)
+	}
+	if got := providerReads(f); got != 1 {
+		t.Errorf("catalog reads = %d, want 1 (a listed model must not wait for a second answer)", got)
+	}
+}
+
+// #287's refusal stays for an id that no answer lists, and it suggests from
+// every answer it saw: each suggestion is one the check would accept.
+func TestCreate_ModelInNeitherListIsStillRefused_SuggestingFromBothAnswers(t *testing.T) {
+	f := newFakeServer(t)
+	f.catalogSeq = []map[string][]string{builtInModels, refreshedModel}
+	d := newTestDriver(t, f)
+
+	_, err := createWithModel(t, d, "deepseek/deepseek-flsh")
+	var fe *fleet.Error
+	if !errors.As(err, &fe) || fe.Kind != fleet.ErrorInvalid {
+		t.Fatalf("err = %v, want an invalid fleet error", err)
+	}
+	for _, want := range []string{`"deepseek/deepseek-flash"`, `"deepseek/deepseek-v4-flash"`} {
+		if !strings.Contains(fe.Message, want) {
+			t.Errorf("message %q does not offer %s", fe.Message, want)
+		}
+	}
+	if len(f.sessions) != 0 {
+		t.Errorf("sessions = %d, want none left behind", len(f.sessions))
+	}
+	if got := providerReads(f); got < 2 {
+		t.Errorf("catalog reads = %d, want the list re-read before refusing", got)
+	}
+}
+
+// Waiting for the list is bounded: a catalog that never gains the model ends in
+// the refusal, after the window and not before.
+func TestCreate_UnlistedModelIsRefusedOnceTheWindowEnds(t *testing.T) {
+	f := newFakeServer(t)
+	f.catalog = map[string][]string{"p": {"a"}}
+	d := newTestDriver(t, f)
+	d.catalogSettle, d.catalogPoll = 60*time.Millisecond, 10*time.Millisecond
+
+	start := time.Now()
+	_, err := createWithModel(t, d, "p/b")
+	var fe *fleet.Error
+	if !errors.As(err, &fe) || fe.Kind != fleet.ErrorInvalid {
+		t.Fatalf("err = %v, want an invalid fleet error", err)
+	}
+	if elapsed := time.Since(start); elapsed < 60*time.Millisecond {
+		t.Errorf("refused after %v, before the %v window ended", elapsed, d.catalogSettle)
+	}
+	if got := providerReads(f); got < 3 {
+		t.Errorf("catalog reads = %d, want the window polled more than once", got)
+	}
+}
+
+// The caller's deadline ending during the wait is a deadline, not a verdict on
+// the model.
+func TestCreate_DeadlineEndingDuringTheWaitIsNotAModelRefusal(t *testing.T) {
+	f := newFakeServer(t)
+	f.catalog = map[string][]string{"p": {"a"}}
+	d := newTestDriver(t, f)
+	d.catalogSettle, d.catalogPoll = 10*time.Second, 5*time.Millisecond
+
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+	_, err := d.Create(ctx, fleet.RequestFrom(fleet.Caller{}), "key-deadline",
+		fleet.SessionSpec{Cwd: "/work/x", Model: "p/b"})
+	var fe *fleet.Error
+	if errors.As(err, &fe) && fe.Kind == fleet.ErrorInvalid {
+		t.Fatalf("err = %v: the caller's deadline was reported as a refused model", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want the context deadline", err)
 	}
 }
