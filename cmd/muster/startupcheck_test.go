@@ -267,3 +267,75 @@ func TestStartupChecks_AFileThatStartsStillPassesBothSurfaces(t *testing.T) {
 		t.Errorf("config.load = %+v, want pass", row)
 	}
 }
+
+// #365: the same variable name may be declared once per runtime when the
+// entries' runtime lists share no id. The service's start (validateConfigExtras)
+// and `muster doctor`'s config.load row give the same verdict on every shape,
+// because they are the same check — and a refusal keeps today's message.
+func TestSessionEnvSameNameStartAndDoctorAgree(t *testing.T) {
+	if hostOS() == "windows" {
+		t.Skip("the runtime set differs on Windows (ADR 303); the cases below name tmux")
+	}
+	tmuxID, ocID := string(tmux.DefaultRuntime), string(opencode.DefaultRuntime)
+	entry := func(file string, runtimes ...string) map[string]any {
+		e := map[string]any{"name": "GH_TOKEN", "fromFile": file, "required": true}
+		if len(runtimes) > 0 {
+			e["appliesTo"] = map[string]any{"runtimes": runtimes}
+		}
+		return e
+	}
+	agentOnly := func(file, agent string) map[string]any {
+		e := entry(file)
+		e["appliesTo"] = map[string]any{"agents": []string{agent}}
+		return e
+	}
+	const dup = `"GH_TOKEN" is declared more than once`
+
+	cases := []struct {
+		name    string
+		entries []any
+		want    string // "" = the file starts
+	}{
+		{"disjoint runtimes", []any{entry("/etc/broad", tmuxID), entry("/etc/narrow", ocID)}, ""},
+		{"disjoint runtimes, other order", []any{entry("/etc/narrow", ocID), entry("/etc/broad", tmuxID)}, ""},
+		{"overlapping runtimes", []any{entry("/etc/a", tmuxID, ocID), entry("/etc/b", ocID)}, dup},
+		{"one unscoped", []any{entry("/etc/a"), entry("/etc/b", ocID)}, dup},
+		{"both unscoped", []any{entry("/etc/a"), entry("/etc/b")}, dup},
+		{"agents alone", []any{agentOnly("/etc/a", "sid"), agentOnly("/etc/b", "may")}, dup},
+		{"disjoint but one id is a typo", []any{entry("/etc/a", tmuxID), entry("/etc/b", "opencod")}, `"opencod"`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "fleet.json")
+			putCfg(t, path, startupDoc(map[string]any{"sessionEnv": c.entries}))
+			cfg, err := loadConfig(path)
+			if err != nil {
+				t.Fatalf("the test's own config does not load: %v", err)
+			}
+
+			startErr := validateConfigExtras(cfg, envOf(map[string]string{"FLEET_RUNTIME": "tmux"}))
+			rows := runChecks(context.Background(), testDoctorEnv(map[string]string{"FLEET_CONFIG": path, "FLEET_RUNTIME": "tmux"}))
+			row := rowByID(t, rows, "config.load")
+
+			if c.want == "" {
+				if startErr != nil {
+					t.Fatalf("a file that starts was refused: %v", startErr)
+				}
+				if row.Status != statusPass {
+					t.Fatalf("config.load = %+v, want pass", row)
+				}
+				return
+			}
+			if startErr == nil || !strings.Contains(startErr.Error(), c.want) {
+				t.Fatalf("start = %v, want a refusal saying %q", startErr, c.want)
+			}
+			if row.Status != statusFail || !strings.Contains(row.Detail, c.want) {
+				t.Fatalf("config.load = %+v, want a fail saying %q", row, c.want)
+			}
+			if strings.Contains(row.Detail+row.Summary, "/etc/") {
+				t.Fatalf("config.load leaks a fromFile path: %+v", row)
+			}
+		})
+	}
+}

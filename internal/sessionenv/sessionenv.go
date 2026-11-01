@@ -158,8 +158,16 @@ type Entry struct {
 // has an optional runtime switched off. An entry naming an id outside the set
 // is a typo. A nil set skips that check, for a caller that only wants the
 // shape.
+//
+// A name may be declared more than once only across entries whose runtime
+// scopes are disjoint (muster issue #365; see runtimesDisjoint). That is what
+// lets Provision stay a plain loop: after Validate, at most one entry of a
+// given name is in scope for any session, so no precedence between entries of
+// one name exists to be decided.
 func Validate(entries []Entry, knownRuntimes []fleet.RuntimeId) error {
-	seen := make(map[string]bool, len(entries))
+	// seen holds, per name, the runtime scope of every entry already accepted
+	// under it — what a later entry with the same name is compared against.
+	seen := make(map[string][][]string, len(entries))
 	for _, e := range entries {
 		if !ValidName(e.Name) {
 			return fmt.Errorf("sessionEnv: %q is not a usable variable name "+
@@ -182,11 +190,14 @@ func Validate(entries []Entry, knownRuntimes []fleet.RuntimeId) error {
 		// Two entries for the same name would leave "which one wins"
 		// unanswered — refused here rather than resolved by iteration order,
 		// which would make the answer depend on how the config file happened
-		// to list them.
-		if seen[e.Name] {
-			return fmt.Errorf("sessionEnv: %q is declared more than once", e.Name)
+		// to list them. The one exception is a pair that provably cannot both
+		// reach a session; see runtimesDisjoint.
+		for _, prev := range seen[e.Name] {
+			if !runtimesDisjoint(prev, e.AppliesTo.Runtimes) {
+				return fmt.Errorf("sessionEnv: %q is declared more than once", e.Name)
+			}
 		}
-		seen[e.Name] = true
+		seen[e.Name] = append(seen[e.Name], e.AppliesTo.Runtimes)
 		for _, r := range e.AppliesTo.Runtimes {
 			// An empty id would never match anything, so the entry would be
 			// silently inert — the same fault a typo is, caught the same way.
@@ -200,6 +211,34 @@ func Validate(entries []Entry, knownRuntimes []fleet.RuntimeId) error {
 		}
 	}
 	return nil
+}
+
+// runtimesDisjoint reports whether two entries carrying the same variable name
+// can be allowed side by side (muster issue #365): both must name
+// appliesTo.runtimes, and the two lists must share no runtime id.
+//
+// That is the only case where it is decidable from the configuration alone that
+// no session can match both. Scope.Matches gates every entry on the runtime
+// serving the create, and a session is created on exactly one runtime, so two
+// entries whose runtime lists share no id are never both in scope — "which one
+// wins" has no second candidate, and no order of the file can matter.
+//
+// Anything weaker is refused. An entry with no runtime list reaches every
+// runtime, so it overlaps every other. Separating the entries by agents or
+// markers alone proves nothing: an agent or a marker can be carried by a
+// session on either runtime, so one session could match both.
+func runtimesDisjoint(a, b []string) bool {
+	if len(a) == 0 || len(b) == 0 {
+		return false
+	}
+	for _, x := range a {
+		for _, y := range b {
+			if x == y {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func containsRuntime(known []fleet.RuntimeId, id string) bool {

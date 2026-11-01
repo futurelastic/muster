@@ -725,7 +725,10 @@ runtime ids (the `runtime` values of `GET /v1/runtimes`); the entry is provision
 created on one of them. It combines with the other selectors as `runtimes` AND (`agents` OR
 `markers`), and an empty selector means "any". **An entry with no `appliesTo.runtimes` reaches
 every runtime the machine registers, including one registered later** — scope a credential that
-belongs to one runtime. An id the service does not know is a startup error. Reference:
+belongs to one runtime. An id the service does not know is a startup error. The same variable name
+may be declared more than once only when every entry names `appliesTo.runtimes` and no two lists
+share a runtime (#365), so each runtime's sessions get that runtime's own value under the name its
+tools read; any other duplicate is a startup error. Reference:
 [`session-identity.md`](session-identity.md).
 
 **`conversationId`** (#224) is a caller-chosen UUID that asks the runtime to

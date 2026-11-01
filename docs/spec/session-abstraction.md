@@ -2060,7 +2060,10 @@ service's. A create that carries `isolateEnvironment: true` against a `false` dr
   configuration and keeps no database shared across sessions;
 - `OPENCODE_DISABLE_CLAUDE_CODE=1`, because by default opencode loads the user's Claude Code
   instructions and skills;
-- this machine's `sessionEnv` entries that apply, then the create's `env`;
+- this machine's `sessionEnv` entries that apply, then the create's `env` (a variable name may be
+  declared by more than one entry only when each names `appliesTo.runtimes` and no two lists share a
+  runtime id, so at most one entry per name can apply to a session — #365; any other duplicate is
+  refused at startup);
 - the session's own server credential, which reaches only that session's process.
 
 On Windows the same environment is built with these differences, and the contract does not change:

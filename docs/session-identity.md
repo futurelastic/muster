@@ -53,9 +53,10 @@ Nothing here is optional to *validate*: every entry is checked once, at daemon
 start, against the same rule set a Go test exercises directly
 (`ValidateSessionEnv` in `internal/drivers/tmux`) — an entry with neither or
 both of `fromFile` / `fromSession`, a relative path, a `fromSession` other than
-`ref` / `id`, a bad variable name, or the same `name` declared twice all fail
-startup with a message naming the entry, rather than becoming a create-time
-refusal every later caller meets.
+`ref` / `id`, a bad variable name, or the same `name` declared twice (unless the
+two entries are scoped to disjoint runtimes — see "One variable name, a
+different source per runtime") all fail startup with a message naming the
+entry, rather than becoming a create-time refusal every later caller meets.
 
 ### Why this is config-file-only, with no `FLEET_` environment variable
 
@@ -228,6 +229,45 @@ this build can register — a misspelled id is a startup message, not an entry
 that silently never applies. The check is against what the build *knows*, not
 what is running, so one configuration file can be shared by machines that do
 not all enable the optional runtime.
+
+### One variable name, a different source per runtime
+
+Two entries may carry the same `name` when it is provable from the file alone
+that no session can match both. The rule is exactly this: **both entries name
+`appliesTo.runtimes`, and the two lists share no runtime id.** It exists for a
+credential that belongs to one runtime and must not reach another, while the
+tools in every runtime read the same fixed variable name — a broad forge token
+under `GH_TOKEN` for one runtime's sessions, a narrow single-repo token under
+the same `GH_TOKEN` for another runtime whose model provider is a third party:
+
+```json
+[
+  {"name": "GH_TOKEN", "fromFile": "/absolute/path/broad", "required": true,
+   "appliesTo": {"runtimes": ["claude-code-tmux"]}},
+  {"name": "GH_TOKEN", "fromFile": "/absolute/path/narrow", "required": true,
+   "appliesTo": {"runtimes": ["opencode"]}}
+]
+```
+
+Each runtime's sessions then receive the entry scoped to their own runtime and
+nothing else: the other entry is out of scope, so it is not provisioned, not
+required, not compared against, and **its file is not read** — a missing file
+behind one runtime's entry refuses only that runtime's creates. The runtime
+matched is the one serving the create, as above, never the caller's hint.
+
+Everything else stays refused at startup (and by `muster doctor`'s `config.load`
+row) with the message it always had, `"<name>" is declared more than once`, so
+"which one wins" never depends on the order of the file:
+
+| Two entries with the same `name`, where… | Result |
+|---|---|
+| both name `runtimes` and the lists share no id | accepted |
+| the lists share any id | refused |
+| either entry has no `runtimes` (it reaches every runtime, so it overlaps the other) | refused |
+| they differ only by `agents` or `markers` | refused — an agent or marker can run on either runtime, so one session could match both |
+
+Narrowing by `agents` or `markers` on top of disjoint `runtimes` is allowed; it
+only narrows an entry further.
 
 ## Exporting the session's own identity
 
