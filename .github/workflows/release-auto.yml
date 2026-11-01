@@ -23,7 +23,7 @@ name: Release (auto)
 # one: npx is the one install surface (see release-npm.yml).
 #
 # TRUSTED PUBLISHING. npm matches the workflow that STARTS the run, and each of
-# the five packages holds one trusted publisher: `release-auto.yml`, permanently.
+# the seven packages holds one trusted publisher: `release-auto.yml`, permanently.
 # That is why every route to npm goes through THIS file — a tag this run cut, a
 # tag named by `publish-tag`, or the unpublished final the schedule finds — and
 # never through a `release-npm.yml` dispatch, which can only dry-run (#263).

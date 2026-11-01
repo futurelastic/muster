@@ -604,7 +604,7 @@ attention before you restart.
 ## Publishing to npm
 
 Every publish goes through `release-auto.yml`, and only that. npm trusted
-publishing matches the workflow that **starts** a run, each of the five packages
+publishing matches the workflow that **starts** a run, each of the seven packages
 holds exactly one trusted publisher, and it is `release-auto.yml` — permanently.
 Nobody repoints it to publish something by hand.
 

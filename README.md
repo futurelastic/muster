@@ -138,9 +138,10 @@ muster --version                      # muster <version> (...)
 `@futurelastic/muster` is a small launcher: npm installs exactly one platform
 package beside it and runs that binary. Nothing is downloaded at install time,
 and every release carries npm provenance. Release candidates publish under the
-`next` dist-tag; `latest` only moves to a final release. Windows is built and
-tested by every release but not published to npm yet and has no
-interactive-terminal driver — see [`docs/install.md`](docs/install.md#windows).
+`next` dist-tag; `latest` only moves to a final release. Windows (x64 and arm64)
+installs the same way, and every release is run on Windows before and after it
+is published; it has no interactive-terminal driver — see
+[`docs/install.md`](docs/install.md#windows).
 Every final is also published to the company release host, which installs and
 updates a machine's apps: [`docs/install.md`](docs/install.md#from-the-release-host).
 
@@ -268,7 +269,8 @@ implemented it:
   precondition that could not be discharged from inside this repository, is
   [`docs/adoption.md`](docs/adoption.md).
 - ✅ **A release path** — one npm install surface, release candidates and
-  finals, and a Windows build that is tested on every release.
+  finals, and Windows packages that are run on Windows before they are published
+  and installed from the registry on Windows after.
 
 Next:
 
@@ -278,8 +280,8 @@ Next:
   re-adding it.
 - ⬜ **Metrics.** Subprocess spawn cost is known to degrade with host load —
   8× on a machine under heavy load — and nothing measures it in production.
-- ⬜ **Windows publication and an interactive-terminal driver there.** Built and
-  tested today; not yet on npm, and the multiplexer driver is not available.
+- ⬜ **An interactive-terminal driver on Windows.** Windows installs from npm and
+  runs the subprocess runtime; the multiplexer driver is not available there.
 
 The honest list of what is missing is in
 [`docs/internals.md`](docs/internals.md), kept current on purpose.

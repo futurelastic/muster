@@ -33,7 +33,7 @@ release:
   # (2026-10-02, #250) public-tool: every green trunk head gets a candidate (rc -> npm `next`).
   # (2026-10-15, #325) The final is a human act: `final: human` with `test-period: 0d` (0d is valid
   # only with `final: human`), so the maintainer finalizes a candidate when ready (-> npm `latest`).
-  # The npm publish is NOT the template's single-package `npm:` job: muster ships five packages,
+  # The npm publish is NOT the template's single-package `npm:` job: muster ships seven packages (a launcher and one per platform, Windows included),
   # so .github/workflows/release-auto.yml calls release-npm.yml with the tag instead.
   route: public-tool
   candidates: auto

@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -605,5 +606,84 @@ func TestBuildReleaseStillFailsWhenARequiredTargetCannotBuild(t *testing.T) {
 	}
 	if !strings.Contains(out, "linux/arm64 is a required target and did not build") {
 		t.Errorf("the failure must name the target:\n%s", out)
+	}
+}
+
+// ---- the Windows packages are published and proved on Windows (#309) --------
+//
+// The workflows are read as text: the module takes no YAML dependency, and what
+// is pinned here is a handful of facts about how the jobs are wired, each one a
+// way the Windows check could quietly stop being a check.
+
+// jobBlock returns one job's text from a workflow: its `  name:` line up to the
+// next job's. Job names sit at two spaces of indent, a job's own keys at four.
+func jobBlock(t *testing.T, wf, name string) string {
+	t.Helper()
+	loc := regexp.MustCompile(`(?m)^  ` + regexp.QuoteMeta(name) + `:[ \t]*$`).FindStringIndex(wf)
+	if loc == nil {
+		t.Fatalf("release-npm.yml has no job %q", name)
+	}
+	rest := wf[loc[1]:]
+	if next := regexp.MustCompile(`(?m)^  [A-Za-z0-9_-]+:[ \t]*$`).FindStringIndex(rest); next != nil {
+		rest = rest[:next[0]]
+	}
+	return rest
+}
+
+func releaseNpmWorkflow(t *testing.T) string {
+	t.Helper()
+	b, err := os.ReadFile(".github/workflows/release-npm.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// The publish needs the Windows run, the run is on both architectures' own
+// hardware, and it cannot be skipped: a job skipped by its own `if:` skips every
+// job that needs it, and a publish that silently does not happen reads as green.
+func TestReleaseNpmPublishRequiresTheWindowsRun(t *testing.T) {
+	wf := releaseNpmWorkflow(t)
+	verify := jobBlock(t, wf, "verify-windows")
+	for _, want := range []string{"windows-latest", "windows-11-arm", "--version", "muster-$env:TAG-windows-$env:ARCH.exe", "steps.has.outputs.present"} {
+		if !strings.Contains(verify, want) {
+			t.Errorf("verify-windows must carry %q", want)
+		}
+	}
+	if !regexp.MustCompile(`(?m)^    needs:.*\bbinaries\b`).MatchString(verify) {
+		t.Error("verify-windows must need the build that produced the binaries")
+	}
+	if regexp.MustCompile(`(?m)^    if:`).MatchString(verify) {
+		t.Error("verify-windows must not be skipped by a job-level if: a skipped dependency skips the publish; skip its steps instead")
+	}
+	npm := jobBlock(t, wf, "npm")
+	if !regexp.MustCompile(`(?m)^    needs:.*\bverify-windows\b`).MatchString(npm) {
+		t.Error("the publish job must need verify-windows")
+	}
+}
+
+// The post-publish check installs what was published, from the registry, the way
+// a user does, and never on a dry run (nothing is on the registry then).
+func TestReleaseNpmInstallsThePublishedPackageOnWindows(t *testing.T) {
+	wf := releaseNpmWorkflow(t)
+	install := jobBlock(t, wf, "install-windows")
+	for _, want := range []string{"windows-latest", "windows-11-arm", "npm install -g", "@futurelastic/muster@", "muster --version", "process.arch"} {
+		if !strings.Contains(install, want) {
+			t.Errorf("install-windows must carry %q", want)
+		}
+	}
+	if !regexp.MustCompile(`(?m)^    needs:.*\bnpm\b`).MatchString(install) {
+		t.Error("install-windows must run after the publish job")
+	}
+	if !regexp.MustCompile(`(?m)^    if:.*!inputs\.dry_run`).MatchString(install) {
+		t.Error("install-windows must not run on a dry run: there is nothing on the registry to install")
+	}
+}
+
+// A Windows check that may fail quietly is not a check, and release-auto.yml
+// starts from a CI whose Windows job already gates every candidate.
+func TestReleaseNpmNeverLetsAWindowsFailurePass(t *testing.T) {
+	if regexp.MustCompile(`(?m)^\s*continue-on-error\s*:`).MatchString(releaseNpmWorkflow(t)) {
+		t.Error("release-npm.yml must not set continue-on-error")
 	}
 }
