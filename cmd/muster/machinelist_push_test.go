@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"fmt"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -597,4 +598,208 @@ func mustPrincipals(t *testing.T, cfg *fileConfig) []service.Principal {
 		t.Fatal(err)
 	}
 	return ps
+}
+
+// --- the CLI, end to end ------------------------------------------------------
+
+// pushRig is two machines: B, a running service that takes pushes (a reload rig
+// served over HTTP with the holder wired in, and a key principal for A), and A, a
+// config and a state directory a `muster machine-list` command runs from.
+type pushRig struct {
+	b      *reloadRig
+	l      liveList
+	srvURL string
+	aCfg   string
+	aState string
+	aList  string
+	getenv func(string) string
+}
+
+func newPushRig(t *testing.T, bMode string, bSeq uint64, aMode string) *pushRig {
+	t.Helper()
+	// A's identity: a signing key in A's state directory, named "machine-a".
+	aState := t.TempDir()
+	aPub, aPriv, err := peerkey.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := peerkey.SavePrivate(filepath.Join(aState, machineKeyFile), aPriv); err != nil {
+		t.Fatal(err)
+	}
+
+	// B: a list at bSeq, a machine key (list peers authenticate by key), and a key
+	// principal for machine-a holding read and push-list.
+	dir := t.TempDir()
+	l := liveList{owner: listKey(0x01), path: filepath.Join(dir, "machines.json")}
+	l.put(t, bSeq, map[string]string{"m-a": "http://127.0.0.1:1"})
+	if _, priv, err := peerkey.Generate(); err != nil {
+		t.Fatal(err)
+	} else if err := peerkey.SavePrivate(filepath.Join(dir, machineKeyFile), priv); err != nil {
+		t.Fatal(err)
+	}
+	doc := rlDoc(rlPrincipal("op", "tok-op", "read"), map[string]any{
+		"name": "machine-a", "publicKey": peerkey.FormatPublicKey(aPub), "grants": []string{"read", "push-list"},
+	})
+	doc["machineList"] = map[string]any{"mode": bMode, "path": l.path, "fleet": "fleet-1", "signer": listPub(l.owner)}
+	b := newReloadRigIn(t, dir, doc)
+	srv := httptest.NewServer(service.NewMux(b.svc, service.Config{Table: b.rl.table, MachineList: machineListAPI{b.rl}}))
+	t.Cleanup(srv.Close)
+
+	// A: pins the same owner, knows B as a key peer named after B's service.
+	aList := filepath.Join(t.TempDir(), "machines.json")
+	aCfg := filepath.Join(t.TempDir(), "fleet.json")
+	putCfg(t, aCfg, map[string]any{
+		"principals":  []any{rlPrincipal("op", "tok", "read")},
+		"peers":       []any{map[string]any{"machine": "test-machine", "url": srv.URL, "auth": "key"}},
+		"machineList": map[string]any{"mode": aMode, "path": aList, "fleet": "fleet-1", "signer": listPub(l.owner)},
+	})
+	return &pushRig{b: b, l: l, srvURL: srv.URL, aCfg: aCfg, aState: aState, aList: aList,
+		getenv: func(string) string { return "" }}
+}
+
+func (p *pushRig) writeA(t *testing.T, seq uint64, machines map[string]string) []byte {
+	t.Helper()
+	raw := signRaw(t, p.l.owner, seq, machines, nil)
+	if err := os.WriteFile(p.aList, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func (p *pushRig) run(args ...string) (code int, out, errOut string) {
+	var o, e bytes.Buffer
+	full := append([]string{"machine-list"}, args...)
+	full = append(full, "--config="+p.aCfg, "--state-dir="+p.aState, "--self=machine-a")
+	_, code = runMachineList(full, p.getenv, &o, &e)
+	return code, o.String(), e.String()
+}
+
+func TestMachineListPushAndFetch_EndToEnd(t *testing.T) {
+	// B runs `only` at seq 1; A is in shadow, the phase in which a list adds no
+	// peer yet, so B is found through the config's own peer entry.
+	p := newPushRig(t, "only", 1, "shadow")
+	stream := p.b.stream("tok-op")
+	raw := p.writeA(t, 2, map[string]string{"m-a": "http://127.0.0.1:1", "m-c": "http://127.0.0.1:3"})
+
+	code, out, errOut := p.run("push", "test-machine")
+	if code != 0 {
+		t.Fatalf("push exit %d\nstdout: %s\nstderr: %s", code, out, errOut)
+	}
+	if !strings.Contains(out, "accepted: seq 2 now in force (was 1, mode only)") {
+		t.Errorf("push output:\n%s", out)
+	}
+	// B has it, live: no poll in between.
+	if got, ferr := pushHolder(p.b).Held(); ferr != nil || !bytes.Equal(got, raw) {
+		t.Fatalf("B holds %q (%+v), want the pushed bytes", got, ferr)
+	}
+	if body := liveMachinesBody(p.b); !strings.Contains(body, `"m-c"`) {
+		t.Errorf("B's peers do not include the pushed list's machine: %s", body)
+	}
+	if rlEnds(stream, 300*time.Millisecond) {
+		t.Error("a stream was closed by the push")
+	}
+
+	// fetch: byte-equal to what B holds, and it verifies here.
+	out2 := filepath.Join(t.TempDir(), "fetched.json")
+	code, _, errOut = p.run("fetch", "test-machine", "--out="+out2)
+	if code != 0 {
+		t.Fatalf("fetch exit %d\nstderr: %s", code, errOut)
+	}
+	if got, _ := os.ReadFile(out2); !bytes.Equal(got, raw) {
+		t.Error("fetch did not write the list B holds, byte for byte")
+	}
+	if !strings.Contains(errOut, "verified here") || !strings.Contains(errOut, "seq 2") {
+		t.Errorf("fetch said: %s", errOut)
+	}
+	// The same list again is not newer: a refusal, exit 1, and B is unchanged.
+	code, out, _ = p.run("push", "test-machine")
+	if code != 1 || !strings.Contains(out, "REFUSED machine-list-not-newer") {
+		t.Fatalf("second push exit %d:\n%s", code, out)
+	}
+	if mark, _ := machinelist.ReadSeq(p.b.dir); mark != 2 {
+		t.Errorf("B's highest accepted sequence = %d, want 2", mark)
+	}
+}
+
+func TestMachineListPush_RefusesWhatThisMachineWouldNotTakeItself(t *testing.T) {
+	p := newPushRig(t, "only", 1, "shadow")
+	// A list naming push-list: refused on this side, before any peer is asked.
+	raw := signRaw(t, p.l.owner, 2, map[string]string{"m-a": "http://127.0.0.1:1"}, func(d *machinelist.Document) {
+		d.Machines[0].Grants = []string{"read", "push-list"}
+	})
+	if err := os.WriteFile(p.aList, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, out, errOut := p.run("push", "test-machine")
+	if code != 1 || !strings.Contains(errOut, "would not take that list itself") || strings.Contains(out, "accepted") {
+		t.Fatalf("exit %d\nstdout: %s\nstderr: %s", code, out, errOut)
+	}
+	if mark, _ := machinelist.ReadSeq(p.b.dir); mark != 1 {
+		t.Errorf("a refused push moved B's sequence to %d", mark)
+	}
+
+	// A list signed by a stranger.
+	if err := os.WriteFile(p.aList, signRaw(t, listKey(0x77), 2, map[string]string{"m-a": "http://127.0.0.1:1"}, nil), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, errOut := p.run("push", "test-machine"); code != 1 || !strings.Contains(errOut, "not pinned") {
+		t.Fatalf("a stranger's list: exit %d: %s", code, errOut)
+	}
+}
+
+func TestMachineListPush_TheTargetMustBeAKeyPeerThatThisMachineKnows(t *testing.T) {
+	p := newPushRig(t, "only", 1, "shadow")
+	p.writeA(t, 2, map[string]string{"m-a": "http://127.0.0.1:1"})
+
+	code, out, _ := p.run("push", "nobody")
+	if code != 1 || !strings.Contains(out, "is not a peer of this machine") {
+		t.Fatalf("an unknown machine: exit %d\n%s", code, out)
+	}
+
+	// A token peer: the request is signed, so the peer must be a key peer.
+	putCfg(t, p.aCfg, map[string]any{
+		"principals":  []any{rlPrincipal("op", "tok", "read")},
+		"peers":       []any{map[string]any{"machine": "test-machine", "url": p.srvURL, "token": "t"}},
+		"machineList": map[string]any{"mode": "shadow", "path": p.aList, "fleet": "fleet-1", "signer": listPub(p.l.owner)},
+	})
+	code, out, _ = p.run("push", "test-machine")
+	if code != 1 || !strings.Contains(out, "authenticates by token") {
+		t.Fatalf("a token peer: exit %d\n%s", code, out)
+	}
+	if mark, _ := machinelist.ReadSeq(p.b.dir); mark != 1 {
+		t.Errorf("B's sequence moved to %d", mark)
+	}
+}
+
+func TestMachineListPush_APeerWithoutThePushGrantRefusesIt(t *testing.T) {
+	p := newPushRig(t, "only", 1, "shadow")
+	// Take push-list away from machine-a on B, as an operator would.
+	doc := rlDoc(rlPrincipal("op", "tok-op", "read"), map[string]any{
+		"name": "machine-a", "publicKey": publicKeyOf(t, p.aState), "grants": []string{"read"},
+	})
+	doc["machineList"] = map[string]any{"mode": "only", "path": p.l.path, "fleet": "fleet-1", "signer": listPub(p.l.owner)}
+	putCfg(t, p.b.path, doc)
+	p.b.rl.check("poll")
+
+	p.writeA(t, 2, map[string]string{"m-a": "http://127.0.0.1:1"})
+	code, out, _ := p.run("push", "test-machine")
+	if code != 1 || !strings.Contains(out, "push-list") {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	if mark, _ := machinelist.ReadSeq(p.b.dir); mark != 1 {
+		t.Errorf("B took a list from a peer without the grant: sequence %d", mark)
+	}
+	// And fetching still works: read is a separate, weaker grant.
+	if code, _, errOut := p.run("fetch", "test-machine"); code != 0 {
+		t.Fatalf("fetch with read only: exit %d: %s", code, errOut)
+	}
+}
+
+func publicKeyOf(t *testing.T, stateDir string) string {
+	t.Helper()
+	priv, err := peerkey.LoadPrivate(filepath.Join(stateDir, machineKeyFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return peerkey.FormatPublicKey(priv.Public().(ed25519.PublicKey))
 }

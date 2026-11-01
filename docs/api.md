@@ -21,7 +21,8 @@ open.
 
 **Grants.** With a principal table configured, each caller is a named identity
 with its own credential and its own list of grants: `read`, `create`, `send`,
-`interrupt`, `close`, `rename`, `discard`, `keys`, `label`, `remote-control`, `relay`.
+`interrupt`, `close`, `rename`, `discard`, `keys`, `label`, `remote-control`, `relay`,
+`push-list`.
 Every grant defaults to denied. ⚠️ `keys` is the one that can **escalate** a session (it delivers
 `BTab`, which cycles the permission mode — see `POST …/keys` below), so grant it
 as that, not as "arrow keys". Without a principal table the service runs in
@@ -105,6 +106,8 @@ every configured peer, exactly one hop — peers never recurse.
 | `POST` | `…/{id}/labels` | Set or delete caller-supplied labels | `label` | yes |
 | `POST` | `…/{id}/remote-control` | Turn a running session's remote control on or off | `remote-control` ⚠️ | yes |
 | `DELETE` | `/v1/machines/{machine}/sessions/{id}` | Destroy the session | `close` | yes |
+| `GET` | `/v1/machine-list` | The owner-signed machine list this machine has in force, byte for byte | `read` | this machine only |
+| `PUT` | `/v1/machine-list` | Hand this machine a newer signed machine list; it is written and put in force live | `push-list` | this machine only |
 
 ⚠️ = the specification requires `read`; the implementation does not check it yet.
 
@@ -195,6 +198,30 @@ is verified with. It must itself be signed with that peer's **current** key. The
 previous key stays acceptable for ten minutes and cannot rotate anything. It
 needs a state directory (`unsupported` without one) and is refused for a bearer
 token. `muster key rotate` is the client.
+
+### `GET` and `PUT /v1/machine-list` (#352)
+
+The owner-signed machine list ([`machine-list.md`](machine-list.md)) can be handed
+from one machine to another. `GET` returns the list this machine has **in force**
+(not the file on disk, which may be a candidate it refused) exactly as it was
+signed, under the ordinary `read` grant: the list is signed, so serving it reveals
+nothing a stronger grant would protect. `404` (`machine-list-none`) when a mode is
+on and nothing is in force; `501` (`machine-list-off`) when this machine uses no list.
+
+`PUT` takes the signed envelope as the body, byte for byte, at most 1 MiB, and
+needs **`push-list`**, a grant of its own that nothing implies and that a signed
+list cannot give. The caller's credential and grant are checked, and the size
+bounded, **before the body is read**, signed callers included: a request signed
+with a key is verified from its headers (the signature covers the digest the
+sender claims) and the body is then checked against that digest before anything
+acts on it. The list is taken only if it verifies against the signer pinned on
+*this* machine and its `seq` is strictly higher than the highest this machine has
+accepted; it is then written atomically and put in force through the same reload a
+changed file gets, no restart. `200` returns `{fleet, seq, previousSeq, mode,
+machines}` and means written **and** in force; every refusal changes nothing and
+carries a `reason` (the list is in `machine-list.md`). Neither route is relayed:
+there is no `{machine}` segment, they always mean the machine addressed. `muster
+machine-list push` and `fetch` are the clients.
 
 ### `GET /v1/whoami`
 

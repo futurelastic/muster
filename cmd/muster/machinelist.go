@@ -415,12 +415,20 @@ func usageMachineList() string {
 		"       muster machine-list sign   --in=DRAFT --key=FILE [--seq=N] [--out=FILE]",
 		"       muster machine-list verify FILE [--config=PATH | --fleet=ID --signer=PUBKEY [--min-seq=N]]",
 		"       muster machine-list show   FILE [--config=PATH | --fleet=ID --signer=PUBKEY]",
+		"       muster machine-list push   MACHINE... [--file=FILE] [--config=PATH] [--state-dir=DIR] [--self=ID]",
+		"       muster machine-list fetch  MACHINE [--out=FILE] [--config=PATH] [--state-dir=DIR] [--self=ID]",
 		"",
 		"keygen makes the owner's signing key. Keep it OFFLINE: the service never reads it.",
 		"create writes an unsigned draft; edit it by hand if you prefer. sign signs it with the key.",
 		"verify checks a list against what you pin (flags, or the machineList block of the config) and",
 		"exits 1 if it does not verify. show prints what a list says; it marks the contents unverified",
 		"unless you gave it something to verify against.",
+		"push hands the list this machine holds (the config's path, or --file) to each peer, signed with",
+		"this machine's key; the peer must hold the push-list grant for it, and takes the list only if it",
+		"verifies against ITS pinned signer and its seq is higher than any it has accepted. A list this",
+		"machine would not take itself is not sent. fetch reads the list a peer has in force (the peer",
+		"needs the read grant), verifies it against what you pin, and writes it to --out or stdout; it",
+		"never installs anything.",
 	}, "\n")
 }
 
@@ -482,6 +490,10 @@ func runMachineList(args []string, getenv func(string) string, stdout, stderr io
 			err = listVerify(f, getenv, stdout)
 		case "show":
 			err = listShow(f, getenv, stdout)
+		case "push":
+			err = listPush(f, getenv, stdout)
+		case "fetch":
+			err = listFetch(f, getenv, stdout, stderr)
 		case "-h", "--help":
 			fmt.Fprintln(stdout, usageMachineList())
 			return true, 0

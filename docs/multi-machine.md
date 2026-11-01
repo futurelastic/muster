@@ -81,7 +81,9 @@ and the retired key is useless ten minutes later.
 Writing every machine into every other does not scale past a few. An owner can
 instead sign **one list** of the fleet's machines (their keys, addresses and
 grants) and each machine reads it in place of hand-written peers. The signer's
-key is pinned locally by a person, and the list can arrive by any channel.
+key is pinned locally by a person, and the list can arrive by any channel,
+including from a peer you have granted `push-list` (it is checked against the
+pinned signer and must be newer, and applies without a restart).
 [`machine-list.md`](machine-list.md) has the commands, the four rollout modes
 (`off`, `shadow`, `prefer`, `only`) and the format.
 

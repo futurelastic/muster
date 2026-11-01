@@ -1200,7 +1200,7 @@ func usageTop() string {
 		"       muster service install|status|uninstall  set up this binary as a per-user service (muster service -h)",
 		"       muster principal add|list|grant|revoke   enrol, list or re-grant clients (muster principal)",
 		"       muster key init|show|rotate     this machine's signing key for peers that authenticate by key (muster key -h)",
-		"       muster machine-list keygen|create|sign|verify|show   the owner-signed machine list (muster machine-list -h)",
+		"       muster machine-list keygen|create|sign|verify|show|push|fetch   the owner-signed machine list (muster machine-list -h)",
 		"       muster --version                print the build",
 		"       muster -h | --help              print this usage",
 		"",
