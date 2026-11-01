@@ -26,10 +26,10 @@
 # so `shasum -a 256 -c` run next to a downloaded file verifies it without
 # anyone renaming anything.
 #
-# The windows binaries are built on every run but are not published to npm
-# (scripts/assemble-npm.mjs leaves them out unless told otherwise): they are
-# there so the Windows end-to-end job (scripts/e2e-windows.ps1) installs what the
-# release would build, and so their promotion later is a one-line change.
+# The windows binaries are built on every run and published to npm with the
+# rest (#309): release-npm.yml runs each on Windows before the publish, and the
+# Windows end-to-end job (scripts/e2e-windows.ps1) installs what the release
+# builds.
 #
 # WHICH TARGETS A TAG CAN BUILD (#316). This script is the TOOLING's copy, run
 # against an older tag's source, so the target list cannot be assumed to match
@@ -38,10 +38,11 @@
 # release on it, on every scheduled retry. The four unix targets are required:
 # any of them failing to build fails the release. The windows targets are
 # optional: a source that does not build for one is skipped with a warning, and
-# the release carries only what was built. Nothing downstream needs the skipped
-# files: assemble-npm.mjs does not assemble an unpublished platform, and the
-# Windows end-to-end job builds trunk and asks for the windows packages with
-# --all, so a windows build that broke on trunk still fails there, loudly.
+# the release carries only what was built. What is downstream copes with the gap:
+# assemble-npm.mjs skips a platform marked optional whose binary is absent,
+# release-npm.yml's Windows jobs skip their steps for it, and the Windows
+# end-to-end job builds trunk and asks for the windows packages with --all, so a
+# windows build that broke on trunk still fails there, loudly.
 set -eu
 
 if [ $# -lt 1 ] || [ $# -gt 2 ]; then

@@ -19,20 +19,48 @@ func writeValue(t *testing.T, content string) string {
 	return p
 }
 
+// Validate judges a fromFile by the host's own absolute rule (#386), so a
+// fixture that goes through it must be built from a path that is absolute on
+// the host running the test: a literal "/etc/k" has no drive on Windows and is
+// refused there. A fixture that only reaches Validate needs the path's form,
+// not a file, so these are filepath.Join(t.TempDir(), …) and nothing is created.
+// (Provision tests that read a deliberately missing path keep their literal: it
+// is never judged for its form, only opened.)
+
 func TestValidate(t *testing.T) {
-	good := Entry{Name: "FLEET_X", FromFile: "/etc/x"}
+	good := Entry{Name: "FLEET_X", FromFile: writeValue(t, "x")}
 	for name, c := range map[string]struct {
 		in      []Entry
 		wantErr bool
 	}{
 		"good":      {[]Entry{good}, false},
-		"bad name":  {[]Entry{{Name: "A-B", FromFile: "/x"}}, true},
+		"bad name":  {[]Entry{{Name: "A-B", FromFile: good.FromFile}}, true},
 		"no file":   {[]Entry{{Name: "A"}}, true},
 		"relative":  {[]Entry{{Name: "A", FromFile: "x"}}, true},
 		"duplicate": {[]Entry{good, good}, true},
 	} {
 		if err := Validate(c.in, nil); (err != nil) != c.wantErr {
 			t.Errorf("%s: err = %v, wantErr %v", name, err, c.wantErr)
+		}
+	}
+}
+
+// #386: fromFile is absolute by the host's own rule (filepath.IsAbs), not by a
+// leading "/": a Windows drive path has none, and the Unix-only test refused
+// every fromFile on that platform. A relative path is refused everywhere, with
+// the same message. This package runs in the Windows gate (scripts/gate-windows.sh),
+// so this test is that platform's oracle for the rule; the drive, UNC and rooted
+// cases through the command line live in cmd/muster.
+func TestValidateFromFileFollowsTheHostsAbsoluteRule(t *testing.T) {
+	abs := writeValue(t, "x") // under t.TempDir(): absolute in whichever form this host writes
+	if err := Validate([]Entry{{Name: "A", FromFile: abs}}, nil); err != nil {
+		t.Errorf("an absolute path on this host was refused: %v", err)
+	}
+	sep := string(filepath.Separator)
+	for _, rel := range []string{"x", "." + sep + "x", ".." + sep + "x", filepath.Join("sub", "x")} {
+		err := Validate([]Entry{{Name: "A", FromFile: rel}}, nil)
+		if err == nil || !strings.Contains(err.Error(), "must be an absolute path") {
+			t.Errorf("relative %q: err = %v, want the absolute-path refusal", rel, err)
 		}
 	}
 }
@@ -175,8 +203,9 @@ func TestProvisionMatchesTheDriversRuntimeNotTheSpecs(t *testing.T) {
 
 func TestValidateChecksRuntimeIdsAgainstTheKnownSet(t *testing.T) {
 	known := []fleet.RuntimeId{"alpha", "beta"}
+	file := filepath.Join(t.TempDir(), "k")
 	scoped := func(ids ...string) []Entry {
-		return []Entry{{Name: "K", FromFile: "/etc/k", AppliesTo: Scope{Runtimes: ids}}}
+		return []Entry{{Name: "K", FromFile: file, AppliesTo: Scope{Runtimes: ids}}}
 	}
 	if err := Validate(scoped("alpha", "beta"), known); err != nil {
 		t.Errorf("known ids refused: %v", err)
@@ -193,7 +222,7 @@ func TestValidateChecksRuntimeIdsAgainstTheKnownSet(t *testing.T) {
 		t.Error("an empty runtime id was accepted")
 	}
 	// The scope check does not touch entries without runtimes.
-	if err := Validate([]Entry{{Name: "K", FromFile: "/etc/k"}}, known); err != nil {
+	if err := Validate([]Entry{{Name: "K", FromFile: file}}, known); err != nil {
 		t.Errorf("an unscoped entry refused: %v", err)
 	}
 }
@@ -305,8 +334,10 @@ func TestCheckSessionSource(t *testing.T) {
 // #365: one variable name may carry a different source per runtime — but only
 // when the configuration alone proves no session can match both entries.
 func TestValidateSameNameNeedsDisjointRuntimeLists(t *testing.T) {
+	dir := t.TempDir()
+	x, y := filepath.Join(dir, "x"), filepath.Join(dir, "y")
 	at := func(ids ...string) Entry {
-		return Entry{Name: "GH_TOKEN", FromFile: "/etc/" + strings.Join(ids, "-"), AppliesTo: Scope{Runtimes: ids}}
+		return Entry{Name: "GH_TOKEN", FromFile: filepath.Join(dir, strings.Join(ids, "-")), AppliesTo: Scope{Runtimes: ids}}
 	}
 	withAgents := func(e Entry, agents ...string) Entry {
 		e.AppliesTo.Agents = agents
@@ -326,13 +357,13 @@ func TestValidateSameNameNeedsDisjointRuntimeLists(t *testing.T) {
 		"one runtime shared":              {[]Entry{at("alpha", "beta"), at("beta", "gamma")}, true},
 		"identical scope":                 {[]Entry{at("alpha"), at("alpha")}, true},
 		"third overlaps the first":        {[]Entry{at("alpha"), at("beta"), at("alpha", "gamma")}, true},
-		"first unscoped":                  {[]Entry{{Name: "GH_TOKEN", FromFile: "/etc/x"}, at("beta")}, true},
-		"second unscoped":                 {[]Entry{at("alpha"), {Name: "GH_TOKEN", FromFile: "/etc/x"}}, true},
-		"both unscoped":                   {[]Entry{{Name: "GH_TOKEN", FromFile: "/etc/x"}, {Name: "GH_TOKEN", FromFile: "/etc/y"}}, true},
-		"agents alone separate them":      {[]Entry{{Name: "GH_TOKEN", FromFile: "/etc/x", AppliesTo: Scope{Agents: []string{"sid"}}}, {Name: "GH_TOKEN", FromFile: "/etc/y", AppliesTo: Scope{Agents: []string{"may"}}}}, true},
-		"markers alone separate them":     {[]Entry{{Name: "GH_TOKEN", FromFile: "/etc/x", AppliesTo: Scope{Markers: []string{"a"}}}, {Name: "GH_TOKEN", FromFile: "/etc/y", AppliesTo: Scope{Markers: []string{"b"}}}}, true},
+		"first unscoped":                  {[]Entry{{Name: "GH_TOKEN", FromFile: x}, at("beta")}, true},
+		"second unscoped":                 {[]Entry{at("alpha"), {Name: "GH_TOKEN", FromFile: x}}, true},
+		"both unscoped":                   {[]Entry{{Name: "GH_TOKEN", FromFile: x}, {Name: "GH_TOKEN", FromFile: y}}, true},
+		"agents alone separate them":      {[]Entry{{Name: "GH_TOKEN", FromFile: x, AppliesTo: Scope{Agents: []string{"sid"}}}, {Name: "GH_TOKEN", FromFile: y, AppliesTo: Scope{Agents: []string{"may"}}}}, true},
+		"markers alone separate them":     {[]Entry{{Name: "GH_TOKEN", FromFile: x, AppliesTo: Scope{Markers: []string{"a"}}}, {Name: "GH_TOKEN", FromFile: y, AppliesTo: Scope{Markers: []string{"b"}}}}, true},
 		"agents differ, runtime shared":   {[]Entry{withAgents(at("alpha"), "sid"), withAgents(at("alpha"), "may")}, true},
-		"agents scoped vs runtime scoped": {[]Entry{{Name: "GH_TOKEN", FromFile: "/etc/x", AppliesTo: Scope{Agents: []string{"sid"}}}, at("beta")}, true},
+		"agents scoped vs runtime scoped": {[]Entry{{Name: "GH_TOKEN", FromFile: x, AppliesTo: Scope{Agents: []string{"sid"}}}, at("beta")}, true},
 	} {
 		err := Validate(c.in, nil)
 		if (err != nil) != c.wantErr {
@@ -355,10 +386,11 @@ func TestValidateSameNameNeedsDisjointRuntimeLists(t *testing.T) {
 
 // Only the same NAME is constrained: different names never meet the rule.
 func TestValidateDifferentNamesIgnoreRuntimeOverlap(t *testing.T) {
+	dir := t.TempDir()
 	in := []Entry{
-		{Name: "A", FromFile: "/etc/a", AppliesTo: Scope{Runtimes: []string{"alpha"}}},
-		{Name: "B", FromFile: "/etc/b", AppliesTo: Scope{Runtimes: []string{"alpha"}}},
-		{Name: "C", FromFile: "/etc/c"},
+		{Name: "A", FromFile: filepath.Join(dir, "a"), AppliesTo: Scope{Runtimes: []string{"alpha"}}},
+		{Name: "B", FromFile: filepath.Join(dir, "b"), AppliesTo: Scope{Runtimes: []string{"alpha"}}},
+		{Name: "C", FromFile: filepath.Join(dir, "c")},
 	}
 	if err := Validate(in, nil); err != nil {
 		t.Errorf("distinct names refused: %v", err)
@@ -368,9 +400,10 @@ func TestValidateDifferentNamesIgnoreRuntimeOverlap(t *testing.T) {
 // The runtime ids of a duplicate pair are still checked against the known set.
 func TestValidateSameNameRuntimeIdsStillCheckedAgainstTheKnownSet(t *testing.T) {
 	known := []fleet.RuntimeId{"alpha", "beta"}
+	dir := t.TempDir()
 	in := []Entry{
-		{Name: "K", FromFile: "/etc/a", AppliesTo: Scope{Runtimes: []string{"alpha"}}},
-		{Name: "K", FromFile: "/etc/g", AppliesTo: Scope{Runtimes: []string{"gamma"}}},
+		{Name: "K", FromFile: filepath.Join(dir, "a"), AppliesTo: Scope{Runtimes: []string{"alpha"}}},
+		{Name: "K", FromFile: filepath.Join(dir, "g"), AppliesTo: Scope{Runtimes: []string{"gamma"}}},
 	}
 	err := Validate(in, known)
 	if err == nil || !strings.Contains(err.Error(), `"gamma"`) {
@@ -387,6 +420,9 @@ func TestValidateSameNameRuntimeIdsStillCheckedAgainstTheKnownSet(t *testing.T) 
 // including the runtime-unknown "" — is in scope of both. Enumerates every pair
 // of scopes over a small universe rather than sampling it.
 func TestValidateAcceptedDuplicatesNeverBothMatchASession(t *testing.T) {
+	// Built once, outside the enumeration below (some thousand iterations).
+	dir := t.TempDir()
+	fileA, fileB := filepath.Join(dir, "a"), filepath.Join(dir, "b")
 	universe := []string{"a", "b", "c"}
 	var subsets [][]string // every subset of the universe, the empty one included
 	for mask := 0; mask < 1<<len(universe); mask++ {
@@ -409,8 +445,8 @@ func TestValidateAcceptedDuplicatesNeverBothMatchASession(t *testing.T) {
 				for _, xb := range otherAxes {
 					sa, sb := xa, xb
 					sa.Runtimes, sb.Runtimes = ra, rb
-					ea := Entry{Name: "K", FromFile: "/etc/a", AppliesTo: sa}
-					eb := Entry{Name: "K", FromFile: "/etc/b", AppliesTo: sb}
+					ea := Entry{Name: "K", FromFile: fileA, AppliesTo: sa}
+					eb := Entry{Name: "K", FromFile: fileB, AppliesTo: sb}
 
 					// The rule as the issue states it, written independently of
 					// the implementation.

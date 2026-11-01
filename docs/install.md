@@ -476,9 +476,15 @@ New-Item -ItemType Directory -Force $dir | Out-Null
 
 ### Install
 
-The Windows packages are built and tested by every release but are **not
-published to npm yet**, so `npm i -g @futurelastic/muster` does not give a
-Windows machine a binary. Two routes work today:
+`npm i -g @futurelastic/muster` installs on Windows as it does anywhere else:
+the launcher pulls `@futurelastic/muster-win32-x64` or `-win32-arm64` to match
+Node's architecture, and `muster --version` names the release. Every release
+proves that twice (`release-npm.yml`): before anything is published, each
+Windows binary runs on a runner of its own architecture, and after the publish
+the launcher is installed from the registry on both and run. A release cut from
+a source older than the Windows work has no Windows build, so it publishes no
+Windows package and its launcher lists none. Two more routes work without the
+registry:
 
 1. **Build from source** on any machine with Go, stamping it as step 1 does:
 
@@ -592,9 +598,13 @@ machine is the cost, and it is the operator's to bear.
 
 Said here so nobody has to find it out:
 
-- **The Windows packages are unpublished.** They are assembled and installed in
-  CI, never from the registry.
-- **arm64 is cross-built and never run.** Only `amd64` is exercised.
+- **The registry install is proved only as far as `--version`.** The release
+  installs the published launcher on a bare runner and runs `muster --version`.
+  The service, the scheduled task, enrolment and sessions are exercised by CI's
+  end-to-end job, from locally assembled packages rather than the registry.
+- **arm64 is run only that far.** The release runs the arm64 binary, and installs
+  from the registry, on an arm64 Windows runner; the end-to-end job (service,
+  task, sessions) runs on `amd64` only.
 - **The WSL peer route has not been run.** The Windows-to-WSL direction relies on
   WSL's localhost forwarding; the reverse direction depends on the WSL network
   mode. Treat both as configuration to prove on the machine.

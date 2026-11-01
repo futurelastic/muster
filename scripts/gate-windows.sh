@@ -28,6 +28,7 @@ ALLOW=(
 	./internal/delivery/modclient
 	./internal/drivers/opencode
 	./internal/privfs
+	./internal/sessionenv
 	./internal/state
 	./cmd/muster
 )
@@ -46,6 +47,12 @@ MUST_PASS=(
 	TestIsolation_ConcurrentSessionsSeeOnlyTheirOwnEnv
 	TestIsolation_SessionEnvPrecedenceAndFreshRead
 	TestIsolation_SessionEnvIsScopedByRuntime
+	TestSessionEnvFromFileIsJudgedByTheHostsAbsoluteRule
+	TestValidate
+	TestValidateFromFileFollowsTheHostsAbsoluteRule
+	TestValidateSameNameNeedsDisjointRuntimeLists
+	TestProvisionPrecedence
+	TestProvisionGivesEachRuntimeItsOwnValueForASharedName
 	TestIsolation_RuntimePathReachesTheSession
 	TestSandboxRefusedOnAHostWithoutTheMechanism
 	TestCreatedFileHasOwnerOnlyProtectedDACL

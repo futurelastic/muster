@@ -9,10 +9,26 @@ name: Release npm
 #   @futurelastic/muster-darwin-x64       only the one that matches the machine
 #   @futurelastic/muster-linux-x64
 #   @futurelastic/muster-linux-arm64
+#   @futurelastic/muster-win32-x64        muster.exe; npm names follow process.platform
+#   @futurelastic/muster-win32-arm64
 #
-# All five carry the SAME version, the release tag without its "v". The
+# All seven carry the SAME version, the release tag without its "v". The
 # launcher pins the platform packages to that exact version and refuses to run
 # a mismatched one. Platform packages are published first, the launcher last.
+#
+# WINDOWS (#309). The two win32 packages are published like the rest, and are
+# proved on Windows twice. BEFORE the publish, `verify-windows` runs each
+# binary the tag built on the hardware it is for (windows-latest for amd64, an
+# arm64 runner for arm64) and prints its version; `npm` needs it, so a Windows
+# binary that does not start publishes nothing, not even the other six.
+# AFTER the publish, `install-windows` installs the launcher from the registry
+# with `npm i -g` on those two runners and runs `muster --version`, the one
+# thing a user does. A tag cut before the Windows work (#316) has no windows
+# binary: both jobs then skip their steps, assemble-npm.mjs leaves the packages
+# out and the launcher does not list them, so such a tag still publishes.
+# Neither job is allowed `continue-on-error`: release-auto.yml starts from a
+# green CI, whose Windows job already gates every candidate, and a Windows check
+# that may fail quietly is not a check.
 #
 # TWO ENTRY POINTS, ONE PIPELINE
 #
@@ -31,7 +47,7 @@ name: Release npm
 # TRUSTED PUBLISHING (OIDC) ONLY. No npm token is stored, read or accepted, and
 # the job refuses to run if one is in its environment. npm matches the workflow
 # that STARTS the run, and each package holds ONE trusted publisher. Setup on
-# npmjs.com, for EACH of the five packages: Settings -> Trusted publishing ->
+# npmjs.com, for EACH of the seven packages: Settings -> Trusted publishing ->
 # GitHub Actions, this repository, workflow file name = `release-auto.yml`.
 # That setting is permanent. Do NOT switch it to `release-npm.yml` to publish
 # something by hand — a dispatch here can no longer publish, and the way to
@@ -84,6 +100,11 @@ jobs:
       # Passed through env, never interpolated into a script: an input is
       # caller-controlled text.
       TAG: ${{ inputs.tag }}
+    outputs:
+      # The windows architectures this tag's build produced ("amd64 arm64", or
+      # empty for a tag whose source cannot build windows, #316). The two Windows
+      # jobs read it; it is the one place that question is answered.
+      windows: ${{ steps.windows.outputs.built }}
     steps:
       # A manual dispatch cannot authenticate to npm: the trusted publisher names
       # release-auto.yml. Say so now, before any build, instead of failing late
@@ -133,6 +154,23 @@ jobs:
           sha256sum -c SHA256SUMS
           ./muster-"$TAG"-linux-amd64 --version | tee /dev/stderr | grep -qF "muster $TAG "
 
+      - name: Which windows binaries were built
+        id: windows
+        working-directory: ${{ runner.temp }}/dist
+        run: |
+          set -eu
+          built=""
+          for arch in amd64 arm64; do
+            if [ -f "muster-$TAG-windows-$arch.exe" ]; then built="$built $arch"; fi
+          done
+          built="${built# }"
+          echo "built=$built" >> "$GITHUB_OUTPUT"
+          if [ -n "$built" ]; then
+            echo "windows binaries: $built"
+          else
+            echo "::notice::$TAG has no windows binary (its source predates the Windows work); the windows packages are not published for it"
+          fi
+
       # Workflow artifacts, not release assets: the consumer is the npm job
       # below. The name carries the tag: one run can publish two tags (a
       # candidate and a final) and upload-artifact refuses a second artifact of
@@ -144,9 +182,73 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # Each windows binary the tag built, run once on the hardware it is for (#309).
+  # The job always runs, and its steps skip for a tag without windows binaries:
+  # a job skipped by `if:` would also skip `npm` (a skipped `needs` is not a
+  # success), and a publish that silently does not happen is the worse failure.
+  # The expected CPU is asserted, so a runner label that drifts to another
+  # architecture cannot make an emulated run read as proof.
+  verify-windows:
+    name: Run the Windows build (${{ matrix.arch }})
+    needs: binaries
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    permissions: {} # nothing here reads the repository or the API
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: windows-latest
+            cpu: AMD64
+          - arch: arm64
+            runner: windows-11-arm
+            cpu: ARM64
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      TAG: ${{ inputs.tag }}
+      ARCH: ${{ matrix.arch }}
+      BUILT: ${{ needs.binaries.outputs.windows }}
+    steps:
+      - name: Does this tag carry a windows-${{ matrix.arch }} build
+        id: has
+        run: |
+          $present = (@($env:BUILT -split ' ') -contains $env:ARCH)
+          "present=$($present.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+          if (-not $present) {
+            Write-Host "::notice::$env:TAG has no windows-$env:ARCH binary; nothing to run"
+          }
+
+      - uses: actions/download-artifact@v4
+        if: steps.has.outputs.present == 'true'
+        with:
+          name: muster-binaries-${{ inputs.tag }}
+          path: ${{ runner.temp }}/dist
+
+      - name: Run the binary and read its version
+        if: steps.has.outputs.present == 'true'
+        env:
+          WANT_CPU: ${{ matrix.cpu }}
+        run: |
+          if ($env:PROCESSOR_ARCHITECTURE -ne $env:WANT_CPU) {
+            throw "this runner is $env:PROCESSOR_ARCHITECTURE, not $env:WANT_CPU: a $env:ARCH binary would not be proved on its own hardware"
+          }
+          $exe = Join-Path $env:RUNNER_TEMP "dist\muster-$env:TAG-windows-$env:ARCH.exe"
+          $out = (& $exe --version 2>&1 | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) { throw "$exe --version exited $LASTEXITCODE`n$out" }
+          Write-Host $out
+          if (-not $out.StartsWith("muster $env:TAG ")) {
+            throw "the binary says '$out', not 'muster $env:TAG ...': it is not the release it is published under"
+          }
+          "- windows-$env:ARCH ($env:PROCESSOR_ARCHITECTURE) runs: ``$out``" >> $env:GITHUB_STEP_SUMMARY
+
   npm:
     name: Publish to npm (trusted publishing)
-    needs: binaries
+    # verify-windows is required: it always succeeds or fails (never skipped),
+    # so this job cannot be skipped by it. See the note above that job.
+    needs: [binaries, verify-windows]
     runs-on: ubuntu-latest # NEVER self-hosted: npm trusted publishing does not support it.
     permissions:
       contents: read # read the repository's visibility
@@ -227,3 +329,86 @@ jobs:
             # counts a publish that lost a race to an earlier attempt as done (#261).
             scripts/release-npm-guard.sh publish "$NAME" "$VERSION" "$DIST" "$RUNNER_TEMP/pkgs/$dir" | tee -a "$GITHUB_STEP_SUMMARY"
           done < "$RUNNER_TEMP/pkgs/PUBLISH_ORDER"
+
+  # What a Windows user does, against what was just published (#309): install
+  # the launcher from the registry and run it. It runs only after a real
+  # publish (a dry run has nothing on the registry), and on the same two
+  # runners as verify-windows. The registry can take a moment to serve a version
+  # the publish call has just returned for, so the whole install-and-run is
+  # retried for a few minutes; a launcher that installs but cannot find its
+  # platform package (an optional dependency that was not served yet) fails the
+  # `--version` and is retried with it. A failure that outlasts the budget is
+  # real: the run is red, and re-running it skips the packages that are already
+  # on npm and checks again.
+  install-windows:
+    name: Install from npm on Windows (${{ matrix.arch }})
+    needs: [binaries, npm]
+    if: ${{ !inputs.dry_run }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    permissions: {}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: windows-latest
+            cpu: x64
+          - arch: arm64
+            runner: windows-11-arm
+            cpu: arm64
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      TAG: ${{ inputs.tag }}
+      ARCH: ${{ matrix.arch }}
+      BUILT: ${{ needs.binaries.outputs.windows }}
+    steps:
+      - name: Does this tag carry a windows-${{ matrix.arch }} package
+        id: has
+        run: |
+          $present = (@($env:BUILT -split ' ') -contains $env:ARCH)
+          "present=$($present.ToString().ToLower())" >> $env:GITHUB_OUTPUT
+          if (-not $present) {
+            Write-Host "::notice::$env:TAG has no windows-$env:ARCH package; nothing to install"
+          }
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        if: steps.has.outputs.present == 'true'
+        with:
+          node-version: 24 # npm's launcher is Node; its architecture picks the platform package
+
+      - name: npm i -g the published launcher, then muster --version
+        if: steps.has.outputs.present == 'true'
+        env:
+          WANT_CPU: ${{ matrix.cpu }}
+        run: |
+          # The launcher chooses its platform package by process.arch, so a Node
+          # that is not the runner's own (an x64 build emulated on arm64) would
+          # install, and prove, the wrong package.
+          $nodeArch = (node -p 'process.arch').Trim()
+          if ($nodeArch -ne $env:WANT_CPU) {
+            throw "node here is $nodeArch, not $env:WANT_CPU: the win32-$env:WANT_CPU package would not be the one installed"
+          }
+          $version = $env:TAG.TrimStart('v')
+          $spec = "@futurelastic/muster@$version"
+          $got = $null
+          for ($attempt = 1; $attempt -le 15; $attempt++) {
+            Write-Host "== attempt ${attempt}: npm i -g $spec"
+            npm install -g --prefer-online --no-audit --no-fund $spec
+            if ($LASTEXITCODE -eq 0) {
+              $prefix = (npm prefix -g).Trim()
+              $env:PATH = "$prefix;$env:PATH"
+              $out = (& muster --version 2>&1 | Out-String).Trim()
+              Write-Host $out
+              if ($LASTEXITCODE -eq 0 -and $out.StartsWith("muster $env:TAG ")) { $got = $out; break }
+              Write-Host "muster --version did not name $env:TAG yet"
+            }
+            if ($attempt -lt 15) {
+              Write-Host 'the registry may not serve this version everywhere yet; waiting 20s'
+              Start-Sleep -Seconds 20
+            }
+          }
+          if (-not $got) { throw "$spec did not install and run on windows-$env:ARCH within the retry budget" }
+          "- ``npm i -g $spec`` on windows-$env:ARCH ($nodeArch): ``$got``" >> $env:GITHUB_STEP_SUMMARY

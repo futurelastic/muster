@@ -451,9 +451,12 @@ func TestIsolation_SameNameOnDisjointRuntimesGivesThisRuntimeItsOwnValue(t *test
 		{Name: "GH_TOKEN", FromFile: filepath.Join(t.TempDir(), "broad-absent"), Required: true,
 			AppliesTo: sessionenv.Scope{Runtimes: []string{"claude-code-tmux"}}},
 	}
-	// Whether the pair is accepted at startup is sessionenv.Validate's question,
-	// answered in that package: it checks fromFile with a Unix absolute-path
-	// test, which a Windows temp path does not pass, and this test runs there.
+	// The pair is also accepted at startup. This is the call that failed on the
+	// Windows runner while #365 was wrapped — a temp path is absolute there but
+	// has no leading "/" — until Validate judged fromFile by the host's rule (#386).
+	if err := sessionenv.Validate(entries, nil); err != nil {
+		t.Fatalf("a pair that is disjoint by runtime, over host-absolute files, was refused at startup: %v", err)
+	}
 	for i, order := range [][]sessionenv.Entry{entries, {entries[1], entries[0]}} {
 		d, _ := newIsolatedDriver(t, WithSessionEnv(order))
 		sess := mustCreate(t, d, "same-name-"+strconv.Itoa(i), fleet.SessionSpec{})

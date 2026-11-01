@@ -1,13 +1,18 @@
 #!/usr/bin/env node
-// Assemble the five npm packages for a release (#243).
+// Assemble the npm packages for a release (#243): one per platform and the
+// launcher, seven in all.
 //
 //   node scripts/assemble-npm.mjs [--all] BINDIR TAG OUTDIR
 //
-//   --all   also assemble the platforms marked published:false (windows). They
-//           are built by every release but not published: this flag is how the
-//           Windows end-to-end job installs them, and how a later release
-//           promotes them. Without it they are neither assembled, nor in
-//           PUBLISH_ORDER, nor in the launcher's optionalDependencies.
+//   --all   assemble EVERY platform in the table, published or not, and fail on
+//           a missing binary even for an optional platform. A release does not
+//           pass it: it publishes the platforms marked published:true that the
+//           tagged source could build. The Windows end-to-end job passes it, so
+//           a windows build that broke on trunk fails there, loudly, instead of
+//           being skipped; and it is how a platform not yet published is
+//           assembled for a test before it is promoted. A platform left out is
+//           neither assembled, nor in PUBLISH_ORDER, nor in the launcher's
+//           optionalDependencies.
 //   BINDIR  where scripts/build-release.sh put muster-<TAG>-<os>-<arch>[.exe].
 //   TAG     the release tag, v<digit>...; the npm version is the tag without
 //           the leading "v", and is the SAME for every package.
@@ -29,15 +34,19 @@ import { fileURLToPath } from 'node:url';
 // windows is `win32`, not `windows`.
 //
 // published:false marks a platform that is built and can be assembled, but is
-// not part of a normal release (see --all above). `ext` is the binary's suffix,
-// both in the build output name and inside the package.
+// not part of a normal release (see --all above); none is today. optional:true
+// marks a platform an older source cannot build (#316): scripts/build-release.sh
+// skips it for a tag cut before that platform was supported, so a release of that
+// tag carries no binary for it and publishes without it, and the launcher does not
+// list it. A required platform with no binary is an error. `ext` is the binary's
+// suffix, both in the build output name and inside the package.
 export const PLATFORMS = [
   { goos: 'darwin', goarch: 'arm64', os: 'darwin', cpu: 'arm64', ext: '', published: true },
   { goos: 'darwin', goarch: 'amd64', os: 'darwin', cpu: 'x64', ext: '', published: true },
   { goos: 'linux', goarch: 'amd64', os: 'linux', cpu: 'x64', ext: '', published: true },
   { goos: 'linux', goarch: 'arm64', os: 'linux', cpu: 'arm64', ext: '', published: true },
-  { goos: 'windows', goarch: 'amd64', os: 'win32', cpu: 'x64', ext: '.exe', published: false },
-  { goos: 'windows', goarch: 'arm64', os: 'win32', cpu: 'arm64', ext: '.exe', published: false },
+  { goos: 'windows', goarch: 'amd64', os: 'win32', cpu: 'x64', ext: '.exe', published: true, optional: true },
+  { goos: 'windows', goarch: 'arm64', os: 'win32', cpu: 'arm64', ext: '.exe', published: true, optional: true },
 ];
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -59,13 +68,22 @@ export function assemble(binDir, tag, outDir, { all = false } = {}) {
   mkdirSync(outDir, { recursive: true });
   const order = [];
   const optional = {};
+  const skipped = [];
 
   for (const p of PLATFORMS) {
     if (!p.published && !all) continue;
     const suffix = `${p.os}-${p.cpu}`;
     const binName = `muster${p.ext}`;
     const src = join(binDir, `muster-${tag}-${p.goos}-${p.goarch}${p.ext}`);
-    if (!existsSync(src)) throw new Error(`missing binary ${src}`);
+    if (!existsSync(src)) {
+      // A source that predates this platform was built without it (#316).
+      // Publish the rest; --all is the strict mode that refuses.
+      if (p.optional && !all) {
+        skipped.push(suffix);
+        continue;
+      }
+      throw new Error(`missing binary ${src}`);
+    }
     const dir = join(outDir, `muster-${suffix}`);
     mkdirSync(join(dir, 'bin'), { recursive: true });
     copyFileSync(src, join(dir, 'bin', binName));
@@ -93,7 +111,7 @@ export function assemble(binDir, tag, outDir, { all = false } = {}) {
   order.push(`${SCOPE}/muster`);
 
   writeFileSync(join(outDir, 'PUBLISH_ORDER'), order.map((n) => n.replace(`${SCOPE}/`, '')).join('\n') + '\n');
-  return { version, order };
+  return { version, order, skipped };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
@@ -105,8 +123,9 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     process.exit(2);
   }
   try {
-    const { version, order } = assemble(resolve(args[0]), args[1], resolve(args[2]), { all });
+    const { version, order, skipped } = assemble(resolve(args[0]), args[1], resolve(args[2]), { all });
     console.log(`assemble-npm: ${version} (dist-tag ${distTag(version)}): ${order.join(', ')}`);
+    if (skipped.length) console.log(`assemble-npm: no binary for ${skipped.join(', ')}; this tag's source predates the platform, so it is not published`);
   } catch (err) {
     console.error(`assemble-npm: ${err.message}`);
     process.exit(1);

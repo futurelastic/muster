@@ -7,10 +7,10 @@
 .DESCRIPTION
   Run by CI's `windows` job, after scripts/gate-windows.sh. It is the only place
   the PIECES are exercised together: the release build for windows, the npm
-  packages assembled from it (--all, because windows is built but not
-  published), the launcher, enrolment, `doctor`, the service started through
-  its scheduled task, the HTTP API, and the process tree the subprocess driver
-  leaves behind.
+  packages assembled from it (--all, so a windows binary that was not built is
+  an error here and not a skipped package), the launcher, enrolment, `doctor`,
+  the service started through its scheduled task, the HTTP API, and the process
+  tree the subprocess driver leaves behind.
 
   The "opencode" it drives is a stand-in: the opencode package's own test binary
   (`go test -c`), which answers as the runtime when invoked as one. No opencode
