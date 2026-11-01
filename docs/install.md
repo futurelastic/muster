@@ -302,6 +302,12 @@ order of this page and the order of its output are the same.
      "unsafe_server_context"`) and `GET /v1/health` shows `serverContext` for both
      the service and the running server; `FLEET_TMUX_ALLOW_DESKTOP_SERVER=1` is the
      explicit override;
+   - the default runtime offers a sandbox for the agent it starts (muster #345) on a
+     host where the agent CLI was measured to start and authenticate inside the
+     profile — `GET /v1/runtimes` shows `sandbox` there, or `sandboxUnavailable`
+     with the reason where it does not (most often: the agent's login is in the
+     login keychain, which the profile does not open). `FLEET_TMUX_SANDBOX=off`
+     stops the runtime offering it;
    - when `FLEET_RUNTIME_OPENCODE=1`, set `FLEET_OPENCODE_BIN` to the opencode
      binary's absolute path, for the same reason (row: `runtime.opencode`,
      which resolves the binary and never runs it). A runtime that is enabled but

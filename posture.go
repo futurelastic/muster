@@ -143,8 +143,10 @@ type PostureSupport struct {
 
 // PostureSupportFrom derives what a runtime can enforce from what it declares.
 // A runtime that cannot confine a session reports nothing enforceable beyond an
-// empty attended posture, which is the truth about the default multiplexer
-// runtime today (docs/api.md, #344).
+// empty attended posture. The default multiplexer runtime is such a runtime on a
+// host where its agent CLI did not start and authenticate under the profile when
+// that was measured, and on every host that has no sandbox mechanism
+// (docs/api.md, #344, #345).
 func PostureSupportFrom(c DriverCapabilities) PostureSupport {
 	s := PostureSupport{Network: []SandboxNetwork{}, IsolatedEnvironment: c.IsolatesEnvironment}
 	if c.Sandbox == nil {
@@ -206,7 +208,11 @@ func (p Posture) Lower(caps DriverCapabilities) (PostureMapping, error) {
 		}
 	}
 	if m.Sandbox != nil && !sup.Files {
-		why := "it cannot confine a session (no operating-system sandbox)"
+		why := "it cannot confine a session (no operating-system sandbox"
+		if caps.SandboxUnavailable != "" {
+			why += ": " + caps.SandboxUnavailable
+		}
+		why += ")"
 		if p.Unattended() {
 			why += ", and an unattended session is always confined"
 		}

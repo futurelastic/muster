@@ -153,3 +153,24 @@ func TestPostureValidate(t *testing.T) {
 		t.Errorf("a valid posture was refused: %v", err)
 	}
 }
+
+// A runtime that could offer a sandbox on another host and cannot on this one
+// says why, in the refusal itself (muster #345): "posture-unenforceable" with no
+// reason sends an operator hunting through logs for what the runtime already knew.
+func TestPostureLower_ARefusalCarriesTheReasonTheRuntimeGave(t *testing.T) {
+	caps := plainCaps()
+	caps.SandboxUnavailable = "the agent CLI is not logged in when it runs under the profile on this host"
+	_, err := Posture{Attendance: AttendanceUnattended}.Lower(caps)
+	var fe *Error
+	if !errors.As(err, &fe) || fe.Reason != ReasonPostureUnenforceable {
+		t.Fatalf("err = %v, want posture-unenforceable", err)
+	}
+	if !strings.Contains(fe.Message, caps.SandboxUnavailable) {
+		t.Errorf("message %q does not carry the runtime's reason", fe.Message)
+	}
+	// A runtime that gave none is refused exactly as before.
+	if _, err := (Posture{Attendance: AttendanceUnattended}).Lower(plainCaps()); err == nil ||
+		strings.Contains(err.Error(), ": )") {
+		t.Errorf("err = %v", err)
+	}
+}

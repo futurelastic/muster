@@ -262,6 +262,14 @@ type DriverCapabilities struct {
 	// absent rather than offering a weaker profile under the same name. Like
 	// every flag here it inherits `source: assumed` from an unreached peer.
 	Sandbox *SandboxSupport `json:"sandbox,omitempty"`
+	// SandboxUnavailable says, in a sentence a refused create can quote, why
+	// Sandbox is absent on a driver that could in principle offer one (muster
+	// #345): the host has no mechanism, the service already runs inside a
+	// profile, or the runtime's own CLI would not start and authenticate under
+	// the profile when it was measured on this host. Empty when Sandbox is
+	// present, and empty on a driver that never offers one. Informational: the
+	// refusal itself is decided by Sandbox alone.
+	SandboxUnavailable string `json:"sandboxUnavailable,omitempty"`
 	// ConfirmsDelivery reports whether the driver can distinguish
 	// "submitted" from "queued".
 	ConfirmsDelivery bool `json:"confirmsDelivery"`

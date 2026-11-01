@@ -42,6 +42,12 @@
 //	                       server hands its security session to every
 //	                       session it runs, and a desktop one loses the
 //	                       login Keychain-held logins of agent runtimes.
+//	FLEET_TMUX_SANDBOX     set to "off" to stop the "tmux" runtime offering a
+//	                       sandbox (muster #345). Left on, the runtime declares
+//	                       one only on a host where its agent CLI was measured
+//	                       to start and authenticate under the profile, and a
+//	                       create or posture that needs confinement is refused,
+//	                       with the reason, anywhere else.
 //	FLEET_RUNTIME_OPENCODE set to 1 to ALSO register a second local driver
 //	                       (muster issue #55) over opencode
 //	                       (github.com/sst/opencode), a third-party agent
@@ -534,6 +540,15 @@ func main() {
 		// for a session this service did not create and for one older than the
 		// create record. One process-table query per listing.
 		opts = append(opts, tmux.WithProcessAgent())
+		// muster #345: let a create confine the agent in the host's sandbox. On by
+		// default, because an unattended session on this runtime otherwise runs
+		// prompt-free with nothing confined; whether it is OFFERED is still the
+		// host's answer, measured at the first capability read (the agent CLI must
+		// start and authenticate under the profile), so a host where it does not
+		// keeps refusing with the reason. FLEET_TMUX_SANDBOX=off opts out.
+		if strings.ToLower(os.Getenv("FLEET_TMUX_SANDBOX")) != "off" {
+			opts = append(opts, tmux.WithSandbox(tmux.SandboxOptions{}))
+		}
 		// Where the runtime keeps its own local credential material —
 		// stat'ed, never read, to answer #12 (SessionState.CredentialGeneration,
 		// EventMachineAccount). Same off-by-default reasoning as
