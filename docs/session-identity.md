@@ -44,7 +44,7 @@ A list under `sessionEnv` in the same JSON file `principals`, `peers`,
 | Field | Meaning |
 |---|---|
 | `name` | The variable a session's process will see. Same shape rule every env name in this project follows: letters, digits, underscore, not starting with a digit. |
-| `fromFile` | An absolute path this machine reads **fresh on every create** — see "Restart enables it; rotation needs nothing" below. |
+| `fromFile` | An absolute path this machine reads **fresh on every create** — see "Restart enables it; rotation needs nothing" below. "Absolute" follows the host's own rule: a leading `/` on Unix; a drive or UNC path on Windows (`C:\\ProgramData\\…\\token` once JSON-escaped). A relative path is refused on every host. |
 | `fromSession` | The other source: the created session's own identity, `"ref"` (`<machine>/<id>`) or `"id"` (the bare id). Exactly one of `fromFile` / `fromSession` per entry — see "Exporting the session's own identity" below. |
 | `required` | Fail closed (`true`) or silently omit (`false`) when the file cannot be read. Per entry, not machine-wide — see "Fail-closed, per entry". |
 | `appliesTo` | Optional. `runtimes`, `agents` and/or `markers`: `runtimes` is matched against the runtime the session is created on, `agents` / `markers` against `SessionSpec.Agent` / `SessionSpec.Marker`. Absent or all-empty matches every session on every runtime the machine registers — see "Scoping: `appliesTo`". |

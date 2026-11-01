@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -400,11 +401,17 @@ func TestLoadConfigRejectsAPrincipalMissingATokenOrName(t *testing.T) {
 // a message an operator reads once, and an optional runtime that is merely
 // switched off on this machine is not.
 func TestSessionEnvRuntimeIdsAreCheckedAgainstTheBuildsKnownSet(t *testing.T) {
+	// Absolute on this host (#386): Validate judges fromFile by filepath.IsAbs,
+	// so a literal "/etc/..." is relative on Windows, where this test runs too.
+	tokenFile, err := json.Marshal(filepath.Join(t.TempDir(), "token"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	load := func(runtimes string) []sessionenv.Entry {
 		t.Helper()
 		path := filepath.Join(t.TempDir(), "config.json")
 		body := `{"principals": [{"name": "op", "token": "tok", "grants": ["read"]}],
-			"sessionEnv": [{"name": "TOKEN", "fromFile": "/etc/fleet/token", "required": true,
+			"sessionEnv": [{"name": "TOKEN", "fromFile": ` + string(tokenFile) + `, "required": true,
 				"appliesTo": {"runtimes": ` + runtimes + `}}]}`
 		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 			t.Fatal(err)
@@ -422,7 +429,7 @@ func TestSessionEnvRuntimeIdsAreCheckedAgainstTheBuildsKnownSet(t *testing.T) {
 			t.Errorf("registered runtime id %q refused: %v", id, err)
 		}
 	}
-	err := sessionenv.Validate(load(`["opencod"]`), known)
+	err = sessionenv.Validate(load(`["opencod"]`), known)
 	if err == nil {
 		t.Fatal("a misspelled runtime id was accepted at startup")
 	}
