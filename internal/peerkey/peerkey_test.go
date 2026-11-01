@@ -248,3 +248,105 @@ func TestSignerPicksUpAReplacedKeyFile(t *testing.T) {
 		t.Fatal("the signer kept using the replaced key")
 	}
 }
+
+// muster #352: a route can verify the signature from the headers alone, before
+// it reads the body, and check the body against the signed digest afterwards.
+
+func TestVerifyHeadersAcceptsWithoutReadingTheBody(t *testing.T) {
+	pub, path := newKey(t)
+	s, _ := NewSigner(path, "alpha")
+	body := []byte(`{"format":"muster-machine-list/1"}`)
+	r := signed(t, s, "PUT", "/v1/machine-list", body, "beta", nil)
+	h, err := ParseAuthorization(r.Header.Get("Authorization"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The body is never handed over: only the headers are consulted.
+	if _, err := VerifyHeaders(h, r, "beta", []ed25519.PublicKey{pub}, time.Now(), NewReplayCache(10)); err != nil {
+		t.Fatalf("VerifyHeaders: %v", err)
+	}
+	if err := CheckBody(r, body); err != nil {
+		t.Fatalf("CheckBody on the signed body: %v", err)
+	}
+}
+
+func TestVerifyHeadersStillRefusesWhatVerifyRefuses(t *testing.T) {
+	pub, path := newKey(t)
+	otherPub, _ := newKey(t)
+	s, _ := NewSigner(path, "alpha")
+	body := []byte(`x`)
+	cases := []struct {
+		name string
+		self string
+		keys []ed25519.PublicKey
+		at   time.Time
+		want error
+	}{
+		{"wrong target", "gamma", []ed25519.PublicKey{pub}, time.Now(), ErrBadSig},
+		{"wrong key", "beta", []ed25519.PublicKey{otherPub}, time.Now(), ErrBadSig},
+		{"expired", "beta", []ed25519.PublicKey{pub}, time.Now().Add(MaxSkew + 5*time.Second), ErrExpired},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := signed(t, s, "PUT", "/v1/machine-list", body, "beta", nil)
+			h, _ := ParseAuthorization(r.Header.Get("Authorization"))
+			if _, err := VerifyHeaders(h, r, tc.self, tc.keys, tc.at, NewReplayCache(10)); !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestVerifyHeadersSpendsTheNonceOnlyAfterTheSignatureVerifies(t *testing.T) {
+	pub, path := newKey(t)
+	otherPub, _ := newKey(t)
+	s, _ := NewSigner(path, "alpha")
+	r := signed(t, s, "PUT", "/v1/machine-list", []byte(`x`), "beta", nil)
+	h, _ := ParseAuthorization(r.Header.Get("Authorization"))
+	cache := NewReplayCache(10)
+	if _, err := VerifyHeaders(h, r, "beta", []ed25519.PublicKey{otherPub}, time.Now(), cache); !errors.Is(err, ErrBadSig) {
+		t.Fatalf("err = %v, want ErrBadSig", err)
+	}
+	if _, err := VerifyHeaders(h, r, "beta", []ed25519.PublicKey{pub}, time.Now(), cache); err != nil {
+		t.Fatalf("a refused signature must not have spent the nonce: %v", err)
+	}
+	if _, err := VerifyHeaders(h, r, "beta", []ed25519.PublicKey{pub}, time.Now(), cache); !errors.Is(err, ErrReplay) {
+		t.Fatalf("second use: err = %v, want ErrReplay", err)
+	}
+}
+
+func TestCheckBodyRefusesABodyOtherThanTheSignedOne(t *testing.T) {
+	_, path := newKey(t)
+	s, _ := NewSigner(path, "alpha")
+	r := signed(t, s, "PUT", "/v1/machine-list", []byte(`signed body`), "beta", nil)
+	if err := CheckBody(r, []byte(`another body`)); !errors.Is(err, ErrDigest) {
+		t.Fatalf("err = %v, want ErrDigest", err)
+	}
+}
+
+func TestVerifyHeadersRefusesAMalformedDigestHeader(t *testing.T) {
+	pub, path := newKey(t)
+	s, _ := NewSigner(path, "alpha")
+	good := BodyDigest([]byte(`x`))
+	for name, claim := range map[string]string{
+		"missing":   "",
+		"no prefix": good,
+		"short":     "sha256=" + good[:63],
+		"long":      "sha256=" + good + "0",
+		"uppercase": "sha256=" + strings.ToUpper(good),
+		"not hex":   "sha256=" + strings.Repeat("g", 64),
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := signed(t, s, "PUT", "/v1/machine-list", []byte(`x`), "beta", nil)
+			h, _ := ParseAuthorization(r.Header.Get("Authorization"))
+			if claim == "" {
+				r.Header.Del(DigestHeader)
+			} else {
+				r.Header.Set(DigestHeader, claim)
+			}
+			if _, err := VerifyHeaders(h, r, "beta", []ed25519.PublicKey{pub}, time.Now(), NewReplayCache(10)); !errors.Is(err, ErrDigest) {
+				t.Fatalf("err = %v, want ErrDigest", err)
+			}
+		})
+	}
+}

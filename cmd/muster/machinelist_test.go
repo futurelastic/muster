@@ -364,16 +364,16 @@ func TestMachineListCLIRoundTrip(t *testing.T) {
 func TestDoctorRow(t *testing.T) {
 	f, cfg := newListFixture(t, "shadow", 4)
 	base := basePeers(t, cfg)
-	row := listDoctorRow(loadMachineList(cfg, f.stateDir, "self"), base)
+	row := listDoctorRow(loadMachineList(cfg, f.stateDir, "self"), base, nil)
 	if row.ID != "machine-list" || row.Status != statusPass || !strings.Contains(row.Detail, "shadow changes nothing") {
 		t.Errorf("shadow row = %+v", row)
 	}
 	cfg.MachineList.Mode = "only"
 	_ = os.Remove(f.listPath)
-	if row := listDoctorRow(loadMachineList(cfg, f.stateDir, "self"), base); row.Status != statusFail {
+	if row := listDoctorRow(loadMachineList(cfg, f.stateDir, "self"), base, nil); row.Status != statusFail {
 		t.Errorf("only-mode with a missing list must fail the check: %+v", row)
 	}
-	if row := listDoctorRow(loadMachineList(nil, "", "self"), nil); row.Status != statusSkip {
+	if row := listDoctorRow(loadMachineList(nil, "", "self"), nil, nil); row.Status != statusSkip {
 		t.Errorf("no list: %+v", row)
 	}
 }

@@ -232,7 +232,9 @@ order of this page and the order of its output are the same.
 
    With more than a few machines, do not hand-write peers: have the owner sign
    one machine list and point each machine's `machineList` block at it
-   (`shadow` first, read the `machine-list` row, then `prefer` or `only`). See
+   (`shadow` first, read the `machine-list` row, then `prefer` or `only`). A
+   newer list can also be handed to a running machine by a peer you grant
+   `push-list` (`muster machine-list push`), and applies at once. See
    [`machine-list.md`](machine-list.md).
 
 7. **Inbox delivery, if this machine has an index writer** —
@@ -412,7 +414,9 @@ to it.
   reason is logged, and `config.reload` goes to `warn` with it (the config itself
   may have been applied in the same pass — a bad list never holds back an
   unrelated principal edit). An unchanged list is not re-applied. Signing the next
-  list clears the warning.
+  list clears the warning. A list a peer pushes (`PUT /v1/machine-list`, #352)
+  goes through the same code in the request itself, so the pusher gets the real
+  outcome; the poll that follows finds nothing new.
 - The `machineList` block itself — its `mode`, `path`, `fleet` and pinned
   `signer` — stays **restart-only**. The path and the pin say what the service
   trusts, and an edit to a trust root takes effect only when a person restarts the

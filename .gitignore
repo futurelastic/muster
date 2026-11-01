@@ -105,3 +105,6 @@ id_rsa*
 # path, so it catches a scratch file dropped anywhere by mistake rather than
 # only the one location someone remembered to avoid.
 *.rawcapture
+
+# ─── Built binary from `go build ./cmd/muster` at the repo root ───
+/muster

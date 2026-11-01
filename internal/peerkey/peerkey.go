@@ -352,15 +352,74 @@ func ParseAuthorization(v string) (Header, error) {
 // AFTER the signature verifies, so an attacker cannot fill it with nonces that
 // were never signed.
 func Verify(h Header, r *http.Request, body []byte, self string, keys []ed25519.PublicKey, now time.Time, replay *ReplayCache) (int, error) {
-	skew := now.Sub(time.Unix(h.TS, 0))
-	if skew > MaxSkew || skew < -MaxSkew {
-		return -1, fmt.Errorf("%w (this machine's clock reads %s, the signature says %s)",
-			ErrExpired, now.UTC().Format(time.RFC3339), time.Unix(h.TS, 0).UTC().Format(time.RFC3339))
+	if err := checkSkew(h, now); err != nil {
+		return -1, err
 	}
 	digest := BodyDigest(body)
 	if claimed := r.Header.Get(DigestHeader); claimed != "sha256="+digest {
 		return -1, ErrDigest
 	}
+	return verifySignature(h, r, digest, self, keys, now, replay)
+}
+
+// VerifyHeaders is Verify for a verifier that has NOT read the body yet. It
+// checks the signature over the digest the sender CLAIMS in DigestHeader; that
+// claim sits inside the signed canonical string, so the claim itself is
+// authenticated. What it does not establish is that the body about to be read
+// is the one that was digested: the caller must read the body (bounded) and
+// pass it to CheckBody before acting on a single byte of it.
+//
+// It exists so a route can refuse a caller that lacks the grant for it without
+// first reading the body (muster #352). Every other route reads the body first
+// and calls Verify, which is unchanged.
+func VerifyHeaders(h Header, r *http.Request, self string, keys []ed25519.PublicKey, now time.Time, replay *ReplayCache) (int, error) {
+	if err := checkSkew(h, now); err != nil {
+		return -1, err
+	}
+	claimed, ok := strings.CutPrefix(r.Header.Get(DigestHeader), "sha256=")
+	if !ok || !validDigestHex(claimed) {
+		return -1, ErrDigest
+	}
+	return verifySignature(h, r, claimed, self, keys, now, replay)
+}
+
+// CheckBody is the second half of VerifyHeaders: it confirms the body that was
+// read is the one whose digest the sender signed.
+func CheckBody(r *http.Request, body []byte) error {
+	if r.Header.Get(DigestHeader) != "sha256="+BodyDigest(body) {
+		return ErrDigest
+	}
+	return nil
+}
+
+// validDigestHex reports whether s is what BodyDigest returns: 64 lowercase hex
+// characters. A claim in any other shape could never equal a body's digest.
+func validDigestHex(s string) bool {
+	if len(s) != 2*sha256.Size {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func checkSkew(h Header, now time.Time) error {
+	skew := now.Sub(time.Unix(h.TS, 0))
+	if skew > MaxSkew || skew < -MaxSkew {
+		return fmt.Errorf("%w (this machine's clock reads %s, the signature says %s)",
+			ErrExpired, now.UTC().Format(time.RFC3339), time.Unix(h.TS, 0).UTC().Format(time.RFC3339))
+	}
+	return nil
+}
+
+// verifySignature is the part of verification both entry points share: the
+// signature over the canonical string, then the replay cache. The cache is
+// consulted only AFTER the signature verifies.
+func verifySignature(h Header, r *http.Request, digest, self string, keys []ed25519.PublicKey, now time.Time, replay *ReplayCache) (int, error) {
 	msg := Canonical(r.Method, r.RequestURI, digest, self, h.Machine, h.TS, h.Nonce, assertionsOf(r.Header))
 	matched := -1
 	for i, k := range keys {

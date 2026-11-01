@@ -72,6 +72,11 @@ unless a case documents one. Two cases do today:
 - `posture-unenforceable` on an `unsupported` (muster #344) — a `create` whose
   `posture` the runtime it resolved cannot enforce; `message` names what is
   missing. `retryable: false`; see §3.2.
+- `machine-list-*` on `invalid`, `unsupported`, `not_found` and `conflict`
+  (muster #352) — the machine-list routes' own refusals, one reason per failed
+  check (§3.1, *The machine list*). The kind says whose fault it is; the reason
+  says which check, so a caller does not parse `message` to learn whether to
+  re-sign the list, ask an operator, or try again.
 
 **An id that is a live session's conversation id (muster #268).** `{id}` is
 always this service's session `id`; a session's *conversation* id (the runtime's
@@ -425,6 +430,64 @@ body, ignore the field it does not know, and answer `201` for a session bound to
 nothing. Only a positive answer may be cached; a relaying service asks again
 before refusing, so a peer that has since upgraded is not refused on stale
 evidence.
+
+### 3.1.1 The machine list
+
+An owner-signed list of the machines in a fleet (docs/machine-list.md) can be
+handed from one machine to another over this API. The list is signed, so the
+channel proves nothing about it; what these routes decide is who may use the
+channel and in what order. Neither route is relayed: they always mean the machine
+that was addressed, so there is no `{machine}` segment.
+
+```
+GET /v1/machine-list
+→ 200 <the list this machine has IN FORCE, byte for byte as it was signed;
+       Content-Type: application/json>
+→ 404 not_found    reason "machine-list-none"  — a mode is on and nothing is in force
+→ 501 unsupported  reason "machine-list-off"   — this machine uses no list
+
+PUT /v1/machine-list
+   <body: the signed envelope, byte for byte, at most 1 MiB>
+→ 200 MachineListReceipt
+→ 400 invalid      reasons "machine-list-too-large" | "machine-list-malformed" |
+                   "machine-list-signer-not-pinned" | "machine-list-signature" |
+                   "machine-list-other-fleet" | "machine-list-grant"
+→ 401 unauthorized — no credential, or the principal lacks `push-list`
+→ 409 conflict     reason "machine-list-not-newer"
+→ 501 unsupported  reasons "machine-list-off" | "machine-list-no-state-dir" |
+                   "machine-list-unsupported" | "machine-list-not-applied" |
+                   "machine-list-not-writable"
+
+MachineListReceipt {
+  fleet       : string
+  seq         : integer   // the sequence now in force on this machine
+  previousSeq : integer   // the highest this machine had accepted before; 0 when none
+  mode        : "shadow" | "prefer" | "only"   // shadow: in force for reporting only
+  machines    : integer   // how many machines the list names
+}
+```
+
+**Serving.** `GET` needs only the `read` grant. It answers with the list in
+force, not the file on disk (which may be a candidate this machine refused), so
+what a peer fetches is what this machine is running on.
+
+**Accepting.** `PUT` needs the `push-list` grant (§5) and checks, in this order,
+refusing at the first that fails: the credential; the grant; whether this machine
+uses a list at all and, in `prefer` and `only`, has a state directory to remember
+the highest accepted sequence in; the size (`Content-Length`, then a read bounded
+at 1 MiB). **Nothing up to the size check reads the body**, signed callers
+included (§5). Only then is the list verified, against the signer an operator
+pinned on THIS machine, and only if its `seq` is **strictly higher** than the
+highest this machine has accepted is it written (atomically, temp file and
+rename) and put in force through the same reload a changed file gets, without a
+restart. `200` therefore means written **and** in force; any other answer means
+nothing changed, on disk or in memory. A list is never trusted for having been
+delivered by a peer, and a push cannot change the pinned signers, the mode or the
+path.
+
+**The highest accepted sequence** is the higher of the mark recorded in the state
+directory and the sequence of the list in force. Equal is refused, not accepted
+as a no-op: a list is replaced only by a newer one.
 
 ### 3.2 Sessions
 
@@ -2570,7 +2633,7 @@ ordering is wrong rather than handing you a cursor that would skip.
   development.
 - Permissions are **per verb, per machine**. `list` and `state` may be granted
   broadly; `create`, `input`, `interrupt`, `close`, `rename`, `discard`, `keys`,
-  `label`, `remote-control` and `acting-person` are granted per peer and default to denied. That default is deliberate
+  `label`, `remote-control`, `push-list` and `acting-person` are granted per peer and default to denied. That default is deliberate
   and applies to a fresh deployment as much as an established one — no grant is
   implied by anything else, including a runtime advertising the capability the
   grant gates (§3, `keys`; muster #68).
@@ -2593,6 +2656,16 @@ ordering is wrong rather than handing you a cursor that would skip.
   §3.3, `route`). It defaults to denied
   like every other grant, and it is not something to hand to an agent: it is the
   grant that lets a message skip the label.
+- **`push-list` hands this machine a new machine list** (muster #352,
+  `PUT /v1/machine-list`, §3.1.1). It is the one grant whose holder can replace
+  this machine's peer table and the machine principals in it, bounded: the list
+  must verify against the signer an operator pinned here, its `seq` must be
+  strictly higher than the highest accepted, and it cannot change the pins, the
+  mode or the path. Serving the list is `read`. Denied by default like every
+  grant, not implied by the legacy all-verbs flags, and a machine with no
+  principal table refuses every push (nobody can hold it). A signed list cannot
+  give it either: a list that names it is refused whole, because who may hand a
+  machine its next list is a local decision, like the pinned signer.
 - **`acting-person` is attribution, not a verb** (muster #349). A mutating
   request may carry `Fleet-Acting-Person` (an opaque id) and
   `Fleet-Acting-Issuer` (the id of whatever minted it), both required together,
@@ -2627,6 +2700,15 @@ ordering is wrong rather than handing you a cursor that would skip.
   sender is the principal named by `machine`, with that principal's grants; a
   request is judged exactly as one authenticated by token. It does not encrypt
   and does not authenticate responses.
+- **A route that must judge the caller before it reads the body** (muster #352,
+  `PUT /v1/machine-list` only) verifies a signed request from its headers: the
+  signature is over the digest the sender **claims** in `Fleet-Content-Digest`,
+  which sits inside the signed text, so the claim is authenticated. The verifier
+  then reads the body, bounded, and MUST refuse with `401 unauthorized` a body
+  that does not hash to the claimed digest before acting on any byte of it. The
+  refusal the previous bullet requires still holds; on this route it happens
+  after the grant check rather than before. The claim MUST be `sha256=` and
+  exactly 64 lowercase hex characters.
 - **Key rotation.** `POST /v1/peer-key {"publicKey": "ed25519:…"}`, signed with
   the sender's **current** key, replaces the key the sender is verified with. The
   replaced key is accepted for at most ten minutes and MUST NOT be able to rotate

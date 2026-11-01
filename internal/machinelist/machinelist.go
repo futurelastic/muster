@@ -424,3 +424,34 @@ func WriteSeq(dir string, seq uint64) error {
 	}
 	return os.Rename(tmp.Name(), filepath.Join(dir, SeqFile))
 }
+
+// rename is os.Rename, a variable so a test can make the last step of WriteFile
+// fail and show that a failed write leaves the destination as it was.
+var rename = os.Rename
+
+// WriteFile puts raw at path atomically: a temporary file in the same directory,
+// synced, then renamed over path, so a reader (and a crash) sees the old file or
+// the new one and never half of either. The temporary file is removed on every
+// failure, and the destination is untouched until the rename. It is how a list
+// handed over by a peer is installed (muster #352); the directory must be one
+// the service can write.
+func WriteFile(path string, raw []byte) error {
+	dir := filepath.Dir(path)
+	tmp, err := privfs.CreateTemp(dir, "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(raw); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return rename(tmp.Name(), path)
+}

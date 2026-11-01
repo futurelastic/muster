@@ -46,8 +46,10 @@ On each machine, in `config.json`:
                    "nextSigner": "ed25519:..." } }
 ```
 
-`nextSigner` is optional (see *Recovery*). The list is read when the service
-starts; restart to apply a new one.
+`nextSigner` is optional (see *Recovery*). The service watches the file and
+applies a newer list without a restart (a list that does not verify, or is not
+newer, is refused as a whole and the last good one stays). A list can also be
+handed to a running service by a peer: see *Handing a list to another machine*.
 
 ### Modes
 
@@ -126,7 +128,7 @@ The document in the payload:
 | field | meaning |
 |---|---|
 | `fleet` | the fleet's id. A machine pinned to one fleet refuses another's list. |
-| `seq` | starts at 1 and must increase with every list; lower than the highest accepted is refused (equal is fine: reloading the same file). |
+| `seq` | starts at 1 and must increase with every list; lower than the highest accepted is refused (equal is fine: reloading the same file). A list **pushed by a peer** must be strictly higher: equal is refused (see *Handing a list to another machine*). |
 | `machines[].id` | the machine's id as it names itself (`FLEET_MACHINE`); unique. |
 | `machines[].publicKey` | the machine's signing key (`muster key show`). |
 | `machines[].addresses` | base URLs, in the order to try. |
@@ -153,11 +155,98 @@ A key nobody pinned cannot recover anything: the document cannot add to the trus
 A machine's key is in the list, so rotating it means issuing a new list.
 `muster key rotate` tells hand-written key peers only; it does not touch a list.
 
+### Handing a list to another machine
+
+A machine can hand the list it holds to another over the service's own API, so
+the owner signs once and a running fleet follows without anyone copying files.
+The channel is still untrusted: a list is taken for what it is, never for who
+delivered it.
+
+```sh
+muster machine-list push  machine-b machine-c [--file=machines.json]   # send the list this machine holds
+muster machine-list fetch machine-b --out=machines.json                 # read what machine-b has in force
+```
+
+Both commands are signed with *this* machine's key (the one `muster key show`
+prints), so the peer judges them by what this machine is granted there. They take
+`--config`, `--state-dir` and `--self` (this machine's id) when `FLEET_CONFIG`,
+`FLEET_STATE_DIR` and `FLEET_MACHINE` are not set. A peer is named as it is in the
+config's `peers` (which must say `"auth": "key"`, because the request is signed)
+or, failing that, as the list being sent names it, which is what makes `push`
+usable while every machine is still in `shadow`. `push` first verifies the list
+against this machine's own pins and the highest sequence accepted here, and sends
+nothing a machine would not take itself. `fetch` verifies what it got against
+what *you* pin and writes it out; it never installs anything. Neither runs on its
+own: the service does not push or pull lists.
+
+**Who may do what.** Serving needs the `read` grant. **Accepting needs `push-list`,
+a grant of its own that nothing implies**: not `send`, not `relay`, not the
+legacy flags, and not what `muster service install` gives the local service. An
+operator gives it to one peer at a time, on the machine that will take the push:
+
+```sh
+muster principal add machine-a --public-key=ed25519:... --grants=read,push-list   # a new peer
+muster principal grant machine-a push-list                                          # one that exists
+```
+
+A push from a peer without it is refused before its body is read. The grant is
+**local on purpose**: a signed list that names `push-list` is refused as a whole
+(like an unknown grant), because who may hand a machine its next list is decided
+there, like the pinned signer. In `prefer` and `only`, where a listed machine
+replaces a hand-written principal of the same name, that one grant is carried
+across to the listed machine **when the key is the same**; if the list gives that
+machine a different key the grant lapses and `muster doctor` (row `machine-list`)
+says so. Grant it only after the machine runs a build that knows it, and revoke it
+before rolling back: an older build refuses a config that names a grant it does
+not know.
+
+**What a push is checked against**, in this order, refusing at the first failure
+and changing nothing:
+
+1. the caller's credential, then its `push-list` grant (no principal table: refused);
+2. that this machine uses a list at all, and in `prefer`/`only` has a state
+   directory to remember the highest sequence in;
+3. the size, at most 1 MiB;
+4. only then is the body read, and the list verified against the signer pinned
+   **here**: shape, signer, signature, fleet, grants;
+5. its `seq` must be **strictly higher** than the highest this machine has
+   accepted: the higher of the mark in the state directory and the list in force.
+   Equal is refused. Shadow records no mark, so there the list in force is the
+   floor.
+
+Then the list replaces the current one, **whether that was copied in by hand or
+not**: it is written beside the configured path and renamed over it (a crash never
+leaves half a list), and put in force by the same reload a changed file gets, with
+no restart. The answer is binary. `200` means the list is written **and** in force;
+anything else means nothing changed, on disk or in memory, and the reason is one of:
+
+| status | reason | meaning |
+|---|---|---|
+| 401 | | no credential, or the caller lacks `push-list` |
+| 501 | `machine-list-off` | this machine uses no list |
+| 501 | `machine-list-no-state-dir` | `prefer`/`only` need `FLEET_STATE_DIR` |
+| 400 | `machine-list-too-large` | over 1 MiB |
+| 400 | `machine-list-malformed` | not a list, or trailing content |
+| 400 | `machine-list-signer-not-pinned` | signed by a key not pinned here |
+| 400 | `machine-list-signature` | the signature does not verify |
+| 400 | `machine-list-other-fleet` | another fleet's list |
+| 400 | `machine-list-grant` | an unknown grant, or `push-list`, in the list |
+| 501 | `machine-list-unsupported` | names several signers |
+| 409 | `machine-list-not-newer` | `seq` is not higher than the highest accepted |
+| 501 | `machine-list-not-applied` | genuine, but this machine cannot put it in force now (a peer in it cannot be built; the sequence cannot be recorded, in which case the previous file is restored) |
+| 501 | `machine-list-not-writable` | the list's file cannot be written: the service must be able to write the directory the list lives in |
+
+A push can bring forward any genuine newer list, including one that no longer
+names the pusher or empties the peer set in `only`; that is the owner's signed
+decision. It cannot change the pinned signers, the mode or the path (those stay
+restart-only), and it never touches principals that are not machines. A list
+signed far ahead in `seq` raises the mark for good: that is the owner's
+signature, and the owner's to use sparingly.
+
 ### What is not here yet
 
-Several signers, several fleets in one list, handing the list from one peer to
-another over the service's own API (copy the file; the signature makes the channel
-irrelevant), and reloading without a restart.
+Several signers, several fleets in one list, and a service that hands its list on
+by itself (a push or a pull is a command someone runs).
 
 ## Test vector
 

@@ -1,10 +1,14 @@
 package machinelist
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -287,3 +291,81 @@ const (
 	vectorPayload   = `{"format":"muster-machine-list/1","fleet":"example-fleet","seq":1,"machines":[{"id":"machine-a","publicKey":"ed25519:0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc","addresses":["http://10.8.0.11:9000"],"grants":["read"]}],"issuers":[],"signers":["ed25519:iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w"]}`
 	vectorSignature = "c6xQZfPYQ_KaZCXa_IFNBg1NvdP94I-qL1AkrfaK0UFtrpN_kI4MCmK9UpPFirj4d8HVreFOU6JcPM1YXasKAQ"
 )
+
+// muster #352: a list handed over by a peer is installed atomically.
+
+func TestWriteFileIsAtomic(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "machines.json")
+	if err := os.WriteFile(path, []byte("old list\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// The last step fails: the destination is byte-identical and nothing is left.
+	real := rename
+	rename = func(oldpath, newpath string) error { return errors.New("injected: the rename failed") }
+	err := WriteFile(path, []byte("new list\n"))
+	rename = real
+	if err == nil {
+		t.Fatal("a failed rename was reported as success")
+	}
+	if got, _ := os.ReadFile(path); !bytes.Equal(got, []byte("old list\n")) {
+		t.Fatalf("the destination changed on a failed write: %q", got)
+	}
+	assertNoTemp(t, dir)
+
+	// And when it succeeds, the destination is exactly the bytes given.
+	if err := WriteFile(path, []byte("new list\n")); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(path); !bytes.Equal(got, []byte("new list\n")) {
+		t.Fatalf("destination = %q", got)
+	}
+	assertNoTemp(t, dir)
+	if runtime.GOOS != "windows" {
+		fi, _ := os.Stat(path)
+		if fi.Mode().Perm()&0o077 != 0 {
+			t.Errorf("mode %v: the list should be owner-only like everything else the service writes", fi.Mode().Perm())
+		}
+	}
+
+	// Into a path that did not exist yet.
+	fresh := filepath.Join(dir, "fresh.json")
+	if err := WriteFile(fresh, []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(fresh); string(got) != "x" {
+		t.Fatalf("fresh = %q", got)
+	}
+}
+
+func TestWriteFileIntoAnUnwritableDirectoryChangesNothing(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("directory permissions do not stop this user")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "machines.json")
+	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(dir, 0o700)
+	if err := WriteFile(path, []byte("new")); err == nil {
+		t.Fatal("writing into a read-only directory succeeded")
+	}
+	if got, _ := os.ReadFile(path); string(got) != "old" {
+		t.Fatalf("the destination changed: %q", got)
+	}
+}
+
+func assertNoTemp(t *testing.T, dir string) {
+	t.Helper()
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			t.Errorf("temporary file left behind: %s", e.Name())
+		}
+	}
+}

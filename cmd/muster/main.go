@@ -891,6 +891,10 @@ func main() {
 		// A live table, so a reload swaps it without rebuilding the mux (#347).
 		rl.table = service.NewPrincipalTable(principals)
 		svcCfg.Table = rl.table
+		// A peer may fetch the list in force and, holding push-list, hand over a
+		// newer one (muster #352). Only a service with a config file has the
+		// reloader that puts a list into force.
+		svcCfg.MachineList = machineListAPI{rl}
 		for _, p := range principals {
 			log.Printf("muster: principal %q grants=%v", p.Name, p.Grants)
 		}
@@ -1196,7 +1200,7 @@ func usageTop() string {
 		"       muster service install|status|uninstall  set up this binary as a per-user service (muster service -h)",
 		"       muster principal add|list|grant|revoke   enrol, list or re-grant clients (muster principal)",
 		"       muster key init|show|rotate     this machine's signing key for peers that authenticate by key (muster key -h)",
-		"       muster machine-list keygen|create|sign|verify|show   the owner-signed machine list (muster machine-list -h)",
+		"       muster machine-list keygen|create|sign|verify|show|push|fetch   the owner-signed machine list (muster machine-list -h)",
 		"       muster --version                print the build",
 		"       muster -h | --help              print this usage",
 		"",

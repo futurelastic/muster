@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/futurelastic/muster/internal/privfs"
+	"github.com/futurelastic/muster/internal/service"
 )
 
 const grantsFixture = `{
@@ -248,5 +249,19 @@ func TestTwoEditsInOneSecondKeepBothOriginals(t *testing.T) {
 	first, _ := os.ReadFile(p + ".20261009-053000.bak")
 	if string(first) != grantsFixture {
 		t.Errorf("the first original was overwritten:\n%s", first)
+	}
+}
+
+// muster #352: `muster service install` enrols the local service principal with
+// supervisorGrants, so a grant that lets a holder replace this machine's peer
+// table must never be in it, or every new install would hold it by default.
+func TestSupervisorGrantsNeverIncludePushList(t *testing.T) {
+	for _, g := range supervisorGrants() {
+		if g == service.GrantPushList {
+			t.Fatalf("supervisorGrants includes %s: every new `service install` would grant it by default", g)
+		}
+	}
+	if !service.ValidGrant(service.GrantPushList) {
+		t.Fatal("push-list is not a grant this build can configure")
 	}
 }
