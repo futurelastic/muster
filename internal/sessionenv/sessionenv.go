@@ -36,6 +36,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	fleet "github.com/futurelastic/muster"
@@ -122,8 +123,9 @@ type Entry struct {
 	// startup by Validate, not on every create, so a typo is a message an
 	// operator reads once, not a refusal every later caller meets.
 	Name string
-	// FromFile is an absolute path read fresh on every Provision. Never
-	// staged, logged, or placed in an argv.
+	// FromFile is an absolute path, by the host's own rule (filepath.IsAbs: a
+	// leading "/" on Unix, a drive or UNC root on Windows), read fresh on every
+	// Provision. Never staged, logged, or placed in an argv.
 	FromFile string
 	// FromSession is the other source (muster issue #326): the created
 	// session's own identity, SessionRef or SessionID. A tool running inside a
@@ -184,7 +186,10 @@ func Validate(entries []Entry, knownRuntimes []fleet.RuntimeId) error {
 				return fmt.Errorf("sessionEnv: %q's fromSession %q must be %q or %q",
 					e.Name, e.FromSession, SessionRef, SessionID)
 			}
-		case !strings.HasPrefix(e.FromFile, "/"):
+		case !filepath.IsAbs(e.FromFile):
+			// The host's rule, not a leading "/": a Windows path has no such
+			// prefix, so the Unix-only test refused every fromFile there
+			// (muster issue #386). A relative path is refused on every host.
 			return fmt.Errorf("sessionEnv: %q's fromFile %q must be an absolute path", e.Name, e.FromFile)
 		}
 		// Two entries for the same name would leave "which one wins"

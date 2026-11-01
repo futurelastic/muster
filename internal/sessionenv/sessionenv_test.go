@@ -20,7 +20,7 @@ func writeValue(t *testing.T, content string) string {
 }
 
 func TestValidate(t *testing.T) {
-	good := Entry{Name: "FLEET_X", FromFile: "/etc/x"}
+	good := Entry{Name: "FLEET_X", FromFile: writeValue(t, "x")}
 	for name, c := range map[string]struct {
 		in      []Entry
 		wantErr bool
@@ -33,6 +33,25 @@ func TestValidate(t *testing.T) {
 	} {
 		if err := Validate(c.in, nil); (err != nil) != c.wantErr {
 			t.Errorf("%s: err = %v, wantErr %v", name, err, c.wantErr)
+		}
+	}
+}
+
+// #386: fromFile is absolute by the host's own rule (filepath.IsAbs), not by a
+// leading "/": a Windows drive path has none, and the Unix-only test refused
+// every fromFile on that platform. A relative path is refused everywhere, with
+// the same message. The Windows-specific cases live in cmd/muster, which is in
+// the Windows gate; this package is not (scripts/gate-windows.sh).
+func TestValidateFromFileFollowsTheHostsAbsoluteRule(t *testing.T) {
+	abs := writeValue(t, "x") // under t.TempDir(): absolute in whichever form this host writes
+	if err := Validate([]Entry{{Name: "A", FromFile: abs}}, nil); err != nil {
+		t.Errorf("an absolute path on this host was refused: %v", err)
+	}
+	sep := string(filepath.Separator)
+	for _, rel := range []string{"x", "." + sep + "x", ".." + sep + "x", filepath.Join("sub", "x")} {
+		err := Validate([]Entry{{Name: "A", FromFile: rel}}, nil)
+		if err == nil || !strings.Contains(err.Error(), "must be an absolute path") {
+			t.Errorf("relative %q: err = %v, want the absolute-path refusal", rel, err)
 		}
 	}
 }
