@@ -6,8 +6,8 @@
 //   node publish.mjs keygen                               make a signing key: the SEED on stdout, the PUBLIC key on stderr
 //
 // WHAT IS PUBLISHED. The four unix binaries scripts/build-release.sh writes
-// (muster-<tag>-<os>-<arch>), and nothing else: the Windows binaries stay on npm's side of the line until the
-// Windows package work lands. The host's folder for the release is the version without its "v"; the files keep the
+// (muster-<tag>-<os>-<arch>), and nothing else: the Windows binaries are published to npm (#309), and stay on npm's
+// side of the line. The host's folder for the release is the version without its "v"; the files keep the
 // build script's names, so `sha256sum -c SHA256SUMS` run next to a download verifies it with nobody renaming anything.
 //
 // THE PROTOCOL (the host's "repos publish from CI" contract; this file is the only caller in this repo):

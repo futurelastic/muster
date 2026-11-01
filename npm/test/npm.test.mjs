@@ -29,30 +29,55 @@ test('version comes from the tag; prereleases go to next', () => {
   assert.equal(distTag('1.2.3-rc.1'), 'next');
 });
 
-test('a normal release is the four published platforms, and nothing for windows', () => {
+test('a normal release is the six platforms and the launcher, windows included', () => {
   const out = mkdtempSync(join(tmpdir(), 'muster-npm-'));
-  const { order } = assemble(fakeBinaries('v1.0.0'), 'v1.0.0', out);
+  const { order, skipped } = assemble(fakeBinaries('v1.0.0'), 'v1.0.0', out);
+  assert.deepEqual(order, [
+    '@futurelastic/muster-darwin-arm64', '@futurelastic/muster-darwin-x64',
+    '@futurelastic/muster-linux-x64', '@futurelastic/muster-linux-arm64',
+    '@futurelastic/muster-win32-x64', '@futurelastic/muster-win32-arm64',
+    '@futurelastic/muster',
+  ]);
+  assert.deepEqual(skipped, []);
+  assert.equal(readFileSync(join(out, 'PUBLISH_ORDER'), 'utf8').split('\n').filter(Boolean).at(-1), 'muster', 'the launcher is still published last');
+  const m = require(join(out, 'muster', 'package.json'));
+  assert.deepEqual(Object.keys(m.optionalDependencies).filter((n) => n.includes('win32')).sort(),
+    ['@futurelastic/muster-win32-arm64', '@futurelastic/muster-win32-x64']);
+});
+
+// #316: build-release.sh skips a windows target the tagged source cannot build, so a
+// release of a tag cut before the Windows work carries no windows binary. It must
+// still publish, and the launcher it publishes must not claim a package that does
+// not exist at that version.
+test('a source that predates windows still releases, without the windows packages', () => {
+  const dir = fakeBinaries('v1.0.0');
+  for (const p of PLATFORMS.filter((x) => x.optional)) rmSync(join(dir, `muster-v1.0.0-${p.goos}-${p.goarch}${p.ext}`));
+  const out = mkdtempSync(join(tmpdir(), 'muster-npm-'));
+  const { order, skipped } = assemble(dir, 'v1.0.0', out);
   assert.deepEqual(order, [
     '@futurelastic/muster-darwin-arm64', '@futurelastic/muster-darwin-x64',
     '@futurelastic/muster-linux-x64', '@futurelastic/muster-linux-arm64',
     '@futurelastic/muster',
   ]);
+  assert.deepEqual(skipped, ['win32-x64', 'win32-arm64']);
   assert.equal(existsSync(join(out, 'muster-win32-x64')), false, 'windows is not assembled');
   assert.equal(readFileSync(join(out, 'PUBLISH_ORDER'), 'utf8').includes('win32'), false);
   const m = require(join(out, 'muster', 'package.json'));
   assert.equal(Object.keys(m.optionalDependencies).some((n) => n.includes('win32')), false);
-});
-
-test('a normal release does not need the windows binaries to exist', () => {
-  const dir = fakeBinaries('v1.0.0');
-  for (const p of PLATFORMS.filter((x) => !x.published)) rmSync(join(dir, `muster-v1.0.0-${p.goos}-${p.goarch}${p.ext}`));
-  assert.doesNotThrow(() => assemble(dir, 'v1.0.0', mkdtempSync(join(tmpdir(), 'muster-npm-'))));
+  // --all is the strict mode the Windows end-to-end job uses: a windows build that
+  // broke on trunk must fail there, not be skipped.
   assert.throws(() => assemble(dir, 'v1.0.0', mkdtempSync(join(tmpdir(), 'muster-npm-')), { all: true }), /missing binary .*windows-amd64\.exe/);
 });
 
-test('--all assembles win32 with muster.exe, pinned and named by process.platform', () => {
+test('a missing unix binary is an error, never a skip', () => {
+  const dir = fakeBinaries('v1.0.0');
+  rmSync(join(dir, 'muster-v1.0.0-linux-arm64'));
+  assert.throws(() => assemble(dir, 'v1.0.0', mkdtempSync(join(tmpdir(), 'muster-npm-'))), /missing binary .*linux-arm64/);
+});
+
+test('win32 is assembled with muster.exe, pinned and named by process.platform', () => {
   const out = mkdtempSync(join(tmpdir(), 'muster-npm-'));
-  const { order } = assemble(fakeBinaries('v2.0.0'), 'v2.0.0', out, { all: true });
+  const { order } = assemble(fakeBinaries('v2.0.0'), 'v2.0.0', out);
   assert.equal(order.at(-1), '@futurelastic/muster', 'launcher is still published last');
   assert.equal(order.length, 7);
   for (const cpu of ['x64', 'arm64']) {
@@ -71,18 +96,27 @@ test('--all assembles win32 with muster.exe, pinned and named by process.platfor
   assert.equal(m.optionalDependencies['@futurelastic/muster-win32-arm64'], '2.0.0');
 });
 
+test('--all assembles the same seven packages a release does', () => {
+  const dir = fakeBinaries('v2.0.0');
+  const a = assemble(dir, 'v2.0.0', mkdtempSync(join(tmpdir(), 'muster-npm-')));
+  const b = assemble(dir, 'v2.0.0', mkdtempSync(join(tmpdir(), 'muster-npm-')), { all: true });
+  assert.deepEqual(b.order, a.order);
+});
+
 test('every package packs exactly its allowlist', () => {
   const out = mkdtempSync(join(tmpdir(), 'muster-npm-'));
   const { order } = assemble(fakeBinaries('v9.9.9-rc.1'), 'v9.9.9-rc.1', out);
   assert.equal(order.at(-1), '@futurelastic/muster', 'launcher is published last');
-  assert.equal(order.length, 5);
+  assert.equal(order.length, 7);
   for (const name of order) {
     const dir = join(out, name.replace('@futurelastic/', ''));
     const [info] = JSON.parse(execFileSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], { cwd: dir, encoding: 'utf8' }));
     const files = info.files.map((f) => f.path).sort();
     const want = name === '@futurelastic/muster'
       ? ['LICENSE', 'README.md', 'bin/muster.js', 'package.json']
-      : ['LICENSE', 'README.md', 'bin/muster', 'package.json'];
+      : name.includes('-win32-')
+        ? ['LICENSE', 'README.md', 'bin/muster.exe', 'package.json']
+        : ['LICENSE', 'README.md', 'bin/muster', 'package.json'];
     assert.deepEqual(files, want, name);
   }
 });
@@ -95,6 +129,7 @@ test('launcher pins every platform package to its own exact version', () => {
   assert.deepEqual(Object.keys(m.optionalDependencies).sort(), [
     '@futurelastic/muster-darwin-arm64', '@futurelastic/muster-darwin-x64',
     '@futurelastic/muster-linux-arm64', '@futurelastic/muster-linux-x64',
+    '@futurelastic/muster-win32-arm64', '@futurelastic/muster-win32-x64',
   ]);
   for (const v of Object.values(m.optionalDependencies)) assert.equal(v, '1.4.0');
   assert.equal(m.scripts, undefined, 'no install scripts');
@@ -131,7 +166,7 @@ test('resolveBinary: win32 resolves to bin/muster.exe, and only where the launch
   };
   const listed = { '@futurelastic/muster-win32-x64': '1.0.0' };
   assert.equal(resolveBinary('win32', 'x64', resolve, '1.0.0', listed), join(pkg, 'bin', 'muster.exe'));
-  // A launcher assembled without --all does not list win32, so it does not claim it.
+  // A launcher assembled from a source that predates windows does not list win32, so it does not claim it.
   assert.throws(() => resolveBinary('win32', 'x64', resolve, '1.0.0', { '@futurelastic/muster-linux-x64': '1.0.0' }), /no prebuilt binary for win32-x64/);
   assert.deepEqual(supportedFrom({ '@futurelastic/muster-win32-arm64': '1', '@futurelastic/muster-win32-x64': '1', other: '1' }), ['win32-arm64', 'win32-x64']);
 });
