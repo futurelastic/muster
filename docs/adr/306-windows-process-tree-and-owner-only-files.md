@@ -87,7 +87,8 @@ list — never a pass it did not earn.
   away, and a list that cannot be read refuses the module. The modules
   directory itself is still the install's job.
 - The Windows CI job runs an allowlist (`scripts/gate-windows.sh`: procgroup,
-  privfs, the subprocess driver, modclient, state, and `cmd/muster` since #311),
+  privfs, the subprocess driver, modclient, state, `cmd/muster` since #311, and
+  `internal/sessionenv` since #387),
   prints every skip, and fails if a named must-run test did not PASS. Widening
   it further is a follow-up. In `cmd/muster` the tests that cover a Unix tool
   (the shell installer scripts, the git hook row, the inbox route the tmux
