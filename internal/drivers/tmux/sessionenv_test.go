@@ -411,6 +411,36 @@ func TestAppliesToRuntimesWithholdsFromAnotherRuntimesSessions(t *testing.T) {
 	}
 }
 
+// #365: the same variable name may be declared once per runtime. The driver
+// delivers the entry scoped to its own runtime and never reads the other's,
+// whichever order the file lists them in.
+func TestSameNameOnDisjointRuntimesDeliversThisRuntimesValue(t *testing.T) {
+	dir := t.TempDir()
+	mine := filepath.Join(dir, "mine")
+	writeFile(t, mine, "this-runtimes-token")
+	theirs := filepath.Join(dir, "theirs-absent") // required and unreadable: reading it would refuse the create
+
+	entries := []SessionEnvEntry{
+		{Name: "GH_TOKEN", FromFile: mine, Required: true,
+			AppliesTo: SessionEnvScope{Runtimes: []string{string(DefaultRuntime)}}},
+		{Name: "GH_TOKEN", FromFile: theirs, Required: true,
+			AppliesTo: SessionEnvScope{Runtimes: []string{"opencode"}}},
+	}
+	if err := ValidateSessionEnv(entries, DefaultRuntime, "opencode"); err != nil {
+		t.Fatalf("a disjoint pair was refused at startup: %v", err)
+	}
+	for _, order := range [][]SessionEnvEntry{entries, {entries[1], entries[0]}} {
+		d := New("testbox", WithSessionEnv(order))
+		got, err := d.provisionSessionEnv(fleet.SessionSpec{Cwd: "/work/x", Runtime: "opencode"}, "")
+		if err != nil {
+			t.Fatalf("provisionSessionEnv: %v", err)
+		}
+		if got["GH_TOKEN"] != "this-runtimes-token" {
+			t.Errorf("GH_TOKEN = %q, want this runtime's own value", got["GH_TOKEN"])
+		}
+	}
+}
+
 // --- the staging-format bound, attributed to the right party -------------
 
 // A configured value the staging format cannot carry is this machine's

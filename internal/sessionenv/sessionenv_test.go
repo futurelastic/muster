@@ -301,3 +301,196 @@ func TestCheckSessionSource(t *testing.T) {
 		t.Errorf("an entry scoped elsewhere refused: %v", err)
 	}
 }
+
+// #365: one variable name may carry a different source per runtime — but only
+// when the configuration alone proves no session can match both entries.
+func TestValidateSameNameNeedsDisjointRuntimeLists(t *testing.T) {
+	at := func(ids ...string) Entry {
+		return Entry{Name: "GH_TOKEN", FromFile: "/etc/" + strings.Join(ids, "-"), AppliesTo: Scope{Runtimes: ids}}
+	}
+	withAgents := func(e Entry, agents ...string) Entry {
+		e.AppliesTo.Agents = agents
+		return e
+	}
+	const dup = `sessionEnv: "GH_TOKEN" is declared more than once`
+
+	for name, c := range map[string]struct {
+		in      []Entry
+		wantErr bool
+	}{
+		"disjoint, one runtime each":      {[]Entry{at("alpha"), at("beta")}, false},
+		"disjoint, several each":          {[]Entry{at("alpha", "beta"), at("gamma", "delta")}, false},
+		"three, pairwise disjoint":        {[]Entry{at("alpha"), at("beta"), at("gamma")}, false},
+		"disjoint, agents on one":         {[]Entry{withAgents(at("alpha"), "sid"), at("beta")}, false},
+		"disjoint, agents on both":        {[]Entry{withAgents(at("alpha"), "sid"), withAgents(at("beta"), "sid")}, false},
+		"one runtime shared":              {[]Entry{at("alpha", "beta"), at("beta", "gamma")}, true},
+		"identical scope":                 {[]Entry{at("alpha"), at("alpha")}, true},
+		"third overlaps the first":        {[]Entry{at("alpha"), at("beta"), at("alpha", "gamma")}, true},
+		"first unscoped":                  {[]Entry{{Name: "GH_TOKEN", FromFile: "/etc/x"}, at("beta")}, true},
+		"second unscoped":                 {[]Entry{at("alpha"), {Name: "GH_TOKEN", FromFile: "/etc/x"}}, true},
+		"both unscoped":                   {[]Entry{{Name: "GH_TOKEN", FromFile: "/etc/x"}, {Name: "GH_TOKEN", FromFile: "/etc/y"}}, true},
+		"agents alone separate them":      {[]Entry{{Name: "GH_TOKEN", FromFile: "/etc/x", AppliesTo: Scope{Agents: []string{"sid"}}}, {Name: "GH_TOKEN", FromFile: "/etc/y", AppliesTo: Scope{Agents: []string{"may"}}}}, true},
+		"markers alone separate them":     {[]Entry{{Name: "GH_TOKEN", FromFile: "/etc/x", AppliesTo: Scope{Markers: []string{"a"}}}, {Name: "GH_TOKEN", FromFile: "/etc/y", AppliesTo: Scope{Markers: []string{"b"}}}}, true},
+		"agents differ, runtime shared":   {[]Entry{withAgents(at("alpha"), "sid"), withAgents(at("alpha"), "may")}, true},
+		"agents scoped vs runtime scoped": {[]Entry{{Name: "GH_TOKEN", FromFile: "/etc/x", AppliesTo: Scope{Agents: []string{"sid"}}}, at("beta")}, true},
+	} {
+		err := Validate(c.in, nil)
+		if (err != nil) != c.wantErr {
+			t.Errorf("%s: err = %v, wantErr %v", name, err, c.wantErr)
+			continue
+		}
+		if err != nil && err.Error() != dup {
+			t.Errorf("%s: err = %q, want today's message %q", name, err, dup)
+		}
+		// The verdict never depends on how the file happens to list the entries.
+		rev := make([]Entry, len(c.in))
+		for i, e := range c.in {
+			rev[len(c.in)-1-i] = e
+		}
+		if errRev := Validate(rev, nil); (errRev != nil) != c.wantErr {
+			t.Errorf("%s: reversed order err = %v, wantErr %v", name, errRev, c.wantErr)
+		}
+	}
+}
+
+// Only the same NAME is constrained: different names never meet the rule.
+func TestValidateDifferentNamesIgnoreRuntimeOverlap(t *testing.T) {
+	in := []Entry{
+		{Name: "A", FromFile: "/etc/a", AppliesTo: Scope{Runtimes: []string{"alpha"}}},
+		{Name: "B", FromFile: "/etc/b", AppliesTo: Scope{Runtimes: []string{"alpha"}}},
+		{Name: "C", FromFile: "/etc/c"},
+	}
+	if err := Validate(in, nil); err != nil {
+		t.Errorf("distinct names refused: %v", err)
+	}
+}
+
+// The runtime ids of a duplicate pair are still checked against the known set.
+func TestValidateSameNameRuntimeIdsStillCheckedAgainstTheKnownSet(t *testing.T) {
+	known := []fleet.RuntimeId{"alpha", "beta"}
+	in := []Entry{
+		{Name: "K", FromFile: "/etc/a", AppliesTo: Scope{Runtimes: []string{"alpha"}}},
+		{Name: "K", FromFile: "/etc/g", AppliesTo: Scope{Runtimes: []string{"gamma"}}},
+	}
+	err := Validate(in, known)
+	if err == nil || !strings.Contains(err.Error(), `"gamma"`) {
+		t.Errorf("an unknown id in a duplicate pair = %v, want it named", err)
+	}
+	in[1].AppliesTo.Runtimes = []string{"beta"}
+	if err := Validate(in, known); err != nil {
+		t.Errorf("known disjoint pair refused: %v", err)
+	}
+}
+
+// The acceptance rule is only worth having if it is sound: whatever pair
+// Validate lets through, no session — on any runtime, with any agent or marker,
+// including the runtime-unknown "" — is in scope of both. Enumerates every pair
+// of scopes over a small universe rather than sampling it.
+func TestValidateAcceptedDuplicatesNeverBothMatchASession(t *testing.T) {
+	universe := []string{"a", "b", "c"}
+	var subsets [][]string // every subset of the universe, the empty one included
+	for mask := 0; mask < 1<<len(universe); mask++ {
+		var s []string
+		for i, id := range universe {
+			if mask&(1<<i) != 0 {
+				s = append(s, id)
+			}
+		}
+		subsets = append(subsets, s)
+	}
+	otherAxes := []Scope{{}, {Agents: []string{"x"}}, {Markers: []string{"m"}}, {Agents: []string{"x"}, Markers: []string{"m"}}}
+	runtimes := []fleet.RuntimeId{"a", "b", "c", "d", ""}
+	specs := []fleet.SessionSpec{{}, {Agent: "x"}, {Marker: "m"}, {Agent: "x", Marker: "m"}, {Agent: "y"}}
+
+	accepted := 0
+	for _, ra := range subsets {
+		for _, rb := range subsets {
+			for _, xa := range otherAxes {
+				for _, xb := range otherAxes {
+					sa, sb := xa, xb
+					sa.Runtimes, sb.Runtimes = ra, rb
+					ea := Entry{Name: "K", FromFile: "/etc/a", AppliesTo: sa}
+					eb := Entry{Name: "K", FromFile: "/etc/b", AppliesTo: sb}
+
+					// The rule as the issue states it, written independently of
+					// the implementation.
+					shared := false
+					for _, x := range ra {
+						for _, y := range rb {
+							shared = shared || x == y
+						}
+					}
+					want := len(ra) > 0 && len(rb) > 0 && !shared
+					got := Validate([]Entry{ea, eb}, nil) == nil
+					if got != want {
+						t.Fatalf("runtimes %v vs %v (axes %+v / %+v): accepted = %v, want %v", ra, rb, xa, xb, got, want)
+					}
+					if !got {
+						continue
+					}
+					accepted++
+					for _, rt := range runtimes {
+						for _, spec := range specs {
+							if sa.Matches(rt, spec) && sb.Matches(rt, spec) {
+								t.Fatalf("accepted pair %v / %v both match runtime %q spec %+v", ra, rb, rt, spec)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	if accepted == 0 {
+		t.Fatal("the enumeration never reached the accepting case; the test proves nothing")
+	}
+}
+
+// #365: a session on each runtime gets its own value for the shared name, never
+// the other's, and never reads the other's file.
+func TestProvisionGivesEachRuntimeItsOwnValueForASharedName(t *testing.T) {
+	alphaFile := writeValue(t, "alpha-secret\n")
+	betaFile := writeValue(t, "beta-secret\n")
+	entries := []Entry{
+		{Name: "GH_TOKEN", FromFile: alphaFile, Required: true, AppliesTo: Scope{Runtimes: []string{"alpha"}}},
+		{Name: "GH_TOKEN", FromFile: betaFile, Required: true, AppliesTo: Scope{Runtimes: []string{"beta"}}},
+	}
+	if err := Validate(entries, nil); err != nil {
+		t.Fatalf("disjoint pair refused: %v", err)
+	}
+	reversed := []Entry{entries[1], entries[0]}
+
+	for _, set := range [][]Entry{entries, reversed} {
+		for rt, want := range map[fleet.RuntimeId]string{"alpha": "alpha-secret", "beta": "beta-secret"} {
+			got, err := Provision(set, fleet.SessionSpec{Cwd: "/w"}, "m", rt, "", nil)
+			if err != nil || got["GH_TOKEN"] != want {
+				t.Errorf("runtime %s: GH_TOKEN = %q, %v; want %q", rt, got["GH_TOKEN"], err, want)
+			}
+		}
+		// A runtime neither entry names gets neither, and — the entries being
+		// required — a caller's own value for the name is not refused there.
+		got, err := Provision(set, fleet.SessionSpec{Env: map[string]string{"GH_TOKEN": "callers"}}, "m", "gamma", "", nil)
+		if err != nil || got["GH_TOKEN"] != "callers" {
+			t.Errorf("unlisted runtime: %v, %v; want the caller's value untouched", got, err)
+		}
+		got, err = Provision(set, fleet.SessionSpec{}, "m", "gamma", "", nil)
+		if err != nil || len(got) != 0 {
+			t.Errorf("unlisted runtime: %v, %v; want nothing delivered", got, err)
+		}
+		// The runtime the driver serves decides, not the caller's hint.
+		got, err = Provision(set, fleet.SessionSpec{Runtime: "beta"}, "m", "alpha", "", nil)
+		if err != nil || got["GH_TOKEN"] != "alpha-secret" {
+			t.Errorf("a hint naming the other runtime changed the credential: %v, %v", got, err)
+		}
+	}
+
+	// The other runtime's entry is out of scope, so it is not read either: its
+	// missing file refuses only the runtime that owns it.
+	broken := []Entry{entries[0], {Name: "GH_TOKEN", FromFile: "/nonexistent/beta", Required: true, AppliesTo: Scope{Runtimes: []string{"beta"}}}}
+	if got, err := Provision(broken, fleet.SessionSpec{}, "m", "alpha", "", nil); err != nil || got["GH_TOKEN"] != "alpha-secret" {
+		t.Errorf("alpha session met beta's missing file: %v, %v", got, err)
+	}
+	var fe *fleet.Error
+	if _, err := Provision(broken, fleet.SessionSpec{}, "m", "beta", "", nil); !errors.As(err, &fe) || fe.Kind != fleet.ErrorUnsupported {
+		t.Errorf("beta session with its own file missing = %v, want ErrorUnsupported", err)
+	}
+}

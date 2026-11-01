@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -433,6 +434,32 @@ func TestIsolation_SessionEnvIsScopedByRuntime(t *testing.T) {
 	}
 	if vars["FOR_EVERY_RUNTIME"] != "v1" {
 		t.Errorf("an unscoped entry = %q, want it on every runtime", vars["FOR_EVERY_RUNTIME"])
+	}
+}
+
+// #365: the same variable name declared once per runtime. A session on this
+// runtime holds this runtime's value — in its real process environment — and
+// the other runtime's entry is neither delivered nor read, in either file order.
+func TestIsolation_SameNameOnDisjointRuntimesGivesThisRuntimeItsOwnValue(t *testing.T) {
+	mine := filepath.Join(t.TempDir(), "mine")
+	if err := os.WriteFile(mine, []byte("narrow-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entries := []sessionenv.Entry{
+		{Name: "GH_TOKEN", FromFile: mine, Required: true,
+			AppliesTo: sessionenv.Scope{Runtimes: []string{string(DefaultRuntime)}}},
+		{Name: "GH_TOKEN", FromFile: filepath.Join(t.TempDir(), "broad-absent"), Required: true,
+			AppliesTo: sessionenv.Scope{Runtimes: []string{"claude-code-tmux"}}},
+	}
+	if err := sessionenv.Validate(entries, nil); err != nil {
+		t.Fatalf("a disjoint pair was refused at startup: %v", err)
+	}
+	for i, order := range [][]sessionenv.Entry{entries, {entries[1], entries[0]}} {
+		d, _ := newIsolatedDriver(t, WithSessionEnv(order))
+		sess := mustCreate(t, d, "same-name-"+strconv.Itoa(i), fleet.SessionSpec{})
+		if got := inside(t, d, sess.ID).vars()["GH_TOKEN"]; got != "narrow-token" {
+			t.Errorf("order %d: GH_TOKEN = %q, want this runtime's own value", i, got)
+		}
 	}
 }
 
