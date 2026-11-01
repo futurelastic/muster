@@ -153,6 +153,7 @@ GET /v1/runtimes
                                                     "denies": ["files", "unixSockets", "systemServices"],
                                                     "network": ["open", "closed"],
                                                     "packageCache": ["shared", "private"] },  ← absent where cannot
+                                       "sandboxUnavailable": "…",   ← why it is absent, where it could in principle be offered (#345)
                                        "supportsPin": { "model": true,
                                                         "effort": false,
                                                         "agent": true },
@@ -782,8 +783,12 @@ always implies a confined session** (`permissionMode: "bypass"` inside the sandb
 the `files` and `network` asked for on top): a prompt-free session that can read the whole user
 account is the posture this field exists to prevent, so a runtime without a sandbox refuses it;
 `permissionMode: "bypass"` stays for a caller that really wants prompt-free and unconfined. And
-the terminal runtime, whose sessions run in the user's own multiplexer, declares no sandbox, so it
-enforces only an empty or `attended` posture and refuses the rest. A peer that has not been
+the terminal runtime, whose sessions run in the user's own multiplexer, declares a sandbox **only
+on a host where its agent CLI was measured to start and authenticate inside the profile** (muster
+#345; session-abstraction.md §4.3): the multiplexer's server stays outside the profile and only the
+agent program inside the pane is wrapped. On any other host it enforces only an empty or `attended`
+posture and refuses the rest, and the refusal carries the reason the measurement failed
+(`sandboxUnavailable` on that runtime's capabilities). A peer that has not been
 reached is not refused locally: the lowered fields are forwarded and the peer's own refusals
 apply. `posture` is **mutually exclusive** with the three fields it replaces (`400`); a malformed
 one (a relative or unclean path, a writable shared temporary directory, an unknown value) is `400`

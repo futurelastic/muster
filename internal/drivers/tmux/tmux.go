@@ -338,10 +338,24 @@ type Driver struct {
 	// a session runs, and reports nothing about it (agentprogram.go).
 	agentProgram string
 	agentProbe   agentProbeCache
-	shell        string
-	bareExec     bool
-	run          execFunc
-	dial         ctlDialer
+
+	// muster #345: the sandbox this driver can put an agent in. sandboxCfg is
+	// nil unless the composition root enabled it (WithSandbox); whether it is
+	// then OFFERED is the host's answer, measured and cached in sandboxMeasured.
+	// sandboxHost is the host probe, a field so a test needs no real host.
+	// sandboxStates is what each live sandboxed session runs under, filled by
+	// Create and, after a restart, from each session's report file.
+	sandboxCfg      *SandboxOptions
+	sandboxHost     func() (*fleet.SandboxSupport, string)
+	sandboxGo       func(func()) // runs a background refresh; nil means a goroutine
+	sandboxMeasured sandboxMeasurement
+	sandboxMu       sync.Mutex
+	sandboxStates   map[string]*fleet.SandboxState
+	sandboxSwept    time.Time
+	shell           string
+	bareExec        bool
+	run             execFunc
+	dial            ctlDialer
 	// settleDelays overrides defaultSettleDelays for the event stream; tests only.
 	settleDelays []time.Duration
 
@@ -993,6 +1007,7 @@ func noServerRunning(err error) bool {
 // not handed — the audit trail §6 requires is only worth having if nothing
 // in the chain manufactures an actor.
 func (d *Driver) Capabilities() fleet.DriverCapabilities {
+	sandboxSup, sandboxWhy := d.sandboxSupportNow()
 	return fleet.DriverCapabilities{
 		ObservesState:   false,
 		DeliversRawKeys: true,
@@ -1010,8 +1025,13 @@ func (d *Driver) Capabilities() fleet.DriverCapabilities {
 		// muster #329: every mode the CLI's --permission-mode takes, plus
 		// bypass (launched as --dangerously-skip-permissions).
 		CreatePermissionModes: fleet.CreatePermissionModes(),
-		ReportsUsage:          true, // muster #285: from the runtime's own record
-		ReportsContext:        true, // muster #313: the newest request's figures, same record
+		// muster #345: declared only where the agent CLI was measured to start
+		// and authenticate under the profile on this host (sandbox.go); nil, with
+		// the reason, anywhere else — and always nil on a driver nobody enabled it on.
+		Sandbox:            sandboxSup,
+		SandboxUnavailable: sandboxWhy,
+		ReportsUsage:       true, // muster #285: from the runtime's own record
+		ReportsContext:     true, // muster #313: the newest request's figures, same record
 		// muster #301: true only once WithProcessAgent is wired, so an absent
 		// Session.Agent is answerable per machine rather than assumed.
 		ReportsAgent: d.agentFromProcess,
@@ -1730,6 +1750,7 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 	// right after this List) is how its captured exit reaches the history
 	// record instead.
 	rows = d.reapDeadRows(ctx, rows, captures)
+	d.sweepSandbox(rows) // muster #345: private directories nobody owns any more
 
 	// A pane can have vanished between the listing and the capture (see
 	// enumerate's own comment and #29): that row survives — it is still a
@@ -1808,6 +1829,7 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 		raw, digest := classifyCaptureRemembering(c, captured, !r.dead, young, d.memoryLocked(r.session), now)
 		st, carried := d.stampSinceLocked(r.session, raw, now, captured)
 		st.CredentialGeneration = gen
+		st.Sandbox = d.sandboxStateFor(r.session) // muster #345: nil unless this session is confined
 		// Published so a caller can quote it back on a raw key (keys.go). It
 		// is already computed for the classifier's own use; empty when the
 		// capture failed, which correctly leaves that session unkeyable rather
@@ -2357,6 +2379,7 @@ func (d *Driver) State(ctx context.Context, req fleet.Request, ref fleet.Session
 		// lookup.
 		st = d.upgradeTurnsFromRecord(ctx, st, r.cwd, r.session, r.created, r.paneID, r.pid)
 		st = d.upgradeUsageFromRecord(ctx, st, r.cwd, r.session, r.created, r.paneID, r.pid) // muster #285
+		st.Sandbox = d.sandboxStateFor(r.session)                                            // muster #345
 		// Same rewrite List applies, generalised to a one-session read (#10)
 		// — see quotaBlockedState's own comment for why a session's own
 		// state must not be reported as an unqualified "starting"/"idle"/
@@ -4651,6 +4674,8 @@ func (d *Driver) killCorroborated(ctx context.Context, ref fleet.SessionRef) (fl
 	// above is the authority; a failure here never blocks it and is retried
 	// when the module is next ready.
 	d.mods.closeLane(ref.ID)
+	// muster #345: a destroyed session's private directory has no reader left.
+	d.dropSandbox(ref.ID)
 	return fleet.Ack{Accepted: true}, nil
 }
 
@@ -4819,16 +4844,18 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 			Machine: d.machine,
 		}
 	}
-	// muster #281: this driver starts sessions through the user's multiplexer,
-	// whose server socket is the very thing a sandbox must keep a session away
-	// from, so it cannot confine one. Refused before any side effect.
+	// muster #281, #345: this driver starts sessions through the user's
+	// multiplexer, whose server socket is the very thing a sandbox must keep a
+	// session away from. The server stays outside; what can be confined is the
+	// agent program inside the pane, and only on a host where that was measured
+	// to work (sandbox.go). Refused before any side effect whenever it cannot.
+	sandboxProg := ""
 	if spec.Sandbox != nil {
-		return fleet.Session{}, &fleet.Error{
-			Kind: fleet.ErrorUnsupported,
-			Message: "create: this driver cannot enforce a sandbox (its sessions run in the user's own multiplexer, " +
-				"outside any profile this service could apply); refusing rather than start the session unconfined",
-			Machine: d.machine,
+		prog, err := d.sandboxGate(ctx, spec)
+		if err != nil {
+			return fleet.Session{}, err
 		}
+		sandboxProg = prog
 	}
 	// A completed key returns what it produced; a pending one means this
 	// driver was interrupted mid-create and must find out what happened
@@ -5078,6 +5105,23 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 	built := spec
 	built.Name = name
 	argv := d.build(built, contextFile)
+	// muster #345: confine the agent. Wrapped BEFORE the login shell, so the
+	// shell (which only reads the startup files, enters the directory and execs)
+	// stays outside and everything the agent starts is inside.
+	sandboxOK := false
+	if spec.Sandbox != nil {
+		wrapped, drop, err := d.prepareSandbox(spec, name, sandboxProg, argv)
+		if err != nil {
+			_ = d.idem.release(key)
+			return fleet.Session{}, err
+		}
+		argv = wrapped
+		defer func() {
+			if !sandboxOK {
+				drop()
+			}
+		}()
+	}
 
 	// Wrap the agent in a login+interactive shell so it inherits the same
 	// environment a launcher-created session does, and stage a record of what
@@ -5134,6 +5178,7 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 		}
 		return fleet.Session{}, fmt.Errorf("create: %w", err)
 	}
+	sandboxOK = true
 	// The server may be new; do not let a health read keep reporting "no
 	// server" for the rest of the cache window (muster #336).
 	d.forgetServerContext()

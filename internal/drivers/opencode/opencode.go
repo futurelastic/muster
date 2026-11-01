@@ -356,6 +356,14 @@ func WithSessionRoot(dir string) Option { return func(d *Driver) { d.sessionRoot
 // home (checked at New).
 func WithRuntimePath(dirs []string) Option { return func(d *Driver) { d.runtimePath = dirs } }
 
+// sandboxUnavailable is the reason Sandbox is absent, or empty when it is present.
+func (d *Driver) sandboxUnavailable() string {
+	if d.sandbox != nil {
+		return ""
+	}
+	return d.sandboxWhy
+}
+
 // WithSandboxReadPaths adds directories every sandboxed session may read, ahead
 // of what a create asks for: the interpreter or shared package cache a runtime
 // needs that lives somewhere the default profile does not reach (muster #281).
@@ -629,6 +637,8 @@ func (d *Driver) Capabilities() fleet.DriverCapabilities {
 		// system services together (sandbox.go) — a capability absent, never a
 		// weaker profile under the same name.
 		Sandbox: d.sandbox,
+		// And the reason, so a posture refusal can say why (muster #345).
+		SandboxUnavailable: d.sandboxUnavailable(),
 		// muster #283: in isolated mode this driver wrote the session's
 		// configuration itself and reports it back; shared mode has no posture
 		// of its own to report.

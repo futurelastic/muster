@@ -1965,6 +1965,7 @@ DriverCapabilities {
   reportsRuntimeSurface: boolean // can say anything about `runtimeSurface` (§2.13); absent state is answerable only against this
   isolatesEnvironment: boolean // starts a session's process with a BUILT environment, nothing inherited from the service (§2.1 `isolateEnvironment`, muster #280)
   sandbox?        : SandboxSupport  // can wrap a session in an OS sandbox (§2.1 `sandbox`, muster #281): { mechanism, denies[], network[], packageCache[] }; absent = cannot, and a create asking for one is refused `unsupported`
+  sandboxUnavailable? : string      // why `sandbox` is absent on a driver that could offer one (muster #345): no mechanism on the host, the service already inside a profile, or the runtime's CLI did not start and authenticate under the profile when measured here; informational, the refusal is decided by `sandbox` alone
   confirmsDelivery: boolean   // can distinguish submitted from queued
   supportsResume  : boolean   // sessions survive a service restart
   deliversToInbox : boolean   // has an inbox delivery path wired for at least some targets
@@ -2020,8 +2021,15 @@ half-offered, where the platform cannot deny all three classes. For the opencode
 present on macOS only, enforced with the system's `sandbox-exec` and a profile the driver generates;
 on any other platform, in the test-only shared mode (one server cannot confine one of its sessions),
 or when the service itself already runs inside a sandbox (a profile cannot be nested), it is absent
-and the reason is in the refusal. The tmux driver never declares it: its sessions live in the user's
-own multiplexer, whose server socket is exactly what a sandbox must keep a session from. A session
+and the reason is in the refusal. The tmux driver declares it **only where it was measured to work**
+(muster #345). Its sessions live in the user's own multiplexer, whose server socket is exactly what a
+sandbox must keep a session from, so the server stays outside the profile and only the agent program
+inside the pane is wrapped, with a unix-socket connect denied outright. "The host can apply a
+profile" is not enough for that: the capability is declared only when the agent CLI, started the way
+a create starts it and confined by the profile a create would write, reports a logged-in account. A
+host where it does not — most likely because the credentials live in the login keychain, whose
+services the profile does not open — has `sandbox` absent and the reason in `sandboxUnavailable`, and
+a create or posture that needs confinement is refused with it. It offers no `packageCache` mode. A session
 created with `sandbox` reports the profile in force in `state.sandbox` on every read and in every
 listing — the paths and posture actually granted, defaults included — so a reader confirms the
 profile rather than assumes it from the request. Like every flag here it inherits `source: assumed`

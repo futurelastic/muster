@@ -707,8 +707,17 @@ that cannot enforce all of it answers `unsupported` with `reason: "posture-unenf
 anything starts; `GET /v1/runtimes` reports each runtime's `posture` (what it can enforce), and
 `POST /v1/posture/dry-run` with `{"posture": {...}}` shows the mapping per runtime without creating
 anything. `unattended` always means confined: it is `bypass` inside the sandbox, so a runtime with no
-sandbox — today the interactive-terminal runtime — refuses it rather than start a prompt-free session
-that reads the whole account. It cannot be combined with `sandbox`, `permissionMode` or
+sandbox refuses it rather than start a prompt-free session that reads the whole account. The
+interactive-terminal runtime (#345) has one **on a host where its agent CLI was measured to start
+and authenticate inside the profile** — the multiplexer's server stays outside and only the agent
+program in the pane is wrapped — and none elsewhere, where its row in `GET /v1/runtimes` says why
+(`sandboxUnavailable`) and a posture that confines is refused. Inside it the agent reads its own
+install and configuration and writes only its working directory, its private space and its own
+transcript directory; anything else the session needs (an agent or skill definition that is a
+symlink out of the configuration directory, a hook script, a linked worktree's git directory) is
+yours to name in `readPaths` / `writePaths`. It still cannot isolate the environment
+(`isolatedEnvironment` is refused there). `FLEET_TMUX_SANDBOX=off` stops it offering one. A posture
+cannot be combined with `sandbox`, `permissionMode` or
 `isolateEnvironment`, which keep working for one release and are **deprecated** in its favour.
 `unattended` needs `send` as well as `create`; the rest needs only `create`.
 
