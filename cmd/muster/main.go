@@ -891,6 +891,10 @@ func main() {
 		// A live table, so a reload swaps it without rebuilding the mux (#347).
 		rl.table = service.NewPrincipalTable(principals)
 		svcCfg.Table = rl.table
+		// A peer may fetch the list in force and, holding push-list, hand over a
+		// newer one (muster #352). Only a service with a config file has the
+		// reloader that puts a list into force.
+		svcCfg.MachineList = machineListAPI{rl}
 		for _, p := range principals {
 			log.Printf("muster: principal %q grants=%v", p.Name, p.Grants)
 		}

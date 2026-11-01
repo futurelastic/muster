@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -118,6 +120,10 @@ type listOutcome struct {
 	// already looked at (muster #354).
 	rawHash  string
 	verified *machinelist.Verified
+	// raw is the exact bytes verified, kept only for a list that verified: what
+	// GET /v1/machine-list serves is the list in force, not whatever is on disk
+	// now (muster #352).
+	raw []byte
 	// principals are the list's machines as principals, grants already checked.
 	principals []service.Principal
 	err        error
@@ -161,6 +167,14 @@ func loadMachineList(cfg *fileConfig, stateDir string, self fleet.MachineId) lis
 		return o
 	}
 	o.rawHash = contentHash(raw)
+	return o.verifyRaw(ml, pins, raw, minSeq)
+}
+
+// verifyRaw verifies raw against the pinned signers and checks its grants. It is
+// the one function a list read from the file and a list pushed by a peer both go
+// through, so the two can never disagree about what verifies (muster #352). minSeq
+// is what Verify refuses anything below.
+func (o listOutcome) verifyRaw(ml *machineListConfig, pins []ed25519.PublicKey, raw []byte, minSeq uint64) listOutcome {
 	v, err := machinelist.Verify(raw, machinelist.Verifier{Fleet: ml.Fleet, Signers: pins, MinSeq: minSeq})
 	if err != nil {
 		o.err = err
@@ -171,9 +185,18 @@ func loadMachineList(cfg *fileConfig, stateDir string, self fleet.MachineId) lis
 		o.err = err
 		return o
 	}
-	o.verified, o.principals = &v, principals
+	o.verified, o.principals, o.raw = &v, principals, raw
 	return o
 }
+
+// errListGrant marks a refusal of a list over a grant it names: one this build
+// does not know, or one a list may not give. Both refuse the whole list.
+var errListGrant = errors.New("machine list: grant")
+
+type listGrantError struct{ msg string }
+
+func (e listGrantError) Error() string        { return e.msg }
+func (e listGrantError) Is(target error) bool { return target == errListGrant }
 
 // machinePrincipals turns the list's machines into principals: a machine in the
 // list may call this one with the grants the list gives it, proving itself by
@@ -187,7 +210,15 @@ func machinePrincipals(doc machinelist.Document) ([]service.Principal, error) {
 		for _, g := range m.Grants {
 			gr := service.Grant(g)
 			if !service.ValidGrant(gr) {
-				return nil, fmt.Errorf("machine list: machine %q: unknown grant %q", m.ID, g)
+				return nil, listGrantError{fmt.Sprintf("machine list: machine %q: unknown grant %q", m.ID, g)}
+			}
+			// Who may hand this machine its next list is decided HERE, by an
+			// operator, like the pinned signer: a signed list cannot name its own
+			// pushers (muster #352). Refused whole, as an unknown grant is, rather
+			// than dropped, which would be a machine quietly given less than the
+			// owner wrote.
+			if gr == service.GrantPushList {
+				return nil, listGrantError{fmt.Sprintf("machine list: machine %q: a list cannot give %q; an operator grants it on this machine, in the config", m.ID, g)}
 			}
 			grants = append(grants, gr)
 		}
@@ -271,7 +302,9 @@ func (o listOutcome) principalsFor(base []service.Principal, handPeers []peerEnt
 		}
 	}
 	var out []service.Principal
+	hand := map[string]service.Principal{}
 	for _, p := range base {
+		hand[p.Name] = p
 		if listed[p.Name] || dropped[p.Name] {
 			continue
 		}
@@ -279,10 +312,24 @@ func (o listOutcome) principalsFor(base []service.Principal, handPeers []peerEnt
 	}
 	for _, p := range o.principals {
 		if listed[p.Name] {
+			if carriesPushList(hand[p.Name], p) {
+				p.Grants = append(append([]service.Grant(nil), p.Grants...), service.GrantPushList)
+			}
 			out = append(out, p)
 		}
 	}
 	return out
+}
+
+// carriesPushList reports whether a listed machine keeps the push-list grant its
+// hand-written principal holds. The list replaces a hand-written principal of
+// the same name, and a list cannot give push-list, so without this an operator
+// could never grant it to a listed machine in prefer or only. It is carried only
+// when the hand-written principal names the same public key: a list that rotates
+// the machine's key lets the grant lapse, which is the safe direction, and
+// `muster doctor` says so (muster #352).
+func carriesPushList(hand, listed service.Principal) bool {
+	return hand.Allows(service.GrantPushList) && len(hand.PublicKey) > 0 && bytes.Equal(hand.PublicKey, listed.PublicKey)
 }
 
 // commit records the list's seq as the highest accepted, so an older genuine
@@ -705,7 +752,7 @@ func listShow(f listFlags, getenv func(string) string, stdout io.Writer) error {
 }
 
 // listDoctorRow is `muster doctor`'s account of the list.
-func listDoctorRow(o listOutcome, base []peerEntry) doctorRow {
+func listDoctorRow(o listOutcome, base []peerEntry, handPrincipals []service.Principal) doctorRow {
 	row := doctorRow{ID: "machine-list"}
 	switch {
 	case o.mode == listModeOff:
@@ -733,5 +780,50 @@ func listDoctorRow(o listOutcome, base []peerEntry) doctorRow {
 			}
 		}
 	}
+	if o.mode != listModeOff {
+		holders, lapsed := pushListNotes(o, handPrincipals)
+		var notes []string
+		if len(holders) > 0 {
+			notes = append(notes, "may push a list to this machine (push-list): "+strings.Join(holders, ", "))
+		}
+		if len(lapsed) > 0 {
+			notes = append(notes, "push-list is NOT carried over to the listed machine(s) "+strings.Join(lapsed, ", ")+
+				", whose key in the list differs from the one the config names: re-grant it with the key the list now gives them")
+			if row.Status == statusPass {
+				row.Status = statusWarn
+			}
+		}
+		if len(notes) > 0 {
+			if row.Detail != "" {
+				row.Detail += "\n"
+			}
+			row.Detail += strings.Join(notes, "\n")
+		}
+	}
 	return row
+}
+
+// pushListNotes says who holds push-list under the config, and which hand-written
+// holders of it a prefer or only list would strip because the list gives that
+// machine a different key (muster #352).
+func pushListNotes(o listOutcome, hand []service.Principal) (holders, lapsed []string) {
+	listed := map[string]service.Principal{}
+	for _, p := range o.principals {
+		listed[p.Name] = p
+	}
+	for _, h := range hand {
+		if !h.Allows(service.GrantPushList) {
+			continue
+		}
+		holders = append(holders, h.Name)
+		if o.verified == nil || !o.active() {
+			continue
+		}
+		if lp, ok := listed[h.Name]; ok && fleet.MachineId(h.Name) != o.self && !carriesPushList(h, lp) {
+			lapsed = append(lapsed, h.Name)
+		}
+	}
+	sort.Strings(holders)
+	sort.Strings(lapsed)
+	return holders, lapsed
 }

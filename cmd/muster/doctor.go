@@ -437,8 +437,12 @@ func runChecks(ctx context.Context, env doctorEnv) []doctorRow {
 	// --- the owner-signed machine list (#351) ----------------------------------
 	{
 		base, _ := resolvePeers(getenv("FLEET_PEERS"), cfg)
+		var handPrincipals []service.Principal
+		if cfg != nil {
+			handPrincipals, _ = cfg.principals()
+		}
 		listSelf := self
-		c.add(listDoctorRow(loadMachineList(cfg, getenv("FLEET_STATE_DIR"), listSelf), base))
+		c.add(listDoctorRow(loadMachineList(cfg, getenv("FLEET_STATE_DIR"), listSelf), base, handPrincipals))
 	}
 
 	// --- peers ----------------------------------------------------------------

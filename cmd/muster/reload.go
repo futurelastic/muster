@@ -21,6 +21,7 @@ import (
 
 	fleet "github.com/futurelastic/muster"
 	"github.com/futurelastic/muster/internal/drivers/remote"
+	"github.com/futurelastic/muster/internal/machinelist"
 	"github.com/futurelastic/muster/internal/peerkey"
 	"github.com/futurelastic/muster/internal/service"
 )
@@ -436,11 +437,43 @@ func (rl *reloader) candidateList(cfg *fileConfig) (listOutcome, error) {
 	if cand.err != nil {
 		return cand, redactErr(cand.err, cfg.MachineList.Path)
 	}
-	if cur := rl.listOut.verified; cur != nil && cand.verified.Document.Seq <= cur.Document.Seq {
-		return cand, fmt.Errorf("machine list: sequence %d is not higher than the list in force (%d); a rollback or a re-sign at the same sequence is refused",
-			cand.verified.Document.Seq, cur.Document.Seq)
+	if cur := rl.listOut.verified; cur != nil {
+		hi, err := rl.highestAccepted()
+		if err != nil {
+			return cand, err
+		}
+		if cand.verified.Document.Seq <= hi {
+			return cand, fmt.Errorf("machine list: sequence %d is not higher than the list in force (%d); a rollback or a re-sign at the same sequence is refused",
+				cand.verified.Document.Seq, hi)
+		}
 	}
 	return cand, nil
+}
+
+// highestAccepted is the one number a list's sequence is measured against: the
+// higher of the mark prefer and only record in the state directory and the
+// sequence of the list in force, in any mode (shadow records no mark). The file
+// reload and a pushed list (acceptPushed, muster #352) both use it, so they can
+// never disagree about whether a list is newer. The caller holds rl.mu.
+//
+// With a list in force the two numbers agree, since the list in force verified
+// against the mark; they differ only when NO list is in force (the start found
+// the file missing or refused). There a hand-placed file equal to the mark is
+// still taken by the reload, which is the restore-from-backup path, and a push
+// of that sequence is refused: a push replaces, it does not restore.
+func (rl *reloader) highestAccepted() (uint64, error) {
+	var hi uint64
+	if rl.statusDir != "" {
+		n, err := machinelist.ReadSeq(rl.statusDir)
+		if err != nil {
+			return 0, err
+		}
+		hi = n
+	}
+	if cur := rl.listOut.verified; cur != nil && cur.Document.Seq > hi {
+		hi = cur.Document.Seq
+	}
+	return hi, nil
 }
 
 // apply applies the config (when cfgChanged) and the machine list (when it
@@ -522,6 +555,22 @@ func (rl *reloader) apply(raw []byte, hash, reason string, cfgChanged bool, list
 		}
 	}
 
+	rl.swapIn(reason, next, hash, basePrincipals, handPeers, listOut, build, keep, cfgChanged, listChanged, listHash, listRefusal)
+	return nil
+}
+
+// swapIn puts a plan into force: the principal table, the peers, the list. It is
+// the tail of apply, where nothing can refuse any more, and it is shared with a
+// pushed list (acceptPushed) so there is ONE path by which a list goes into force
+// (muster #352). The caller holds rl.mu and has built every driver in build.
+//
+// cfgChanged says whether next is a new config (and so whether the config's own
+// status moves); listChanged says whether listOut is a candidate list, and
+// listRefusal that the candidate was refused and the list in force stays.
+func (rl *reloader) swapIn(reason string, next *fileConfig, hash string, basePrincipals []service.Principal, handPeers []peerEntry,
+	listOut listOutcome, build map[fleet.MachineId]appliedPeer, keep map[fleet.MachineId]bool,
+	cfgChanged, listChanged bool, listHash string, listRefusal error) {
+
 	// Everything that can fail has passed: from here on nothing refuses.
 	principals := listOut.principalsFor(basePrincipals, handPeers)
 	before := rl.table.Snapshot()
@@ -582,7 +631,6 @@ func (rl *reloader) apply(raw []byte, hash, reason string, cfgChanged bool, list
 		rl.seenList = listHash
 	}
 	rl.writeStatus(st)
-	return nil
 }
 
 // startupCheck is what a restart onto cfg would meet in the file itself: the
