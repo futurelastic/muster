@@ -147,11 +147,18 @@ func signedKeyFor(cfg Config, machine string) (Principal, bool) {
 // authenticateSigned resolves a Muster-Sig request to its principal, or says
 // why not. It reads the body (bounded) to digest it and puts it back.
 //
+// With deferBody the body is NOT read: the signature is verified over the digest
+// the sender claims (peerkey.VerifyHeaders) and the caller owns the second half,
+// peerkey.CheckBody, before it acts on any byte of the body. That exists for one
+// route, a push of the machine list, which must refuse a caller without the
+// grant before reading what it sent (muster #352); every other route reads the
+// body here.
+//
 // Every refusal is the same kind — unauthorized, a 401 — with a message that
 // says which check failed, except that a sender no table lists and a signature
 // that does not verify read the same: telling them apart would let a stranger
 // enumerate machine names.
-func (svc *Service) authenticateSigned(cfg Config, r *http.Request) (Principal, *fleet.Error) {
+func (svc *Service) authenticateSigned(cfg Config, r *http.Request, deferBody bool) (Principal, *fleet.Error) {
 	refuse := func(msg string) (Principal, *fleet.Error) {
 		return Principal{}, &fleet.Error{Kind: fleet.ErrorUnauthorized, Message: msg}
 	}
@@ -160,7 +167,7 @@ func (svc *Service) authenticateSigned(cfg Config, r *http.Request) (Principal, 
 		return refuse("malformed signed-request header")
 	}
 	var body []byte
-	if r.Body != nil && r.Body != http.NoBody {
+	if !deferBody && r.Body != nil && r.Body != http.NoBody {
 		body, err = io.ReadAll(io.LimitReader(r.Body, peerkey.MaxBodyBytes+1))
 		if err != nil {
 			return refuse("the request body could not be read")
@@ -175,7 +182,12 @@ func (svc *Service) authenticateSigned(cfg Config, r *http.Request) (Principal, 
 		return refuse("signature does not verify")
 	}
 	keys := svc.peerKeys.keys(p.Name, p.PublicKey, time.Now())
-	matched, err := peerkey.Verify(h, r, body, string(svc.Self()), keys, time.Now(), svc.sigReplay)
+	var matched int
+	if deferBody {
+		matched, err = peerkey.VerifyHeaders(h, r, string(svc.Self()), keys, time.Now(), svc.sigReplay)
+	} else {
+		matched, err = peerkey.Verify(h, r, body, string(svc.Self()), keys, time.Now(), svc.sigReplay)
+	}
 	if err != nil {
 		switch {
 		case errors.Is(err, peerkey.ErrExpired):

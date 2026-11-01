@@ -41,6 +41,14 @@ type Config struct {
 	// a restart. Its non-emptiness decides the mode the way Principals does.
 	Table *PrincipalTable
 
+	// MachineList is what GET and PUT /v1/machine-list talk to (muster #352): the
+	// running service's own holder of the owner-signed machine list. The service
+	// package cannot verify or apply a list (that needs the pinned signer, the
+	// reload and the state directory, all of which live in the binary), so it
+	// asks. Nil means this machine does not use a list and both routes answer
+	// that it is off.
+	MachineList MachineListHolder
+
 	// AllowLocalMutations permits create/input/interrupt/close against
 	// sessions ON THIS MACHINE. Defaults FALSE — §6 requirement 3 taken
 	// literally: reads may be granted broadly, mutations are opt-in.
@@ -113,6 +121,11 @@ func NewMux(svc *Service, cfg Config) *http.ServeMux {
 	mux.HandleFunc("POST /v1/machines/{machine}/sessions/{id}/remote-control", withAuth(svc, cfg, mutating(svc, cfg, handleRemoteControl(svc))))
 	mux.HandleFunc("DELETE /v1/machines/{machine}/sessions/{id}", withAuth(svc, cfg, mutating(svc, cfg, handleClose(svc))))
 	mux.HandleFunc("GET /v1/events", withAuth(svc, cfg, reading(handleEvents(svc))))
+	// The owner-signed machine list, handed from one machine to another (#352).
+	// Serving it is a read; accepting one is its own grant, checked before the
+	// body is read, which is why this route authenticates by its headers.
+	mux.HandleFunc("GET /v1/machine-list", withAuth(svc, cfg, reading(handleGetMachineList(cfg))))
+	mux.HandleFunc("PUT /v1/machine-list", withAuthDeferringBody(svc, cfg, pushListGate(svc, handlePutMachineList(cfg))))
 
 	return mux
 }
@@ -130,17 +143,35 @@ func NewMux(svc *Service, cfg Config) *http.ServeMux {
 // already landed for the mutating verbs by the time this was written, and
 // only the read half was still true).
 func withAuth(svc *Service, cfg Config, next http.HandlerFunc) http.HandlerFunc {
+	return authenticated(svc, cfg, false, next)
+}
+
+// withAuthDeferringBody is withAuth for a route that must decide what a caller
+// may do BEFORE it reads the body. A bearer caller is unaffected (its
+// credential is in a header); a signed caller is verified from its headers, and
+// the request carries a mark that its body has not yet been checked against the
+// digest it signed, which checkedBody (machinelist.go) then does. One route uses
+// it, the machine-list push (muster #352).
+func withAuthDeferringBody(svc *Service, cfg Config, next http.HandlerFunc) http.HandlerFunc {
+	return authenticated(svc, cfg, true, next)
+}
+
+func authenticated(svc *Service, cfg Config, deferBody bool, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if len(cfg.principals()) > 0 {
 			if peerkey.IsSigned(r.Header.Get("Authorization")) {
 				// A peer proving it holds a private key (muster #350). Token
 				// peers never reach this: their header is "Bearer …".
-				p, ferr := svc.authenticateSigned(cfg, r)
+				p, ferr := svc.authenticateSigned(cfg, r, deferBody)
 				if ferr != nil {
 					writeError(w, ferr)
 					return
 				}
-				next(w, r.WithContext(withPrincipal(r.Context(), p)))
+				ctx := withPrincipal(r.Context(), p)
+				if deferBody {
+					ctx = context.WithValue(ctx, bodyUncheckedKey{}, true)
+				}
+				next(w, r.WithContext(ctx))
 				return
 			}
 			p, ok := cfg.principalFor(r)
@@ -165,6 +196,10 @@ func withAuth(svc *Service, cfg Config, next http.HandlerFunc) http.HandlerFunc 
 		next(w, r)
 	}
 }
+
+// bodyUncheckedKey marks a request whose signature was verified from its headers
+// alone: its body must go through checkedBody before anything acts on it.
+type bodyUncheckedKey struct{}
 
 type principalKey struct{}
 

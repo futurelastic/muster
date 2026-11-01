@@ -714,7 +714,13 @@ func supervisorGrants() []service.Grant {
 		//
 		// acting-person (muster #349) is excluded the same way: it lets a client
 		// name the human it acts for in the audit, and drives nothing.
-		if g != service.GrantRelay && g != service.GrantLabel && g != service.GrantRemoteControl && g != service.GrantHumanRelay && g != service.GrantActingPerson {
+		//
+		// push-list (muster #352) is excluded for a stronger reason than the
+		// others: it lets a holder replace this machine's peer table, and
+		// `muster service install` enrols the local service principal with THIS
+		// set, so counting it would grant it by default on every new install.
+		// It is given per peer, by an operator, and nowhere else.
+		if g != service.GrantRelay && g != service.GrantLabel && g != service.GrantRemoteControl && g != service.GrantHumanRelay && g != service.GrantActingPerson && g != service.GrantPushList {
 			out = append(out, g)
 		}
 	}

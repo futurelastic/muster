@@ -105,6 +105,9 @@ var specFieldTypes = map[string]any{
 	// #285: the runtime's own account of what a session spent.
 	"Usage":     Usage{},
 	"TurnUsage": TurnUsage{},
+
+	// #352: the answer to a pushed machine list that was taken.
+	"MachineListReceipt": MachineListReceipt{},
 }
 
 // specFieldExceptions records a Go field that a normative type block

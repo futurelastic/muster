@@ -173,6 +173,24 @@ const (
 	// relay the peer must hold it too (see actingPerson). Absent means denied, like
 	// every other grant, so no existing principal gains it by upgrading.
 	GrantActingPerson Grant = "acting-person"
+	// GrantPushList lets a principal hand this machine a new owner-signed
+	// machine list (PUT /v1/machine-list, muster #352).
+	//
+	// ⚠️ It is the one grant whose holder can replace this machine's peer table
+	// and the machine principals in it. That is bounded: the list must verify
+	// against the signer an operator pinned HERE, its sequence must be strictly
+	// higher than the highest this machine has accepted, and it cannot change
+	// the pins, the mode or the path. A holder can bring forward a genuine newer
+	// list; it cannot forge one, or roll one back.
+	//
+	// Its own grant, and not implied by anything: not by send or relay, not by
+	// the legacy single-token flags, not by `muster service install`'s set (see
+	// supervisorGrants), and a signed list cannot give it to a machine either —
+	// who may hand this machine its next list is a local decision, like the
+	// pinned signer. Serving the list is GrantRead: it is signed, so reading it
+	// reveals nothing a stronger grant would protect. Absent means denied, like
+	// every other grant, so no existing principal gains it by upgrading.
+	GrantPushList Grant = "push-list"
 )
 
 // Grants is every grant this service defines, in the order an operator would
@@ -189,7 +207,7 @@ func Grants() []Grant {
 	return []Grant{
 		GrantRead, GrantCreate, GrantSend, GrantInterrupt,
 		GrantClose, GrantRename, GrantDiscard, GrantKeys, GrantLabel, GrantRemoteControl,
-		GrantRelay, GrantHumanRelay, GrantActingPerson,
+		GrantRelay, GrantHumanRelay, GrantActingPerson, GrantPushList,
 	}
 }
 
@@ -289,6 +307,12 @@ func grantForVerb(r *http.Request) Grant {
 		return GrantLabel
 	case r.Method == http.MethodPost && strings.HasSuffix(path, "/remote-control"):
 		return GrantRemoteControl
+	case r.Method == http.MethodPut && path == "/v1/machine-list":
+		// Not routed through mutating() (it would let any caller in when the
+		// legacy FLEET_ALLOW_MUTATIONS flag is set); pushListGate checks this
+		// grant itself. Listed here so every route a principal needs a grant for
+		// answers the same question in one place.
+		return GrantPushList
 	case r.Method == http.MethodDelete:
 		return GrantClose
 	}

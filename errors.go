@@ -187,6 +187,49 @@ const ReasonRuntimeUnavailable = "runtime-unavailable"
 // the explicit override the message names.
 const ReasonUnsafeServerContext = "unsafe_server_context"
 
+// The reasons a machine-list route gives (api-http.md §3.1, muster #352). The
+// Kind says whose fault it is (invalid: the list; unsupported: this machine's
+// setup; conflict: a list no newer than the one this machine has accepted); the
+// Reason says which check, so a caller does not parse Message to find out
+// whether to re-sign, re-send later, or ask an operator.
+const (
+	// ReasonMachineListOff: no machineList block, or mode "off". Nothing to
+	// serve and nowhere to put a pushed list.
+	ReasonMachineListOff = "machine-list-off"
+	// ReasonMachineListNone: the mode is on and no list is in force (the file
+	// was missing or refused at the start).
+	ReasonMachineListNone = "machine-list-none"
+	// ReasonMachineListNoStateDir: prefer and only remember the highest accepted
+	// sequence in the state directory, and this machine has none.
+	ReasonMachineListNoStateDir = "machine-list-no-state-dir"
+	// ReasonMachineListTooLarge: the body is larger than a list may be.
+	ReasonMachineListTooLarge = "machine-list-too-large"
+	// ReasonMachineListMalformed: not a list envelope, or not a list document.
+	ReasonMachineListMalformed = "machine-list-malformed"
+	// ReasonMachineListSignerNotPinned: signed by a key this machine did not
+	// pin, or by one the document does not name.
+	ReasonMachineListSignerNotPinned = "machine-list-signer-not-pinned"
+	// ReasonMachineListSignature: the signature does not verify.
+	ReasonMachineListSignature = "machine-list-signature"
+	// ReasonMachineListOtherFleet: another fleet's list.
+	ReasonMachineListOtherFleet = "machine-list-other-fleet"
+	// ReasonMachineListUnsupported: names several signers, which this build
+	// does not support.
+	ReasonMachineListUnsupported = "machine-list-unsupported"
+	// ReasonMachineListGrant: the list names a grant this build does not know,
+	// or one a list may not give (push-list).
+	ReasonMachineListGrant = "machine-list-grant"
+	// ReasonMachineListNotNewer: the sequence is not higher than the highest
+	// this machine has accepted. Re-sign with a higher one.
+	ReasonMachineListNotNewer = "machine-list-not-newer"
+	// ReasonMachineListNotApplied: the list is genuine but this machine cannot
+	// put it in force right now. Nothing was changed.
+	ReasonMachineListNotApplied = "machine-list-not-applied"
+	// ReasonMachineListNotWritable: the list's file cannot be written. Nothing
+	// was changed.
+	ReasonMachineListNotWritable = "machine-list-not-writable"
+)
+
 func (e *Error) Error() string {
 	if e.Machine != "" {
 		return fmt.Sprintf("fleet: %s (%s, machine=%s)", e.Message, e.Kind, e.Machine)
