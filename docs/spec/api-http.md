@@ -117,6 +117,7 @@ GET /v1/health
         "labels": { "maxKeys": 16, "maxKeyBytes": 128, "maxValueBytes": 128 },
         "supportsConversationId": true,
         "supportsIsolateEnvironment": true,
+        "supportsIsolateConfiguration": true,
         "supportsSandbox": true,
         "supportsLaunchSettings": true,
         "launchSettingsOutsideBypass": ["crossSessionInbound"],
@@ -154,6 +155,7 @@ GET /v1/runtimes
                                        "supportsResume": false,
                                        "deliversToInbox": false,
                                        "isolatesEnvironment": false,
+                                       "isolatesConfiguration": true,
                                        "sandbox": { "mechanism": "macos-sandbox-exec",
                                                     "denies": ["files", "unixSockets", "systemServices"],
                                                     "network": ["open", "closed"],
@@ -188,7 +190,8 @@ POST /v1/posture/dry-run                                        ← needs only `
 → 200 { "runtimes": [ { "machine": "...", "runtime": "...", "enforceable": true, "known": true,
                         "mapping": { "permissionMode": "bypass",
                                      "sandbox": {"writePaths": ["/abs"], "network": "closed"},
-                                     "isolateEnvironment": false } },
+                                     "isolateEnvironment": false,
+                                     "isolateConfiguration": false } },
                       { "machine": "...", "runtime": "...", "enforceable": false, "known": true,
                         "reason": "create: posture cannot be enforced by this runtime: ..." } ] }
 
@@ -721,11 +724,12 @@ Idempotency-Key: <caller-supplied, required>
 { "runtime": "...", "cwd": "/abs/path", "agent": "...", "model": "...",
   "effort": "...", "name": "...", "marker": "...", "remoteControl": true,
   "prompt": "...", "contextRef": "/abs/path", "trustCwd": false,
-  "env": {"NAME": "value"}, "isolateEnvironment": true,
+  "env": {"NAME": "value"}, "isolateEnvironment": true, "isolateConfiguration": true,
   "sandbox": {"readPaths": ["/abs"], "writePaths": ["/abs"], "network": "open",
               "packageCache": {"path": "/abs/cache", "mode": "private"}},
   "posture": {"attendance": "unattended", "files": {"writePaths": ["/abs"], "readPaths": ["/abs"]},
-              "network": "closed", "isolatedEnvironment": true},   ← instead of the three fields above (#344)
+              "network": "closed", "isolatedEnvironment": true,
+              "configuration": "given"},   ← instead of the fields above (#344, #392)
   "resume": "<conversation id>", "conversationId": "<caller-chosen uuid>",
   "permissionMode": "bypass", "consents": ["folder-trust"],
   "mcpConfig": ["/abs/servers.json"],
@@ -820,6 +824,24 @@ about what a `201` then means — the session holds *only* the variables the cre
 machine's `sessionEnv`) named, **including the model-provider key it needs, which isolation cannot
 hide from the session's own tool shell**; give each lane its own spend-capped key.
 
+**`isolateConfiguration: true` is a requirement, and a driver that cannot meet it answers
+`unsupported`** (muster #392; session-abstraction.md §2.1 and §4.3). The session then loads only the
+configuration the create names — its `settings`, `mcpConfig` and `contextRef` plus the working
+directory's own project settings (`.claude/settings.json`, not the per-machine
+`.claude/settings.local.json`) — and nothing from the account the service runs as: no user-level
+hooks, plugins, permission rules or enabled tools, and no tool server the create did not list. A
+runtime that can start a session so reports `isolatesConfiguration: true` in `/v1/runtimes`; against
+any other the create is refused before anything is started, and a relay to a peer whose `/v1/health`
+lacks `supportsIsolateConfiguration` is refused on this side, before the peer sees it. It needs only
+`create`: it narrows what the session loads and grants nothing. Three things to plan for. An `agent`
+the create names must be defined in the working directory's `.claude/agents`; one defined only at
+user level is not loaded and the terminal runtime's agent refuses to start (visible, not a degraded
+session). `unattended` lowers to `bypass`, whose acceptance screen the user setting that suppresses
+it no longer reaches, so a client that combines the two sends `consents: ["bypass-permissions"]`. And
+a `resume` that names no `posture.configuration` carries `given` forward from the conversation's
+previous session (a resume must not come back loading the owner's tool servers); `posture.configuration:
+"inherit"` is the explicit way back, and a runtime that cannot give it refuses the resume instead.
+
 **`sandbox` is a requirement, and a driver that cannot enforce it answers `unsupported`** (muster
 #281; session-abstraction.md §2.1 and §4.3). A runtime that can confine a session reports a
 `sandbox` object in `/v1/runtimes`; against any other the create is refused before anything is
@@ -832,13 +854,14 @@ session reaches and grants nothing. A `201` then means the session runs under th
 `state.sandbox` reports on every read; it does **not** make the working directory trustworthy
 afterwards (§2.1: run any git against it inside the same profile).
 
-**`posture` is the engine-neutral spelling of `permissionMode`, `sandbox` and
-`isolateEnvironment`** (muster #344). It says what the work needs and never how a runtime
+**`posture` is the engine-neutral spelling of `permissionMode`, `sandbox`, `isolateEnvironment`
+and `isolateConfiguration`** (muster #344, #392). It says what the work needs and never how a runtime
 spells it: `attendance` (`attended`, the default, or `unattended` — no permission prompts),
 `files` (present: file access confined to the working directory and the session's private
-directory plus the `writePaths` and `readPaths` named), `network` (`open` or `closed`) and
-`isolatedEnvironment`. Every field present is a requirement. The service lowers it onto the
-three per-runtime fields using only what the resolved runtime declares in `/v1/runtimes`
+directory plus the `writePaths` and `readPaths` named), `network` (`open` or `closed`),
+`isolatedEnvironment` and `configuration` (`inherit`, the default, or `given`: the session loads
+only the configuration the create names). Every field present is a requirement. The service lowers
+it onto the per-runtime fields using only what the resolved runtime declares in `/v1/runtimes`
 (`posture` on each row says which parts it can enforce), and **refuses with `unsupported`,
 `reason: "posture-unenforceable"`, before anything is started** when it cannot enforce all of
 it — never a weaker posture under the same name. Two rules shape the mapping. **`unattended`
@@ -853,13 +876,15 @@ agent program inside the pane is wrapped. On any other host it enforces only an 
 posture and refuses the rest, and the refusal carries the reason the measurement failed
 (`sandboxUnavailable` on that runtime's capabilities). A peer that has not been
 reached is not refused locally: the lowered fields are forwarded and the peer's own refusals
-apply. `posture` is **mutually exclusive** with the three fields it replaces (`400`); a malformed
+apply. `posture` is **mutually exclusive** with the fields it replaces (`400`); a malformed
 one (a relative or unclean path, a writable shared temporary directory, an unknown value) is `400`
 on any machine. `unattended` needs the `send` grant on top of `create`, as `bypass` does; a posture
 that only narrows needs `create`. `POST /v1/posture/dry-run` takes `{"posture": {...}}` and
 returns, per runtime, whether it is enforceable and the fields it lowers to, changing nothing; it is
 the same function a create runs. `permissionMode`, `sandbox` and `isolateEnvironment` keep working
-unchanged for one release and are **deprecated** in favour of `posture`.
+unchanged for one release and are **deprecated** in favour of `posture`; `isolateConfiguration` is
+the per-runtime spelling a relay forwards and is not deprecated, but a client states it through
+`posture.configuration`.
 
 **A 201 for a create that asked to pin `agent`/`model`/`effort` is not proof
 the pin was applied** — a value this driver cannot pass through safely is

@@ -85,6 +85,7 @@ SessionSpec {
   contextRef?: AbsolutePath       // see §5.3 — never inline, never argv
   env?       : map<string,string> // out of band only, never argv (§5.3)
   isolateEnvironment?: boolean    // the session's process carries ONLY a built environment, never the service's own; a driver that cannot refuses `unsupported` (§4.3)
+  isolateConfiguration?: boolean  // the session loads ONLY the configuration this create names — no user-level settings, no tool server the create did not list; a driver that cannot refuses `unsupported` (§4.3, muster #392)
   sandbox?   : SandboxSpec        // an OS sandbox around the session's process: files, unix sockets and system services denied outside what is granted; a driver that cannot enforce it refuses `unsupported` (§4.3)
   resume?    : string             // a prior conversation this session continues
   conversationId?: string         // a caller-chosen UUID this session starts a NEW conversation under; mutually exclusive with resume
@@ -141,6 +142,23 @@ environment into a caller that asked for less (§5.6); a relay to a peer that pr
 refused the same way (api-http.md §3.3). It is a plain boolean: there is no honest request for the
 opposite, and a driver that always isolates simply honours it. What it does and does not promise is
 in §4.3.
+
+**`isolateConfiguration` is a requirement, and it narrows what the session LOADS** (muster #392).
+A session the service creates also loads the configuration of the account the service runs as: the
+user-level settings (hooks, plugins, permission rules, enabled tools) and the user-level tool
+servers. `isolateConfiguration: true` asks that the session's configuration be exactly what the
+create named — its `settings`, its `mcpConfig`, its `contextRef` — plus the working directory's own
+project settings, and nothing from that account. It is the right request for a client that runs
+sessions on behalf of other people: a rule that denies the owner's servers one by one leaves open
+any server the owner adds later, while this leaves it unreachable by construction. A driver that
+cannot deliver it (`isolatesConfiguration: false`, §4.3) refuses the create `unsupported`, before
+any side effect, never a session with less isolation than asked (§5.6); a relay to a peer that
+predates the field is refused the same way (api-http.md §3.3). It is a plain boolean, and it does
+not confine what the loaded session can then touch — that is `sandbox` and `posture`. One
+consequence a caller must plan for: an `agent` named alongside it must be defined at the working
+directory's project level, because an agent defined only at user level is not loaded and the
+runtime refuses to start rather than substitute another. Engine-neutral callers spell it
+`posture.configuration: "given"` (api-http.md §3.3).
 
 **`sandbox` is a requirement, and it is refused rather than degraded** (muster #281). Environment
 isolation decides what a session is *handed*; it does not decide what the session can *reach*. A
@@ -2026,6 +2044,7 @@ DriverCapabilities {
   reportsAgent    : boolean   // can read `agent` (§2.1/§2.12, muster #301) for any live session it lists, not only one it created; absent agent is answerable only against this: true = the runtime was started without one, false = never reported (and an `agent` list filter matches nothing)
   reportsRuntimeSurface: boolean // can say anything about `runtimeSurface` (§2.13); absent state is answerable only against this
   isolatesEnvironment: boolean // starts a session's process with a BUILT environment, nothing inherited from the service (§2.1 `isolateEnvironment`, muster #280)
+  isolatesConfiguration: boolean // can start a session that loads ONLY the configuration its create names, nothing from the account the service runs as (§2.1 `isolateConfiguration`, muster #392)
   sandbox?        : SandboxSupport  // can wrap a session in an OS sandbox (§2.1 `sandbox`, muster #281): { mechanism, denies[], network[], packageCache[] }; absent = cannot, and a create asking for one is refused `unsupported`
   sandboxUnavailable? : string      // why `sandbox` is absent on a driver that could offer one (muster #345): no mechanism on the host, the service already inside a profile, or the runtime's CLI did not start and authenticate under the profile when measured here; informational, the refusal is decided by `sandbox` alone
   confirmsDelivery: boolean   // can distinguish submitted from queued
@@ -2114,6 +2133,19 @@ that returns no usable list (an older release without the endpoint, an error, or
 leaves that one create unchecked, because "could not tell" is not "wrong"; and a listed id is
 accepted by the check, not guaranteed to succeed at the first turn. Like every flag here it
 inherits `source: assumed` from an unreached peer.
+
+**`isolatesConfiguration` answers "can a session here be started with ONLY the configuration its
+create named"** (muster #392). `true` means the driver starts the agent so that it loads no
+user-level settings and connects to no tool server the create did not list. The terminal runtime
+declares it while its agent command is built by the driver's own builder, which passes the agent
+CLI's `--setting-sources project` and `--strict-mcp-config`: the settings layers the CLI reads are
+narrowed to the working directory's project settings, and the tool servers to those in the create's
+`mcpConfig`. The create's own `settings` (a launch-time flag layer, not a settings source) and
+`contextRef` are unaffected. A driver that starts its agent with a caller-supplied command builder
+declares `false`, as does a runtime whose server loads the account's configuration before any
+session exists (opencode). A create that carries `isolateConfiguration: true` against a `false`
+driver is refused `unsupported`. Like every flag here it inherits `source: assumed` from an
+unreached peer.
 
 **`isolatesEnvironment` answers "can a session here be started with ONLY the environment its
 create asked for"** (muster #280). `true` means the driver starts each session in a process of its

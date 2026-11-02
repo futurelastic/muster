@@ -598,7 +598,7 @@ carries `Cache-Control: no-store`.
 {
   "runtime": "", "cwd": "/abs/path", "agent": "", "model": "", "effort": "",
   "name": "", "prompt": "", "contextRef": "/abs/path", "marker": "",
-  "remoteControl": true, "trustCwd": false, "env": {}, "isolateEnvironment": false, "sandbox": null,
+  "remoteControl": true, "trustCwd": false, "env": {}, "isolateEnvironment": false, "isolateConfiguration": false, "sandbox": null,
   "resume": "", "conversationId": "", "permissionMode": "", "consents": [],
   "mcpConfig": [], "settings": {}, "labels": {}
 }
@@ -711,6 +711,24 @@ is started. Needs only `create`. It cannot hide the model-provider key the sessi
 from the session's own tool shell: give each lane its own spend-capped key. See
 session-abstraction.md §4.3 for the exact base environment and what isolation does not cover.
 
+**`isolateConfiguration`** (#392) requires that the session load only the configuration your create
+names — your `settings`, your `mcpConfig`, your `contextRef` — plus the working directory's own project
+settings (`.claude/settings.json`; the per-machine `.claude/settings.local.json` is not loaded), and
+nothing from the account the service runs as: no user-level hooks, plugins, permission
+rules or enabled tools, and no tool server you did not list. That is the request for a client that runs
+sessions on behalf of other people: denying the owner's servers one by one leaves open any server the
+owner adds later, while this leaves it unreachable. A runtime that cannot do that
+(`isolatesConfiguration: false` in `GET /v1/runtimes`) answers `unsupported` before anything is started.
+Needs only `create`. Plan for three consequences. An `agent` you name must be defined in the working
+directory's `.claude/agents`: one defined only at user level is not loaded, and the agent CLI refuses to
+start rather than substitute another. `unattended` is `bypass`, whose acceptance screen the user setting
+that suppresses it no longer reaches, so send `consents: ["bypass-permissions"]` with it. And a `resume`
+that names no `posture.configuration` carries `given` forward from the conversation's last session
+(the response's `carried.isolateConfiguration` says so) — a resumed session must not come back loading
+the owner's servers; `posture.configuration: "inherit"` is the explicit way back, and a runtime that
+cannot give it refuses the resume. It narrows what the session *loads*, not what the loaded session can
+reach: that is `sandbox`.
+
 **`sandbox`** (#281) wraps the session's process, and so every tool it starts, in an
 operating-system sandbox: reads and writes denied outside the working directory and the
 session's own private directory, unix-socket connects denied (a path rule does not stop a
@@ -728,8 +746,10 @@ git on it only inside the same profile. See session-abstraction.md §2.1.
 the work needs, not how a runtime spells it — `attendance` (`attended` default, or `unattended`:
 no permission prompts), `files` (present: confine file access to the working directory and the
 session's private directory, plus `writePaths` / `readPaths` you name — a linked worktree's git
-common directory goes in `writePaths`), `network` (`open` or `closed`) and `isolatedEnvironment` —
-and the service maps it onto each runtime's own permission mode, pre-approval and sandbox. A runtime
+common directory goes in `writePaths`), `network` (`open` or `closed`), `isolatedEnvironment` and
+`configuration` (`inherit` default, or `given`: the session loads only the configuration the create
+names, `isolateConfiguration` above) — and the service maps it onto each runtime's own permission mode,
+pre-approval, sandbox and configuration switch. A runtime
 that cannot enforce all of it answers `unsupported` with `reason: "posture-unenforceable"` before
 anything starts; `GET /v1/runtimes` reports each runtime's `posture` (what it can enforce), and
 `POST /v1/posture/dry-run` with `{"posture": {...}}` shows the mapping per runtime without creating
@@ -744,8 +764,9 @@ transcript directory; anything else the session needs (an agent or skill definit
 symlink out of the configuration directory, a hook script, a linked worktree's git directory) is
 yours to name in `readPaths` / `writePaths`. It still cannot isolate the environment
 (`isolatedEnvironment` is refused there). `FLEET_TMUX_SANDBOX=off` stops it offering one. A posture
-cannot be combined with `sandbox`, `permissionMode` or
-`isolateEnvironment`, which keep working for one release and are **deprecated** in its favour.
+cannot be combined with `sandbox`, `permissionMode`, `isolateEnvironment` or `isolateConfiguration`;
+the first three keep working for one release and are **deprecated** in its favour, and
+`isolateConfiguration` is the spelling a relay forwards.
 `unattended` needs `send` as well as `create`; the rest needs only `create`.
 
 **Providers an opencode session may use** (#293) are the operator's decision, not a field:

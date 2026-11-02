@@ -278,6 +278,7 @@ build.
 | `F-IMPORTS` | must | A directory that is trusted but was never approved to import from outside itself, and whose instruction file does, shows the external-imports dialog, which the driver classifies as such, reads as an unnumbered menu with the decline highlighted, and can find exactly one affirmative option in. Observed only: the dialog is never answered. | `internal/drivers/tmux/classify.go#classifyPromptKind`, `internal/drivers/tmux/tmux.go#consentableKinds`, `internal/drivers/tmux/tmux.go#affirmativeOption` |
 | `B5` | must | A session started in bypass-permissions mode reaches its composer with no acceptance screen in the way, given the user setting that suppresses it. | `internal/drivers/tmux/tmux.go#claudeCodeCommand` |
 | `F-BYPASS` | warn | The bypass-acceptance screen, when it can be produced, is classified as such; otherwise the wording of its two options is still present in the candidate. Observed only: it is never answered. | `internal/drivers/tmux/tmux.go#acceptanceScreen` |
+| `B-CONFIG` | must | A session started with only the configuration its create names (--setting-sources project and --strict-mcp-config) runs the working directory's project-settings hook and starts the tool server named with --mcp-config, and runs neither a local-settings hook nor a tool server from the project's own .mcp.json; the same session without those two switches runs all four. The user settings layer is excluded by the same switch but cannot be planted here, because the run shares the real account's settings, so the local layer stands for it. | `internal/drivers/tmux/tmux.go#claudeCodeCommand` |
 | `D1` | must | The runtime's per-process session record appears within fifteen seconds of launch carrying the fields this service reads, with the expected types and values. | `internal/drivers/tmux/terminalpath2_transcript.go#processSessionRecord` |
 | `D3` | must | The record's process start time (UTC text, or on Linux clock ticks since boot) corroborates the running process, so the record can be trusted to belong to that process and not to a recycled pid. | `internal/drivers/tmux/terminalpath2_transcript.go#parseProcessSessionRecordStartTime` |
 | `D4` | must | With remote control off, the record carries no bridge id and the screen shows no control-channel label. The negative half only: the positive half needs a bridge, which a check never creates. | `internal/drivers/tmux/controlchannel.go#controlChannelOf` |
@@ -342,7 +343,7 @@ reason; they do not report them as unable to run.
 |---|---|---|
 | 0 | One scan of the candidate for the wording the screen classifiers read (F-LIMIT, F-APIERR, H-RC, H-RCREC, F-FEEDBACK, F-USAGE, F-MODE, and F-BYPASS as a fallback). | 0 |
 | 1 | The isolated multiplexer server. | 0 |
-| 2 | Five sessions: a trusted directory whose instruction file imports a file from outside it (C1, D1, D3, D4, B2, E-*…), an untrusted one (F-TRUST), a trusted one never approved to import (F-IMPORTS), and two in bypass mode (B5, F-BYPASS; and F-MODE reads the default-mode and bypass sessions' indicator rows, after giving each up to ten seconds to paint it — measured: the composer is up about a second before the row under it). | 0 |
+| 2 | Seven sessions: a trusted directory whose instruction file imports a file from outside it (C1, D1, D3, D4, B2, E-*…), an untrusted one (F-TRUST), a trusted one never approved to import (F-IMPORTS), two in bypass mode (B5, F-BYPASS; and F-MODE reads the default-mode and bypass sessions' indicator rows, after giving each up to ten seconds to paint it — measured: the composer is up about a second before the row under it), and a pair of trusted directories that carry the same four sources of ambient configuration (a project-settings hook, a local-settings hook, a tool server in the project's own `.mcp.json`, and one named with `--mcp-config`), one session started with only the configuration its create names and one without (B-CONFIG: each source touches a file when it runs, so no model turn is spent; the pair is watched up to 15 seconds for what must run and 3 seconds more for what must not, and a control that shows fewer than all four makes the check `error`, not `pass`). | 0 |
 | 3 | Drafts pasted into the composer and cleared again (F-COMPOSER, F-MLDRAFT, F-PASTEMARK, F-WRAP), and a session used once to enter shell mode (G6). | 0 |
 | 4 | Five sends on the trusted session: a first one that creates the transcript, then a short one, a single line over 800 bytes, a 40-line paste, and text with control bytes and a tab (G1, G2, E-USER, E-PASTE, E-NAME, E-SLUG, B2, B7a, D2). | 5 |
 | 5 | One programmatic rename of the trusted session — the driver's own Rename then its own SyncTitle, the same two calls and order the service uses (H-RENAME). No model turn: a rename is a driver-level call, not a prompt. | 0 |
@@ -355,6 +356,11 @@ no model turn. Every turn is a synthetic, nonce-tagged prompt at the smallest mo
 and lowest effort. The first send is made only to create the transcript, because the
 runtime writes it at the first turn and the driver confirms a send by the screen until it
 exists; the confirmation checks are asserted on the sends after it.
+
+`B-CONFIG` (#392) was added after that run and is not in its numbers: it adds two boot
+sessions and no model turn. Run alone against a current supported build
+(`--only B-CONFIG`) it took about 21 seconds, most of it the teardown's wait for the
+youngest session to reach a safe age.
 
 ## Pack layout
 

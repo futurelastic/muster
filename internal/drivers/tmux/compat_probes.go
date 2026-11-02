@@ -214,6 +214,9 @@ type compatEvidence struct {
 	// a, b, c, u and i are the five boot sessions; i is the one that meets the
 	// external-imports dialog (#212).
 	a, b, c, u, i compatBoot
+	// g and gc are the pair B-CONFIG compares (#392): the same four sources of
+	// ambient configuration, one session started with isolateConfiguration.
+	g, gc compatConfigSeen
 	// bypassSetting: the user's own setting that suppresses the acceptance
 	// screen, read (never written) so a missing premise is reported as such.
 	bypassSetting    string // "true", "false", "absent" or an error text

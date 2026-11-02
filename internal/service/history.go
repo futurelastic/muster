@@ -117,6 +117,10 @@ type launchFacts struct {
 	// `create`. A later resume by a principal without it may carry them
 	// forward only because this is true.
 	SendAuth bool `json:"sendAuth,omitempty"`
+	// IsolateConfiguration records that the create asked for a session whose
+	// configuration is only what it named (muster #392), so a resume that names
+	// no posture configuration launches the same way.
+	IsolateConfiguration bool `json:"isolateConfiguration,omitempty"`
 	// Conversation is the conversation the create named (resume or
 	// conversationId), known before the session's own record shows up.
 	Conversation string `json:"conversation,omitempty"`
@@ -134,7 +138,10 @@ type launchRecord struct {
 	Mode     string          `json:"mode,omitempty"`
 	Settings json.RawMessage `json:"settings,omitempty"`
 	SendAuth bool            `json:"sendAuth,omitempty"`
-	At       time.Time       `json:"at"`
+	// IsolateConfiguration is launchFacts.IsolateConfiguration, kept for the
+	// next resume (muster #392).
+	IsolateConfiguration bool      `json:"isolateConfiguration,omitempty"`
+	At                   time.Time `json:"at"`
 }
 
 type historyDoc struct {
@@ -432,14 +439,17 @@ func (h *historyStore) syncLaunchLocked(r *seenRecord, at time.Time) bool {
 	next := launchRecord{Runtime: r.Runtime, Conversation: conv, At: at}
 	if prev != nil {
 		next.Mode, next.Settings, next.SendAuth = prev.Mode, prev.Settings, prev.SendAuth
+		next.IsolateConfiguration = prev.IsolateConfiguration
 	}
 	if r.Launch != nil {
 		next.Mode, next.Settings, next.SendAuth = r.Launch.Mode, r.Launch.Settings, r.Launch.SendAuth
+		next.IsolateConfiguration = r.Launch.IsolateConfiguration
 	}
 	if r.ObsMode != "" {
 		next.Mode = r.ObsMode
 	}
 	if prev != nil && prev.Mode == next.Mode && prev.SendAuth == next.SendAuth &&
+		prev.IsolateConfiguration == next.IsolateConfiguration &&
 		string(prev.Settings) == string(next.Settings) {
 		// Nothing a resume would read has changed, so this is not a reason to
 		// write — but the conversation is still being seen, and its record must

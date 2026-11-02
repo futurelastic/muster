@@ -203,6 +203,10 @@ type Driver struct {
 	// isolateEnvironment create field (muster #280), learned and trusted exactly
 	// like supportsConversationId — see requireIsolateEnvironment.
 	supportsIsolateEnvironment *bool
+	// supportsIsolateConfiguration is what the peer's /v1/health said about the
+	// isolateConfiguration create field (muster #392), learned and trusted
+	// exactly like supportsIsolateEnvironment — see requireIsolateConfiguration.
+	supportsIsolateConfiguration *bool
 	// supportsSandbox is what the peer's /v1/health said about `sandbox` (muster
 	// #281), the same shape and the same reason as supportsIsolateEnvironment.
 	supportsSandbox *bool
@@ -492,6 +496,7 @@ func (d *Driver) RefreshCapabilities(ctx context.Context, req fleet.Request) err
 			d.labelLimits = h.Labels
 			d.supportsConversationId = h.SupportsConversationId
 			d.supportsIsolateEnvironment = h.SupportsIsolateEnvironment
+			d.supportsIsolateConfiguration = h.SupportsIsolateConfiguration
 			d.supportsSandbox = h.SupportsSandbox
 			d.supportsLaunchSettings = h.SupportsLaunchSettings
 			d.launchSettingsOutsideBypass = h.LaunchSettingsOutsideBypass
@@ -523,6 +528,9 @@ type peerHealthBody struct {
 	// isolateEnvironment create field (muster #280); the same bare-flag shape
 	// as SupportsConversationId, for the same reason.
 	SupportsIsolateEnvironment *bool `json:"supportsIsolateEnvironment"`
+	// SupportsIsolateConfiguration is absent on a peer that predates the
+	// isolateConfiguration create field (muster #392); the same bare-flag shape.
+	SupportsIsolateConfiguration *bool `json:"supportsIsolateConfiguration"`
 	// SupportsSandbox is absent on a peer that predates the sandbox create field
 	// (muster #281): the same bare-flag shape, for the same reason.
 	SupportsSandbox *bool `json:"supportsSandbox"`
@@ -601,6 +609,7 @@ func (d *Driver) requireConversationId(ctx context.Context, req fleet.Request) e
 	d.labelLimits = h.Labels
 	d.supportsConversationId = h.SupportsConversationId
 	d.supportsIsolateEnvironment = h.SupportsIsolateEnvironment
+	d.supportsIsolateConfiguration = h.SupportsIsolateConfiguration
 	d.supportsSandbox = h.SupportsSandbox
 	d.supportsLaunchSettings = h.SupportsLaunchSettings
 	d.launchSettingsOutsideBypass = h.LaunchSettingsOutsideBypass
@@ -645,6 +654,7 @@ func (d *Driver) requireIsolateEnvironment(ctx context.Context, req fleet.Reques
 	d.labelLimits = h.Labels
 	d.supportsConversationId = h.SupportsConversationId
 	d.supportsIsolateEnvironment = h.SupportsIsolateEnvironment
+	d.supportsIsolateConfiguration = h.SupportsIsolateConfiguration
 	d.supportsSandbox = h.SupportsSandbox
 	d.supportsLaunchSettings = h.SupportsLaunchSettings
 	d.launchSettingsOutsideBypass = h.LaunchSettingsOutsideBypass
@@ -654,6 +664,47 @@ func (d *Driver) requireIsolateEnvironment(ctx context.Context, req fleet.Reques
 			Kind: fleet.ErrorUnsupported,
 			Message: fmt.Sprintf("peer %s does not carry isolateEnvironment (older build); the create was not sent, "+
 				"because that peer would accept it and silently start a session with the service's own environment", d.machine),
+			Machine: d.machine,
+		}
+	}
+	return nil
+}
+
+// requireIsolateConfiguration refuses forwarding a create that REQUIRES a session
+// whose configuration is only what the create names to a peer that would drop the
+// requirement (muster #392) — requireIsolateEnvironment's pattern, with the same
+// failure behind it: a peer on an older build ignores the field it does not know,
+// answers 201, and starts the session loading the account's own settings and tool
+// servers while the caller believes it does not. Only a positive cached answer is
+// trusted; anything else is asked again. The peer then applies its own driver's
+// refusal if that driver cannot confine the configuration.
+func (d *Driver) requireIsolateConfiguration(ctx context.Context, req fleet.Request) error {
+	d.mu.RLock()
+	supported := d.supportsIsolateConfiguration
+	d.mu.RUnlock()
+	if supported != nil && *supported {
+		return nil
+	}
+	h, err := d.peerHealth(ctx, req)
+	if err != nil {
+		return fmt.Errorf("remote: could not confirm %s carries isolateConfiguration, so the create was not sent: %w", d.machine, err)
+	}
+	d.mu.Lock()
+	d.build = h.Build
+	d.maxInputBytes = h.MaxInputBytes
+	d.labelLimits = h.Labels
+	d.supportsConversationId = h.SupportsConversationId
+	d.supportsIsolateEnvironment = h.SupportsIsolateEnvironment
+	d.supportsIsolateConfiguration = h.SupportsIsolateConfiguration
+	d.supportsSandbox = h.SupportsSandbox
+	d.supportsLaunchSettings = h.SupportsLaunchSettings
+	d.launchSettingsOutsideBypass = h.LaunchSettingsOutsideBypass
+	d.mu.Unlock()
+	if h.SupportsIsolateConfiguration == nil || !*h.SupportsIsolateConfiguration {
+		return &fleet.Error{
+			Kind: fleet.ErrorUnsupported,
+			Message: fmt.Sprintf("peer %s does not carry isolateConfiguration (older build); the create was not sent, "+
+				"because that peer would accept it and silently start a session that also loads the account's own settings and tool servers", d.machine),
 			Machine: d.machine,
 		}
 	}
@@ -684,6 +735,7 @@ func (d *Driver) requireSandbox(ctx context.Context, req fleet.Request) error {
 	d.labelLimits = h.Labels
 	d.supportsConversationId = h.SupportsConversationId
 	d.supportsIsolateEnvironment = h.SupportsIsolateEnvironment
+	d.supportsIsolateConfiguration = h.SupportsIsolateConfiguration
 	d.supportsSandbox = h.SupportsSandbox
 	d.supportsLaunchSettings = h.SupportsLaunchSettings
 	d.launchSettingsOutsideBypass = h.LaunchSettingsOutsideBypass
@@ -753,6 +805,7 @@ func (d *Driver) requireLaunchSettings(ctx context.Context, req fleet.Request, s
 	d.labelLimits = h.Labels
 	d.supportsConversationId = h.SupportsConversationId
 	d.supportsIsolateEnvironment = h.SupportsIsolateEnvironment
+	d.supportsIsolateConfiguration = h.SupportsIsolateConfiguration
 	d.supportsSandbox = h.SupportsSandbox
 	d.supportsLaunchSettings = h.SupportsLaunchSettings
 	d.launchSettingsOutsideBypass = h.LaunchSettingsOutsideBypass
@@ -1349,6 +1402,12 @@ type createBody struct {
 	// requireIsolateEnvironment — because an older peer would drop it and start
 	// the session with its whole environment.
 	IsolateEnvironment bool `json:"isolateEnvironment,omitempty"`
+	// IsolateConfiguration travels with the create (muster #392): a requirement
+	// that the session load only the configuration the create names. Create
+	// refuses a peer that has not confirmed it carries the field — see
+	// requireIsolateConfiguration — because an older peer would drop it and start
+	// the session with the account's own settings and tool servers.
+	IsolateConfiguration bool `json:"isolateConfiguration,omitempty"`
 	// Sandbox travels with the create (muster #281). Create refuses a peer that
 	// has not confirmed it carries the field — see requireSandbox — because an
 	// older peer would drop it and start the session UNCONFINED, the one outcome
@@ -1429,7 +1488,8 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 		Marker: spec.Marker, RemoteControl: spec.RemoteControl,
 		Labels:         spec.Labels,
 		ConversationId: spec.ConversationId, IsolateEnvironment: spec.IsolateEnvironment,
-		Sandbox: spec.Sandbox,
+		IsolateConfiguration: spec.IsolateConfiguration,
+		Sandbox:              spec.Sandbox,
 	}
 	if len(spec.Labels) > 0 {
 		if err := d.requireLabels(ctx, req); err != nil {
@@ -1443,6 +1503,11 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 	}
 	if spec.IsolateEnvironment {
 		if err := d.requireIsolateEnvironment(ctx, req); err != nil {
+			return fleet.Session{}, err
+		}
+	}
+	if spec.IsolateConfiguration {
+		if err := d.requireIsolateConfiguration(ctx, req); err != nil {
 			return fleet.Session{}, err
 		}
 	}

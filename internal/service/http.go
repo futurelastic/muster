@@ -554,6 +554,11 @@ func handleHealth(svc *Service) http.HandlerFunc {
 			// isolated environment is refused against an older build rather than
 			// forwarded and silently started with the service's own environment.
 			"supportsIsolateEnvironment": true,
+			// Whether the create endpoint understands `isolateConfiguration`
+			// (muster #392): the same wire-protocol fact. A build that predates it
+			// would drop the field and start the session loading the account's own
+			// settings and tool servers, so a relaying peer asks first.
+			"supportsIsolateConfiguration": true,
 			// Whether the create endpoint understands `sandbox` (muster #281):
 			// a relaying peer asks before forwarding, because a build that predates
 			// the field would drop it, answer 201 and start the session unconfined.
@@ -962,6 +967,12 @@ type createSessionBody struct {
 	// needs no grant beyond create. See fleet.SessionSpec.IsolateEnvironment.
 	IsolateEnvironment bool `json:"isolateEnvironment"`
 
+	// IsolateConfiguration requires that the session load only the configuration
+	// this create names, nothing from the account the service runs as (muster
+	// #392). It only NARROWS what the session reaches, so it needs no grant
+	// beyond create. See fleet.SessionSpec.IsolateConfiguration.
+	IsolateConfiguration bool `json:"isolateConfiguration"`
+
 	// Sandbox asks for an operating-system sandbox around the session (muster
 	// #281). Like IsolateEnvironment it only NARROWS what the session reaches,
 	// so it needs no grant beyond create. See fleet.SandboxSpec.
@@ -1205,9 +1216,9 @@ func handleCreateSession(svc *Service) http.HandlerFunc {
 		// can also carry. Both at once would have two sources of truth for one
 		// session, so the request is refused rather than one silently winning.
 		if body.Posture != nil {
-			if body.Sandbox != nil || body.PermissionMode != "" || body.IsolateEnvironment {
+			if body.Sandbox != nil || body.PermissionMode != "" || body.IsolateEnvironment || body.IsolateConfiguration {
 				writeError(w, &fleet.Error{Kind: fleet.ErrorInvalid, Message: "posture cannot be combined with sandbox, " +
-					"permissionMode or isolateEnvironment: it is the engine-neutral spelling of those three; send one of the two (#344)", Machine: machine})
+					"permissionMode, isolateEnvironment or isolateConfiguration: it is the engine-neutral spelling of those; send one of the two (#344, #392)", Machine: machine})
 				return
 			}
 			if err := body.Posture.Validate(); err != nil {
@@ -1257,6 +1268,7 @@ func handleCreateSession(svc *Service) http.HandlerFunc {
 				return
 			}
 			body.PermissionMode, body.Sandbox, body.IsolateEnvironment = mapped.PermissionMode, mapped.Sandbox, mapped.IsolateEnvironment
+			body.IsolateConfiguration = mapped.IsolateConfiguration
 		}
 
 		// #180: refuse env naming a variable this machine's delivery module
@@ -1286,7 +1298,7 @@ func handleCreateSession(svc *Service) http.HandlerFunc {
 		var launch resumeLaunch
 		if via != resolvedPeer {
 			var cerr *fleet.Error
-			launch, cerr = svc.carryResumeLaunch(r, machine, resolvedRuntime, d.Capabilities().CreatePermissionModes, &body)
+			launch, cerr = svc.carryResumeLaunch(r, machine, resolvedRuntime, d.Capabilities(), &body)
 			if cerr != nil {
 				writeError(w, cerr)
 				return
@@ -1309,8 +1321,9 @@ func handleCreateSession(svc *Service) http.HandlerFunc {
 			Marker: body.Marker, RemoteControl: body.RemoteControl,
 			TrustCwd: body.TrustCwd, Env: body.Env, Resume: body.Resume,
 			ConversationId: body.ConversationId, IsolateEnvironment: body.IsolateEnvironment,
-			Sandbox:        body.Sandbox,
-			PermissionMode: body.PermissionMode, Consents: body.Consents,
+			IsolateConfiguration: body.IsolateConfiguration,
+			Sandbox:              body.Sandbox,
+			PermissionMode:       body.PermissionMode, Consents: body.Consents,
 			McpConfig: body.McpConfig, Labels: body.Labels,
 			Settings: body.Settings,
 		}

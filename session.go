@@ -202,6 +202,25 @@ type SessionSpec struct {
 	// environment — and it does not confine the filesystem (see §4.3).
 	IsolateEnvironment bool `json:"isolateEnvironment,omitempty"`
 
+	// IsolateConfiguration requires that the session's configuration is ONLY
+	// what this create names: its Settings, its McpConfig, its ContextRef and the
+	// working directory's own project settings — nothing from the account the
+	// service runs as (muster #392). The runtime then does not load the
+	// user-level settings (hooks, plugins, permission rules, enabled tools) and
+	// connects to no tool server the create did not name.
+	//
+	// It is a requirement, not a preference, and a plain boolean for the same
+	// reason IsolateEnvironment is. A driver that cannot deliver it
+	// (DriverCapabilities.IsolatesConfiguration is false) REFUSES the create as
+	// unsupported rather than start a session that reaches a tool server its
+	// owner configured for themselves (§2.1, §5.6).
+	//
+	// What it does not do: it is not a sandbox. It narrows what the runtime LOADS;
+	// what the loaded session can then touch is Sandbox's and Posture's business.
+	// An Agent named alongside it must be defined at the working directory's
+	// project level, because an agent defined at user level is not loaded.
+	IsolateConfiguration bool `json:"isolateConfiguration,omitempty"`
+
 	// Sandbox asks for an operating-system sandbox around the session's process
 	// and everything it starts (muster #281): file access, unix-socket connects
 	// and system-service lookups denied outside what is granted. See SandboxSpec.

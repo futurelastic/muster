@@ -99,6 +99,13 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 		// this driver has no honest way to make it start under a caller's
 		// instead. Refused for the same reason as resume, three lines above.
 		"conversationId": spec.ConversationId != "",
+		// muster #392: the server loads the account's own configuration (its
+		// user-level config and tool servers) before any session exists, and has
+		// no per-session switch that narrows what it loaded. Never offered, so
+		// Capabilities.IsolatesConfiguration is false and the service refuses a
+		// posture asking for it first (posture-unenforceable); this is the
+		// driver's own refusal for a caller that sets the field directly.
+		"isolateConfiguration": spec.IsolateConfiguration,
 	}
 	if d.shared != nil {
 		// muster #280: one server for every session has no way to give one
