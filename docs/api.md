@@ -465,7 +465,7 @@ for — `person` or `personDropped` (below).
   forwarded it here). A relayed call is recorded on both machines; ask the
   machine it entered for the original principal.
 - **`outcome`** is the receipt's (`submitted`, `queued`, `refused`, `unknown`,
-  …), `error` when the driver failed after the call was attempted (the text may
+  `stalled`, …), `error` when the driver failed after the call was attempted (the text may
   have arrived), or `unknown` for a call the process died in the middle of.
   A request refused for its own shape (empty text, unknown field) never reached
   a driver and leaves no record.
@@ -909,6 +909,7 @@ service's.
 | `submitted` | The agent received it — reachable only when the driver's `confirmsDelivery` capability is `true` (see below) | Done |
 | `queued` | Accepted, submission unconfirmed | Done |
 | `refused` | The driver actively declined; `reason` says why | Read the reason — this is information, not a fault |
+| `stalled` | The session reads `working` and has drawn nothing for the whole stall bound (`state.stalled`, #391). **Nothing was written.** Not a `refused`: it does not clear by waiting | Do not send again — recover the session (client guide, *A session that stops drawing*) |
 | `unknown` | Sent, outcome unverifiable. On `delivery.route: "terminal"` **the text may be sitting unsent** | On the terminal: retry with `resumeIfStranded: true`. On **`inbox`: do not** — the message may have arrived; see below |
 | `delivered` | The receiver's own transcript recorded the message as a peer message — reachable only on `delivery.route: "inbox"` | Done |
 
@@ -1420,6 +1421,7 @@ not in the response.
     "composerDigest": "…", "screenDigest": "…",
     "quota": { "since": "…", "resetHint": "…" },
     "lastTurn": { "outcome": "failed", "reason": "…", "retryable": true },
+    "stalled": { "since": "…", "reason": "…" },
     "controlChannel": { "state": "active", "bridgeId": "…" },
     "permissionMode": "acceptEdits",
     "usage": {
@@ -1462,6 +1464,23 @@ a decode error, never a silent default.
 **`confidence`** — `observed` (read from a structured API) or `inferred`
 (deduced from a screen). It survives a relay rather than being flattened, so a
 proxied answer never looks more certain than the original.
+
+**`stalled`** (#391) — present when the session reads `working` and its screen has
+not changed for the whole stall bound. `status` stays `working`; this is the
+footnote that says the runtime stopped drawing. A running turn cannot hold still
+(its spinner animates and its elapsed counter ticks), so stillness for the bound
+is a hang, not a long turn — and a long turn, however long, never trips it.
+`since` is when the screen was first seen in the state it has held since;
+`reason` is prose for people and logs, never branched on. **Absent is not
+"healthy"**: the status is not `working`, the service has not yet watched the
+screen hold still for the whole bound, or the driver does not look
+(`observesStall` in `/v1/runtimes`). The service's clock for it starts at the
+first read that finds the screen and is not carried across a restart of the
+service, so a session that was already hung reads stalled only once the bound has
+elapsed since the restart. Configure the bound with `FLEET_STALL_AFTER` (default
+`30m`; `0` turns the judgement off). A send to a stalled session is answered
+`stalled` and writes nothing. It clears the moment the screen changes. A change
+fires `session.state`.
 
 **`permissionMode`** (#194) — the permission mode the runtime shows the session
 to be in: `default`, `acceptEdits`, `plan`, `auto`, `bypass` (the same word

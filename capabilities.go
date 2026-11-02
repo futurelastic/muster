@@ -189,6 +189,18 @@ type DriverCapabilities struct {
 	// so a temporarily unreachable machine can never report a bare false and
 	// become permanently incapable in a caller's cache (§4.3, D3).
 	ObservesPermissionMode bool `json:"observesPermissionMode"`
+	// ObservesStall reports whether the driver judges a `working` session
+	// stalled (SessionState.Stalled, muster #391) and answers a send to one with
+	// OutcomeStalled.
+	//
+	// It exists so an absent Stalled is answerable: on a driver declaring this it
+	// means "not judged stalled" — which is not "healthy" (see Stall) — and on one
+	// that does not it means "this driver never looks", so a caller that needs to
+	// know whether a long `working` is a hang falls back to SessionState.Since
+	// and its own bound. Like every flag here it inherits `source: assumed` from
+	// an unreached peer, so a temporarily unreachable machine can never report a
+	// bare false and become permanently incapable in a caller's cache (§4.3, D3).
+	ObservesStall bool `json:"observesStall"`
 	// CreatePermissionModes lists the values of SessionSpec.PermissionMode this
 	// driver accepts at create (muster #329), a subset of
 	// fleet.CreatePermissionModes. A caller offering its users a choice of mode

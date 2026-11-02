@@ -114,9 +114,10 @@ survey behind "rare" is [`docs/positioning.md`](docs/positioning.md).
 - **A session has a state, not a pulse.** Finished, out of quota, died on an
   error and holding unsent text all look like a quiet terminal; here they are
   different states, each saying whether it was `observed` or `inferred`.
-- **Sending a prompt is not fire-and-forget.** `submitted`, `queued`, `unknown`
-  and `refused` are distinct outcomes; `unknown` means the text is stranded, not
-  sent, and a retry never resubmits a human's text.
+- **Sending a prompt is not fire-and-forget.** `submitted`, `queued`, `unknown`,
+  `refused` and `stalled` are distinct outcomes; `unknown` means the text is
+  stranded, not sent, and a retry never resubmits a human's text; `stalled` means
+  the session stopped drawing and nothing was written.
 - **A session blocked on a dialog can be answered remotely** — by option index,
   carrying a nonce so the answer cannot land on a question that changed.
 - **Every route is authenticated.** No unauthenticated mode, loopback bind by

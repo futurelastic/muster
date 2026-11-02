@@ -307,6 +307,7 @@ SessionState {
   screenDigest?   : string        // fingerprint of the screen read — corroborates `keys` (§3); only from a driver declaring deliversRawKeys (§4.3)
   quota?          : QuotaBlock    // set when status is quota_blocked
   lastTurn?       : TurnEnd       // how the most recent turn ended, if the driver knows
+  stalled?        : Stall         // status is `working` and nothing has been drawn for the whole stall bound (#391); only from a driver declaring observesStall (§4.3); absent = not judged stalled, never "healthy"
   turns?          : integer       // agent turns completed since the most recent prompt delivery (#111); 0 is a finding, absent means the driver could not count
   credentialGeneration?: Timestamp // this machine's local credential generation at read time (#12)
   controlChannel?: ControlChannel  // what the RUNTIME says about its own remote-control channel (#48)
@@ -389,7 +390,58 @@ TurnEnd {
   reason?   : string      // the runtime's own words; for humans, never branched on
   retryable?: boolean     // the runtime's own claim that sending anything resumes the session
 }
+
+Stall {
+  since  : Timestamp      // when the screen was first seen in the state it has held since: the start of the quiet stretch, not of the verdict
+  reason : string         // this driver's words for why the session reads stalled; for humans and logs, never branched on
+}
 ```
+
+> **`stalled` is a footnote on `working`, not a status (muster issue #391).**
+> A hung runtime paints exactly like a busy one: the spinner is on screen, the
+> status is `working`, and `working` is the status that means "it will get to
+> your input". Measured: a session sat in `working` for about 43 hours after
+> its last turn, and five sends to it were each accepted and answered `queued`
+> without a turn ever starting. Nothing in the API told that session from one in
+> the middle of a long turn.
+>
+> The status stays `working` because that is what the screen says; `stalled`
+> changes what the reader should DO about it. The same shape as `lastTurn` and
+> `controlChannel`, for the same reason: folding it into `status` would rewrite
+> an observation with an inference.
+>
+> **What counts as a sign of life is only this: the screen changed.** A running
+> turn cannot hold still — the spinner animates and its elapsed counter ticks —
+> and a turn that completes repaints the screen. A session that reads `working`
+> throughout, on a screen that is the same for the whole bound, has a runtime
+> that stopped drawing. There is no guess at how long a turn should take (a
+> healthy turn can run for hours and never trips this) and no reading of the
+> runtime's transcript (a long tool call writes nothing for minutes and the
+> session is fine).
+>
+> **The bound is configurable and the judgement can be switched off.** A driver
+> that does not look declares `observesStall: false` (§4.3). An absent `stalled`
+> is then answerable: on a driver declaring it, "not judged stalled" — which is
+> not a finding that the session is healthy (§5.7); on one that does not, "this
+> driver never looks", and a caller falls back to `since` and a bound of its
+> own. It is also absent for any status but `working`, and for as long as the
+> service has not yet watched the screen hold still for the whole bound.
+>
+> **The clock is the service's own.** The quiet stretch is measured from what
+> this service has seen, and is not carried across a restart of it: a session
+> that was already hung reads stalled once the bound has elapsed since the
+> restart — late, never early. It also needs a reader to start: a session nobody
+> has read since the service started has no quiet stretch yet. `since` is
+> therefore "unchanged since at least this long ago", never "when the runtime
+> stopped".
+>
+> **It clears the moment the screen changes or the status leaves `working`**,
+> and a screen that goes quiet again starts a new stretch with a new `since`. A
+> send to a stalled session is answered `stalled` and writes nothing (§2.4,
+> api-http.md §3.3). `stalled` is a material change for `session.state` events
+> (api-http.md §4), compared by `since` and not by `reason`: it fires when the
+> verdict appears, clears, or begins a new stretch, never on a stall that merely
+> continues.
 
 > **`screenDigest` is present only from a driver that declares
 > `deliversRawKeys` (§4.3).** It fingerprints the whole screen this state was
@@ -700,7 +752,7 @@ for capabilities; it holds field by field.
 
 ```
 DeliveryReceipt {
-  outcome : "submitted" | "queued" | "refused" | "unknown"
+  outcome : "submitted" | "queued" | "refused" | "unknown" | "stalled"
           | "delivered" | "held" | "denied" | "expired" | "dropped"
   reason? : string
   delivery? : DeliveryPath
@@ -719,6 +771,15 @@ Input delivery is **not** fire-and-forget, and not a boolean.
 - `queued` — accepted by the driver, submission unconfirmed
 - `refused` — the driver declined; `reason` explains why
 - `unknown` — sent, outcome unverifiable
+- `stalled` — the driver declined to send because the session reads `working`
+  and has drawn nothing for the whole stall bound (`state.stalled`, §2.3;
+  muster #391). **Nothing was written.** The runtime is not reading, so a
+  `queued` would have promised what cannot happen; `reason` names the stall.
+  Unlike `refused` it does not clear by waiting and no rewording of the send
+  changes it: the caller recovers the session (interrupt it, or close it and
+  resume its conversation) instead of sending again. A client that predates the
+  value must treat an outcome it does not know as "not delivered", never as
+  `queued`.
 
 `delivery` names the path that made the receipt (#184): `terminal` (the
 session's composer — the text arrives as the user's own turn) or `inbox` (the
@@ -1959,6 +2020,7 @@ DriverCapabilities {
   observesControlChannel: boolean // can report `controlChannel` (§2.3); absent state is answerable only against this
   createPermissionModes?: string[] // the `permissionMode` values a create accepts on this driver (§2.1), a subset of default|acceptEdits|plan|auto|bypass; absent = the driver did not say (an older peer, or one not reached), which is unknown, never "none"
   observesPermissionMode: boolean // can report `permissionMode` (§2.3); absent state is answerable only against this. A driver may report it from a posture it configured itself (the local opencode driver reports `bypass`, muster #283) and leave it absent for a session it set nothing on; and a driver may honour `permissionMode: "bypass"` only together with an enforced `sandbox` (§2.1), refusing `unsupported` otherwise
+  observesStall   : boolean   // judges a `working` session stalled (`stalled`, §2.3, muster #391) and answers a send to one `stalled` (§2.4); absent stalled is answerable only against this: true = "not judged stalled" (not "healthy"), false = this driver never looks
   reportsUsage    : boolean   // can read `usage` (§2.3, muster #285) from its runtime; absent usage is answerable only against this: true = "not yet known", false = never
   reportsContext  : boolean   // can read `usage.context` (§2.3, muster #313), the size of the context the newest request carried, from its runtime; separate from `reportsUsage` because a runtime can report summed spend without per-request figures; absent context is answerable only against this: true = "not yet known", false = never
   reportsAgent    : boolean   // can read `agent` (§2.1/§2.12, muster #301) for any live session it lists, not only one it created; absent agent is answerable only against this: true = the runtime was started without one, false = never reported (and an `agent` list filter matches nothing)

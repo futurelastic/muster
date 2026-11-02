@@ -331,6 +331,18 @@ of an idle session should still classify exactly as before. A driver that
 cannot parse the height falls back to treating every row as visible, which is
 the pre-#169 behaviour, not a failure.
 
+`FLEET_STALL_AFTER` (#391) is how long a session that reads `working` may show
+the identical screen before the service says it has stalled: `state.stalled` is
+set, and `input` to it answers `stalled` and writes nothing instead of `queued`.
+A Go duration (`45m`, `2h`); unset means 30 minutes; `0` or `off` switches the
+judgement off, and `observesStall` in `/v1/runtimes` then reads `false`. An
+unparsable value is logged at startup and ignored, so the default stays in force.
+Lower it only if hangs cost you more than an occasional refused send to a session
+that was fine; a live turn repaints every second, so a bound of a few minutes is
+already far outside one. The quiet clock is the service's own memory and starts
+again after a restart, so right after a deploy a session that was already hung
+reads stalled only once the bound has elapsed since the restart.
+
 ## Running it
 
 ```sh
