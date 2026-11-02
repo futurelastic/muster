@@ -826,10 +826,10 @@ func TestInstallRefusesABinaryThatNamesAnotherRelease(t *testing.T) {
 	}
 }
 
-func TestInstallSendsTheTokenAsAHeaderAndNeverInAnArgument(t *testing.T) {
-	d := newDLInstall(t)
-	site := serveRelease(t, "0.4.0", fakeMuster("0.4.0", "ok"), "read-token", "")
-	// curl is wrapped so its argument list is recorded: the token must not be in it.
+// recordCurlArgs wraps curl in the install's PATH so every argument list it is run with is appended to a file, and
+// returns that file's path: a token that reached a command line is readable by every account on the machine.
+func (d *dlInstall) recordCurlArgs(t *testing.T) string {
+	t.Helper()
 	real, err := exec.LookPath("curl")
 	if err != nil {
 		t.Skip("curl not available")
@@ -838,6 +838,19 @@ func TestInstallSendsTheTokenAsAHeaderAndNeverInAnArgument(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(d.bin, "curl"), []byte(wrap), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	return filepath.Join(d.home, "curl.args")
+}
+
+func (s *dlSite) paths() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.hits...)
+}
+
+func TestInstallSendsTheTokenAsAHeaderAndNeverInAnArgument(t *testing.T) {
+	d := newDLInstall(t)
+	site := serveRelease(t, "0.4.0", fakeMuster("0.4.0", "ok"), "read-token", "")
+	argsFile := d.recordCurlArgs(t)
 	if out, code := d.run(t, map[string]string{"DL_URL": site.srv.URL}, "0.4.0"); code == 0 {
 		t.Fatalf("a locked host must refuse an install with no token:\n%s", out)
 	}
@@ -845,8 +858,45 @@ func TestInstallSendsTheTokenAsAHeaderAndNeverInAnArgument(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("install with a token failed (%d):\n%s", code, out)
 	}
-	args, _ := os.ReadFile(filepath.Join(d.home, "curl.args"))
+	args, _ := os.ReadFile(argsFile)
 	if strings.Contains(string(args), "read-token") {
+		t.Errorf("the token is on curl's command line:\n%s", args)
+	}
+}
+
+// The no-version install reads latest.json first, and a host that wants a sign-in refuses that read before anything
+// else (#390). The token must sign it, and every read after it, with no version given anywhere.
+func TestInstallTakesTheNewestVersionFromAHostThatWantsASignIn(t *testing.T) {
+	site := serveRelease(t, "0.4.0", fakeMuster("0.4.0", "ok"), "read-token", "")
+
+	// No token: the first read is the one refused, and the installer asks for nothing after it.
+	unsigned := newDLInstall(t)
+	out, code := unsigned.run(t, map[string]string{"DL_URL": site.srv.URL})
+	if code != 1 || !strings.Contains(out, "cannot read "+site.srv.URL+"/muster/latest.json") {
+		t.Fatalf("an unsigned read of latest.json must fail the install by name (%d):\n%s", code, out)
+	}
+	if unsigned.installedVersion(t) != "" {
+		t.Errorf("nothing may be installed after a refused read, installed %q", unsigned.installedVersion(t))
+	}
+	for _, p := range site.paths() {
+		if p != "/muster/latest.json" {
+			t.Errorf("after the refusal the installer must not ask for %s", p)
+		}
+	}
+	refused := len(site.paths())
+
+	// A token: latest.json, then the sums, then the binary, each of which this host would have refused unsigned.
+	signed := newDLInstall(t)
+	argsFile := signed.recordCurlArgs(t)
+	out, code = signed.run(t, map[string]string{"DL_URL": site.srv.URL, "DL_TOKEN": "read-token"})
+	if code != 0 || signed.installedVersion(t) != "0.4.0" {
+		t.Fatalf("a signed install of the newest version failed (%d, installed %q):\n%s", code, signed.installedVersion(t), out)
+	}
+	want := []string{"/muster/latest.json", "/muster/0.4.0/SHA256SUMS", "/muster/0.4.0/muster-v0.4.0-linux-amd64"}
+	if got := site.paths()[refused:]; strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("reads with a token = %v, want %v", got, want)
+	}
+	if args, _ := os.ReadFile(argsFile); strings.Contains(string(args), "read-token") {
 		t.Errorf("the token is on curl's command line:\n%s", args)
 	}
 }
