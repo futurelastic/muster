@@ -757,6 +757,13 @@ func (f *fakeMux) exec(ctx context.Context, name string, args ...string) ([]byte
 			}
 		}
 		return nil, nil
+	case "run-shell":
+		// The server-context probe (#336, #389), which runs on any macOS host
+		// that builds a Driver. Play the job it starts, so a test that is not
+		// about the probe does not wait out its timeout for an answer that
+		// never comes.
+		playProbeJob(args[len(args)-1], "Background")
+		return nil, nil
 	case "display-message":
 		// #180 H2: foregroundIsRuntime's own query. A live runtime pane
 		// reports the runtime's process title (its version string), so

@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -23,6 +26,11 @@ func init() {
 // ctxMux wraps the package's fake multiplexer with the three calls the #336
 // code makes: whether a server answers, its pid, and what `launchctl
 // managername` says when the server runs it.
+//
+// The server's answer travels the way a real server's does since #389: the
+// probe's `run-shell -b` job writes it to a file. The fake plays the job, so a
+// test can make the job slow (jobWrites false: it never finishes) or the
+// client slow (clientGate: the client call blocks until the channel closes).
 type ctxMux struct {
 	*fakeMux
 	mu           sync.Mutex
@@ -32,6 +40,30 @@ type ctxMux struct {
 	serverPID    string
 	newSessions  int
 	listSessions int
+
+	neverAnswers bool              // the job never writes its answer
+	clientGate   chan struct{}     // when set, a run-shell client call blocks until it is closed
+	runShells    [][]string        // the args of every run-shell sent
+	runShellCtxs []context.Context // the context each run-shell client ran under
+}
+
+// probeAnswerRE finds where the probe's job was told to leave its answer.
+var probeAnswerRE = regexp.MustCompile(`/bin/mv -f \S+ (\S+)'`)
+
+// playProbeJob does what the server-context probe's `run-shell -b` job does
+// inside a real server: write `answer` where the script says, whole or not at
+// all. It returns false when script is not the probe's job.
+func playProbeJob(script, answer string) bool {
+	mt := probeAnswerRE.FindStringSubmatch(script)
+	if mt == nil {
+		return false
+	}
+	part := mt[1] + ".part"
+	if err := os.WriteFile(part, []byte(answer+"\n"), 0o600); err != nil {
+		return true // the directory is gone: the job fails quietly, as a real one does
+	}
+	_ = os.Rename(part, mt[1])
+	return true
 }
 
 func (m *ctxMux) exec(ctx context.Context, name string, args ...string) ([]byte, error) {
@@ -53,9 +85,19 @@ func (m *ctxMux) exec(ctx context.Context, name string, args ...string) ([]byte,
 		m.mu.Unlock()
 		return []byte(pid + "\n"), nil
 	case "run-shell":
-		c := m.serverCtx
+		c, never, gate := m.serverCtx, m.neverAnswers, m.clientGate
+		m.runShells = append(m.runShells, append([]string(nil), args...))
+		m.runShellCtxs = append(m.runShellCtxs, ctx)
 		m.mu.Unlock()
-		return []byte(c + "\n"), nil
+		if gate != nil {
+			<-gate
+		}
+		// The job: leave the answer where the script says to. A real server
+		// never prints it back to the client, and neither does this one.
+		if !never {
+			playProbeJob(args[len(args)-1], c)
+		}
+		return nil, nil
 	case "new-session":
 		m.newSessions++
 		m.serverUp = true
@@ -272,11 +314,210 @@ func TestServerContextMeasurementIsCachedUntilACreate(t *testing.T) {
 	}
 }
 
+// shells returns the run-shell calls and the contexts their clients ran under.
+func (m *ctxMux) shells() ([][]string, []context.Context) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([][]string(nil), m.runShells...), append([]context.Context(nil), m.runShellCtxs...)
+}
+
+// stepClock is a clock a test moves by hand, so the 30 s window can pass
+// without the test waiting for it.
+type stepClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *stepClock) now() time.Time { c.mu.Lock(); defer c.mu.Unlock(); return c.t }
+func (c *stepClock) advance(d time.Duration) {
+	c.mu.Lock()
+	c.t = c.t.Add(d)
+	c.mu.Unlock()
+}
+
+// muster #389: the only `run-shell` this service sends is backgrounded and
+// silent, and its client is not one a timeout can kill. A foreground one made
+// the server print the job's output to a client the probe's own timeout had
+// killed, and the server died with every session in it.
+func TestServerProbeSendsOnlyABackgroundSilentJobWhoseClientCannotBeKilled(t *testing.T) {
+	m := &ctxMux{fakeMux: twoSessions(), serverUp: true, serverCtx: "Background", serverPID: "7"}
+	sc := ctxDriver(m, "darwin", "Background").Capabilities().ServerContext
+	if sc == nil || sc.Server == nil || sc.Server.Context != "Background" {
+		t.Fatalf("the answer must still reach the health report: %+v", sc)
+	}
+	calls, ctxs := m.shells()
+	if len(calls) != 1 {
+		t.Fatalf("%d run-shell calls for one measurement, want 1: %q", len(calls), calls)
+	}
+	args := calls[0]
+	if len(args) != 3 || args[0] != "run-shell" || args[1] != "-b" {
+		t.Fatalf("run-shell must be backgrounded (-b) and carry only its job: %q", args)
+	}
+	job := args[2]
+	if !strings.Contains(job, ">/dev/null 2>&1") || !strings.HasSuffix(job, "exit 0") {
+		t.Errorf("the job must print nothing and always exit 0, or the server has something to say to its client: %q", job)
+	}
+	if ctxs[0].Done() != nil {
+		t.Error("the run-shell client ran under a context that can cancel it: a timeout would kill it mid-job")
+	}
+}
+
+// muster #389, done-when 3: a server's context is read once per server run,
+// not every health window.
+func TestServerContextIsAskedOfAServerOnce(t *testing.T) {
+	clk := &stepClock{t: time.Unix(1785760000, 0)}
+	m := &ctxMux{fakeMux: twoSessions(), serverUp: true, serverCtx: "Background", serverPID: "7:100"}
+	d := ctxDriver(m, "darwin", "Background", withClock(clk.now))
+	asked := func() int { c, _ := m.shells(); return len(c) }
+	read := func() string {
+		sc := d.Capabilities().ServerContext
+		if sc == nil || sc.Server == nil {
+			t.Fatalf("no server context: %+v", sc)
+		}
+		return sc.Server.Context
+	}
+
+	if got := read(); got != "Background" || asked() != 1 {
+		t.Fatalf("first read: context %q after %d asks", got, asked())
+	}
+	for i := 0; i < 4; i++ {
+		clk.advance(serverContextTTL + time.Second)
+		if got := read(); got != "Background" {
+			t.Fatalf("window %d: context %q", i, got)
+		}
+	}
+	if asked() != 1 {
+		t.Errorf("the server was asked %d times across five health windows, want 1", asked())
+	}
+
+	// A new server run — a new start time under the same pid, or a new pid —
+	// is a different server and is asked afresh.
+	for i, id := range []string{"7:200", "9:200"} {
+		m.mu.Lock()
+		m.serverPID, m.serverCtx = id, "Aqua"
+		m.mu.Unlock()
+		clk.advance(serverContextTTL + time.Second)
+		if got := read(); got != "Aqua" {
+			t.Errorf("server %q: context %q, want Aqua", id, got)
+		}
+		if asked() != 2+i {
+			t.Errorf("after server %q: %d asks, want %d", id, asked(), 2+i)
+		}
+	}
+}
+
+// A probe that got no answer is not remembered as one: the next window asks again.
+func TestServerContextNoAnswerIsAskedAgainNextWindow(t *testing.T) {
+	clk := &stepClock{t: time.Unix(1785760000, 0)}
+	m := &ctxMux{fakeMux: twoSessions(), serverUp: true, serverCtx: "Background", serverPID: "7", neverAnswers: true}
+	d := ctxDriver(m, "darwin", "Background", withClock(clk.now), withProbeJob("", 150*time.Millisecond))
+	if sc := d.Capabilities().ServerContext; sc == nil || sc.Server == nil || sc.Server.Context != "unknown" {
+		t.Fatalf("a job that never answers must read unknown: %+v", sc)
+	}
+	m.mu.Lock()
+	m.neverAnswers = false
+	m.mu.Unlock()
+	clk.advance(serverContextTTL + time.Second)
+	if sc := d.Capabilities().ServerContext; sc == nil || sc.Server == nil || sc.Server.Context != "Background" {
+		t.Fatalf("the second window must ask again and get its answer: %+v", sc)
+	}
+	if calls, _ := m.shells(); len(calls) != 2 {
+		t.Errorf("%d asks, want 2", len(calls))
+	}
+}
+
+// muster #389, done-when 1, against the fake: a job that outlives the probe's
+// timeout leaves the probe unknown, its client uncancelled, and nothing behind.
+func TestServerProbeWhoseJobOutlivesItsTimeoutLeavesNothingToCrashOn(t *testing.T) {
+	m := &ctxMux{fakeMux: twoSessions(), serverUp: true, serverCtx: "Background", serverPID: "7", neverAnswers: true}
+	d := ctxDriver(m, "darwin", "Background", withProbeJob("", 150*time.Millisecond))
+	start := time.Now()
+	sc := d.Capabilities().ServerContext
+	if took := time.Since(start); took > 3*time.Second {
+		t.Errorf("the health read took %v with a 150ms probe", took)
+	}
+	if sc == nil || sc.Server == nil || sc.Server.Context != "unknown" {
+		t.Fatalf("serverContext = %+v", sc)
+	}
+	calls, ctxs := m.shells()
+	if len(calls) != 1 || ctxs[0].Done() != nil {
+		t.Fatalf("calls=%d; the client must run under a context that cannot be cancelled", len(calls))
+	}
+	// The private directory the job was to answer in is gone; a job that
+	// finishes later finds nothing to write to and says nothing.
+	mt := probeAnswerRE.FindStringSubmatch(calls[0][2])
+	if mt == nil {
+		t.Fatalf("no answer path in %q", calls[0][2])
+	}
+	if _, err := os.Stat(filepath.Dir(mt[1])); !os.IsNotExist(err) {
+		t.Errorf("the probe left %s behind (%v)", filepath.Dir(mt[1]), err)
+	}
+}
+
+// A server that is slow to take the command holds the client. The probe does
+// not kill it (that is what crashed servers), and does not stack a second one
+// on top of it either.
+func TestServerProbeKeepsOneUnkilledClientWhileAServerIsSlow(t *testing.T) {
+	clk := &stepClock{t: time.Unix(1785760000, 0)}
+	gate := make(chan struct{})
+	m := &ctxMux{fakeMux: twoSessions(), serverUp: true, serverCtx: "Background", serverPID: "7", clientGate: gate}
+	d := ctxDriver(m, "darwin", "Background", withClock(clk.now), withProbeJob("", 150*time.Millisecond))
+	read := func() string {
+		sc := d.Capabilities().ServerContext
+		if sc == nil || sc.Server == nil {
+			t.Fatalf("no server context: %+v", sc)
+		}
+		return sc.Server.Context
+	}
+	if got := read(); got != "unknown" {
+		t.Fatalf("a client the server has not released: %q, want unknown", got)
+	}
+	clk.advance(serverContextTTL + time.Second)
+	if got := read(); got != "unknown" {
+		t.Fatalf("second window: %q, want unknown", got)
+	}
+	if calls, ctxs := m.shells(); len(calls) != 1 || ctxs[0].Done() != nil {
+		t.Fatalf("%d run-shell clients while the first was still held, want exactly 1, uncancelled", len(calls))
+	}
+
+	close(gate) // the server takes the command; the client returns
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		d.sctxCache.probeMu.Lock()
+		busy := d.sctxCache.probing
+		d.sctxCache.probeMu.Unlock()
+		if !busy {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the probe never released after its client returned")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	clk.advance(serverContextTTL + time.Second)
+	if got := read(); got != "Background" {
+		t.Errorf("once the client is free the next window asks and answers: %q", got)
+	}
+}
+
+// The job's paths come from the temp directory, and a job is run by whatever
+// shell the user configured; a path any of them reads specially is not carried.
+func TestServerProbeScriptRefusesAPathItCannotCarry(t *testing.T) {
+	if got := serverProbeScript("/var/folders/ab/T/muster-ctx-1/answer", ""); got == "" {
+		t.Error("an ordinary temp path must be carried")
+	}
+	for _, p := range []string{"/tmp/a b/answer", "/tmp/a'b/answer", "/tmp/a#b/answer", "/tmp/a$b/answer", "/tmp/a;b/answer", ""} {
+		if got := serverProbeScript(p, ""); got != "" {
+			t.Errorf("path %q produced a job: %q", p, got)
+		}
+	}
+}
+
 // Live (FLEET_TMUX_INTEGRATION=1, macOS only), against a PRIVATE server: the
 // context the driver reports for a running server is the one `launchctl
 // managername` answers when the server runs it — measured through the real
-// multiplexer, not a fake. This is what makes `run-shell`'s stdout a trustworthy
-// carrier for the answer.
+// multiplexer, not a fake: the job `run-shell -b` starts inside the server
+// writes the answer to a file, and that file is a trustworthy carrier for it.
 func TestLiveServerContextIsReadFromTheServer(t *testing.T) {
 	m := newLiveMux(t)
 	if _, err := exec.LookPath("launchctl"); err != nil {
@@ -297,5 +538,31 @@ func TestLiveServerContextIsReadFromTheServer(t *testing.T) {
 	}
 	if sc.Server.PID <= 0 {
 		t.Errorf("server pid = %d", sc.Server.PID)
+	}
+}
+
+// muster #389, done-when 1, live (FLEET_TMUX_INTEGRATION=1) against a PRIVATE
+// server: a probe whose job outlives its timeout does not take the server
+// down. The job is held for a second under a 200ms timeout, so the probe has
+// given up long before it ends — the case that used to kill the server when the
+// job finished and the server wrote to the client the timeout had killed.
+func TestLiveProbeWhoseJobOutlivesItsTimeoutDoesNotCrashTheServer(t *testing.T) {
+	m := newLiveMux(t)
+	m.run("new-session", "-d", "-s", "ctxprobe", "sleep", "60")
+	pid := strings.TrimSpace(m.run("display-message", "-p", "#{pid}"))
+	if pid == "" || strings.Contains(pid, "no server") {
+		t.Fatalf("no server to probe: %q", pid)
+	}
+	d := New("livebox", WithBinary(m.wrapper), withGOOS("darwin"), withProbeJob("sleep 1; ", 200*time.Millisecond))
+	sc := d.Capabilities().ServerContext
+	if sc == nil || sc.Server == nil || sc.Server.Context != "unknown" {
+		t.Fatalf("a probe cut off by its timeout must read unknown: %+v", sc)
+	}
+	time.Sleep(3 * time.Second) // the job ends, and the server may do whatever it does then
+	if got := strings.TrimSpace(m.run("display-message", "-p", "#{pid}")); got != pid {
+		t.Fatalf("the server died or was replaced: pid %q before, %q after", pid, got)
+	}
+	if got := m.run("list-sessions", "-F", "#{session_name}"); !strings.Contains(got, "ctxprobe") {
+		t.Fatalf("the server lost its session: %q", got)
 	}
 }
