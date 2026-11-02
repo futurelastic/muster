@@ -316,6 +316,7 @@ starts recreating work that is already running.
 | `evidence` | human-readable reason — show it, do not parse it |
 | `since` | when this status was **first observed to hold** |
 | `prompt` | present when the session is blocked on a question (§6) |
+| `stalled` | present when the session reads `working` and its screen has not changed for the whole stall bound — a hang, not a long turn (§7, *A session that stops drawing*) |
 
 Two rules that will save you an incident:
 
@@ -340,10 +341,16 @@ Two rules that will save you an incident:
   needed. Ignore this and abandoned work sits looking available.
 - **`unknown` is not `dead`.** It means the service could not determine the
   state. Never clean up, kill or restart on `unknown`.
-- **`since` is your stall detector, and it needs no probe.** `waiting_input`
-  held for 12 seconds is a human typing; held for 14 hours it is a session
-  nobody is coming back to. Do not type into a pane to find out — that is
-  exactly the invasive test this field exists to replace.
+- **`since` is your stall detector for `waiting_input`, and it needs no probe.**
+  `waiting_input` held for 12 seconds is a human typing; held for 14 hours it is
+  a session nobody is coming back to. Do not type into a pane to find out — that
+  is exactly the invasive test this field exists to replace.
+- **`working` for a long time is not, by itself, a stall — read `stalled`, not
+  `since`.** A turn can run for hours. `state.stalled` is present only when the
+  screen has not changed at all for the whole bound (default 30 minutes), which a
+  running turn cannot do: its spinner animates. Absent is not "healthy" — on a
+  driver that does not look (`observesStall: false` in `/v1/runtimes`) fall back
+  to `since` and a bound of your own.
 
 ## 5. Reading one session
 
@@ -739,6 +746,44 @@ DELETE /v1/machines/aurora/sessions/alpha?startedAt=2026-08-01T23%3A14%3A01%2B07
 Omitting it is allowed and gives you a weaker guarantee — the driver
 corroborates against its own sightings instead of against what *you* saw — and
 the refusal tells you which one you got.
+
+### A session that stops drawing
+
+A hung runtime paints exactly like a busy one: `status: working`, a spinner on
+screen. Before muster #391 a send to one was answered `queued` — the answer that
+says it will be handled — and went on being answered `queued` for as long as
+anyone sent, one session for about 43 hours. Now the service says so:
+
+- **`GET` the session: `state.stalled` is present** — `{"since","reason"}`.
+  `status` is still `working`. `since` is when the screen was first seen holding
+  still; the verdict was reached a stall bound (`FLEET_STALL_AFTER`, default 30
+  minutes) later. It is the service's own clock and does not survive a restart of
+  the service, so right after one a hung session reads stalled late, never early.
+- **`input` to it answers `outcome: "stalled"` and writes nothing.** Not a
+  `refused`: a refusal clears by waiting or by you acting on the composer, and this
+  does not. **Do not send again** — you get the same answer until the session is
+  recovered. A client built before the value existed must read an outcome it does
+  not know as "not delivered", never as `queued`.
+
+**Recover it, in this order, stopping at the first step that works:**
+
+1. **Read it once more.** `stalled` clears the moment the screen changes; a
+   session that has woken is no longer stalled, and your send can go through.
+2. **`POST …/interrupt`.** This only expresses intent (`202`); confirmation is the
+   session repainting, so watch `session.state` (§8) for `stalled` clearing and
+   `status` leaving `working`. A runtime that was merely blocked comes back here.
+   Give it a bound of your own — a minute is plenty — and do not repeat it.
+3. **Close it and resume the conversation.** If `stalled` is still present, the
+   runtime is not reading keys either. Read `conversation` from the session
+   (`known: true` and its `id`) **before** closing, then `DELETE …?startedAt=<from
+   the read>` and `POST …/sessions` with `resume: "<that id>"` and the same `cwd`
+   (*Creating a session*, below). The conversation's record is on disk and
+   continues; what is lost is anything the hung process held only in memory,
+   including text it had queued but not yet taken — send that again afterwards.
+
+Two things this is not. It is not a reason to close on `unknown`, which means the
+service could not tell. And it is not a verdict about the *work*: a long tool call
+or a long thinking turn keeps the spinner moving and never reads stalled.
 
 ### Creating a session
 
@@ -1736,6 +1781,7 @@ boundaries.)
 - [ ] Checks `self` from `/v1/machines` before attaching, so local sessions do not take a remote path
 - [ ] Treats "not found in a partial view" as unknown, not as absent
 - [ ] Reads `lastTurn` before treating an `idle` session as having succeeded
+- [ ] Treats an `input` outcome it does not know — `stalled` above all — as "not delivered", never as `queued`, and recovers a stalled session instead of sending again
 - [ ] Never discards composer text without quoting back its `composerDigest`
 - [ ] Has its own principal and its own token
 - [ ] Reads `promptDelivery` before re-sending a create-time prompt through `input`

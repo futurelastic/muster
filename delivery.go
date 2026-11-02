@@ -26,6 +26,20 @@ const (
 	// OutcomeUnknown means the input was sent but the outcome is
 	// unverifiable.
 	OutcomeUnknown Outcome = "unknown"
+	// OutcomeStalled means the driver declined to send because the session
+	// reads `working` and has shown no sign of life for longer than the stall
+	// bound (muster #391; see Stall). Nothing was written: the runtime is not
+	// going to act on the text, so a `queued` would have promised what cannot
+	// happen. Reason names the stall, and the session's state carries the same
+	// fact as `stalled`. A caller recovers the session (api-http.md §3.3, the
+	// client guide's section on a stalled session) rather than retrying the
+	// send.
+	//
+	// Distinct from OutcomeRefused, which protects a session from input that
+	// would corrupt it and whose cause clears by waiting or by a caller's own
+	// action on the composer: a stall does not clear by itself, and no
+	// rewording of the send changes the answer.
+	OutcomeStalled Outcome = "stalled"
 
 	// The five values below are muster #119's own: a target's own
 	// inbox — reached only when a driver capability-detects one and
@@ -62,7 +76,7 @@ const (
 
 func (o Outcome) valid() bool {
 	switch o {
-	case OutcomeSubmitted, OutcomeQueued, OutcomeRefused, OutcomeUnknown,
+	case OutcomeSubmitted, OutcomeQueued, OutcomeRefused, OutcomeUnknown, OutcomeStalled,
 		OutcomeDelivered, OutcomeHeld, OutcomeDenied, OutcomeExpired, OutcomeDropped:
 		return true
 	default:

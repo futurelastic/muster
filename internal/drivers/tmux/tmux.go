@@ -236,6 +236,15 @@ const (
 	// whole story.
 	unsentAgeWorthMentioning = 10 * time.Minute
 
+	// defaultStallAfter is how long a `working` session's screen may hold
+	// perfectly still before the session reads as stalled (muster #391). A live
+	// turn animates its spinner and ticks an elapsed counter, so even a minute of
+	// stillness is far outside a healthy turn; the default is generous on
+	// purpose, because the cost of a false verdict is a refused send to a
+	// session that was fine, and the cost of a late one is a wait measured in
+	// minutes against a stall measured in hours. See stall.go.
+	defaultStallAfter = 30 * time.Minute
+
 	// submitConfirmWindow bounds the wait for delivered text to render before
 	// it is submitted. Generous on purpose: a slow render and a stuck pane
 	// look identical over a short budget, and failing early strands the text.
@@ -332,7 +341,10 @@ type Driver struct {
 	bin          string
 	deadline     time.Duration
 	captureLines int
-	build        CommandBuilder
+	// stallAfter is how long a `working` session's screen must hold still
+	// before it reads as stalled; zero turns the judgement off (stall.go).
+	stallAfter time.Duration
+	build      CommandBuilder
 	// agentProgram is the program the default command builder starts ("claude").
 	// Empty when a caller replaced the builder: this driver then cannot say what
 	// a session runs, and reports nothing about it (agentprogram.go).
@@ -702,6 +714,19 @@ func WithCaptureLines(n int) Option {
 	}
 }
 
+// WithStallAfter sets how long a session that reads `working` may show the
+// identical screen before it reads as stalled (muster #391; stall.go). Zero
+// turns the judgement off — no session is ever flagged and a send is never
+// answered `stalled` — and a negative value is ignored, like the other
+// duration options here. Default defaultStallAfter.
+func WithStallAfter(dur time.Duration) Option {
+	return func(d *Driver) {
+		if dur >= 0 {
+			d.stallAfter = dur
+		}
+	}
+}
+
 // WithCommandBuilder replaces the default agent CLI invocation.
 func WithCommandBuilder(b CommandBuilder) Option {
 	return func(d *Driver) {
@@ -883,6 +908,7 @@ func New(machine fleet.MachineId, opts ...Option) *Driver {
 		bin:          "tmux",
 		deadline:     defaultDeadlineMs * time.Millisecond,
 		captureLines: defaultCaptureLines,
+		stallAfter:   defaultStallAfter,
 		build:        claudeCodeCommand,
 		agentProgram: defaultAgentProgram,
 		run:          runReal,
@@ -1025,6 +1051,10 @@ func (d *Driver) Capabilities() fleet.DriverCapabilities {
 		// was readable at that moment (a dialog owns the screen), not that
 		// nobody looked.
 		ObservesPermissionMode: true,
+		// muster #391: judged from the screen's own stillness (stall.go), and
+		// declared only while the bound is on, so an absent state.stalled is
+		// answerable per machine rather than assumed.
+		ObservesStall: d.stallAfter > 0,
 		// muster #329: every mode the CLI's --permission-mode takes, plus
 		// bypass (launched as --dangerously-skip-permissions).
 		CreatePermissionModes: fleet.CreatePermissionModes(),
@@ -1846,12 +1876,14 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 		if nd, ok := driftBySession[r.session]; ok {
 			st.Evidence += "; " + driftSentence(nd.want, r.session)
 		}
+		digestSince := d.digestSinceLocked(r.session, digest, now)
 		d.recordObservationLocked(r.session, observation{
 			created: r.created, cwd: r.cwd, at: now,
 			status: st.Status, statusSince: *st.Since, digest: digest,
-			digestSince:   d.digestSinceLocked(r.session, digest, now),
+			digestSince:   digestSince,
 			sinceRestored: carried,
 		}, captured, *st.Since)
+		st.Stalled = d.stallVerdict(st, digest, digestSince, now) // muster #391
 		started := r.created
 		s := fleet.Session{
 			SessionRef: fleet.SessionRef{Machine: d.machine, ID: r.session, Name: r.session},
@@ -2352,12 +2384,14 @@ func (d *Driver) State(ctx context.Context, req fleet.Request, ref fleet.Session
 		if st.WaitingOn == fleet.WaitingUnsentInput {      // #240, same as List
 			st.StrandedDelivery = d.ownDeliveryLocked(r.session, r.cwd, c, captured)
 		}
+		digestSince := d.digestSinceLocked(r.session, digest, now)
 		d.recordObservationLocked(r.session, observation{
 			created: r.created, cwd: r.cwd, at: now,
 			status: st.Status, statusSince: *st.Since, digest: digest,
-			digestSince:   d.digestSinceLocked(r.session, digest, now),
+			digestSince:   digestSince,
 			sinceRestored: carried,
 		}, captured, *st.Since)
+		st.Stalled = d.stallVerdict(st, digest, digestSince, now) // muster #391
 		d.mu.Unlock()
 		// Same record upgrade List applies to LastTurn (#56) — State has no
 		// pre-resolved Conversation to reuse (it returns a bare
@@ -2611,6 +2645,15 @@ func (d *Driver) send(ctx context.Context, req fleet.Request, ref fleet.SessionR
 			}
 			pinned = module
 		}
+	}
+
+	// #391: a session that reads `working` and has drawn nothing new for the
+	// whole stall bound reads no input on any path, so none is tried and the
+	// caller is told so rather than handed a `queued` that cannot come true.
+	// Ahead of the ledger and every route below for the same reason: it is a fact
+	// about the session, and each of them would only find it out the slow way.
+	if receipt, stalled := d.stalledOnSend(ctx, ref); stalled {
+		return receipt, nil
 	}
 
 	// #184: the cross-path ledger, before any path is chosen. An earlier inbox

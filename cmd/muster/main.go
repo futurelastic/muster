@@ -242,6 +242,12 @@
 //	                       comma-separated environment names forwarded to a module
 //	                       child; nothing else is, beyond PATH HOME USER LANG
 //	                       TMPDIR FLEET_STATE_DIR, and a FLEET_ name never is.
+//	FLEET_STALL_AFTER      how long a session that reads `working` may show
+//	                       the identical screen before it reads stalled
+//	                       (`state.stalled`, and a send to it is answered
+//	                       `stalled`). A Go duration, e.g. 45m; `0` or `off`
+//	                       turns the judgement off. Absent means 30m; an
+//	                       unparsable value is logged and ignored. muster #391.
 //	FLEET_CAPTURE_LINES    how many lines of each pane this driver captures
 //	                       to classify it. Absent, or not a positive
 //	                       integer, means the built-in default is used and
@@ -650,6 +656,16 @@ func main() {
 				opts = append(opts, tmux.WithCaptureLines(n))
 				log.Printf("muster: pane capture window set to %d lines (#148)", n)
 			}
+		}
+		// muster #391: how long a `working` session's screen may hold still
+		// before it reads stalled. The driver has a default (30m); this only
+		// overrides it, or turns the judgement off.
+		stallAfter, stallSet, stallNote := parseStallAfter(os.Getenv("FLEET_STALL_AFTER"))
+		if stallNote != "" {
+			log.Print("muster: " + stallNote)
+		}
+		if stallSet {
+			opts = append(opts, tmux.WithStallAfter(stallAfter))
 		}
 		// #185: optional external delivery modules. Off unless
 		// FLEET_DELIVERY_MODULES names one; resolved here, started after

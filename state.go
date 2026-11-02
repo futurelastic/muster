@@ -278,6 +278,58 @@ type TurnEnd struct {
 	Retryable bool `json:"retryable,omitempty"`
 }
 
+// Stall says a session reads `working` and has shown no sign of life for longer
+// than the bound this driver was configured with (muster #391).
+//
+// # Why this is a fact beside Status, not a status
+//
+// A hung runtime paints exactly like a busy one: the spinner is on screen, the
+// status is `working`, and `working` is the status that means "it will get to
+// your input". Measured: a session sat in `working` for about 43 hours, and
+// five sends to it were each answered `queued` — the one answer that says it
+// will be handled — without a single turn starting. Nothing in the API
+// distinguished that session from one in the middle of a long turn.
+//
+// The status stays `working` because that is what the screen says and the
+// driver does not know more; the stall is a footnote that changes what the
+// reader should DO about it. The same shape TurnEnd and ControlChannel take, for
+// the same reason: folding it into Status would rewrite an observation with an
+// inference.
+//
+// # What counts as a sign of life
+//
+// A running turn cannot hold still: the spinner animates and its elapsed
+// counter ticks, so a live screen changes every second, and a turn that
+// completes repaints the screen. A screen that is byte-for-byte the same for
+// the whole bound, in a session that read `working` throughout, is therefore a
+// runtime that stopped drawing — not one thinking for a long time. That is the
+// only signal used: no guess about how long a turn should take, and no reading
+// of the transcript.
+//
+// # When it is absent
+//
+// Absent means "not judged stalled" and is never a finding that the session is
+// healthy (§5.7). It is also absent on a driver that does not look
+// (DriverCapabilities.ObservesStall), for a session that is not `working`, and
+// for as long as this service has not yet watched the screen hold still for the
+// whole bound. The clock is the service's own: it is not carried across a
+// restart of the service, so a stall that began before one is reported again
+// once the bound has elapsed since the restart. Read `Since` as "unchanged
+// since at least this long ago", never as when the runtime stopped.
+//
+// It clears the moment the screen changes or the status leaves `working`.
+type Stall struct {
+	// Since is the moment the screen was first seen in the state it has held
+	// since — the start of the quiet stretch, not of the stall verdict. The
+	// verdict is reached Since plus the configured bound.
+	Since Timestamp `json:"since"`
+
+	// Reason is this driver's own words for why the session reads as stalled,
+	// for humans and logs. Do not branch on it: branch on the field being
+	// present, the same discipline TurnEnd.Reason holds itself to.
+	Reason string `json:"reason"`
+}
+
 // WarningKind names what a footer notice (see Warning) is ABOUT, when this
 // driver recognises its wording.
 //
@@ -536,6 +588,15 @@ type SessionState struct {
 	// NOT that the turn succeeded (§5.7: absence is not a finding).
 	LastTurn *TurnEnd `json:"lastTurn,omitempty"`
 
+	// Stalled is present when the session reads `working` and its screen has
+	// not changed for the whole stall bound (muster #391; see Stall). A send
+	// to such a session is answered with OutcomeStalled and writes nothing.
+	//
+	// Independent of Status, which stays `working`: the screen says so, and
+	// this driver does not know more. Nil is not a finding that the session is
+	// healthy — see Stall for everything it does not mean.
+	Stalled *Stall `json:"stalled,omitempty"`
+
 	// Turns is how many agent turns have completed since this session's most
 	// recent prompt delivery (muster #111) — the fact that tells "the
 	// agent ran and produced nothing" apart from "the agent never ran at
@@ -699,6 +760,11 @@ func UnknownState(confidence Confidence, evidence string) SessionState {
 // per-keystroke event, so it cannot produce a storm the way ScreenDigest
 // would.
 //
+// Stalled (#391) is material by the same rule: a session going quiet while it
+// still reads `working` moves nothing else here. It is compared by Since and
+// not by Reason, so it fires when the verdict appears, clears, or begins a new
+// quiet stretch — never on a stall that merely continues.
+//
 // The rule for adding a field to this comparison: if a caller may branch on
 // it, it is material; if the documentation says not to parse it, it is not.
 func (s SessionState) MateriallyDiffers(other SessionState) bool {
@@ -718,6 +784,9 @@ func (s SessionState) MateriallyDiffers(other SessionState) bool {
 		return true
 	}
 	if !sameTurnEnd(s.LastTurn, other.LastTurn) {
+		return true
+	}
+	if !sameStall(s.Stalled, other.Stalled) {
 		return true
 	}
 	if !sameControlChannel(s.ControlChannel, other.ControlChannel) {
@@ -793,6 +862,23 @@ func sameTurnEnd(a, b *TurnEnd) bool {
 		return a == b
 	}
 	return a.Outcome == b.Outcome && a.Reason == b.Reason && a.Retryable == b.Retryable
+}
+
+// sameStall compares the stall verdict (#391). Material for the same reason
+// ControlChannel is: a session going quiet changes nothing else on this struct
+// — still `working`, same prompt, same composer — so a feed that did not fire
+// on it would leave a mirror believing the session is making progress, which
+// is the exact belief the field exists to end. Clearing matters as much.
+//
+// Reason is not compared: it is prose, and it may carry how long the quiet
+// stretch has lasted, which moves on every read. Since is fixed for as long as
+// the screen holds still, so appearing, clearing and a new stretch each fire
+// once, and a stall that merely continues never does.
+func sameStall(a, b *Stall) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Since.Equal(b.Since)
 }
 
 // sameControlChannel compares what the runtime says about its own control

@@ -1753,12 +1753,26 @@ part in it.
 POST /v1/machines/{machine}/sessions/{id}/input?runtime=
 { "text": "..." }                      (submit defaults to true: §3.3)
 
-→ 200 { "outcome": "submitted" | "queued" | "refused" | "unknown",
+→ 200 { "outcome": "submitted" | "queued" | "refused" | "unknown" | "stalled",
         "reason": "prompt holds unsent input",
         "delivery": { "route": "terminal" | "inbox" | "module",
                       "module"?: "<name>" },
         "sessionIds"?: ["<session id>", ...] }   (refused: `{id}` was a conversation id, §2)
 ```
+
+**`stalled` (muster #391) says the session reads `working` and has drawn nothing
+for the whole stall bound, and that nothing was written.** It is an ordinary
+`200` like `refused` and for the same reason — an expected domain outcome, not
+a fault — but it is not a `refused` and must not be handled as one: a refusal
+clears by waiting or by the caller acting on the composer, while a stall clears
+only when the session is recovered, and no rewording of the send changes the
+answer. The session's own state says the same (`state.stalled`, below), and
+`reason` names it. It is decided before any path is chosen, so `delivery` is
+absent. **A client that does not know the value must treat it as "not
+delivered", never as `queued`** — the whole point of the answer is that `queued`
+would have promised what cannot happen. Recovery is the client guide's section
+on a stalled session: `interrupt`, then `DELETE` the session and `create` again
+with `resume` if it stays stalled.
 
 **`delivery.route` (muster #184) names the path that made the receipt.** It
 is `inbox` for anything the inbox path decided — a delivery, an `unknown`, or a
@@ -2010,6 +2024,31 @@ reason to drop the finding. The vocabulary is expected to grow as new notices
 are measured; it is not claimed exhaustive by having one member today. A
 change fires `session.state` on the event stream (§4) like any other material
 change. It never changes `status`.
+
+`state.stalled` — when present — says the session reads `working` and its screen
+has not changed for the whole stall bound (muster #391):
+`{"since":"…","reason":"…"}`. `since` is when the screen was first seen in the
+state it has held since — the start of the quiet stretch, and the verdict was
+reached `since` plus the bound; `reason` is prose for humans and logs and is
+never branched on. It never changes `status`, which stays `working`: the screen
+says so, and the driver does not know more. A running turn cannot hold still —
+its spinner animates and its elapsed counter ticks — so stillness for the whole
+bound is a runtime that stopped drawing, not one thinking for a long time, and
+nothing else (no guess at how long a turn should take, no read of the
+transcript) is used.
+
+**Absent is not "healthy"** (§5.7). It means not judged stalled: the status is
+not `working`, the service has not yet watched the screen hold still for the
+whole bound, or the driver does not look — `observesStall` in `/v1/runtimes`
+says which driver does, and an unreached peer reports it `assumed`. The clock is
+the service's own and is not carried across a restart of it, so a session that
+was hung before one reads stalled only once the bound has elapsed since the
+restart. The bound is configured on the service (`FLEET_STALL_AFTER`, default
+30 minutes; `0` turns the judgement off), and the field clears the moment the
+screen changes or the status leaves `working`. It fires `session.state` (§4)
+when it appears, clears, or begins a new quiet stretch — compared by `since`,
+not `reason`, so a stall that merely continues is silent. A peer built before
+the field sends no key, and a relay passes it through untouched.
 
 `state.usage` — when present — is what the session has spent, as its runtime
 reports it (muster #285): `{"input":311,"output":42,"cacheRead":3013,"cacheWrite":60,
@@ -2467,7 +2506,7 @@ from silence is the failure mode this whole specification is organised against.
 **`session.state` fires on any material change**, which is every structured
 field a caller branches on: `status`, `confidence`, `waitingOn`,
 `composerDigest`, `strandedDelivery`, the prompt (its options, highlight and **nonce**), `quota`,
-`lastTurn`, `turns`, `usage` (muster #285; once per completed request, and its `asOf` alone is not a change), `credentialGeneration`. It began firing on `status` alone, and
+`lastTurn`, `stalled` (muster #391; by `since`, so a stall that continues is silent), `turns`, `usage` (muster #285; once per completed request, and its `asOf` alone is not a change), `credentialGeneration`. It began firing on `status` alone, and
 everything else then moved underneath a silent feed — including the nonce,
 whose entire job is to make an answer submitted against a replaced question
 refusable. A feed that under-reports does not merely go stale; it manufactures

@@ -87,6 +87,11 @@ const (
 	// this session's composer for longer than the caller would wait.
 	// Transient; retrying is expected to succeed.
 	RefusedBusy Class = "refused.busy"
+	// Stalled: nothing was delivered because the session reads `working` and
+	// has drawn nothing new for the whole stall bound (#391), so the runtime
+	// would not have read it. Unlike the two refusals above, nothing a caller
+	// does to the send changes the answer, and waiting does not clear it.
+	Stalled Class = "stalled"
 	// Stranded: the text reached the composer but was not confirmed
 	// submitted, and a record was kept so a resume can finish it.
 	Stranded Class = "stranded"
