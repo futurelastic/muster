@@ -55,7 +55,8 @@ type resumeLaunch struct {
 // A caller that may not is REFUSED, not silently downgraded: a resume that came
 // back in the ordinary mode is the failure this exists to end, and a refusal
 // names the way out (`permissionMode: "default"`).
-func (s *Service) carryResumeLaunch(r *http.Request, machine fleet.MachineId, rt fleet.RuntimeId, createModes []string, body *createSessionBody) (resumeLaunch, *fleet.Error) {
+func (s *Service) carryResumeLaunch(r *http.Request, machine fleet.MachineId, rt fleet.RuntimeId, caps fleet.DriverCapabilities, body *createSessionBody) (resumeLaunch, *fleet.Error) {
+	createModes := caps.CreatePermissionModes
 	callerSend := true
 	if p, ok := principalOf(r); ok {
 		callerSend = p.Allows(GrantSend)
@@ -104,6 +105,28 @@ func (s *Service) carryResumeLaunch(r *http.Request, machine fleet.MachineId, rt
 		}
 	}
 
+	// muster #392: a conversation launched with only the configuration its create
+	// named resumes the same way unless the request says otherwise, in words: a
+	// posture configuration of "inherit". Silence is not that — it is the case
+	// this carry exists for. Narrowing needs no grant. A runtime that cannot give
+	// the guarantee refuses (never a silent resume that loads the account's own
+	// settings and tool servers), and the refusal names the way out.
+	if found && rec.IsolateConfiguration && !body.IsolateConfiguration &&
+		(body.Posture == nil || body.Posture.Configuration == "") {
+		if !caps.IsolatesConfiguration {
+			return resumeLaunch{}, &fleet.Error{
+				Kind:   fleet.ErrorUnsupported,
+				Reason: fleet.ReasonPostureUnenforceable,
+				Message: "resuming this conversation would carry forward a session that loaded only the configuration its create named, " +
+					"and this runtime cannot do that (#392): refusing rather than resume it with the account's own settings and tool servers; " +
+					"send posture.configuration \"" + string(fleet.ConfigurationInherit) + "\" to resume it with them",
+				Machine: machine,
+			}
+		}
+		body.IsolateConfiguration = true
+		carried.IsolateConfiguration = true
+	}
+
 	out := resumeLaunch{}
 	if !carried.Empty() {
 		out.carried = &carried
@@ -119,6 +142,8 @@ func (s *Service) carryResumeLaunch(r *http.Request, machine fleet.MachineId, rt
 		Settings:     compactSettings(body),
 		SendAuth:     (fleet.PermissionModeNeedsSend(mode) || hasSettings(body)) && sendAuth,
 		Conversation: firstNonEmpty(body.Resume, body.ConversationId),
+		// What this launch gave the session in configuration, for the next resume (#392).
+		IsolateConfiguration: body.IsolateConfiguration,
 	}
 	out.facts = launch
 	return out, nil

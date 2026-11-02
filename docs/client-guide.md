@@ -802,6 +802,7 @@ Idempotency-Key: 4f1c9e2a-…          ← REQUIRED
   "consents": ["folder-trust"],      ← optional, the general form of the line above; also "external-imports"
   "env": {"MY_SESSION_ID": "…"},     ← optional, delivered out of band — never argv
   "isolateEnvironment": true,        ← optional REQUIREMENT: only a built environment, nothing from the service; `unsupported` where the runtime cannot (api.md)
+  "isolateConfiguration": true,      ← optional REQUIREMENT: load only the settings, tool servers and context this create names, nothing from the service user's account; an `agent` must then be project-level; `unsupported` where the runtime cannot (api.md)
   "sandbox": {"network": "open"},    ← optional REQUIREMENT: an OS sandbox (files, unix sockets, system services denied outside the grants); `unsupported` where the runtime cannot (api.md)
   "resume": "<conversation id>",     ← optional, continue a prior conversation
   "conversationId": "<caller uuid>", ← optional, START a new one under this id; mutually exclusive with resume

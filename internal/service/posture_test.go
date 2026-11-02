@@ -19,6 +19,7 @@ func (d *confinedDriver) Capabilities() fleet.DriverCapabilities {
 	c := d.carryDriverImpl.Capabilities()
 	c.Source = fleet.CapabilitiesObserved
 	c.IsolatesEnvironment = true
+	c.IsolatesConfiguration = true
 	c.CreatePermissionModes = []string{string(fleet.PermissionModeDefault), fleet.PermissionModeBypass}
 	c.Sandbox = &fleet.SandboxSupport{
 		Mechanism: "test",

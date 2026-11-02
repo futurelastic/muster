@@ -33,6 +33,13 @@ import (
 // Consents are never carried: a consent answers one boot question on one
 // session, and a standing one would be exactly the permission it refuses to be.
 //
+// IsolateConfiguration is carried when the previous session was launched with
+// only the configuration its create named (muster #392) and this request names no
+// posture configuration: a resume that came back loading the account's own
+// settings and tool servers would be exactly the leak the field exists to end. It
+// only narrows, so it needs no grant. A resume that wants the account's
+// configuration back says `posture.configuration: "inherit"`.
+//
 // An explicit permissionMode in the request wins over the carried mode, and an
 // explicit settings object wins over carried settings; a field the request named
 // is never reported here.
@@ -47,11 +54,16 @@ type CarriedLaunch struct {
 	// because the conversation's previous session carried it, as the compact
 	// JSON the driver put on argv. Empty when no settings were carried.
 	Settings json.RawMessage `json:"settings,omitempty"`
+
+	// IsolateConfiguration is true when this create launched with only the
+	// configuration it named because the conversation's previous session did
+	// (muster #392).
+	IsolateConfiguration bool `json:"isolateConfiguration,omitempty"`
 }
 
 // Empty reports whether nothing was carried.
 func (c CarriedLaunch) Empty() bool {
-	return c.PermissionMode == "" && len(c.Settings) == 0
+	return c.PermissionMode == "" && len(c.Settings) == 0 && !c.IsolateConfiguration
 }
 
 // LaunchSettingsAllowedOutsideBypass returns the part of a settings object a

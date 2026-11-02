@@ -94,6 +94,12 @@ var catalogue = []Spec{
 		ReliedOn: []string{"internal/drivers/tmux/tmux.go#acceptanceScreen"},
 	},
 	{
+		ID:       "B-CONFIG",
+		Gate:     GateMust,
+		Asserts:  "A session started with only the configuration its create names (--setting-sources project and --strict-mcp-config) runs the working directory's project-settings hook and starts the tool server named with --mcp-config, and runs neither a local-settings hook nor a tool server from the project's own .mcp.json; the same session without those two switches runs all four. The user settings layer is excluded by the same switch but cannot be planted here, because the run shares the real account's settings, so the local layer stands for it.",
+		ReliedOn: []string{"internal/drivers/tmux/tmux.go#claudeCodeCommand"},
+	},
+	{
 		ID:       "D1",
 		Gate:     GateMust,
 		Asserts:  "The runtime's per-process session record appears within fifteen seconds of launch carrying the fields this service reads, with the expected types and values.",

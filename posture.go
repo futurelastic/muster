@@ -14,17 +14,17 @@ import (
 // can park it for good.
 //
 // A Posture says what the work NEEDS, never how a runtime spells it. The
-// service lowers it onto the three per-runtime fields that already exist —
-// SessionSpec.PermissionMode, SessionSpec.Sandbox and
-// SessionSpec.IsolateEnvironment — using only what the runtime's own
-// DriverCapabilities declare, and refuses the create when the runtime cannot
+// service lowers it onto the per-runtime fields that already exist —
+// SessionSpec.PermissionMode, SessionSpec.Sandbox, SessionSpec.IsolateEnvironment
+// and SessionSpec.IsolateConfiguration (muster #392) — using only what the
+// runtime's own DriverCapabilities declare, and refuses the create when the runtime cannot
 // enforce all of it. Nothing starts with a weaker posture than the one asked.
 //
 // # One mapping, not one per driver
 //
 // What a runtime can enforce is already a function of capabilities it declares
-// (Sandbox, CreatePermissionModes, IsolatesEnvironment), so the mapping lives
-// here, once. The dry run, the capability report and the create itself all call
+// (Sandbox, CreatePermissionModes, IsolatesEnvironment, IsolatesConfiguration),
+// so the mapping lives here, once. The dry run, the capability report and the create itself all call
 // the same functions, so they cannot disagree; and the driver that finally
 // receives the lowered fields still enforces them and still refuses what it
 // cannot (§2.1) — this is a second reading of the same capability, not a second
@@ -56,6 +56,29 @@ const (
 	AttendanceUnattended Attendance = "unattended"
 )
 
+// Configuration says where the session's own configuration comes from: the
+// settings layers it loads and the tool servers it connects to (muster #392).
+type Configuration string
+
+const (
+	// ConfigurationInherit is today's behaviour and the default: the session
+	// also loads the configuration of the account the service runs as — the
+	// user-level settings file with its hooks, plugins and permission rules, and
+	// the user-level tool servers.
+	ConfigurationInherit Configuration = "inherit"
+	// ConfigurationGiven means the session's configuration is exactly what the
+	// create named — its `settings`, its `mcpConfig` and its `contextRef` — plus
+	// the working directory's own project settings, and nothing from the account
+	// the service runs as. A tool server the account adds later is not open to
+	// it: the guarantee is that nothing is inherited, not that named servers are
+	// denied one by one.
+	//
+	// An `agent` the create names must be defined in the working directory's
+	// project layer; one defined only at user level is not found (the runtime
+	// refuses to start, which is visible, not a degraded session).
+	ConfigurationGiven Configuration = "given"
+)
+
 // PostureFiles is the file-system part of a posture. Its presence asks for file
 // access to be confined to the session's working directory and private
 // directory, plus the paths named here.
@@ -82,6 +105,10 @@ type Posture struct {
 	// IsolatedEnvironment requires the session's process to carry only a built
 	// environment (SessionSpec.IsolateEnvironment).
 	IsolatedEnvironment bool `json:"isolatedEnvironment,omitempty"`
+	// Configuration is "inherit" (the default) or "given" (muster #392): with
+	// "given" the session loads only the configuration the create named. Like
+	// IsolatedEnvironment it only narrows what the session reaches.
+	Configuration Configuration `json:"configuration,omitempty"`
 }
 
 // Unattended reports whether the posture asks for a prompt-free session.
@@ -99,6 +126,11 @@ func (p Posture) Validate() error {
 	case "", SandboxNetworkOpen, SandboxNetworkClosed:
 	default:
 		return fmt.Errorf("posture.network %q is not one of %q, %q", string(p.Network), SandboxNetworkOpen, SandboxNetworkClosed)
+	}
+	switch p.Configuration {
+	case "", ConfigurationInherit, ConfigurationGiven:
+	default:
+		return fmt.Errorf("posture.configuration %q is not one of %q, %q", string(p.Configuration), ConfigurationInherit, ConfigurationGiven)
 	}
 	if p.Files != nil {
 		for _, path := range p.Files.ReadPaths {
@@ -118,6 +150,10 @@ func (p Posture) Validate() error {
 	}
 	return nil
 }
+
+// Given reports whether the posture asks for a session whose configuration is
+// only what the create named (muster #392).
+func (p Posture) Given() bool { return p.Configuration == ConfigurationGiven }
 
 // Confines reports whether the posture needs an enforced sandbox: it names file
 // access or a closed network, or it is unattended (which implies confinement).
@@ -139,6 +175,9 @@ type PostureSupport struct {
 	Network []SandboxNetwork `json:"network"`
 	// IsolatedEnvironment: the session's process can carry a built environment.
 	IsolatedEnvironment bool `json:"isolatedEnvironment"`
+	// GivenConfiguration: the session can be started with only the configuration
+	// the create named (muster #392).
+	GivenConfiguration bool `json:"givenConfiguration"`
 }
 
 // PostureSupportFrom derives what a runtime can enforce from what it declares.
@@ -148,7 +187,7 @@ type PostureSupport struct {
 // that was measured, and on every host that has no sandbox mechanism
 // (docs/api.md, #344, #345).
 func PostureSupportFrom(c DriverCapabilities) PostureSupport {
-	s := PostureSupport{Network: []SandboxNetwork{}, IsolatedEnvironment: c.IsolatesEnvironment}
+	s := PostureSupport{Network: []SandboxNetwork{}, IsolatedEnvironment: c.IsolatesEnvironment, GivenConfiguration: c.IsolatesConfiguration}
 	if c.Sandbox == nil {
 		return s
 	}
@@ -171,6 +210,8 @@ type PostureMapping struct {
 	Sandbox *SandboxSpec `json:"sandbox,omitempty"`
 	// IsolateEnvironment mirrors Posture.IsolatedEnvironment.
 	IsolateEnvironment bool `json:"isolateEnvironment,omitempty"`
+	// IsolateConfiguration mirrors Posture.Configuration == "given" (muster #392).
+	IsolateConfiguration bool `json:"isolateConfiguration,omitempty"`
 }
 
 // Lower maps the posture onto the per-runtime create fields and decides whether
@@ -195,6 +236,7 @@ func (p Posture) Lower(caps DriverCapabilities) (PostureMapping, error) {
 		}
 	}
 	m.IsolateEnvironment = p.IsolatedEnvironment
+	m.IsolateConfiguration = p.Given()
 
 	if caps.Source == CapabilitiesAssumed {
 		return m, nil
@@ -234,6 +276,9 @@ func (p Posture) Lower(caps DriverCapabilities) (PostureMapping, error) {
 	}
 	if p.IsolatedEnvironment && !sup.IsolatedEnvironment {
 		return refuse("it cannot isolate the session's environment")
+	}
+	if p.Given() && !sup.GivenConfiguration {
+		return refuse("it cannot start a session with only the configuration the create names (it would also load the account's own settings and tool servers)")
 	}
 	return m, nil
 }

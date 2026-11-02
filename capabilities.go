@@ -266,6 +266,13 @@ type DriverCapabilities struct {
 	// create as unsupported; a caller can also read this flag first. Like every
 	// flag here it inherits `source: assumed` from an unreached peer.
 	IsolatesEnvironment bool `json:"isolatesEnvironment"`
+	// IsolatesConfiguration reports whether the driver can start a session whose
+	// configuration is only what the create names — no user-level settings, no
+	// tool server the create did not list (muster #392). A caller that needs it
+	// sets SessionSpec.IsolateConfiguration and a driver reporting false refuses
+	// that create as unsupported; a caller can also read this flag first. Like
+	// every flag here it inherits `source: assumed` from an unreached peer.
+	IsolatesConfiguration bool `json:"isolatesConfiguration"`
 	// Sandbox declares that the driver can wrap a session in an operating-system
 	// sandbox (muster #281): SessionSpec.Sandbox is honoured, and every session
 	// created with it reports the profile in force (SessionState.Sandbox). Absent

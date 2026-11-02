@@ -188,6 +188,10 @@ func compatDirs(scratch string) map[string]string {
 		"b": filepath.Join(scratch, "t", "b"),
 		"u": filepath.Join(scratch, "u"),
 		"i": filepath.Join(scratch, "i"),
+		// g and gc carry the same four sources of ambient configuration, one
+		// session started with isolateConfiguration and its control (B-CONFIG, #392).
+		"g":  filepath.Join(scratch, "t", "g"),
+		"gc": filepath.Join(scratch, "t", "gc"),
 	}
 }
 
@@ -321,6 +325,10 @@ func (h *compatHarness) startWorld(ctx context.Context) (err error) {
 		}
 	}
 
+	if err := plantCompatConfiguration(scratch, w.dirs); err != nil {
+		return fmt.Errorf("configuration sources: %w", err)
+	}
+
 	// The import the instruction files of "a" and "i" carry (#212). It lives in the
 	// scratch directory itself, outside every working directory, and is not named
 	// like an instruction file, so nothing loads it except by that import.
@@ -390,6 +398,7 @@ func (h *compatHarness) startWorld(ctx context.Context) (err error) {
 		WithBinary(w.mux),
 		WithBareExec(),
 		WithCommandBuilder(w.commandBuilder()),
+		withClaudeArgv(),
 		WithRecordRoot(store.projects),
 		WithProcessSessionsRoot(store.sessions),
 		WithTrustSeed(store.trustState, store.home, []string{filepath.Join(scratch, "t")}),

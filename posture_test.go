@@ -174,3 +174,96 @@ func TestPostureLower_ARefusalCarriesTheReasonTheRuntimeGave(t *testing.T) {
 		t.Errorf("err = %v", err)
 	}
 }
+
+// muster #392: a session whose configuration is only what the create names is a
+// requirement the runtime declares or the create is refused — and it is
+// independent of confinement, so the plain terminal runtime can give it.
+func configCaps() DriverCapabilities {
+	c := plainCaps()
+	c.IsolatesConfiguration = true
+	return c
+}
+
+func TestPostureLower_GivenConfigurationLowersWhereTheRuntimeDeclaresIt(t *testing.T) {
+	for name, caps := range map[string]DriverCapabilities{"plain": configCaps(), "confined": func() DriverCapabilities {
+		c := confinedCaps()
+		c.IsolatesConfiguration = true
+		return c
+	}()} {
+		m, err := Posture{Configuration: ConfigurationGiven}.Lower(caps)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if !m.IsolateConfiguration {
+			t.Errorf("%s: mapping = %+v, want IsolateConfiguration", name, m)
+		}
+		// Asking for it must not drag a sandbox or a mode in with it.
+		if m.Sandbox != nil || m.PermissionMode != "" || m.IsolateEnvironment {
+			t.Errorf("%s: mapping = %+v, want only the configuration", name, m)
+		}
+	}
+}
+
+func TestPostureLower_GivenConfigurationRefusedWhereTheRuntimeCannot(t *testing.T) {
+	_, err := Posture{Configuration: ConfigurationGiven}.Lower(plainCaps())
+	var fe *Error
+	if !errors.As(err, &fe) {
+		t.Fatalf("err = %v, want a fleet error", err)
+	}
+	if fe.Kind != ErrorUnsupported || fe.Reason != ReasonPostureUnenforceable {
+		t.Errorf("kind=%s reason=%q, want unsupported / posture-unenforceable", fe.Kind, fe.Reason)
+	}
+	if !strings.Contains(fe.Message, "configuration the create names") {
+		t.Errorf("message %q does not say what is missing", fe.Message)
+	}
+}
+
+// Absent and "inherit" are today's behaviour: nothing lowered, nothing refused,
+// on a runtime that cannot give the guarantee too.
+func TestPostureLower_InheritedConfigurationAsksForNothing(t *testing.T) {
+	for _, p := range []Posture{{}, {Configuration: ConfigurationInherit}} {
+		for _, caps := range []DriverCapabilities{plainCaps(), configCaps()} {
+			m, err := p.Lower(caps)
+			if err != nil {
+				t.Fatalf("%+v: %v", p, err)
+			}
+			if m.IsolateConfiguration {
+				t.Errorf("%+v lowered to %+v, want no isolation", p, m)
+			}
+		}
+	}
+}
+
+// An unreached runtime is never refused locally (§4.3, D3), but the field is
+// lowered so the peer, which can decide, receives the requirement.
+func TestPostureLower_GivenConfigurationOnAssumedCapabilitiesIsLoweredNotRefused(t *testing.T) {
+	c := plainCaps()
+	c.Source = CapabilitiesAssumed
+	m, err := Posture{Configuration: ConfigurationGiven}.Lower(c)
+	if err != nil {
+		t.Fatalf("an unreached runtime was refused locally: %v", err)
+	}
+	if !m.IsolateConfiguration {
+		t.Errorf("mapping = %+v: the peer needs the lowered field to decide", m)
+	}
+}
+
+func TestPostureSupportFrom_GivenConfiguration(t *testing.T) {
+	if !PostureSupportFrom(configCaps()).GivenConfiguration {
+		t.Error("a runtime declaring IsolatesConfiguration reports no support")
+	}
+	if PostureSupportFrom(plainCaps()).GivenConfiguration {
+		t.Error("a runtime not declaring IsolatesConfiguration reports support")
+	}
+}
+
+func TestPostureValidate_ConfigurationMustBeKnown(t *testing.T) {
+	if err := (Posture{Configuration: "partial"}).Validate(); err == nil {
+		t.Error("an unknown configuration was accepted")
+	}
+	for _, c := range []Configuration{"", ConfigurationInherit, ConfigurationGiven} {
+		if err := (Posture{Configuration: c}).Validate(); err != nil {
+			t.Errorf("configuration %q refused: %v", c, err)
+		}
+	}
+}

@@ -605,3 +605,21 @@ func TestIsolatedMode_HonoursIsolateEnvironment(t *testing.T) {
 	d, _ := newIsolatedDriver(t)
 	mustCreate(t, d, "k1", fleet.SessionSpec{IsolateEnvironment: true})
 }
+
+// muster #392: the server loads the account's own configuration before any
+// session exists, so there is nothing per session to narrow. The capability is
+// never declared, and a create that sets the field is refused — in both modes,
+// including the one that isolates the environment.
+func TestIsolateConfigurationIsRefusedAndNeverDeclared(t *testing.T) {
+	iso, _ := newIsolatedDriver(t)
+	shared := newTestDriver(t, newFakeServer(t))
+	for name, d := range map[string]*Driver{"isolated": iso, "shared": shared} {
+		if d.Capabilities().IsolatesConfiguration {
+			t.Errorf("%s: the driver declares IsolatesConfiguration", name)
+		}
+		_, err := d.Create(context.Background(), testReq, "k-cfg-"+name, fleet.SessionSpec{Cwd: "/w", IsolateConfiguration: true})
+		if kindOfErr(err) != fleet.ErrorUnsupported {
+			t.Errorf("%s: Create = %v, want ErrorUnsupported", name, err)
+		}
+	}
+}

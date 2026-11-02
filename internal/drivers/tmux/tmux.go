@@ -350,6 +350,13 @@ type Driver struct {
 	// a session runs, and reports nothing about it (agentprogram.go).
 	agentProgram string
 	agentProbe   agentProbeCache
+	// buildsClaudeArgv is true while the argv comes from claudeCodeCommand, the
+	// one builder known to pass the flags that confine which configuration the
+	// agent loads (muster #392). A caller's own builder cannot be promised to,
+	// so a driver carrying one declines IsolatesConfiguration and refuses the
+	// create that needs it. The compat harness wraps claudeCodeCommand and says
+	// so through withClaudeArgv.
+	buildsClaudeArgv bool
 
 	// muster #345: the sandbox this driver can put an agent in. sandboxCfg is
 	// nil unless the composition root enabled it (WithSandbox); whether it is
@@ -733,9 +740,15 @@ func WithCommandBuilder(b CommandBuilder) Option {
 		if b != nil {
 			d.build = b
 			d.agentProgram = ""
+			d.buildsClaudeArgv = false
 		}
 	}
 }
+
+// withClaudeArgv marks a replaced builder as one that wraps claudeCodeCommand and
+// keeps its configuration flags, so the driver still honours IsolateConfiguration
+// (muster #392). Only the compat harness, which checks the real argv, says so.
+func withClaudeArgv() Option { return func(d *Driver) { d.buildsClaudeArgv = true } }
 
 // WithLoginShell sets the interpreter a created session's argv is wrapped in.
 // Default: $SHELL, or a platform default when the process manager does not
@@ -903,23 +916,24 @@ func withNonce(f func() string) func(*Driver)    { return func(d *Driver) { d.no
 // New builds a Driver for one machine.
 func New(machine fleet.MachineId, opts ...Option) *Driver {
 	d := &Driver{
-		machine:      machine,
-		runtime:      DefaultRuntime,
-		bin:          "tmux",
-		deadline:     defaultDeadlineMs * time.Millisecond,
-		captureLines: defaultCaptureLines,
-		stallAfter:   defaultStallAfter,
-		build:        claudeCodeCommand,
-		agentProgram: defaultAgentProgram,
-		run:          runReal,
-		dial:         dialReal,
-		psBin:        "/bin/ps",
-		psRun:        runReal,
-		inboxDial:    dialInboxReal,
-		now:          time.Now,
-		nonce:        randomNonce,
-		observed:     map[string]observation{},
-		retention:    defaultIdempotencyRetention,
+		machine:          machine,
+		runtime:          DefaultRuntime,
+		bin:              "tmux",
+		deadline:         defaultDeadlineMs * time.Millisecond,
+		captureLines:     defaultCaptureLines,
+		stallAfter:       defaultStallAfter,
+		build:            claudeCodeCommand,
+		agentProgram:     defaultAgentProgram,
+		buildsClaudeArgv: true,
+		run:              runReal,
+		dial:             dialReal,
+		psBin:            "/bin/ps",
+		psRun:            runReal,
+		inboxDial:        dialInboxReal,
+		now:              time.Now,
+		nonce:            randomNonce,
+		observed:         map[string]observation{},
+		retention:        defaultIdempotencyRetention,
 	}
 	for _, o := range opts {
 		o(d)
@@ -1072,6 +1086,10 @@ func (d *Driver) Capabilities() fleet.DriverCapabilities {
 		// footer label ObservesControlChannel already reads, once
 		// corroborated — see surface.go's runtimeSurfaceFor.
 		ReportsRuntimeSurface: true,
+		// muster #392: claudeCodeCommand passes --setting-sources project and
+		// --strict-mcp-config for IsolateConfiguration; a caller's own builder
+		// is not promised to.
+		IsolatesConfiguration: d.buildsClaudeArgv,
 		ConfirmsDelivery:      false,
 		SupportsResume:        true,
 		// #122: true only once a composition root has actually wired
@@ -4890,6 +4908,18 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 			Machine: d.machine,
 		}
 	}
+	// muster #392: a session whose configuration is only what the create names
+	// needs flags on the agent's command line, which only the default builder is
+	// known to pass. Refused before any side effect, like the requirement above.
+	if spec.IsolateConfiguration && !d.buildsClaudeArgv {
+		return fleet.Session{}, &fleet.Error{
+			Kind: fleet.ErrorUnsupported,
+			Message: "create: this driver cannot confine a session to the configuration the create names (its " +
+				"command line is built by a replacement builder that is not known to pass the flags that do it); " +
+				"refusing rather than start a session that also loads the account's own settings and tool servers",
+			Machine: d.machine,
+		}
+	}
 	// muster #281, #345: this driver starts sessions through the user's
 	// multiplexer, whose server socket is the very thing a sandbox must keep a
 	// session away from. The server stays outside; what can be confined is the
@@ -5435,6 +5465,18 @@ func claudeCodeCommand(spec fleet.SessionSpec, contextFile string) []string {
 	// one argv element beginning with "{", so it cannot be read as a flag.
 	if settings, err := fleet.ValidateLaunchSettings(spec.PermissionMode, spec.Settings); err == nil && settings != "" {
 		argv = append(argv, "--settings", settings)
+	}
+	// muster #392: a session whose configuration is only what the create names.
+	// `project` is the narrowest source set the CLI takes that still reads the
+	// working directory's own settings: it drops the user layer (hooks, plugins,
+	// permission rules, enabled tools) and the per-machine local layer. The
+	// create's own --settings, --mcp-config and --append-system-prompt-file are
+	// not settings sources and keep working. --strict-mcp-config then drops every
+	// tool server not listed in an --mcp-config below, the user's own included.
+	// An --agent defined only at user level is not found under this set (the CLI
+	// says so and exits, which is visible rather than a degraded session).
+	if spec.IsolateConfiguration {
+		argv = append(argv, "--setting-sources", "project", "--strict-mcp-config")
 	}
 	for _, path := range spec.McpConfig {
 		// Repeated rather than joined: the flag takes one path per occurrence,
