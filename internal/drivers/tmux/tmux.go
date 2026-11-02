@@ -364,6 +364,9 @@ type Driver struct {
 	goos               string
 	managerName        managerNameFunc
 	sctxCache          serverContextCache
+	// probeJobPrefix and probeTimeout shape the server-context probe; tests only.
+	probeJobPrefix string
+	probeTimeout   time.Duration
 
 	now   func() time.Time
 	nonce func() string

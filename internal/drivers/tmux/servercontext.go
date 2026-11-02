@@ -3,7 +3,9 @@ package tmux
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -48,9 +50,13 @@ const contextUnknown = "unknown"
 // the only thing that goes stale is "which server (if any) is running".
 const serverContextTTL = 30 * time.Second
 
-// serverContextProbeTimeout bounds the two multiplexer calls of one
-// measurement, so a wedged server cannot hold a health request.
+// serverContextProbeTimeout bounds one measurement, so a wedged server cannot
+// hold a health request.
 const serverContextProbeTimeout = 3 * time.Second
+
+// serverProbePoll is how often a measurement looks for the answer its job
+// leaves behind.
+const serverProbePoll = 20 * time.Millisecond
 
 // managerNameFunc returns this process's launchd session name.
 type managerNameFunc func(ctx context.Context) (string, error)
@@ -177,6 +183,20 @@ type serverContextCache struct {
 	at   time.Time
 	have bool
 	val  *fleet.ServerContext
+
+	// muster #389: a server's context never changes for its lifetime, so it is
+	// asked of a server once. knownKey names the server run that knownCtx was
+	// read from (its pid and start time); a different key is a different
+	// server and is measured afresh. Both are guarded by mu.
+	knownKey string
+	knownCtx string
+
+	// probing is set from the moment a probe's multiplexer client is started
+	// until that client returns. A probe never kills its client (see
+	// probeServerContext), so a client held by a wedged server can outlive the
+	// probe that started it; this keeps that to one.
+	probing bool
+	probeMu sync.Mutex
 }
 
 func (d *Driver) forgetServerContext() {
@@ -198,7 +218,7 @@ func (d *Driver) reportServerContext() *fleet.ServerContext {
 	if c.have && now.Sub(c.at) < serverContextTTL {
 		return c.val
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), serverContextProbeTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), d.serverProbeTimeout())
 	defer cancel()
 	out := &fleet.ServerContext{Service: d.ownContext(ctx)}
 	if running, err := d.serverRunning(ctx); err == nil && running {
@@ -209,20 +229,165 @@ func (d *Driver) reportServerContext() *fleet.ServerContext {
 	return out
 }
 
-// measureServer reads the running server's pid and context. The context is
-// asked of the server itself: a shell the server runs inherits the server's
-// security session, so `launchctl managername` run there answers for it.
+func (d *Driver) serverProbeTimeout() time.Duration {
+	if d.probeTimeout > 0 {
+		return d.probeTimeout
+	}
+	return serverContextProbeTimeout
+}
+
+// measureServer reads the running server's pid and context. Called with
+// sctxCache.mu held.
+//
+// The context is asked of the server itself: a process the server starts
+// inherits the server's security session, so `launchctl managername` run
+// there answers for it. The answer is kept for as long as the same server run
+// is up (muster #389), so the question is put to a server once, not on every
+// health window.
 func (d *Driver) measureServer(ctx context.Context) *fleet.ServerProcessContext {
 	sp := &fleet.ServerProcessContext{Context: contextUnknown}
-	if out, err := d.run(ctx, d.bin, "display-message", "-p", "#{pid}"); err == nil {
-		if n, err := strconv.Atoi(strings.TrimSpace(string(out))); err == nil && n > 0 {
-			sp.PID = n
-		}
+	c := &d.sctxCache
+	key := ""
+	if out, err := d.run(ctx, d.bin, "display-message", "-p", "#{pid}:#{start_time}"); err == nil {
+		sp.PID, key = serverIdentity(string(out))
 	}
-	if out, err := d.run(ctx, d.bin, "run-shell", "launchctl managername"); err == nil {
-		sp.Context = cleanContextName(string(out))
+	if key != "" && key == c.knownKey && c.knownCtx != "" {
+		sp.Context = c.knownCtx
+		return sp
+	}
+	sp.Context = d.probeServerContext(ctx)
+	// Only an answer is kept. An unknown is a probe that did not finish (a busy
+	// server, a missing launchctl) and is worth asking again at the next window.
+	if key != "" && sp.Context != contextUnknown {
+		c.knownKey, c.knownCtx = key, sp.Context
 	}
 	return sp
+}
+
+// serverIdentity splits what `display-message -p '#{pid}:#{start_time}'`
+// prints into the server's pid and a key naming this run of it. A pid alone
+// can be handed to a later server; the start time tells the two apart. A
+// multiplexer that prints no start time leaves the pid as the whole key, and a
+// pid that does not parse leaves no key at all — nothing is then cached.
+func serverIdentity(raw string) (pid int, key string) {
+	s := strings.TrimSpace(raw)
+	idText, start, _ := strings.Cut(s, ":")
+	n, err := strconv.Atoi(idText)
+	if err != nil || n <= 0 {
+		return 0, ""
+	}
+	if start = strings.TrimSpace(start); start != "" {
+		return n, idText + ":" + start
+	}
+	return n, idText
+}
+
+// probeServerContext asks the running server what its security-session
+// context is, and returns "unknown" when it cannot be told in time.
+//
+// It sends exactly one thing to the server that runs a job: `run-shell -b`
+// whose job prints nothing and always exits 0, so the server has nothing to
+// write back to the client that asked. The answer travels through a file the
+// job renames into place, and this side polls for it.
+//
+// Why that shape (muster #389): a foreground `run-shell` makes the server
+// print the job's output to its command client when the job ends. This
+// probe's own timeout used to kill that client while the job was still
+// running, and the server then wrote to a client that was gone and died with
+// SIGSEGV — every session it hosted with it, five times in three days on one
+// busy machine. Backgrounded, silent and exit-0, there is nothing to print and
+// nothing to report, whatever happens to the client; and the client is not
+// killed on our timeout either (context.WithoutCancel), so even a server that
+// is slow to take the command is never answered by a client that left.
+func (d *Driver) probeServerContext(ctx context.Context) string {
+	c := &d.sctxCache
+	c.probeMu.Lock()
+	if c.probing {
+		c.probeMu.Unlock()
+		return contextUnknown
+	}
+	c.probing = true
+	c.probeMu.Unlock()
+	release := func() {
+		c.probeMu.Lock()
+		c.probing = false
+		c.probeMu.Unlock()
+	}
+
+	dir, err := os.MkdirTemp(safeProbeBase(), "muster-ctx-")
+	if err != nil {
+		release()
+		return contextUnknown
+	}
+	// The job may still be running when this returns; its rename then fails
+	// quietly into /dev/null, which is why the script tolerates it.
+	defer os.RemoveAll(dir)
+	answer := filepath.Join(dir, "answer")
+	script := serverProbeScript(answer, d.probeJobPrefix)
+	if script == "" {
+		release()
+		return contextUnknown
+	}
+
+	clientDone := make(chan error, 1)
+	go func() {
+		defer release()
+		_, err := d.run(context.WithoutCancel(ctx), d.bin, "run-shell", "-b", script)
+		clientDone <- err
+	}()
+
+	tick := time.NewTicker(serverProbePoll)
+	defer tick.Stop()
+	for {
+		if b, err := os.ReadFile(answer); err == nil {
+			return cleanContextName(string(b))
+		}
+		select {
+		case <-ctx.Done():
+			return contextUnknown
+		case err := <-clientDone:
+			if err != nil {
+				return contextUnknown
+			}
+			clientDone = nil // the job is queued; keep waiting for its answer
+		case <-tick.C:
+		}
+	}
+}
+
+// probeSafePath is what a path embedded in the job may consist of. The job
+// runs under whatever the user's configured shell is, so nothing that any of
+// them would read specially (quotes, `#` and `$` — the multiplexer expands
+// `#` before the shell sees it) is allowed in.
+var probeSafePath = regexp.MustCompile(`^[A-Za-z0-9_./+-]+$`)
+
+// safeProbeBase is the directory the answer file lives under: the temp
+// directory, unless its path holds a character the job cannot carry.
+func safeProbeBase() string {
+	if t := os.TempDir(); probeSafePath.MatchString(t) {
+		return t
+	}
+	return "/tmp"
+}
+
+// serverProbeScript is the job body for `run-shell -b`: it writes
+// `launchctl managername` (or the reason it could not) to <answer>.part, then
+// renames it to <answer>, so a reader sees the answer whole or not at all. The
+// outer redirection and `exit 0` are what keep the job silent and successful
+// under any shell. "" when answer cannot be carried safely.
+func serverProbeScript(answer, prefix string) string {
+	if !probeSafePath.MatchString(answer) {
+		return ""
+	}
+	part := answer + ".part"
+	inner := prefix + "/bin/launchctl managername >" + part + " 2>&1; /bin/mv -f " + part + " " + answer
+	return "/bin/sh -c '" + inner + "' >/dev/null 2>&1; exit 0"
+}
+
+// withProbeJob makes the probe slow or short, for tests: prefix runs inside
+// the job before it asks, and timeout replaces serverContextProbeTimeout.
+func withProbeJob(prefix string, timeout time.Duration) Option {
+	return func(d *Driver) { d.probeJobPrefix, d.probeTimeout = prefix, timeout }
 }
 
 func contextWarning(c *fleet.ServerContext) string {
