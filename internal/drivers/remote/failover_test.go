@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -255,5 +257,215 @@ func TestAddressDropsCredentialsInTheURL(t *testing.T) {
 	got, ok := d.Address()
 	if !ok || strings.Contains(got, "secret") || strings.Contains(got, "user") {
 		t.Errorf("Address() = %q,%v must not carry userinfo", got, ok)
+	}
+}
+
+// A connection the transport still holds as alive after its peer has gone (#393).
+//
+// A real socket is in that state only for a moment: the transport's idle watcher
+// sees the close and drops the connection from its pool. A test that needs the
+// state therefore depends on a race, and a test that depends on a race is a
+// flake — the one this replaces failed once in a hosted run and passed on the
+// re-run of the same head. This holds the state still: the peer's close is kept
+// from the transport, and a request put on the connection meets the outcome the
+// test chose.
+const (
+	staleHealthy        int32 = iota // everything passes straight through
+	staleNothingWritten              // a write fails before any byte leaves
+	staleWritten                     // a write is accepted, then the connection ends unanswered
+)
+
+type staleLink struct {
+	addr      string // host:port whose connections are held
+	mode      atomic.Int32
+	stale     atomic.Int64 // requests that were put on a stale connection
+	blackhole bool         // once stale, a new dial to addr is never answered
+	done      chan struct{}
+}
+
+func (l *staleLink) dial(ctx context.Context, network, addr string) (net.Conn, error) {
+	if addr == l.addr && l.blackhole && l.mode.Load() != staleHealthy {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	c, err := (&net.Dialer{}).DialContext(ctx, network, addr)
+	if err != nil || addr != l.addr {
+		return c, err
+	}
+	return &staleConn{Conn: c, link: l, written: make(chan struct{}), closed: make(chan struct{})}, nil
+}
+
+type staleConn struct {
+	net.Conn
+	link    *staleLink
+	written chan struct{} // closed once a request is put on the connection in staleWritten
+	wOnce   sync.Once
+	closed  chan struct{}
+	cOnce   sync.Once
+}
+
+func (c *staleConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if err == nil || c.link.mode.Load() == staleHealthy {
+		return n, err
+	}
+	// The peer has gone and the transport is not to hear of it yet. In
+	// staleWritten it hears of it once there is a request to be left unanswered.
+	var written <-chan struct{}
+	if c.link.mode.Load() == staleWritten {
+		written = c.written
+	}
+	select {
+	case <-written:
+	case <-c.closed:
+	case <-c.link.done:
+	}
+	return 0, io.EOF
+}
+
+func (c *staleConn) Write(p []byte) (int, error) {
+	switch c.link.mode.Load() {
+	case staleNothingWritten:
+		c.link.stale.Add(1)
+		return 0, net.ErrClosed
+	case staleWritten:
+		c.link.stale.Add(1)
+		c.wOnce.Do(func() { close(c.written) })
+		return len(p), nil
+	}
+	return c.Conn.Write(p)
+}
+
+func (c *staleConn) Close() error {
+	c.cOnce.Do(func() { close(c.closed) })
+	return c.Conn.Close()
+}
+
+// stalePair is the ground each test below starts from: the driver has settled on
+// b, a connection to b sits in the pool, and a second address a answers. The
+// pool holds one connection per host, so the next call to b cannot dial around
+// it — it waits for that one and gets it, which is what makes the stale
+// connection certain to be the one used rather than the likelier one.
+type stalePair struct {
+	d     *Driver
+	link  *staleLink
+	a, b  *httptest.Server
+	aHits *atomic.Int64
+}
+
+func newStalePair(t *testing.T, blackhole bool, opts ...Option) *stalePair {
+	t.Helper()
+	a, aHits, _ := countingPeer(t)
+	b, _, _ := countingPeer(t)
+	link := &staleLink{addr: strings.TrimPrefix(b.URL, "http://"), blackhole: blackhole, done: make(chan struct{})}
+	t.Cleanup(func() { close(link.done) })
+	tr := &http.Transport{DialContext: link.dial, MaxConnsPerHost: 1}
+	t.Cleanup(tr.CloseIdleConnections)
+	opts = append([]Option{WithFallbackURLs(a.URL), WithHTTPClient(&http.Client{Transport: tr})}, opts...)
+	d := New("laptop", b.URL, opts...)
+	t.Cleanup(d.Shutdown)
+
+	if err := listErr(d); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := d.Address(); got != "" && got != b.URL {
+		t.Fatalf("the driver should have settled on b, got %q", got)
+	}
+	// The capability probe a first success starts runs on the same pool; let it
+	// finish so it cannot be the request that meets the stale connection.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		d.mu.Lock()
+		busy := d.refreshing
+		d.mu.Unlock()
+		if !busy {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the capability probe never finished")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return &stalePair{d: d, link: link, a: a, b: b, aHits: aHits}
+}
+
+// The incident behind the flake (#393): the address in use goes away while a
+// keep-alive connection to it sits in the pool. The transport hands that
+// connection to the next call, finds it dead, and dials again; the dial is
+// refused. That is a connection that was never made, so the next address is
+// tried — the call must not stop at "a connection existed" because the pool
+// handed one over for an instant.
+func TestAPooledConnectionThatDiedDoesNotStopTheFailover(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mode int32
+	}{
+		{"nothing written", staleNothingWritten},
+		{"written and never answered", staleWritten},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newStalePair(t, false)
+			p.link.mode.Store(tc.mode)
+			p.b.Close()
+
+			if err := listErr(p.d); err != nil {
+				t.Fatalf("the other address answers, so the call must succeed: %v", err)
+			}
+			if p.link.stale.Load() == 0 {
+				t.Fatal("the stale pooled connection was never used: this run proves nothing")
+			}
+			if got, _ := p.d.Address(); got != p.a.URL {
+				t.Errorf("Address() = %q, want the address that answered, %q", got, p.a.URL)
+			}
+		})
+	}
+}
+
+// The other half of the same decision. A request that was put on the stale
+// connection and may have been delivered is the transport's to judge: it sends
+// a request again only when that is safe (nothing was written, or the request
+// is idempotent or carries an Idempotency-Key). One that is neither gets its
+// error and nothing else — the driver must not carry it to another address.
+func TestAPooledConnectionThatTookANonReplayableRequestIsNotReplayedElsewhere(t *testing.T) {
+	p := newStalePair(t, false)
+	p.link.mode.Store(staleWritten)
+	p.b.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.d.current()+"/v1/x", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := p.d.roundTrip(req, "/v1/x")
+	if err == nil {
+		resp.Body.Close()
+		t.Fatal("a request lost on a dead connection must be an error")
+	}
+	if p.link.stale.Load() == 0 {
+		t.Fatal("the stale pooled connection was never used: this run proves nothing")
+	}
+	if hits := p.aHits.Load(); hits != 0 {
+		t.Errorf("the other address received %d request(s): a request that may have been delivered must not be replayed", hits)
+	}
+}
+
+// The connect budget governs every acquisition of a connection, not only the
+// first: when the transport dials again after a dead pooled connection and that
+// address swallows the SYN, the next address is tried within the budget instead
+// of after the caller's whole deadline.
+func TestADialAfterADeadPooledConnectionIsBoundedByTheConnectBudget(t *testing.T) {
+	p := newStalePair(t, true, WithConnectBudget(100*time.Millisecond), WithDeadline(10*time.Second))
+	p.link.mode.Store(staleNothingWritten)
+
+	started := time.Now()
+	if err := listErr(p.d); err != nil {
+		t.Fatalf("fall back after the connect budget: %v", err)
+	}
+	if p.link.stale.Load() == 0 {
+		t.Fatal("the stale pooled connection was never used: this run proves nothing")
+	}
+	if took := time.Since(started); took > 3*time.Second {
+		t.Errorf("took %s: the redial consumed the caller's deadline", took)
 	}
 }

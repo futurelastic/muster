@@ -29,6 +29,13 @@ import (
 // also what keeps a peer with ONE address exactly as it was: with one address
 // there is no second dial to make, and the code below is not entered at all.
 //
+// "Got a connection" means the transport's LATEST attempt to get one succeeded.
+// A pooled keep-alive connection whose peer has since gone is handed over, found
+// dead, and replaced by a fresh dial — and when that dial is refused, no
+// connection was ever made for this request (#393). The transport itself only
+// goes round again when sending the request twice is safe, so a request it
+// would not repeat keeps its error and is not carried to another address.
+//
 // # Why a connect budget
 //
 // A dead address often does not refuse — it swallows the SYN and says nothing.
@@ -159,7 +166,10 @@ func (d *Driver) attemptDial(req *http.Request, left int) (resp *http.Response, 
 		}
 	}
 	ctx, cancel := context.WithCancel(req.Context())
+	// got says whether the connection the transport is acquiring NOW exists, not
+	// whether one ever did: see the GetConn hook below.
 	var got atomic.Bool
+	var gets atomic.Int32
 	var timedOut atomic.Bool
 	timer := time.AfterFunc(budget, func() {
 		if !got.Load() {
@@ -167,10 +177,28 @@ func (d *Driver) attemptDial(req *http.Request, left int) (resp *http.Response, 
 			cancel()
 		}
 	})
-	trace := &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) {
-		got.Store(true)
-		timer.Stop()
-	}}
+	trace := &httptrace.ClientTrace{
+		// The transport asks for a connection once per try, and asks again when
+		// the one it was given turned out to be dead — a pooled keep-alive
+		// connection whose peer went away before the transport noticed. It
+		// asks again only when sending the request again is safe (nothing was
+		// written, or the request is idempotent or carries an Idempotency-Key),
+		// so the earlier connection settles nothing about delivery. What
+		// counts is the latest acquisition: until it is given a connection,
+		// there is none, and the connect budget runs again for it. Without
+		// this the refused redial reads as "a connection existed", the call
+		// stops, and the peer's other addresses are never tried (#393).
+		GetConn: func(string) {
+			if gets.Add(1) > 1 {
+				got.Store(false)
+				timer.Reset(budget)
+			}
+		},
+		GotConn: func(httptrace.GotConnInfo) {
+			got.Store(true)
+			timer.Stop()
+		},
+	}
 	resp, err = d.client.Do(req.WithContext(httptrace.WithClientTrace(ctx, trace)))
 	if err != nil {
 		timer.Stop()
