@@ -87,6 +87,19 @@ by asking the service whether it is healthy. If the new version does not come up
 the installer exits 1. npm remains the other way in; [`release-host.md`](release-host.md) says how a final reaches
 the host.
 
+A host that asks for a sign-in answers 401 to an unsigned read, the installer's own download included. Give the
+installer the read token in `DL_TOKEN` and it sends it as a bearer header on every read it makes (the newest-version
+file, the sums, the build). Fetch the installer the same way, through curl's standard input, so the token is never an
+argument that another account on the machine can read in the process list:
+
+```sh
+export DL_TOKEN=<read token>
+printf 'header = "Authorization: Bearer %s"\n' "$DL_TOKEN" | curl -fsSL -K - <host>/muster/install.sh | sh
+```
+
+`DL_TOKEN` needs `curl`: with only `wget` the installer refuses, because wget has no way to take a header off the
+command line.
+
 ## What a working installation is
 
 Every row below is something an installation can be missing and still start.
