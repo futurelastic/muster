@@ -29,6 +29,11 @@ type PrincipalTable struct {
 type streamBinding struct {
 	p      Principal
 	cancel context.CancelFunc
+	// fleet is whether the stream reaches beyond this machine (scope=fleet).
+	// Only such a stream is cut when a reload pins its principal to this
+	// machine (#395); a stream that already reads locally is exactly what the
+	// pinned principal may have, and is left alone.
+	fleet bool
 }
 
 // NewPrincipalTable starts a table holding initial.
@@ -50,15 +55,17 @@ func (t *PrincipalTable) Snapshot() []Principal {
 }
 
 // Replace installs next and closes every bound stream whose principal no
-// longer holds the credential it authenticated with, or no longer holds the
-// read grant a stream needs. It reports how many it closed, by principal name.
+// longer holds the credential it authenticated with, no longer holds the read
+// grant a stream needs, or — for a stream that reaches the fleet — has been
+// pinned to this machine since (#395). It reports how many it closed, by
+// principal name.
 func (t *PrincipalTable) Replace(next []Principal) map[string]int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.cur.Store(&next)
 	closed := map[string]int{}
 	for b := range t.streams {
-		if !stillValid(next, b.p) {
+		if !stillValid(next, b.p, b.fleet) {
 			b.cancel()
 			delete(t.streams, b)
 			closed[b.p.Name]++
@@ -68,14 +75,20 @@ func (t *PrincipalTable) Replace(next []Principal) map[string]int {
 }
 
 // stillValid reports whether a principal that authenticated earlier would
-// authenticate, and may still read, against table.
-func stillValid(table []Principal, was Principal) bool {
+// authenticate, and may still read, against table. fleet says the stream it
+// asks about reaches beyond this machine: such a stream is no longer valid once
+// the table pins its principal to this machine (#395), because the same request
+// made now would be answered locally. The client reconnects and gets that.
+func stillValid(table []Principal, was Principal, fleet bool) bool {
 	for _, p := range table {
 		if p.Name != was.Name {
 			continue
 		}
 		if p.Token != was.Token || !bytes.Equal(p.PublicKey, was.PublicKey) {
 			continue
+		}
+		if fleet && p.LocalOnly() {
+			return false
 		}
 		return p.Allows(GrantRead)
 	}
@@ -84,20 +97,21 @@ func stillValid(table []Principal, was Principal) bool {
 
 // bind ties ctx to the principal that authenticated it. The returned context
 // is cancelled when a Replace revokes that principal; release must be called
-// when the request ends.
+// when the request ends. fleet is whether the request reaches beyond this
+// machine; see stillValid.
 //
 // The check and the registration happen under the lock Replace holds, so a
 // request that authenticated against the old table and reaches bind after the
 // swap is closed at once rather than slipping through the gap.
-func (t *PrincipalTable) bind(ctx context.Context, p Principal) (context.Context, func()) {
+func (t *PrincipalTable) bind(ctx context.Context, p Principal, fleet bool) (context.Context, func()) {
 	ctx, cancel := context.WithCancel(ctx)
 	t.mu.Lock()
-	if !stillValid(t.Snapshot(), p) {
+	if !stillValid(t.Snapshot(), p, fleet) {
 		t.mu.Unlock()
 		cancel()
 		return ctx, func() {}
 	}
-	b := &streamBinding{p: p, cancel: cancel}
+	b := &streamBinding{p: p, cancel: cancel, fleet: fleet}
 	t.streams[b] = struct{}{}
 	t.mu.Unlock()
 	return ctx, func() {
@@ -125,12 +139,13 @@ func (s *Service) setPrincipalTable(t *PrincipalTable) {
 
 // streamContext is r's context for a long-lived response. When the caller
 // authenticated against a live table it is cancelled if that caller is
-// revoked; otherwise it is r.Context() unchanged.
-func (s *Service) streamContext(r *http.Request) (context.Context, func()) {
+// revoked, or if the stream reaches the fleet (scope) and the caller is pinned
+// to this machine; otherwise it is r.Context() unchanged.
+func (s *Service) streamContext(r *http.Request, scope Scope) (context.Context, func()) {
 	t := s.principalTable.Load()
 	p, ok := principalOf(r)
 	if t == nil || !ok {
 		return r.Context(), func() {}
 	}
-	return t.bind(r.Context(), p)
+	return t.bind(r.Context(), p, scope == ScopeFleet)
 }

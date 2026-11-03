@@ -167,6 +167,10 @@ func authenticated(svc *Service, cfg Config, deferBody bool, next http.HandlerFu
 					writeError(w, ferr)
 					return
 				}
+				if ferr := svc.localOnlyGate(p, r); ferr != nil {
+					writeError(w, ferr)
+					return
+				}
 				ctx := withPrincipal(r.Context(), p)
 				if deferBody {
 					ctx = context.WithValue(ctx, bodyUncheckedKey{}, true)
@@ -180,6 +184,10 @@ func authenticated(svc *Service, cfg Config, deferBody bool, next http.HandlerFu
 					Kind:    fleet.ErrorUnauthorized,
 					Message: "unrecognised credential",
 				})
+				return
+			}
+			if ferr := svc.localOnlyGate(p, r); ferr != nil {
+				writeError(w, ferr)
 				return
 			}
 			next(w, r.WithContext(withPrincipal(r.Context(), p)))
@@ -602,6 +610,18 @@ func handleHealth(svc *Service) http.HandlerFunc {
 
 func handleMachines(svc *Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// A principal pinned to this machine (#395) is told about this machine
+		// and no other, and no peer is dialled on its behalf: not to list them,
+		// and not for ?verify=1 either.
+		if pinnedLocal(r) {
+			col, err := svc.ListThisMachine()
+			if err != nil {
+				writeError(w, &fleet.Error{Kind: fleet.ErrorInvalid, Message: err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, col)
+			return
+		}
 		// ?verify=1 re-probes every peer first, instead of answering from
 		// the cached cycle (muster #154). Still only read.
 		if r.URL.Query().Get("verify") == "1" {
@@ -618,7 +638,11 @@ func handleMachines(svc *Service) http.HandlerFunc {
 
 func handleRuntimes(svc *Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		col, err := svc.ListRuntimes(r.Context())
+		list := svc.ListRuntimes
+		if pinnedLocal(r) {
+			list = svc.ListLocalRuntimes // a peer's row names the peer (#395)
+		}
+		col, err := list(r.Context())
 		if err != nil {
 			writeError(w, &fleet.Error{Kind: fleet.ErrorInvalid, Message: err.Error()})
 			return
@@ -639,6 +663,7 @@ func handleListSessions(svc *Service) http.HandlerFunc {
 			writeError(w, &fleet.Error{Kind: fleet.ErrorInvalid, Message: "scope must be 'local' or 'fleet'"})
 			return
 		}
+		scope = scopeFor(r, scope) // a principal pinned to this machine is answered locally (#395)
 
 		labels, ferr := parseLabelFilter(q["label"])
 		if ferr != nil {
@@ -685,6 +710,7 @@ func handleListClosedSessions(svc *Service) http.HandlerFunc {
 			writeError(w, &fleet.Error{Kind: fleet.ErrorInvalid, Message: "scope must be 'local' or 'fleet'"})
 			return
 		}
+		scope = scopeFor(r, scope) // a principal pinned to this machine is answered locally (#395)
 		var since time.Time
 		if raw := q.Get("since"); raw != "" {
 			t, err := time.Parse(time.RFC3339, raw)
@@ -784,6 +810,7 @@ func handleWatchSessions(svc *Service) http.HandlerFunc {
 			writeError(w, &fleet.Error{Kind: fleet.ErrorInvalid, Message: "scope must be 'local' or 'fleet'"})
 			return
 		}
+		scope = scopeFor(r, scope) // a principal pinned to this machine is answered locally (#395)
 
 		filter := driver.SubscribeFilter{Sessions: q["session"], CwdPrefix: q.Get("cwdPrefix")}
 
@@ -810,7 +837,7 @@ func handleWatchSessions(svc *Service) http.HandlerFunc {
 		wait := watchWait(r)
 
 		// Bound to the caller's credential: revoking it closes this wait (#347).
-		ctx, release := svc.streamContext(r)
+		ctx, release := svc.streamContext(r, scope)
 		defer release()
 		ch, backlog, needResync, cancel := svc.Events(ctx, scope, filter, since, fromEpoch)
 		defer cancel()
@@ -2313,8 +2340,9 @@ func handleEvents(svc *Service) http.HandlerFunc {
 		if q.Get("scope") == string(ScopeLocal) {
 			scope = ScopeLocal
 		}
+		scope = scopeFor(r, scope) // a principal pinned to this machine is answered locally (#395)
 		// Bound to the caller's credential: revoking it closes this stream (#347).
-		ctx, release := svc.streamContext(r)
+		ctx, release := svc.streamContext(r, scope)
 		defer release()
 		ch, backlog, needResync, cancel := svc.Events(ctx, scope, filter, fromCursor, fromEpoch)
 		defer cancel()

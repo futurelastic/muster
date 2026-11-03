@@ -238,6 +238,20 @@ order of this page and the order of its output are the same.
      }
      ```
 
+   **A client that should see only this machine** — a second UI beside the main
+   one, say — gets a principal with `"scope": "local"`:
+
+   ```json
+   { "name": "second-ui", "token": "…", "grants": ["read", "create", "send"], "scope": "local" }
+   ```
+
+   Its fleet-scoped reads are answered for this machine alone, a request naming
+   another machine is refused (`reason: "local-only"`), `GET /v1/machines` lists
+   only this machine, and `GET /v1/whoami` says `scope: "local"`. No other
+   principal changes, and `muster principal list` marks the pinned one. It is
+   applied within seconds like any principal edit; `"fleet"` or no `scope` is
+   the default. See *Scope* in [`api.md`](api.md).
+
    The address is one **you** confirmed reachable from a, never b's own idea of
    its name. A peer known by several addresses takes `"urls": [...]` in place of
    `"url"`, tried in order. Rows: `peer.self-credential`, `peer.<m>.url`,

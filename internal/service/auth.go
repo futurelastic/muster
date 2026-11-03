@@ -243,7 +243,29 @@ type Principal struct {
 	// Grants is what it may do. Absent means read-only is not implied:
 	// absent means nothing is permitted, because §6's default is denied.
 	Grants []Grant
+	// Scope pins the principal to this machine when it is ScopeLocal (muster
+	// #395). Empty — and ScopeFleet, which says the same thing out loud — is
+	// today's behaviour: a principal holding read sees the fleet.
+	//
+	// A field, not a grant, on purpose. Every grant ADDS a permission and
+	// defaults to denied, so a grant that took reach away would read backwards
+	// ("holds local-only" meaning "may do less") and would need every existing
+	// principal migrated to keep what it has. A field that only ever narrows
+	// leaves every principal already in a table exactly as it was.
+	//
+	// What it does, wherever the principal is judged (see localOnlyGate,
+	// scopeFor, handleMachines):
+	//
+	//   - a fleet-scoped read is answered as scope=local, not refused;
+	//   - a request naming any other machine is refused, reads and mutations
+	//     alike, whatever the grants;
+	//   - GET /v1/machines lists this machine alone;
+	//   - GET /v1/whoami reports it.
+	Scope Scope
 }
+
+// LocalOnly reports whether this principal is pinned to this machine.
+func (p Principal) LocalOnly() bool { return p.Scope == ScopeLocal }
 
 // Allows reports whether this principal holds a grant.
 func (p Principal) Allows(g Grant) bool {

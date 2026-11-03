@@ -84,6 +84,7 @@ func handleWhoAmI(svc *Service, cfg Config) http.HandlerFunc {
 			Machine:   svc.Self(),
 			Grants:    grantsForRequest(cfg, r),
 			Source:    fleet.CapabilitiesObserved,
+			Scope:     scopeReport(r),
 			ListsYou:  listsYou,
 		})
 	}

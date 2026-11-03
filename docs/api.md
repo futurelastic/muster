@@ -58,7 +58,49 @@ will meet them one at a time.
 > precise separation and was not rejected on its merits — it costs a new
 > grant plus a migration for every existing principal, which is not worth
 > buying against a distinction nothing has yet been harmed by (muster
-> #81).
+> #81). When something was harmed — a client meant to see one machine listed
+> a second — the answer was a restriction on the principal rather than a
+> grant: see **Scope** below (#395).
+
+**Scope — a principal pinned to this machine (#395).** A principal holding
+`read` sees the whole fleet: `GET /v1/sessions`, `/v1/sessions/closed`,
+`/v1/sessions/watch` and `/v1/events` default to `scope=fleet`, and a path may
+name any peer. To give a client a credential that sees **this machine's
+sessions and nothing else**, set `"scope": "local"` on its principal:
+
+```json
+{ "name": "second-ui", "token": "…", "grants": ["read", "create", "send"], "scope": "local" }
+```
+
+For that principal, whatever its grants:
+
+- a **fleet-scoped read is answered as `scope=local`**, not refused — the
+  listing, the closed listing, the watch and the event stream all carry this
+  machine's one source. The client that never set `scope` keeps working, which
+  is the whole point; an explicit `scope=fleet` is answered the same way, and
+  a malformed `scope` is still `400`;
+- **a request that names another machine is refused**, reads and mutations
+  alike: `401 unauthorized` with `reason: "local-only"` (no grant would help,
+  so the reason says so rather than pointing at a missing one). A peer that
+  exists and a machine id that exists nowhere get the same answer, so the
+  refusal cannot be used to enumerate peers. `GET /v1/whoami?machine=<other>`
+  is a path naming another machine and is refused too;
+- `GET /v1/machines` lists **this machine alone** (the `self` item, one
+  source), and `GET /v1/runtimes` lists this machine's runtimes alone; no peer
+  is dialled on its behalf;
+- `GET`/`PUT /v1/machine-list` — the fleet's roster — are refused;
+- `GET /v1/whoami` reports `scope: "local"`.
+
+`"scope": "fleet"`, or no `scope` at all, is the behaviour every principal had
+before this existed; nothing in an existing table changes by upgrading. It is a
+field and not a grant because every grant **adds** a permission and defaults to
+denied, so a grant that took reach away would read backwards and would have
+needed every existing principal migrated to keep what it has. The restriction
+is for a client that should only ever see this machine; it does not stop that
+client's *service* from talking to peers for other principals. A running
+service applies an edit within seconds: a fleet-scoped stream the principal had
+open is closed so the client reconnects into the local view, and a stream that
+was already local is left alone.
 
 **Deadlines.** `Fleet-Deadline-Ms: <ms>` on any request. A caller may only
 shorten a driver's declared deadline, never extend it. A peer that fails
@@ -155,7 +197,9 @@ stamps say.
 ### `GET /v1/machines`
 
 `{items: [{machine, self, status, observedAt, build, maxInputBytes, peer}],
-sources, complete}`. Always probes peers; there is no `scope` here.
+sources, complete}`. Always probes peers; there is no `scope` here. A principal
+pinned to this machine (`"scope": "local"`, see *Scope* under *Grants*) is
+answered with the `self` item alone and no peer is probed.
 
 `peer` is this service's own standing on each machine:
 `{listsMeBack, grantsToMe, source, observedAt?, auth}` — `auth` is `"key"` when
@@ -225,7 +269,7 @@ machine-list push` and `fetch` are the clients.
 
 ### `GET /v1/whoami`
 
-`{principal, machine, grants, source, listsYou}` — what the credential you
+`{principal, machine, grants, source, scope, listsYou}` — what the credential you
 presented may do. It needs authentication but **no grant**, not even `read`:
 a credential holding nothing can still learn that it holds nothing, instead of
 finding out one `403` at a time. It reports only your own credential, never
@@ -236,6 +280,13 @@ table. Naming a peer does **not** relay: it answers `source: "assumed"` with
 `grants: []`, because this service cannot know what a peer grants. Ask that
 machine directly. A relayed write needs a grant on both machines, and this
 route can confirm only the first.
+
+`scope` is how far the credential reaches (#395): `"local"` for a principal
+pinned to this machine (see *Scope* under *Grants*), `"fleet"` for every other
+principal and for a machine in single-token mode. It is present when the report
+is about this machine and absent when it names a peer. A pinned principal that
+names a peer is refused (`401`, `reason: "local-only"`) rather than given the
+assumed answer.
 
 `?peer=<id>` fills `listsYou`: `true` or `false` for whether `<id>` is in this
 machine's peer roster. It is a question only a service asks. A service probing a

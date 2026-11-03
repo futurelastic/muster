@@ -156,7 +156,11 @@ func listPrincipals(cfgPath string) error {
 				kind = "key"
 			}
 		}
-		fmt.Printf("%-20s %-24s %s\n", p.Name, kind, strings.Join(p.Grants, ","))
+		line := fmt.Sprintf("%-20s %-24s %s", p.Name, kind, strings.Join(p.Grants, ","))
+		if p.Scope == string(service.ScopeLocal) {
+			line += "  [scope local: this machine only]"
+		}
+		fmt.Println(line)
 	}
 	return nil
 }

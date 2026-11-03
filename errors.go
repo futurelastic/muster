@@ -187,6 +187,12 @@ const ReasonRuntimeUnavailable = "runtime-unavailable"
 // the explicit override the message names.
 const ReasonUnsafeServerContext = "unsafe_server_context"
 
+// ReasonLocalOnly is the reason on an unauthorized answer to a principal that
+// is pinned to this machine (`"scope": "local"`, muster #395) and named another
+// one. The Kind alone would read as a missing grant; the Reason says that no
+// grant would help, so a client does not go asking its operator for one.
+const ReasonLocalOnly = "local-only"
+
 // The reasons a machine-list route gives (api-http.md §3.1, muster #352). The
 // Kind says whose fault it is (invalid: the list; unsupported: this machine's
 // setup; conflict: a list no newer than the one this machine has accepted); the
