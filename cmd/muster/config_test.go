@@ -476,3 +476,45 @@ func TestSessionEnvFromSessionIsLoadedAndOneSourceIsEnforced(t *testing.T) {
 		}
 	}
 }
+
+// #395: a principal can be pinned to this machine with "scope": "local". The
+// field only narrows, so absent and "fleet" load as the unrestricted principal
+// every config written before it describes, and a misspelling is an error at
+// load rather than a restriction silently not applied.
+func TestLoadConfigReadsAPrincipalScope(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	body := `{"principals": [
+		{"name": "ui", "token": "t1", "grants": ["read"], "scope": "local"},
+		{"name": "ops", "token": "t2", "grants": ["read"], "scope": "fleet"},
+		{"name": "old", "token": "t3", "grants": ["read"]}
+	]}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps, err := cfg.principals()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{"ui": true, "ops": false, "old": false}
+	for _, p := range ps {
+		if p.LocalOnly() != want[p.Name] {
+			t.Errorf("principal %s: LocalOnly = %v, want %v", p.Name, p.LocalOnly(), want[p.Name])
+		}
+	}
+}
+
+func TestLoadConfigRejectsAMisspelledPrincipalScope(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	body := `{"principals": [{"name": "ui", "token": "t", "grants": ["read"], "scope": "locla"}]}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := loadConfig(path)
+	if err == nil || !strings.Contains(err.Error(), `scope "locla"`) || !strings.Contains(err.Error(), `"ui"`) {
+		t.Errorf("loadConfig error = %v, want one naming the principal and the bad scope", err)
+	}
+}

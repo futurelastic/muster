@@ -157,11 +157,93 @@ func TestPrincipalTable_BindAfterRevokeIsClosed(t *testing.T) {
 	p := Principal{Name: "x", Token: "t", Grants: []Grant{GrantRead}}
 	table := NewPrincipalTable([]Principal{p})
 	table.Replace(nil)
-	ctx, release := table.bind(t.Context(), p)
+	ctx, release := table.bind(t.Context(), p, false)
 	defer release()
 	select {
 	case <-ctx.Done():
 	default:
 		t.Error("a stream bound after its principal was revoked was left open")
+	}
+}
+
+// #395: a reload that pins a principal to this machine cuts the streams that
+// reach the fleet and leaves the ones that already read locally, so the client
+// reconnects into the narrower view instead of keeping the wide one open until
+// it happens to drop.
+func TestPrincipalTable_PinningClosesOnlyFleetStreams(t *testing.T) {
+	read := []Grant{GrantRead}
+	table, srv := tableServer(t, []Principal{
+		{Name: "watcher", Token: "tok-w", Grants: read},
+		{Name: "other", Token: "tok-o", Grants: read},
+	})
+	fleetStream := get(t, srv, "/v1/events", "tok-w")
+	defer fleetStream.Body.Close()
+	localStream := get(t, srv, "/v1/events?scope=local", "tok-w")
+	defer localStream.Body.Close()
+	otherStream := get(t, srv, "/v1/events", "tok-o")
+	defer otherStream.Body.Close()
+
+	closed := table.Replace([]Principal{
+		{Name: "watcher", Token: "tok-w", Grants: read, Scope: ScopeLocal},
+		{Name: "other", Token: "tok-o", Grants: read},
+	})
+	if closed["watcher"] != 1 || len(closed) != 1 {
+		t.Errorf("closed = %v, want exactly the watcher's fleet stream", closed)
+	}
+	if !streamEnds(fleetStream, 2*time.Second) {
+		t.Error("a fleet stream of a principal pinned since is still open")
+	}
+	if streamEnds(localStream, 300*time.Millisecond) {
+		t.Error("a stream that already read locally was closed by the pin")
+	}
+	if streamEnds(otherStream, 300*time.Millisecond) {
+		t.Error("an unrelated principal's stream was closed")
+	}
+
+	// The reconnect is answered, and answered locally: no second 401, no stream
+	// that reaches the fleet.
+	again := get(t, srv, "/v1/events", "tok-w")
+	defer again.Body.Close()
+	if again.StatusCode != http.StatusOK {
+		t.Errorf("reconnect = %d, want 200", again.StatusCode)
+	}
+}
+
+// Lifting the pin, or pinning a principal that holds no fleet stream, closes
+// nothing.
+func TestPrincipalTable_UnpinningClosesNothing(t *testing.T) {
+	read := []Grant{GrantRead}
+	table, srv := tableServer(t, []Principal{{Name: "w", Token: "tok", Grants: read, Scope: ScopeLocal}})
+	stream := get(t, srv, "/v1/events", "tok")
+	defer stream.Body.Close()
+	if closed := table.Replace([]Principal{{Name: "w", Token: "tok", Grants: read}}); len(closed) != 0 {
+		t.Errorf("lifting a pin closed streams: %v", closed)
+	}
+	if streamEnds(stream, 300*time.Millisecond) {
+		t.Error("lifting a pin closed the stream")
+	}
+}
+
+// A fleet request that authenticated just before a reload pinned its principal,
+// and binds just after, must not slip through the gap.
+func TestPrincipalTable_BindAfterPinIsClosedForFleetOnly(t *testing.T) {
+	p := Principal{Name: "x", Token: "t", Grants: []Grant{GrantRead}}
+	table := NewPrincipalTable([]Principal{p})
+	table.Replace([]Principal{{Name: "x", Token: "t", Grants: []Grant{GrantRead}, Scope: ScopeLocal}})
+
+	ctx, release := table.bind(t.Context(), p, true)
+	defer release()
+	select {
+	case <-ctx.Done():
+	default:
+		t.Error("a fleet stream bound after its principal was pinned was left open")
+	}
+
+	ctx, release = table.bind(t.Context(), p, false)
+	defer release()
+	select {
+	case <-ctx.Done():
+		t.Error("a local stream of a pinned principal was closed")
+	default:
 	}
 }

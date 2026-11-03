@@ -194,6 +194,56 @@ func TestReload_RevokeIs401AndClosesOnlyItsStreams(t *testing.T) {
 	}
 }
 
+// #395: pinning a principal in the file takes effect on the running service
+// without a restart — whoami says so, and the stream that reached the fleet is
+// cut so the client reconnects into the local view — while another principal's
+// stream is untouched. A misspelt scope is refused as a whole like any other
+// invalid edit, so the machine keeps the last good table instead of silently
+// not applying the restriction.
+func TestReload_PinningAPrincipalCutsItsFleetStreamOnly(t *testing.T) {
+	r := newReloadRig(t, rlDoc(rlPrincipal("ui", "tok-ui", "read"), rlPrincipal("ops", "tok-ops", "read")))
+	ui, ops := r.stream("tok-ui"), r.stream("tok-ops")
+	if _, body := r.get("/v1/whoami", "tok-ui"); !strings.Contains(body, `"scope":"fleet"`) {
+		t.Fatalf("before the edit whoami = %s, want scope fleet", body)
+	}
+
+	pinned := rlPrincipal("ui", "tok-ui", "read")
+	pinned["scope"] = "local"
+	putCfg(t, r.path, rlDoc(pinned, rlPrincipal("ops", "tok-ops", "read")))
+	r.rl.check("test")
+
+	if _, body := r.get("/v1/whoami", "tok-ui"); !strings.Contains(body, `"scope":"local"`) {
+		t.Errorf("after the edit whoami = %s, want scope local", body)
+	}
+	if !rlEnds(ui, 2*time.Second) {
+		t.Error("the pinned principal's fleet stream is still open")
+	}
+	if rlEnds(ops, 300*time.Millisecond) {
+		t.Error("another principal's stream was closed")
+	}
+	if code, _ := r.get("/v1/machines/other-machine/sessions/x", "tok-ui"); code != 401 {
+		t.Errorf("a peer path for the pinned principal = %d, want 401", code)
+	}
+
+	typo := rlPrincipal("ui", "tok-ui", "read")
+	typo["scope"] = "locla"
+	putCfg(t, r.path, rlDoc(typo, rlPrincipal("ops", "tok-ops", "read")))
+	r.rl.check("test")
+	if _, body := r.get("/v1/whoami", "tok-ui"); !strings.Contains(body, `"scope":"local"`) {
+		t.Errorf("a refused edit changed the pin: whoami = %s", body)
+	}
+}
+
+// principalDiff, which words the reload log line, counts a pin as a change.
+func TestPrincipalDiff_APinIsAChange(t *testing.T) {
+	was := []service.Principal{{Name: "ui", Token: "t"}, {Name: "same", Token: "s"}}
+	now := []service.Principal{{Name: "ui", Token: "t", Scope: service.ScopeLocal}, {Name: "same", Token: "s", Scope: service.ScopeFleet}}
+	added, removed, changed := principalDiff(was, now)
+	if len(added) != 0 || len(removed) != 0 || len(changed) != 1 || changed[0] != "ui" {
+		t.Errorf("diff = +%v -%v ~%v, want only ui changed (fleet written out is the default said aloud)", added, removed, changed)
+	}
+}
+
 // A config that fails validation is refused as a whole: the last good table
 // stays, and doctor can say why.
 func TestReload_InvalidConfigKeepsLastGood(t *testing.T) {

@@ -34,6 +34,13 @@ type GrantReport struct {
 	// under "assumed" and must be read the same way an unreached peer's
 	// capabilities are: a conservative floor, never that peer's real answer.
 	Source CapabilitySource `json:"source"`
+	// Scope is how far this credential reaches (muster #395): "local" for a
+	// principal pinned to the machine that answered — its fleet-scoped reads
+	// are answered locally, a request naming another machine is refused, and
+	// GET /v1/machines lists only this machine — and "fleet" for everyone else.
+	// Present when the report is about the machine that answered; absent when
+	// it names a peer, where this service has no way to know.
+	Scope string `json:"scope,omitempty"`
 	// ListsYou answers a question only a SERVICE asks (muster #154): is
 	// the machine named in `?peer=` in this machine's own roster of peers?
 	// A service probing a peer names itself there and reads this back as

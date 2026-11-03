@@ -42,7 +42,7 @@ served, and the federated ones have been exercised peer to peer.
 | `kind` | HTTP | Meaning |
 |---|---|---|
 | `invalid` | 400 | Malformed request |
-| `unauthorized` | 401 / 403 | Caller not permitted for this verb on this machine |
+| `unauthorized` | 401 / 403 | Caller not permitted for this verb on this machine; or a principal pinned to this machine that named another (`reason: "local-only"`, §5) — no grant would help |
 | `not_found` | 404 | The machine answered, and there is no such session |
 | `conflict` | 409 | Idempotency key reused with a different body; a replayed key whose session has since ended (`reason: "replay-of-ended-session"`, §3.3); or a destructive request whose `startedAt` disagrees with the live session (§5.4) — the request is well formed, the caller's belief is stale |
 | `unsupported` | 501 | Driver lacks the capability (§4.3 of the model); or a runtime this machine's operator enabled has no working driver and no retry under way (`reason: "runtime-unavailable"`, §3.1); or, on macOS, a create that would start the terminal runtime's session server from a context other than `Background` (`reason: "unsafe_server_context"`, `retryable: false`, §3.1); or a create whose `posture` the resolved runtime cannot enforce (`reason: "posture-unenforceable"`, `retryable: false`, §3.2) |
@@ -132,6 +132,8 @@ GET /v1/health
                                          "source": "assumed" } } ] }
 
 GET /v1/machines[?verify=1]
+// A principal pinned to this machine (§5, #395) is answered with the self item
+// and its one source only, and no peer is probed — `verify` included.
 → 200 { "items": [ { "machine": "...", "self": true, "status": "ok",
                      "observedAt": "...",
                      "build": { "known": true, "revision": "...",
@@ -197,8 +199,14 @@ POST /v1/posture/dry-run                                        ← needs only `
 
 GET /v1/whoami[?machine=<id>][&peer=<id>]
 → 200 { "principal": "...", "machine": "...", "grants": ["read", "send"],
-        "source": "observed", "listsYou": null }
+        "source": "observed", "scope": "fleet", "listsYou": null }
 ```
+
+`scope` is `"local"` for a principal pinned to this machine (§5, muster #395)
+and `"fleet"` for every other, including a machine in single-token mode. It is
+present when the report is about the machine that answered and omitted when it
+names a peer, where this service cannot know. A pinned principal that names a
+peer is refused (`401`, `reason: "local-only"`), not given the `assumed` answer.
 
 **`/v1/whoami` reports the presented credential's own grants, and nothing
 about any other principal** (muster #106, session-abstraction.md §7.7).
@@ -448,6 +456,8 @@ GET /v1/machine-list
        Content-Type: application/json>
 → 404 not_found    reason "machine-list-none"  — a mode is on and nothing is in force
 → 501 unsupported  reason "machine-list-off"   — this machine uses no list
+→ 401 unauthorized reason "local-only"         — a principal pinned to this machine (§5);
+                   the same answer for PUT
 
 PUT /v1/machine-list
    <body: the signed envelope, byte for byte, at most 1 MiB>
@@ -508,6 +518,15 @@ calls** (§13.1). A service querying a peer always asks `scope=local`; a peer
 receiving `scope=local` answers for itself and never forwards. This is what
 keeps fan-out one hop deep, and it is the only thing preventing two
 mutually-configured peers from querying each other forever.
+
+**The default is a default for a principal, not a promise to every caller.** A
+principal configured `"scope": "local"` (§5, muster #395) is answered as if it
+had asked `scope=local`, whatever it asked and whether it asked at all: the
+`scope` it sends is validated (`400` when malformed) and then ignored in favour
+of `local`. The same holds for `GET /v1/sessions/closed`, `GET
+/v1/sessions/watch` and `GET /v1/events`. A fleet-scoped read is clamped rather
+than refused because it is what a client that never set `scope` sent; a path
+naming another machine is refused (§5).
 
 A `scope=local` response carries exactly one `SourceStatus`. The proxying
 service **adopts** that record rather than synthesizing a fresh one (§13.2) — a
@@ -2795,6 +2814,27 @@ ordering is wrong rather than handing you a cursor that would skip.
   relay never obtains more than it was granted. A peer authorizes the principal who initiated the request. A
   service that substituted its own identity would make every machine a confused
   deputy for every other.
+- **A principal can be pinned to this machine (`"scope": "local"`, muster
+  #395).** It is a field on the principal, not a grant: a grant adds a
+  permission and defaults to denied, so one that removed reach would read
+  backwards and would need every existing principal migrated; a field that only
+  narrows leaves every principal already configured as it was. `"fleet"` or no
+  `scope` is that unrestricted behaviour. For a pinned principal, whatever
+  grants it holds:
+  - a fleet-scoped read is **answered as `scope=local`** (§3.2) — clamped, not
+    refused, because the default is what a client that never set `scope` sends;
+  - a request naming a machine other than this one — a `{machine}` path segment
+    or `GET /v1/whoami?machine=` — is refused for reads and mutations alike:
+    `401 unauthorized`, `reason: "local-only"`. The answer is the same for a
+    peer and for a machine id that exists nowhere. `GET`/`PUT /v1/machine-list`,
+    which is the fleet's roster, is refused too;
+  - `GET /v1/machines` lists the `self` item only and `GET /v1/runtimes` this
+    machine's runtimes only; no peer is dialled for it;
+  - `GET /v1/whoami` reports `scope: "local"`.
+  A reload that pins a principal closes the fleet-scoped streams it had open
+  (§4.1) so the client reconnects into the local view; a stream that already
+  read locally is left alone. The pin applies to the principal as a caller of
+  THIS service and says nothing of what this service does for others.
 - **A read that reaches beyond this machine — `scope=fleet`, or a path naming a
   specific peer — needs only the `read` grant, never `relay`.** This is a
   deliberate asymmetry with the proxying rule above, not an oversight: a

@@ -346,7 +346,8 @@ func principalDiff(before, after []service.Principal) (added, removed, changed [
 		switch {
 		case !ok:
 			added = append(added, p.Name)
-		case old.Token != p.Token || !bytes.Equal(old.PublicKey, p.PublicKey) || !reflect.DeepEqual(old.Grants, p.Grants):
+		case old.Token != p.Token || !bytes.Equal(old.PublicKey, p.PublicKey) || !reflect.DeepEqual(old.Grants, p.Grants) ||
+			old.LocalOnly() != p.LocalOnly():
 			changed = append(changed, p.Name)
 		}
 	}

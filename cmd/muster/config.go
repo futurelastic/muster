@@ -38,6 +38,13 @@ type fileConfig struct {
 		// prints it.
 		PublicKey string   `json:"publicKey,omitempty"`
 		Grants    []string `json:"grants"`
+		// Scope pins the principal to this machine when it is "local" (muster
+		// #395): its fleet-scoped reads are answered as scope=local, a request
+		// naming another machine is refused, and GET /v1/machines lists this
+		// machine alone. Absent, or "fleet", is today's behaviour — no principal
+		// already in a file changes by upgrading. A restricting field and not a
+		// grant, because a grant adds a permission and defaults to denied.
+		Scope string `json:"scope,omitempty"`
 	} `json:"principals"`
 
 	// Peers are machines this one may call, each with the credential THIS
@@ -223,6 +230,9 @@ func parseConfig(path string, raw []byte) (*fileConfig, error) {
 				return nil, fmt.Errorf("%s: principal %q: publicKey: %w", path, p.Name, err)
 			}
 		}
+		if err := validPrincipalScope(p.Scope); err != nil {
+			return nil, fmt.Errorf("%s: principal %q: %w", path, p.Name, err)
+		}
 	}
 	for i, p := range c.Peers {
 		switch p.Auth {
@@ -241,6 +251,19 @@ func parseConfig(path string, raw []byte) (*fileConfig, error) {
 	return &c, nil
 }
 
+// validPrincipalScope accepts the two scopes a principal can carry (muster
+// #395): "local" pins it to this machine, "fleet" is the default said aloud,
+// and absent is the default left unsaid. Anything else is refused at load, so a
+// typo ("locla") can never be read as "no restriction" on a machine whose
+// operator meant to restrict it.
+func validPrincipalScope(s string) error {
+	switch service.Scope(s) {
+	case "", service.ScopeLocal, service.ScopeFleet:
+		return nil
+	}
+	return fmt.Errorf("scope %q is not %q or %q", s, service.ScopeLocal, service.ScopeFleet)
+}
+
 func (c *fileConfig) principals() ([]service.Principal, error) {
 	out := make([]service.Principal, 0, len(c.Principals))
 	for _, p := range c.Principals {
@@ -252,7 +275,10 @@ func (c *fileConfig) principals() ([]service.Principal, error) {
 			}
 			grants = append(grants, gr)
 		}
-		pr := service.Principal{Name: p.Name, Token: p.Token, Grants: grants}
+		if err := validPrincipalScope(p.Scope); err != nil {
+			return nil, fmt.Errorf("principal %q: %w", p.Name, err)
+		}
+		pr := service.Principal{Name: p.Name, Token: p.Token, Grants: grants, Scope: service.Scope(p.Scope)}
 		if p.PublicKey != "" {
 			k, err := peerkey.ParsePublicKey(p.PublicKey)
 			if err != nil {

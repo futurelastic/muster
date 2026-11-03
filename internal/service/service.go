@@ -798,10 +798,7 @@ func (s *Service) callList(ctx context.Context, req fleet.Request, machine fleet
 // the first. See the root package's doc comment findings list.
 func (s *Service) ListMachines(ctx context.Context, req fleet.Request, callerDeadline time.Duration) (fleet.Collection[fleet.MachineInfo], error) {
 	now := time.Now()
-	items := []fleet.MachineInfo{{
-		Machine: s.self, Self: true, Status: fleet.SourceOK, ObservedAt: now,
-		Build: s.build, MaxInputBytes: s.MaxInputBytes(), Peer: s.selfStanding(),
-	}}
+	items := []fleet.MachineInfo{s.selfMachineInfo(now)}
 	sources := []fleet.SourceStatus{{Machine: s.self, Status: fleet.SourceOK, ObservedAt: now}}
 
 	for machine, d := range s.peerDrivers() {
@@ -881,6 +878,27 @@ func (s *Service) ListMachines(ctx context.Context, req fleet.Request, callerDea
 	return fleet.NewCollection(items, sources)
 }
 
+// selfMachineInfo is this machine's own item in GET /v1/machines.
+func (s *Service) selfMachineInfo(now time.Time) fleet.MachineInfo {
+	return fleet.MachineInfo{
+		Machine: s.self, Self: true, Status: fleet.SourceOK, ObservedAt: now,
+		Build: s.build, MaxInputBytes: s.MaxInputBytes(), Peer: s.selfStanding(),
+	}
+}
+
+// ListThisMachine is GET /v1/machines for a principal pinned to this machine
+// (muster #395): the `self` item alone, with this machine as the one source.
+// It never touches a peer driver, so unlike ListMachines it cannot be slow or
+// fail because of one, and a pinned principal learns nothing about the fleet —
+// not a name, not an address, not that a peer is down.
+func (s *Service) ListThisMachine() (fleet.Collection[fleet.MachineInfo], error) {
+	now := time.Now()
+	return fleet.NewCollection(
+		[]fleet.MachineInfo{s.selfMachineInfo(now)},
+		[]fleet.SourceStatus{{Machine: s.self, Status: fleet.SourceOK, ObservedAt: now}},
+	)
+}
+
 // peerDownOf reports, from a driver's own memory and without a network call,
 // whether the peer it fronts is marked down, with the text to show for it.
 func peerDownOf(d driver.Driver) (string, bool) {
@@ -900,6 +918,17 @@ func peerDownOf(d driver.Driver) (string, bool) {
 // only — the wire example does not show a scope parameter for this
 // endpoint, and this skeleton does not invent fanning it out to peers.
 func (s *Service) ListRuntimes(ctx context.Context) (fleet.Collection[fleet.RuntimeInfo], error) {
+	return s.listRuntimes(ctx, true)
+}
+
+// ListLocalRuntimes is ListRuntimes without the peers' rows: this machine's
+// own runtimes and nothing else. It is what a principal pinned to this machine
+// is answered with (muster #395), since a peer's row names the peer.
+func (s *Service) ListLocalRuntimes(ctx context.Context) (fleet.Collection[fleet.RuntimeInfo], error) {
+	return s.listRuntimes(ctx, false)
+}
+
+func (s *Service) listRuntimes(ctx context.Context, withPeers bool) (fleet.Collection[fleet.RuntimeInfo], error) {
 	now := time.Now()
 	var items []fleet.RuntimeInfo
 	sources := []fleet.SourceStatus{{Machine: s.self, Status: fleet.SourceOK, ObservedAt: now}}
@@ -915,6 +944,9 @@ func (s *Service) ListRuntimes(ctx context.Context) (fleet.Collection[fleet.Runt
 		peers[m] = d
 	}
 	s.mu.RUnlock()
+	if !withPeers {
+		peers = nil
+	}
 
 	// Peers are included, and they are the whole reason this endpoint
 	// matters. api-http.md §3.1 tells clients they MUST consult this before
