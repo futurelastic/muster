@@ -84,6 +84,19 @@ func TestValidateConfigExtras_StartupSettings(t *testing.T) {
 		{"defaultRuntime under an unknown FLEET_RUNTIME", map[string]any{"defaultRuntime": "tmx"},
 			map[string]string{"FLEET_RUNTIME": "nonsense"}, ""},
 
+		// muster #396: only the PATH of the operator's opencode agent file is judged at
+		// the start. Its existence and content are judged on every create, because
+		// what it holds is read then. A file shared by machines that do not all run
+		// opencode is checked the same on each.
+		{"opencode agents, absolute", map[string]any{"opencode": map[string]any{"agents": "/etc/fleet/agents.json"}}, tmux_, ""},
+		{"opencode agents, a file that does not exist yet", map[string]any{"opencode": map[string]any{"agents": "/nonexistent/agents.json"}}, tmux_, ""},
+		{"opencode agents, relative", map[string]any{"opencode": map[string]any{"agents": "agents.json"}}, tmux_,
+			`opencode.agents "agents.json" must be an absolute path`},
+		{"opencode agents, relative, runtime not enabled",
+			map[string]any{"opencode": map[string]any{"agents": "agents.json"}},
+			map[string]string{"FLEET_RUNTIME": "none"}, `opencode.agents "agents.json" must be an absolute path`},
+		{"opencode object without agents", map[string]any{"opencode": map[string]any{}}, tmux_, ""},
+
 		// Trust roots are the tmux driver's: another primary runtime never reads them.
 		{"relative trust root, tmux", map[string]any{"trustRoots": []string{"work/repos"}}, tmux_,
 			`trust root "work/repos" must be an absolute path`},

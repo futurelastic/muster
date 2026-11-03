@@ -139,7 +139,7 @@ func TestExternalDirectoryRules_AreWrittenInOrder(t *testing.T) {
 	// sort would have put first, if the writer used a map.
 	plan := &sandboxPlan{read: []string{"!odd", "/aaa", "/zzz"}}
 	dir := t.TempDir()
-	if err := writeSessionConfig(dir, true, plan, providerPolicy{}); err != nil {
+	if err := writeSessionConfig(dir, true, plan, providerPolicy{}, nil); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(filepath.Join(dir, permissionConfigRel))
@@ -182,7 +182,7 @@ func TestExternalDirectoryRules_OmitARootThatWouldMatchMoreThanItNames(t *testin
 }
 
 func TestWriteSessionConfig_BypassWithoutAPlanIsRefused(t *testing.T) {
-	err := writeSessionConfig(t.TempDir(), true, nil, providerPolicy{})
+	err := writeSessionConfig(t.TempDir(), true, nil, providerPolicy{}, nil)
 	if err == nil {
 		t.Fatal("a bypass config was written with no sandbox plan, so with no boundary behind its approvals")
 	}
@@ -191,7 +191,7 @@ func TestWriteSessionConfig_BypassWithoutAPlanIsRefused(t *testing.T) {
 func TestWriteSessionConfig_NoBypassWritesNoPermission(t *testing.T) {
 	dir := t.TempDir()
 	// A plan alone must not switch the posture on: only an explicit bypass does.
-	if err := writeSessionConfig(dir, false, &sandboxPlan{read: []string{"/x"}}, providerPolicy{}); err != nil {
+	if err := writeSessionConfig(dir, false, &sandboxPlan{read: []string{"/x"}}, providerPolicy{}, nil); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(filepath.Join(dir, permissionConfigRel))

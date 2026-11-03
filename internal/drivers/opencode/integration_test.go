@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -324,7 +325,7 @@ func TestIntegration_ExternalDirectoryRulesAreWhatTheRuntimeResolves(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := writeSessionConfig(sess, true, plan, providers); err != nil {
+	if err := writeSessionConfig(sess, true, plan, providers, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -643,5 +644,106 @@ func TestIntegration_TurnsReadsWhatARealRuntimeRecorded(t *testing.T) {
 	all := getTurns(t, d, sess.SessionRef, "", 0)
 	if len(all.Turns) != 4 {
 		t.Fatalf("the whole record = %q, want four turns", texts(all))
+	}
+}
+
+// muster #396, against the REAL runtime: an agent the operator defines once is
+// listed by an isolated session, a create may name it, and a project agent of the
+// same name wins FIELD BY FIELD. The last is what docs/client-guide.md states, and
+// the stand-in cannot witness it: it is how opencode merges its configuration, so
+// only the real binary can say. No provider is called.
+func TestIntegration_OperatorAgentsMeetAProjectAgentOfTheSameName(t *testing.T) {
+	requireOpencodeIntegration(t)
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("no git on PATH: the runtime reads a project's agents from a git worktree")
+	}
+
+	cwd := t.TempDir()
+	if out, err := exec.Command("git", "-C", cwd, "init", "-q", ".").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	agentsDir := filepath.Join(cwd, ".opencode", "agents")
+	if err := os.MkdirAll(agentsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The project sets a description and a prompt, and nothing else.
+	if err := os.WriteFile(filepath.Join(agentsDir, "persona.md"),
+		[]byte("---\ndescription: the project's description\n---\nthe project's prompt\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file := writeAgentsFile(t, `{"agent": {
+  "persona": {"description": "the operator's description", "mode": "primary", "prompt": "the operator's prompt",
+              "model": "anthropic/claude-x", "temperature": 0.2},
+  "operator-only": {"description": "defined by the operator alone", "mode": "primary"}
+}}`)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	// The built-in provider is allowed on purpose: this session has no credential, and
+	// without a usable provider a create is refused before agents are looked at.
+	d, err := New(ctx, "test-machine", WithOperatorAgents(file), WithSessionRoot(t.TempDir()), WithProviders([]string{builtinProvider}))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer d.Shutdown()
+	req := fleet.RequestFrom(fleet.Caller{Principal: "integration-test"})
+
+	// The operator's own agent is listed and accepted in a repo that knows nothing of it.
+	if _, err := d.Create(ctx, req, "k-alone", fleet.SessionSpec{Cwd: fleet.AbsolutePath(cwd), Agent: "operator-only"}); err != nil {
+		t.Fatalf("Create naming an operator agent: %v", err)
+	}
+
+	// The same name in the project: the project's fields win, the operator's stay
+	// where the project says nothing.
+	both, err := d.Create(ctx, req, "k-both", fleet.SessionSpec{Cwd: fleet.AbsolutePath(cwd), Agent: "persona"})
+	if err != nil {
+		t.Fatalf("Create naming an agent both define: %v", err)
+	}
+	known, ok := d.wasSeen(both.ID)
+	if !ok || known.srv == nil {
+		t.Fatal("the session is not running")
+	}
+	var listing []struct {
+		Name        string   `json:"name"`
+		Description string   `json:"description"`
+		Prompt      string   `json:"prompt"`
+		Temperature *float64 `json:"temperature"`
+		Model       *struct {
+			ProviderID string `json:"providerID"`
+			ModelID    string `json:"modelID"`
+		} `json:"model"`
+	}
+	if err := d.do(ctx, known.srv, "GET", "/agent?directory="+url.QueryEscape(cwd), nil, &listing); err != nil {
+		t.Fatalf("GET /agent: %v", err)
+	}
+	at := -1
+	for i := range listing {
+		if listing[i].Name == "persona" {
+			at = i
+			break
+		}
+	}
+	if at < 0 {
+		t.Fatalf("the runtime does not list persona: %+v", listing)
+	}
+	got := listing[at]
+	if got.Description != "the project's description" || strings.TrimSpace(got.Prompt) != "the project's prompt" {
+		t.Errorf("persona = description %q, prompt %q; want the project's, which wins where it sets a field", got.Description, got.Prompt)
+	}
+	if got.Model == nil || got.Model.ProviderID != "anthropic" || got.Model.ModelID != "claude-x" ||
+		got.Temperature == nil || *got.Temperature != 0.2 {
+		t.Errorf("persona = model %+v, temperature %v; want the operator's, which stays where the project says nothing",
+			got.Model, got.Temperature)
+	}
+
+	// A definition the runtime rejects does not start a session.
+	bad := writeAgentsFile(t, `{"agent": {"persona": {"mode": "bogus"}}}`)
+	d2, err := New(ctx, "test-machine", WithOperatorAgents(bad), WithSessionRoot(t.TempDir()), WithProviders([]string{builtinProvider}))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer d2.Shutdown()
+	if _, err := d2.Create(ctx, req, "k-bad", fleet.SessionSpec{Cwd: fleet.AbsolutePath(cwd), Agent: "persona"}); err == nil {
+		t.Error("a definition with a mode the runtime rejects started a session")
 	}
 }

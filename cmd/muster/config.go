@@ -130,6 +130,18 @@ type fileConfig struct {
 		} `json:"appliesTo,omitempty"`
 	} `json:"sessionEnv,omitempty"`
 
+	// Opencode holds this machine's settings for the opencode runtime that are
+	// not environment variables. Today that is Agents (muster #396): the path of
+	// a JSON file of agents every isolated opencode session on this machine
+	// receives, so an agent defined once can be named on any create without a
+	// change to any repo. Config-file-only and per machine, like SessionEnv: the
+	// declaration (WHICH file) is read at start and changing it needs a restart,
+	// while what the file holds is read afresh on every create, so editing an
+	// agent needs none. The path must be absolute; its existence is not checked
+	// at start — a file that is missing or unusable when a session is created
+	// refuses that create with the reason. docs/install.md has the file's shape.
+	Opencode *opencodeConfig `json:"opencode,omitempty"`
+
 	// MaxInputBytes overrides this machine's limit on `prompt` (create) and
 	// `text` (input) — muster #130. Absent or zero means the shipped
 	// default applies unchanged (internal/service/http.go's
@@ -298,6 +310,20 @@ func (c *fileConfig) principals() ([]service.Principal, error) {
 // receiver answers true rather than panicking: main passes nil for "no file".
 func (c *fileConfig) gatesRemoteControlInput() bool {
 	return c == nil || c.GateRemoteControlInput == nil || *c.GateRemoteControlInput
+}
+
+// opencodeConfig is the "opencode" object of the config file.
+type opencodeConfig struct {
+	Agents string `json:"agents,omitempty"`
+}
+
+// operatorAgentsFile is the path of the operator's opencode agent file, or "" when
+// none is configured. Safe on a nil receiver (no config file at all).
+func (c *fileConfig) operatorAgentsFile() string {
+	if c == nil || c.Opencode == nil {
+		return ""
+	}
+	return c.Opencode.Agents
 }
 
 // sessionEnv converts the wire shape into internal/sessionenv's own type,

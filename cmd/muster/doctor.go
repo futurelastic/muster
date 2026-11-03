@@ -611,6 +611,12 @@ func validateConfigExtras(cfg *fileConfig, getenv func(string) string) error {
 			return errors.New(msg)
 		}
 	}
+	// The operator's opencode agent file (muster #396): only the path is judged
+	// here. Whether the file exists and holds usable agents is judged on every
+	// create, because what it holds is read then and not before.
+	if p := cfg.operatorAgentsFile(); p != "" && !filepath.IsAbs(p) {
+		return fmt.Errorf("opencode.agents %q must be an absolute path", p)
+	}
 	// The default runtime must be one this machine runs. Whether its driver is up
 	// is the start's to say (above).
 	if cfg.DefaultRuntime != "" {

@@ -234,6 +234,11 @@ type Driver struct {
 	providerIDs []string
 	providers   providerPolicy
 
+	// agentsFile is the operator's agent definition file (WithOperatorAgents,
+	// muster #396): its path is fixed here, its content is read again on every
+	// create and relaunch. Empty means the machine defines none.
+	agentsFile string
+
 	// sandbox is what this driver can enforce on this host (nil: nothing) and
 	// sandboxWhy says why not, in words a refused create can quote (muster
 	// #281). sandboxRead is the operator's extra readable directories — an
@@ -382,6 +387,16 @@ func WithSandboxReadPaths(dirs []string) Option { return func(d *Driver) { d.san
 // purpose, for sessions that have no credential of their own. Each id is a
 // provider id as the runtime spells it, with no "/".
 func WithProviders(ids []string) Option { return func(d *Driver) { d.providerIDs = ids } }
+
+// WithOperatorAgents names a JSON file of opencode agents every isolated
+// session on this machine receives (muster #396), so an agent the operator
+// defines once can be named on any create without a change to any repo. The path
+// is absolute and fixed here; the file is read again on every create and every
+// relaunch, so editing an agent needs no restart, and a file that cannot be used
+// refuses the create with the reason. Empty (the default) defines none. Ignored in
+// shared mode, which has no configuration of its own to write them into.
+// operatoragents.go has the file's shape and how it meets a project's agents.
+func WithOperatorAgents(path string) Option { return func(d *Driver) { d.agentsFile = path } }
 
 // WithStateDir makes sessions survive a service restart (muster #282): one
 // record per session, and the sessions' scoped directories, live under dir. With

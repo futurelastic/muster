@@ -12,7 +12,9 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -96,6 +98,40 @@ func fileExists(p string) bool {
 	return err == nil
 }
 
+// fakeSessionAgents is the stand-in for the runtime reading the `agent` entries
+// of the session's own opencode.json at start (muster #396). listed is false when
+// that file defines none. Like the real runtime, it does not start on a
+// definition it rejects — here a mode that is none of subagent, primary and all,
+// the case measured against the real binary — and says why by NAME on stderr when
+// told to log, which is all the driver ever reads of it.
+func fakeSessionAgents(printLogs bool) (names []string, listed bool) {
+	raw, err := os.ReadFile(filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "opencode", "opencode.json"))
+	if err != nil {
+		return nil, false
+	}
+	var cfg struct {
+		Agent map[string]struct {
+			Mode string `json:"mode"`
+		} `json:"agent"`
+	}
+	if json.Unmarshal(raw, &cfg) != nil || len(cfg.Agent) == 0 {
+		return nil, false
+	}
+	for name, a := range cfg.Agent {
+		switch a.Mode {
+		case "", "subagent", "primary", "all":
+			names = append(names, name)
+		default:
+			if printLogs {
+				fmt.Fprintln(os.Stderr, "ERROR service=config error=ConfigInvalidError agent."+name+".mode")
+			}
+			os.Exit(3)
+		}
+	}
+	sort.Strings(names)
+	return names, true
+}
+
 func runFakeOpencode(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	port := fs.Int("port", 0, "")
@@ -107,6 +143,7 @@ func runFakeOpencode(args []string) {
 	if fileExists(".fake-fail-ready") {
 		os.Exit(3) // dies before it ever binds: the startup-failure case
 	}
+	configuredAgents, agentsListed := fakeSessionAgents(*printLogs)
 	user := os.Getenv("OPENCODE_SERVER_USERNAME")
 	pass := os.Getenv("OPENCODE_SERVER_PASSWORD")
 	cwd, _ := os.Getwd()
@@ -163,6 +200,15 @@ func runFakeOpencode(args []string) {
 				_ = os.WriteFile(storeFile, raw, 0o600)
 			}
 			writeJSON(w, session)
+		case path == "/agent" && r.Method == http.MethodGet && agentsListed:
+			// Only for a session whose own configuration defines agents (muster
+			// #396); every other stand-in session answers 404, which is "could not
+			// tell" to the driver, as it always did.
+			list := []wireAgent{}
+			for _, n := range append([]string{"build", "explore", "general", "plan"}, configuredAgents...) {
+				list = append(list, wireAgent{Name: n})
+			}
+			writeJSON(w, list)
 		case path == "/session/status":
 			writeJSON(w, statusMap{})
 		case path == "/session/"+sessionID && r.Method == http.MethodGet && session != nil:

@@ -412,13 +412,14 @@ to it.
   records it for `muster doctor` (row `config.reload`: `warn`, with the reason).
   Fix the file and the next check applies it.
 - Only the two tables move. `trustRoots`, `defaultRuntime`, `sessionEnv`,
+  `opencode` (which file holds [the machine's opencode agents](#agents-every-opencode-session-on-this-machine-receives)),
   `maxInputBytes`, `gateRemoteControlInput`, `closedRetentionDays`,
   `inputAuditRetentionDays` and `machineList` are read at start, so an edit that
   changes one of them is **refused whole**, naming it, and none of that edit —
   principals and peers included — is applied until the service restarts. The
   refusal also says whether the restart it points to would work: it runs the same
   file checks as `muster doctor`'s `config.load` row and as the start itself (the
-  principal table, trust roots, `sessionEnv`, a `defaultRuntime` the machine does
+  principal table, trust roots, `sessionEnv`, `opencode.agents`, a `defaultRuntime` the machine does
   not run, `maxInputBytes`, the retention days, a `machineList` in mode `only`
   that does not verify, the peer list), and ends either "the file passes start-up
   validation" or "a restart would fail: <the start-up error>". Read that before
@@ -456,6 +457,69 @@ to it.
   The service rewrites that file whole when it starts (`appliedReason: "start"`),
   naming the file it started with and the machine list it loaded, so a restart
   clears a refusal the restart resolved; a reload after that moves it on.
+
+### Agents every opencode session on this machine receives
+
+An `opencode` session runs with a home and configuration directories of its own,
+so it never reads the service user's opencode configuration, and an `agent` a
+create names must be one that session's runtime lists: its built-in agents plus
+the project agents under the working directory. To make one agent available on
+every session of this machine without asking each repo to commit it, point
+`opencode.agents` at a JSON file in the file `FLEET_CONFIG` names:
+
+```json
+{ "opencode": { "agents": "/etc/muster/opencode-agents.json" } }
+```
+
+The file holds one top-level key, `agent`, whose value is the object opencode's
+own configuration carries under that name: one definition per agent.
+
+```json
+{
+  "agent": {
+    "reviewer": {
+      "description": "Reviews a change and reports findings, never edits",
+      "mode": "primary",
+      "model": "provider/model",
+      "prompt": "You review. You do not edit files."
+    }
+  }
+}
+```
+
+- **The path is declared at start; the content is read on every create and every
+  relaunch.** Editing an agent, adding one, or creating the file after the service
+  started needs no restart. A session that is already running keeps the
+  definition it started with, because its runtime read it at its own start.
+  Changing *which file* is named is a restart-only edit, like `sessionEnv`.
+  The path must be absolute; whether the file exists is not checked at start.
+- **A file that cannot be used refuses the create with the reason** (`unsupported`:
+  an operator must repair it). That covers a missing or unreadable file, anything
+  that is not a JSON object, an agent defined twice, a definition that is not an
+  object, a file over 1 MiB, and any top-level key other than `agent`. The last is
+  deliberate: providers, permissions and tool servers are set by the service, and a
+  file that could set them would be a way around that policy. A definition the
+  runtime itself rejects (a `mode` that is not `subagent`, `primary` or `all`, say)
+  stops that session's runtime from starting, and the create is refused naming the error
+  the runtime logged. A create is never run as the default agent instead. A session
+  that cannot be relaunched after a restart for this reason is listed `unknown`
+  with the reason.
+- **A project agent of the same name wins, field by field.** The operator's
+  definition is the session's global one. A project's `.opencode/agents/<name>.md`
+  file, or an `agent` entry in the project's `opencode.json`, overrides each field
+  it sets, and leaves the operator's `model`, `temperature` and the rest in force
+  where it sets nothing. An inline `OPENCODE_CONFIG_CONTENT` (a `sessionEnv` entry
+  can still supply one) ranks above both, also field by field; one that carries no
+  `agent` entry leaves these agents alone. This is how opencode 1.18 merges, measured
+  with an isolated home; the driver's gated integration test
+  (`FLEET_OPENCODE_INTEGRATION=1`) pins it. Naming a built-in agent (`build`, `plan`)
+  overrides that agent for every session.
+- **It is not a secret channel.** The definition is written into the session's own
+  configuration and is as visible to the session as any agent prompt; its own
+  `permission` and `tools` entries apply as they do for any agent. In a `bypass`
+  session the sandbox, not the agent file, is the boundary.
+- It has no effect on a shared-mode driver (a test seam that talks to a server it
+  did not start), which has no configuration of its own to write them into.
 
 ## Windows
 
