@@ -405,7 +405,8 @@ func TestReload_RestartOnlyRefusalSaysARestartWouldFail(t *testing.T) {
 func TestReload_AChangeOfTheOpencodeAgentsFileIsRestartOnly(t *testing.T) {
 	r := newReloadRig(t, rlDoc(rlPrincipal("old", "tok-old", "read")))
 	doc := rlDoc(rlPrincipal("old", "tok-old", "read"), rlPrincipal("new", "tok-new", "read"))
-	doc["opencode"] = map[string]any{"agents": "/etc/fleet/opencode-agents.json"}
+	// Absolute by the host's own rule: a POSIX-looking path has no drive on Windows.
+	doc["opencode"] = map[string]any{"agents": filepath.Join(t.TempDir(), "opencode-agents.json")}
 	putCfg(t, r.path, doc)
 	r.rl.check("test")
 
