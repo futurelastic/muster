@@ -196,8 +196,10 @@ func externalDirectoryFor(plan *sandboxPlan) externalDirectoryRules {
 // (provider.go, muster #293) and, for a bypass session only, the tool posture
 // (muster #283) and the outside-directory rules derived from plan (muster #298).
 // The decisions never share a path — a session with no bypass has no
-// `permission` entry at all.
-func writeSessionConfig(dir string, bypass bool, plan *sandboxPlan, providers providerPolicy) error {
+// `permission` entry at all. The operator's agents (operatoragents.go, muster
+// #396) go under `agent`, a key nothing else here writes; none configured means
+// no such key, so the file is what it was before they existed.
+func writeSessionConfig(dir string, bypass bool, plan *sandboxPlan, providers providerPolicy, agents operatorAgents) error {
 	path := filepath.Join(dir, permissionConfigRel)
 	if err := privfs.MkdirAll(filepath.Dir(path)); err != nil {
 		return fmt.Errorf("opencode: creating the session's config directory: %w", err)
@@ -205,6 +207,9 @@ func writeSessionConfig(dir string, bypass bool, plan *sandboxPlan, providers pr
 	cfg := map[string]any{"$schema": "https://opencode.ai/config.json"}
 	for k, v := range providers.configKeys() {
 		cfg[k] = v
+	}
+	if len(agents) > 0 {
+		cfg["agent"] = agents
 	}
 	if bypass {
 		// checkPermissionMode refuses a bypass create with no sandbox, so a nil plan here

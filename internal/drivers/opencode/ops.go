@@ -290,6 +290,13 @@ func (d *Driver) startServerIn(ctx context.Context, spec fleet.SessionSpec, exis
 	if extra == nil {
 		extra = map[string]string{}
 	}
+	// muster #396: the operator's agents are read here, before a directory or a
+	// process exists, on every create and every relaunch — an unusable file
+	// refuses the start, it is never skipped.
+	agents, err := d.operatorAgentsFor()
+	if err != nil {
+		return nil, err
+	}
 	d.mu.RLock()
 	closed := d.closed
 	d.mu.RUnlock()
@@ -336,8 +343,9 @@ func (d *Driver) startServerIn(ctx context.Context, spec fleet.SessionSpec, exis
 	// session's own directory, never in a file another session would read. The
 	// provider policy goes to EVERY session — a session with no credential must
 	// not fall back to the runtime's hosted provider — and is written again on a
-	// relaunch, so a changed operator setting applies from the next start.
-	if err := writeSessionConfig(dir, bypass, plan, d.providers); err != nil {
+	// relaunch, so a changed operator setting applies from the next start. The
+	// operator's agents (muster #396) ride in the same file for the same reason.
+	if err := writeSessionConfig(dir, bypass, plan, d.providers, agents); err != nil {
 		cleanup()
 		return nil, &fleet.Error{Kind: fleet.ErrorInvalid, Message: "create: " + err.Error(), Machine: d.machine}
 	}

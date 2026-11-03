@@ -321,6 +321,7 @@ func restartOnly(running, next *fileConfig) []string {
 	check("trustRoots", running.TrustRoots, next.TrustRoots)
 	check("defaultRuntime", running.DefaultRuntime, next.DefaultRuntime)
 	check("sessionEnv", running.SessionEnv, next.SessionEnv)
+	check("opencode", running.Opencode, next.Opencode)
 	check("maxInputBytes", running.MaxInputBytes, next.MaxInputBytes)
 	// Compare what the setting MEANS, not what the file wrote: an absent key and an
 	// explicit true are the same gate (#275), so adding or dropping the key must

@@ -121,7 +121,10 @@
 //	                       sessionEnv (muster issue #94: an identity
 //	                       declared for every session this machine starts,
 //	                       rather than every caller having to pass it on
-//	                       every create forever). When present the
+//	                       every create forever), and opencode.agents (muster
+//	                       issue #396: the path of a JSON file of agents every
+//	                       isolated opencode session receives, read again on
+//	                       every create). When present the
 //	                       principal table is authoritative and FLEET_TOKEN /
 //	                       FLEET_ALLOW_* are ignored. Absent means
 //	                       single-token mode.
@@ -744,6 +747,9 @@ func main() {
 	stopOpencode := func() {}
 	if getenv("FLEET_RUNTIME_OPENCODE", "") == "1" {
 		bin := os.Getenv("FLEET_OPENCODE_BIN")
+		if cfgFile.operatorAgentsFile() != "" {
+			log.Printf("muster: opencode operator agents configured (#396)")
+		}
 		stopOpencode = svc.StartOptionalRuntime(context.Background(), service.OptionalRuntime{
 			Runtime:    opencode.DefaultRuntime,
 			DeadlineMs: opencode.DefaultDeadlineMs,
@@ -764,6 +770,10 @@ func main() {
 					// muster #293: which providers a session may use. Unset keeps the
 					// runtime's built-in hosted provider off.
 					opencode.WithProviders(splitList(os.Getenv("FLEET_OPENCODE_PROVIDERS"))),
+					// muster #396: agents the operator defines once, written into every
+					// session's own configuration. The path is fixed here; the file is
+					// read again on every create. Empty defines none.
+					opencode.WithOperatorAgents(cfgFile.operatorAgentsFile()),
 				}
 				if attempt > 0 {
 					// The first try gates startup, so it is short. The retries

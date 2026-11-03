@@ -862,6 +862,18 @@ repeat of the same create (same `Idempotency-Key`) after a turn has run, read
 from the runtime's own record of its newest assistant message: `false` is a turn
 that ran as another agent — the default one — and is never reported as honoured.
 
+**Where an `opencode` agent comes from** (muster #396). Besides the runtime's
+built-in agents and the project agents under the session's working directory, an
+isolated session lists the agents the machine's operator defined for every
+session on it (`opencode.agents` in the machine's configuration file,
+[`install.md`](install.md#agents-every-opencode-session-on-this-machine-receives)).
+You name one the same way — `agent` on the create — and need no agent file in the
+repo. If a project defines an agent of the same name, the project wins field by
+field and the operator's definition stays in force where the project sets nothing.
+An operator file that is missing or invalid refuses the create (`unsupported`, with
+the reason, and for the operator to repair); it never falls back to the default
+agent. `pins.agent.honoured` resolves as above, from the first turn's own record.
+
 **The `model` pin on `opencode` resolves the same way** (muster #373). The model
 is carried in the create body and applies to every turn, but the create response
 never names the model in use, so `pins.model.honoured` is `null` on the create

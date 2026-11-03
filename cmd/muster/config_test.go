@@ -250,6 +250,51 @@ func TestLoadConfigWithoutSessionEnvLeavesItEmpty(t *testing.T) {
 	}
 }
 
+// muster #396: opencode.agents is an optional object on the same file, and reads
+// as "none" through the accessor whether the object, the key or the file is absent.
+func TestLoadConfigReadsOpencodeAgents(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	body := `{"principals": [{"name": "op", "token": "tok"}], "opencode": {"agents": "/etc/fleet/opencode-agents.json"}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.operatorAgentsFile(); got != "/etc/fleet/opencode-agents.json" {
+		t.Errorf("operatorAgentsFile() = %q, want the configured path", got)
+	}
+
+	if err := os.WriteFile(path, []byte(`{"principals": [{"name": "op", "token": "tok"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.operatorAgentsFile(); got != "" {
+		t.Errorf("operatorAgentsFile() = %q with no opencode object, want none", got)
+	}
+	var none *fileConfig
+	if got := none.operatorAgentsFile(); got != "" {
+		t.Errorf("operatorAgentsFile() on no config file = %q, want none", got)
+	}
+}
+
+// A typo inside the opencode object fails the load, like one inside a sessionEnv
+// entry: an `agent` that should have been `agents` must not silently define none.
+func TestLoadConfigRejectsATypoInsideTheOpencodeObject(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	body := `{"principals": [{"name": "op", "token": "tok"}], "opencode": {"agent": "/etc/fleet/a.json"}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadConfig(path); err == nil {
+		t.Fatal("loadConfig accepted an unknown field inside opencode")
+	}
+}
+
 // The loader's DisallowUnknownFields (muster issue #94's finding 1: the
 // code ships before the config entry, never the reverse) must keep applying
 // inside a sessionEnv entry, not just at the top level — a typo here is
