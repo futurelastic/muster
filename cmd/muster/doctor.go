@@ -137,6 +137,10 @@ type doctorEnv struct {
 	// (muster #398). Nil means the real scan of this machine; a test stubs it so
 	// the row never depends on what else is running.
 	OpencodeOrphans func(stateDir string) (pids []int, uninspected int, err error)
+	// OpencodeDirs counts the opencode session directories no record names
+	// (muster #399). Nil means the real scan of this machine, stubbed in a test
+	// for the same reason as OpencodeOrphans.
+	OpencodeDirs func(stateDir string) (opencode.OrphanDirReport, error)
 }
 
 func usageDoctor() string {
@@ -345,6 +349,11 @@ func runChecks(ctx context.Context, env doctorEnv) []doctorRow {
 		orphans = opencode.OrphanServers
 	}
 	c.add(checkOpencodeServers(getenv("FLEET_RUNTIME_OPENCODE") == "1", getenv("FLEET_STATE_DIR"), orphans))
+	orphanDirs := env.OpencodeDirs
+	if orphanDirs == nil {
+		orphanDirs = opencode.OrphanDirs
+	}
+	c.add(checkOpencodeDirs(getenv("FLEET_RUNTIME_OPENCODE") == "1", getenv("FLEET_STATE_DIR"), orphanDirs))
 
 	// --- the service manager's own record (Windows only) -----------------------
 	// muster installs no service manager; where the supported one is a scheduled
@@ -1269,6 +1278,91 @@ func checkOpencodeServers(enabled bool, stateDir string, scan func(string) ([]in
 		row.Summary = "no opencode server runs without a session"
 	}
 	return row
+}
+
+// checkOpencodeDirs is the runtime.opencode.dirs row (muster #399): how many
+// opencode session directories under the service's state directory no session
+// record names and no running server holds. A session's directory holds the
+// runtime's conversation database, so a count is a warning, never a failure, and
+// the row splits what the service removes by itself from what it never does:
+//
+//   - a directory holding nothing a session owns (only scratch, caches and lock
+//     files — what a removal that did not finish leaves) is removed by the next
+//     start of the service once nothing has written to it for an hour;
+//   - a directory that may hold a session's own data stays until a person removes
+//     it, because deleting a conversation is not something the service decides.
+//
+// Like the servers row it cannot see a create in flight, whose directory exists a
+// moment before its record, and like every row here it names no path.
+func checkOpencodeDirs(enabled bool, stateDir string, scan func(string) (opencode.OrphanDirReport, error)) doctorRow {
+	row := doctorRow{ID: "runtime.opencode.dirs", Refs: []int{399}}
+	switch {
+	case !enabled:
+		row.Status = statusSkip
+		row.Summary = "FLEET_RUNTIME_OPENCODE is not 1 — there are no opencode session directories to count"
+		return row
+	case stateDir == "":
+		row.Status = statusSkip
+		row.Summary = "FLEET_STATE_DIR is not set — opencode sessions are not remembered, so no session directory outlives its session to be counted"
+		return row
+	}
+	rep, err := scan(stateDir)
+	switch {
+	case errors.Is(err, opencode.ErrScanUnsupported):
+		row.Status = statusSkip
+		row.Summary = "this platform cannot list running processes with their environment — opencode session directories are not counted"
+		return row
+	case err != nil:
+		row.Status = statusUnknown
+		row.Summary = "the opencode session directories could not be listed"
+		row.Detail = err.Error()
+		return row
+	case rep.Total() == 0 && rep.Unreadable == 0 && rep.Uninspected == 0:
+		row.Status = statusPass
+		row.Summary = "no opencode session directory is left without a session record"
+		return row
+	}
+	row.Status = statusWarn
+	var detail []string
+	if rep.Total() == 0 {
+		row.Summary = "no session directory without a record was counted, but it could not be checked completely"
+	} else {
+		row.Summary = fmt.Sprintf("%d opencode session directory(ies) without a session record (%s)", rep.Total(), humanSize(rep.RemovableBytes+rep.HoldStoreBytes))
+		if rep.Removable > 0 {
+			detail = append(detail, fmt.Sprintf("%d (%s) hold nothing a session owns — leftovers of a removal that did not finish. "+
+				"The next start of the service removes those nothing has written to for an hour", rep.Removable, humanSize(rep.RemovableBytes)))
+		}
+		if rep.HoldStore > 0 {
+			detail = append(detail, fmt.Sprintf("%d (%s) may hold a session's conversation database and are never removed automatically; "+
+				"remove one by hand once nobody needs that conversation", rep.HoldStore, humanSize(rep.HoldStoreBytes)))
+		}
+	}
+	if rep.Unreadable > 0 {
+		detail = append(detail, fmt.Sprintf("%d session record(s) could not be read, and the service removes nothing while one cannot, "+
+			"because it might name a directory counted here", rep.Unreadable))
+	}
+	if rep.Uninspected > 0 {
+		detail = append(detail, fmt.Sprintf("%d process(es) look like opencode servers but could not be inspected, so a counted "+
+			"directory may be in use (run the doctor as the service user)", rep.Uninspected))
+	}
+	row.Detail = strings.Join(detail, ". ")
+	return row
+}
+
+// humanSize writes a byte count the way a person reads a disk: one unit, no
+// fraction below a megabyte.
+func humanSize(n int64) string {
+	const k = 1024
+	switch {
+	case n < k:
+		return fmt.Sprintf("%d B", n)
+	case n < k*k:
+		return fmt.Sprintf("%d KiB", (n+k-1)/k)
+	case n < k*k*k:
+		return fmt.Sprintf("%.1f MiB", float64(n)/(k*k))
+	default:
+		return fmt.Sprintf("%.1f GiB", float64(n)/(k*k*k))
+	}
 }
 
 func joinInts(ns []int) string {

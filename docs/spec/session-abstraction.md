@@ -2205,9 +2205,26 @@ with one log line per process (pid, port and the scoped directory's name — nev
 content, which includes the server's credential). The sweep runs only with a state directory, only
 reads the environment of the service user's own processes, and leaves a process alone whenever any
 part of that identity could not be seen. It needs a platform that can read another process's
-environment (macOS, Linux); elsewhere it does nothing. It does not remove scoped directories left
-without a record: those hold a conversation database, and deleting one is not the sweep's call.
-`muster doctor` reports the same processes, as the count in the `runtime.opencode.servers` row.
+environment (macOS, Linux); elsewhere it does nothing. `muster doctor` reports the same processes, as
+the count in the `runtime.opencode.servers` row.
+
+A scoped directory that no record names is a second thing nothing used to remove (#399). What was
+measured on a machine that had them is not a tree whose record went missing: every one was the
+leftover of a removal that did not finish — only the runtime's cache and lock files, or only
+scratch — and none held the conversation database. So the start-up sweep, **after** it has stopped
+the servers and before anything is resumed, removes a record-less directory only when all of these
+hold: it is a real directory directly under the session root named as a session directory is; no
+readable record names it (compared by the last path element); no running server holds it; **nothing in
+it has been written for an hour** (the newest modification time anywhere in the tree, because a
+directory's own time does not move when a file deeper in it is written); and **it holds nothing that
+is a session's own** — every file in it lies under `tmp/`, `xdg/cache/`, `xdg/state/` or
+`xdg/config/`. A file under `home/` or `xdg/data/` (where the database is), or anywhere this list
+does not know, means the directory is kept. It removes nothing at all while a record file cannot be
+read or a process that looks like a server cannot be inspected, because either could be the holder, and
+nothing where the platform cannot list processes. Each removal is one log line (the directory's name
+and size, never a path). A directory that fails only the last check is **never removed
+automatically**; `muster doctor` counts it, in the `runtime.opencode.dirs` row, apart from the
+leftovers the next start removes, and removing it is a person's decision.
 
 **What isolation does not do, stated plainly.** (1) The model-provider key a session needs is *in
 its environment*, and the runtime exposes that environment to its tool shell (`env` lists it).

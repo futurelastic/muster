@@ -586,6 +586,9 @@ func New(ctx context.Context, machine fleet.MachineId, opts ...Option) (*Driver,
 		// anything is resumed, whether or not a record still names it; at this point
 		// this driver holds no server, so every one found is not ours.
 		d.sweepOrphans()
+		// muster #399: and the scoped directories no record names, after the
+		// servers that held them are gone and before a record can be resumed.
+		d.sweepOrphanDirs()
 		d.resume(ctx)
 	}
 	return d, nil

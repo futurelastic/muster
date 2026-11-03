@@ -869,3 +869,77 @@ func TestDoctorOpencodeServersRow(t *testing.T) {
 		t.Errorf("through runChecks: %+v", row)
 	}
 }
+
+// muster #399: the runtime.opencode.dirs row counts the session directories no
+// record names, and says which of them the service removes by itself.
+func TestDoctorOpencodeDirsRow(t *testing.T) {
+	scanning := func(r opencode.OrphanDirReport, err error) func(string) (opencode.OrphanDirReport, error) {
+		return func(string) (opencode.OrphanDirReport, error) { return r, err }
+	}
+	notCalled := func(string) (opencode.OrphanDirReport, error) {
+		t.Fatal("the scan ran for a row that is skipped")
+		return opencode.OrphanDirReport{}, nil
+	}
+	const mib = 1 << 20
+	cases := []struct {
+		name     string
+		enabled  bool
+		stateDir string
+		scan     func(string) (opencode.OrphanDirReport, error)
+		want     rowStatus
+		summary  string
+		detail   []string
+	}{
+		{"runtime not enabled", false, "/state", notCalled, statusSkip, "not 1", nil},
+		{"no state directory", true, "", notCalled, statusSkip, "FLEET_STATE_DIR", nil},
+		{"platform cannot list processes", true, "/state", scanning(opencode.OrphanDirReport{}, opencode.ErrScanUnsupported), statusSkip, "cannot list", nil},
+		{"the listing failed", true, "/state", scanning(opencode.OrphanDirReport{}, errors.New("read: denied")), statusUnknown, "could not be listed", []string{"read: denied"}},
+		{"none", true, "/state", scanning(opencode.OrphanDirReport{}, nil), statusPass, "no opencode session directory", nil},
+		{"leftovers only", true, "/state", scanning(opencode.OrphanDirReport{Removable: 14, RemovableBytes: 42 * mib}, nil), statusWarn,
+			"14 opencode session directory(ies)", []string{"14 (42.0 MiB) hold nothing a session owns", "next start of the service removes"}},
+		{"a directory that may hold a conversation", true, "/state", scanning(opencode.OrphanDirReport{HoldStore: 2, HoldStoreBytes: 3 << 30}, nil), statusWarn,
+			"2 opencode session directory(ies)", []string{"2 (3.0 GiB) may hold a session's conversation database", "never removed automatically"}},
+		{"both kinds", true, "/state", scanning(opencode.OrphanDirReport{Removable: 1, RemovableBytes: 2048, HoldStore: 1, HoldStoreBytes: 5 * mib}, nil), statusWarn,
+			"2 opencode session directory(ies)", []string{"1 (2 KiB) hold nothing", "1 (5.0 MiB) may hold"}},
+		{"records and processes that could not be read", true, "/state", scanning(opencode.OrphanDirReport{Removable: 1, Unreadable: 2, Uninspected: 3}, nil), statusWarn,
+			"1 opencode session directory(ies)", []string{"2 session record(s) could not be read", "3 process(es) look like opencode servers"}},
+		{"nothing counted but the check was incomplete", true, "/state", scanning(opencode.OrphanDirReport{Unreadable: 1}, nil), statusWarn,
+			"could not be checked completely", []string{"1 session record(s) could not be read"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			row := checkOpencodeDirs(tc.enabled, tc.stateDir, tc.scan)
+			if row.ID != "runtime.opencode.dirs" || row.Status != tc.want {
+				t.Fatalf("got %+v, want status %s", row, tc.want)
+			}
+			if !strings.Contains(row.Summary, tc.summary) {
+				t.Errorf("summary %q does not say %q", row.Summary, tc.summary)
+			}
+			for _, want := range tc.detail {
+				if !strings.Contains(row.Detail, want) {
+					t.Errorf("detail %q does not say %q", row.Detail, want)
+				}
+			}
+			if tc.stateDir != "" && strings.Contains(row.Summary+row.Detail, tc.stateDir+"/") {
+				t.Errorf("row carries a filesystem path: %+v", row)
+			}
+		})
+	}
+
+	// Through the whole check run: the seam is used, the row sits beside the
+	// servers row, and a warning never fails the run.
+	env := testDoctorEnv(map[string]string{"FLEET_RUNTIME_OPENCODE": "1", "FLEET_STATE_DIR": t.TempDir()})
+	env.OpencodeDirs = scanning(opencode.OrphanDirReport{Removable: 3}, nil)
+	rows := runChecks(context.Background(), env)
+	if row := rowByID(t, rows, "runtime.opencode.dirs"); row.Status != statusWarn || !strings.Contains(row.Summary, "3 opencode session directory") {
+		t.Errorf("through runChecks: %+v", row)
+	}
+}
+
+func TestHumanSize(t *testing.T) {
+	for n, want := range map[int64]string{0: "0 B", 1023: "1023 B", 1024: "1 KiB", 1025: "2 KiB", 5 << 20: "5.0 MiB", 3 << 30: "3.0 GiB"} {
+		if got := humanSize(n); got != want {
+			t.Errorf("humanSize(%d) = %q; want %q", n, got, want)
+		}
+	}
+}

@@ -340,6 +340,53 @@ func TestSweep_StopsAServerWhoseRecordAndDirectoryAreGone(t *testing.T) {
 	}
 }
 
+// ---- scoped directories no record names (muster #399) -------------------------
+
+// Through the real start: with a state directory the driver removes the
+// leftovers of a removal that did not finish and keeps a directory that may hold
+// a conversation, a directory a record names, and one that was written a moment ago.
+func TestOpen_RemovesRemnantDirectoriesNoRecordNames(t *testing.T) {
+	needsProcessScan(t)
+	state := t.TempDir()
+	f := &scopedFixture{t: t, now: time.Now()}
+	f.storeDir, f.root = stateLayout(state)
+	for _, d := range []string{f.storeDir, f.root} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := 3 * time.Hour
+	remnant := f.dir("muster-opencode-11", old, remnantXDG)
+	scratch := f.dir("muster-opencode-12", old, remnantTmp)
+	store := f.dir("muster-opencode-13", old, withStore)
+	recent := f.dir("muster-opencode-14", time.Minute, remnantXDG)
+	named := f.dir("muster-opencode-15", old, remnantXDG)
+	// The record names a directory whose session cannot be relaunched here (it
+	// carries caller-supplied environment), so the directory is kept as the
+	// record's own.
+	if err := (&recordStore{dir: f.storeDir}).write(&sessionRecord{ID: "ses_kept", Dir: named, EnvNames: []string{"X"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	var logged logLines
+	d := newStateDriver(t, state, WithLogf(logged.add))
+	t.Cleanup(func() { _ = d.Shutdown() })
+
+	for _, p := range []string{remnant, scratch} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s was not removed at start (%v)", filepath.Base(p), err)
+		}
+	}
+	for _, p := range []string{store, recent, named} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("%s was removed at start: %v", filepath.Base(p), err)
+		}
+	}
+	if !logged.has("removed a session directory", "muster-opencode-11") {
+		t.Errorf("no log line says the directory was removed: %q", logged.all())
+	}
+}
+
 // ---- the count the doctor reports ---------------------------------------------
 
 func TestOrphanServers_CountsServersNoRecordNames(t *testing.T) {
