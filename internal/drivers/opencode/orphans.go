@@ -62,8 +62,9 @@ func servePort(line string) (int, bool) {
 // both ends instead — a variable of another name ending in TMPDIR, a sibling
 // directory of root, or a value that merely starts with it does not match.
 func scopedDirIn(line, root string) (string, bool) {
-	prefix := regexp.QuoteMeta(filepath.Clean(root) + string(filepath.Separator))
-	re := regexp.MustCompile(`(?:^|\s)TMPDIR=` + prefix + `(muster-opencode-[0-9]+)/tmp(?:\s|$)`)
+	sep := regexp.QuoteMeta(string(filepath.Separator))
+	prefix := regexp.QuoteMeta(filepath.Clean(root)) + sep
+	re := regexp.MustCompile(`(?:^|\s)TMPDIR=` + prefix + `(muster-opencode-[0-9]+)` + sep + `tmp(?:\s|$)`)
 	m := re.FindStringSubmatch(line)
 	if m == nil {
 		return "", false
