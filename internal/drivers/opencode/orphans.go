@@ -2,10 +2,14 @@ package opencode
 
 import (
 	"errors"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
+	"time"
 )
 
 // Servers nobody holds (muster #398).
@@ -166,4 +170,257 @@ func OrphanServers(stateDir string) (pids []int, uninspected int, err error) {
 func stateLayout(stateDir string) (storeDir, sessionRoot string) {
 	base := filepath.Join(stateDir, "opencode")
 	return filepath.Join(base, "sessions"), filepath.Join(base, "dirs")
+}
+
+// Directories nobody holds (muster #399).
+//
+// #398 stops the servers nobody holds and leaves their scoped directories alone,
+// on purpose: a directory holds the runtime's conversation database, and removing
+// one is destructive. A directory whose record is gone was still never removed by
+// any path, so they accumulate.
+//
+// What was measured on a machine that had them is not what the title suggests:
+// none of the record-less directories was an intact tree whose record had gone.
+// Every one was the remnant of a removal that did not finish — only the runtime's
+// cache and lock files under xdg/, or only scratch under tmp/ — and none held the
+// conversation database (xdg/data/opencode/opencode.db). So the rule below is not
+// about age alone. A record-less directory is removed only when it provably holds
+// nothing that is a session's own: every file in it lies in an area that is
+// disposable by construction. One that does not is reported and never removed.
+
+// orphanDirGrace is how long a record-less directory must have gone unwritten
+// before it is removed. It is not what makes removal safe (the checks below are);
+// it keeps the sweep off a create that is still being set up and off a remnant a
+// person is looking at.
+const orphanDirGrace = time.Hour
+
+// scopedDirName is how sessionDirs names every directory it makes.
+var scopedDirName = regexp.MustCompile(`^muster-opencode-[0-9]+$`)
+
+// disposableAreas are the places in a scoped directory that hold nothing a
+// session owns: scratch, caches, lock files and the configuration this driver
+// writes itself. The conversation database lives in xdg/data and a session's
+// working files in home, and neither is listed — a file anywhere else, or in a
+// place this list does not know, means "may be a session's own".
+var disposableAreas = []string{"tmp", "xdg/cache", "xdg/state", "xdg/config"}
+
+// orphanDir is one scoped directory that no record names and no live server holds.
+type orphanDir struct {
+	// name is the directory's name under the session root, never its path.
+	name string
+	// bytes is the size of the regular files in it.
+	bytes int64
+	// newest is the latest modification time of anything in it, the directory
+	// itself included: a directory's own time moves only when an entry is added
+	// or removed directly in it, so a file written deeper does not show there.
+	newest time.Time
+	// holdsStore is true when anything in it lies outside disposableAreas — or
+	// when it could not be read to the end, which cannot be told apart from a
+	// store.
+	holdsStore bool
+}
+
+// inspectDir reads one scoped directory without following a link.
+func inspectDir(root, name string) orphanDir {
+	dir := filepath.Join(root, name)
+	o := orphanDir{name: name}
+	err := filepath.WalkDir(dir, func(path string, e fs.DirEntry, err error) error {
+		if err != nil {
+			o.holdsStore = true
+			return nil
+		}
+		info, ierr := e.Info()
+		if ierr != nil {
+			o.holdsStore = true
+			return nil
+		}
+		if t := info.ModTime(); t.After(o.newest) {
+			o.newest = t
+		}
+		if e.IsDir() {
+			return nil
+		}
+		if info.Mode().IsRegular() {
+			o.bytes += info.Size()
+		}
+		rel, rerr := filepath.Rel(dir, path)
+		if rerr != nil || !inDisposableArea(filepath.ToSlash(rel)) {
+			o.holdsStore = true
+		}
+		return nil
+	})
+	if err != nil {
+		o.holdsStore = true
+	}
+	return o
+}
+
+// inDisposableArea reports whether rel (slash-separated, relative to a scoped
+// directory) is a file inside one of disposableAreas.
+func inDisposableArea(rel string) bool {
+	for _, area := range disposableAreas {
+		if strings.HasPrefix(rel, area+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// recordedDirs returns the names of the scoped directories the records in
+// storeDir name, and how many record files could not be read. The comparison is on
+// the last path element, so a record naming a directory under another root still
+// holds the same-named one here: the wrong answer costs a directory kept, never
+// one removed. A record that cannot be read could name any directory, which is why
+// callers that remove treat a non-zero count as "remove nothing".
+func recordedDirs(storeDir string) (names map[string]bool, unreadable int) {
+	names = map[string]bool{}
+	for _, it := range (&recordStore{dir: storeDir}).loadAll() {
+		if it.rec == nil {
+			unreadable++
+			continue
+		}
+		if it.rec.Dir != "" {
+			names[filepath.Base(filepath.Clean(it.rec.Dir))] = true
+		}
+	}
+	return names, unreadable
+}
+
+// orphanDirs lists the scoped directories directly under root that no record in
+// storeDir names and no running server holds, in name order. A link, or a file,
+// that merely bears the name is not a scoped directory and is not listed.
+//
+// unreadable is the number of record files that could not be read and uninspected
+// the number of processes that look like servers but could not be inspected: while
+// either is non-zero the list may be missing a holder, and the caller must not
+// treat a directory in it as one nobody holds. err is the scan's, including
+// ErrScanUnsupported; the list is then nil.
+func orphanDirs(storeDir, root string, scan func(string) ([]serverProc, int, error)) (dirs []orphanDir, unreadable, uninspected int, err error) {
+	servers, uninspected, err := scan(root)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	held := map[string]bool{}
+	for _, p := range servers {
+		held[p.dir] = true
+	}
+	named, unreadable := recordedDirs(storeDir)
+	entries, rerr := os.ReadDir(root)
+	if rerr != nil {
+		// A root that is not there has no directories in it.
+		if errors.Is(rerr, fs.ErrNotExist) {
+			return nil, unreadable, uninspected, nil
+		}
+		return nil, unreadable, uninspected, rerr
+	}
+	for _, e := range entries {
+		// DirEntry.Type does not follow a link, so a link named like a scoped
+		// directory is not a directory here.
+		if !e.Type().IsDir() || !scopedDirName.MatchString(e.Name()) || named[e.Name()] || held[e.Name()] {
+			continue
+		}
+		dirs = append(dirs, inspectDir(root, e.Name()))
+	}
+	sort.Slice(dirs, func(i, j int) bool { return dirs[i].name < dirs[j].name })
+	return dirs, unreadable, uninspected, nil
+}
+
+// removable reports whether o may be removed at now: it holds nothing that is a
+// session's own, and nothing in it has been written within the grace period.
+func (o orphanDir) removable(now time.Time) bool {
+	return !o.holdsStore && now.Sub(o.newest) >= orphanDirGrace
+}
+
+// sweepOrphanDirs removes the record-less scoped directories that hold nothing of
+// a session's, once, at start-up. It runs after sweepOrphans (so a server that
+// sweep stopped no longer holds its directory) and before anything is resumed.
+//
+// It removes nothing when a record could not be read, when a process that looks
+// like a server could not be inspected, or when the platform cannot list
+// processes: in each the list of directories nobody holds cannot be trusted.
+// A directory that fails any other check stays, and the doctor row counts it.
+func (d *Driver) sweepOrphanDirs() { d.sweepOrphanDirsWith(scanServers) }
+
+// sweepOrphanDirsWith is sweepOrphanDirs with the process listing given, so a
+// test on any platform can say which servers are running.
+func (d *Driver) sweepOrphanDirsWith(scan func(string) ([]serverProc, int, error)) {
+	if d.noStartSweep || d.store == nil {
+		return
+	}
+	dirs, unreadable, uninspected, err := orphanDirs(d.store.dir, d.sessionRoot, scan)
+	if err != nil {
+		if !errors.Is(err, ErrScanUnsupported) {
+			d.say("opencode: the start-up sweep could not list session directories: %v", err)
+		}
+		return
+	}
+	if unreadable > 0 || uninspected > 0 {
+		if len(dirs) > 0 {
+			d.say("opencode: session directories no record names were left in place: %d record(s) and %d process(es) could not be read, "+
+				"so a directory could still be in use", unreadable, uninspected)
+		}
+		return
+	}
+	now := time.Now()
+	for _, o := range dirs {
+		if !o.removable(now) {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(d.sessionRoot, o.name)); err != nil {
+			d.say("opencode: a session directory no record names could not be removed (%s): %v", o.name, err)
+			continue
+		}
+		d.say("opencode: removed a session directory no record names, no server holds and nothing has written to for %s (%s, %d KiB)",
+			now.Sub(o.newest).Round(time.Minute), o.name, (o.bytes+1023)/1024)
+	}
+}
+
+// OrphanDirReport is what the doctor says about the scoped directories no record
+// names.
+type OrphanDirReport struct {
+	// Removable counts directories holding nothing a session owns; the start-up
+	// sweep removes those that have also gone unwritten for the grace period.
+	// Bytes is their size.
+	Removable      int
+	RemovableBytes int64
+	// HoldStore counts directories that may hold a session's own data — its
+	// conversation database among them. They are never removed automatically.
+	HoldStore      int
+	HoldStoreBytes int64
+	// Unreadable is the number of record files that could not be read, and
+	// Uninspected the number of processes that look like servers but could not
+	// be: with either non-zero the counts may include a directory that is in use.
+	Unreadable  int
+	Uninspected int
+}
+
+// Total is the number of directories counted.
+func (r OrphanDirReport) Total() int { return r.Removable + r.HoldStore }
+
+// OrphanDirs counts the scoped directories under stateDir's session root that no
+// session record names and no running server holds (muster #399). Like
+// OrphanServers it runs from the doctor, another process, so a directory a create
+// in flight has just made is counted for a moment before its record is written.
+// err is ErrScanUnsupported where the platform cannot list processes.
+func OrphanDirs(stateDir string) (OrphanDirReport, error) {
+	storeDir, root := stateLayout(stateDir)
+	return orphanDirReport(storeDir, root, scanServers)
+}
+
+func orphanDirReport(storeDir, root string, scan func(string) ([]serverProc, int, error)) (OrphanDirReport, error) {
+	dirs, unreadable, uninspected, err := orphanDirs(storeDir, root, scan)
+	if err != nil {
+		return OrphanDirReport{}, err
+	}
+	r := OrphanDirReport{Unreadable: unreadable, Uninspected: uninspected}
+	for _, o := range dirs {
+		if o.holdsStore {
+			r.HoldStore++
+			r.HoldStoreBytes += o.bytes
+		} else {
+			r.Removable++
+			r.RemovableBytes += o.bytes
+		}
+	}
+	return r, nil
 }
