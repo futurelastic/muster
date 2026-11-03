@@ -253,6 +253,14 @@ type Driver struct {
 	stateDir string
 	store    *recordStore
 
+	// logf receives the one-line notices this driver has (muster #398): a server it
+	// stopped that no session held. Nil logs nothing; WithLogf sets it.
+	logf func(format string, args ...any)
+	// noStartSweep turns the start-up sweep off. Only a test sets it, so the reap of
+	// a recorded server (reapStale) can be asserted without the sweep stopping the
+	// same process first.
+	noStartSweep bool
+
 	// baseURL and password are the shared-mode seam's inputs (WithBaseURL,
 	// WithCredential); New folds them into shared.
 	baseURL  string
@@ -397,6 +405,16 @@ func WithProviders(ids []string) Option { return func(d *Driver) { d.providerIDs
 // shared mode, which has no configuration of its own to write them into.
 // operatoragents.go has the file's shape and how it meets a project's agents.
 func WithOperatorAgents(path string) Option { return func(d *Driver) { d.agentsFile = path } }
+
+// WithLogf gives the driver somewhere to say that it stopped a server no
+// session held (muster #398): the start-up sweep and the reap of a server the
+// previous service left behind each log one line per process. Nothing else is
+// logged, and no line carries an environment value or a credential.
+func WithLogf(f func(format string, args ...any)) Option { return func(d *Driver) { d.logf = f } }
+
+// withoutStartSweep turns off the sweep New runs before it resumes. Unexported:
+// only a test needs the reap of a recorded server to be the one that acts.
+func withoutStartSweep() Option { return func(d *Driver) { d.noStartSweep = true } }
 
 // WithStateDir makes sessions survive a service restart (muster #282): one
 // record per session, and the sessions' scoped directories, live under dir. With
@@ -546,12 +564,12 @@ func New(ctx context.Context, machine fleet.MachineId, opts ...Option) (*Driver,
 	}
 	d.bin = avail.Path
 	if d.stateDir != "" {
-		base := filepath.Join(d.stateDir, "opencode")
-		d.store = &recordStore{dir: filepath.Join(base, "sessions")}
+		storeDir, stateRoot := stateLayout(d.stateDir)
+		d.store = &recordStore{dir: storeDir}
 		if d.sessionRoot == "" {
 			// A session's database must outlive the service, so its directory
 			// cannot live under the temp directory (muster #282).
-			d.sessionRoot = filepath.Join(base, "dirs")
+			d.sessionRoot = stateRoot
 		}
 		for _, dir := range []string{d.store.dir, d.sessionRoot} {
 			if err := privfs.MkdirAll(dir); err != nil {
@@ -564,6 +582,10 @@ func New(ctx context.Context, machine fleet.MachineId, opts ...Option) (*Driver,
 	}
 	d.sandbox, d.sandboxWhy = sandboxSupport(false)
 	if d.store != nil {
+		// muster #398: a server an earlier service left running is stopped BEFORE
+		// anything is resumed, whether or not a record still names it; at this point
+		// this driver holds no server, so every one found is not ours.
+		d.sweepOrphans()
 		d.resume(ctx)
 	}
 	return d, nil

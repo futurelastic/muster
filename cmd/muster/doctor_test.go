@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"net"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/futurelastic/muster/internal/drivers/opencode"
 	"github.com/futurelastic/muster/internal/privfs"
 )
 
@@ -809,5 +811,61 @@ func TestDoctorOpencodeRuntimeRow(t *testing.T) {
 	}
 	if _, err := os.Stat(marker); err == nil {
 		t.Fatal("the doctor executed the opencode binary")
+	}
+}
+
+// muster #398: the runtime.opencode.servers row counts opencode servers that run
+// with no session record, so a leak is visible without counting processes by hand.
+func TestDoctorOpencodeServersRow(t *testing.T) {
+	scanning := func(pids []int, uninspected int, err error) func(string) ([]int, int, error) {
+		return func(string) ([]int, int, error) { return pids, uninspected, err }
+	}
+	notCalled := func(string) ([]int, int, error) {
+		t.Fatal("the scan ran for a row that is skipped")
+		return nil, 0, nil
+	}
+	cases := []struct {
+		name     string
+		enabled  bool
+		stateDir string
+		scan     func(string) ([]int, int, error)
+		want     rowStatus
+		summary  string
+		detail   string
+	}{
+		{"runtime not enabled", false, "/state", notCalled, statusSkip, "not 1", ""},
+		{"no state directory", true, "", notCalled, statusSkip, "FLEET_STATE_DIR", ""},
+		{"platform cannot list processes", true, "/state", scanning(nil, 0, opencode.ErrScanUnsupported), statusSkip, "cannot list", ""},
+		{"the listing failed", true, "/state", scanning(nil, 0, errors.New("ps: not found")), statusUnknown, "could not be listed", "ps: not found"},
+		{"none without a session", true, "/state", scanning(nil, 0, nil), statusPass, "no opencode server runs", ""},
+		{"servers with no session", true, "/state", scanning([]int{101, 202}, 0, nil), statusWarn, "2 opencode server", "pid 101, 202"},
+		{"servers that could not be inspected", true, "/state", scanning(nil, 3, nil), statusWarn, "3 process(es)", "service user"},
+		{"both", true, "/state", scanning([]int{101}, 2, nil), statusWarn, "1 opencode server", "2 more"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			row := checkOpencodeServers(tc.enabled, tc.stateDir, tc.scan)
+			if row.ID != "runtime.opencode.servers" || row.Status != tc.want {
+				t.Fatalf("got %+v, want status %s", row, tc.want)
+			}
+			if !strings.Contains(row.Summary, tc.summary) {
+				t.Errorf("summary %q does not say %q", row.Summary, tc.summary)
+			}
+			if !strings.Contains(row.Detail, tc.detail) {
+				t.Errorf("detail %q does not say %q", row.Detail, tc.detail)
+			}
+			if strings.Contains(row.Summary+row.Detail, tc.stateDir+"/") && tc.stateDir != "" {
+				t.Errorf("row carries a filesystem path: %+v", row)
+			}
+		})
+	}
+
+	// Through the whole check run: the seam is used, the row sits beside the
+	// runtime.opencode row, and a warning never fails the run.
+	env := testDoctorEnv(map[string]string{"FLEET_RUNTIME_OPENCODE": "1", "FLEET_STATE_DIR": t.TempDir()})
+	env.OpencodeOrphans = scanning([]int{4242}, 0, nil)
+	rows := runChecks(context.Background(), env)
+	if row := rowByID(t, rows, "runtime.opencode.servers"); row.Status != statusWarn || !strings.Contains(row.Detail, "4242") {
+		t.Errorf("through runChecks: %+v", row)
 	}
 }

@@ -2191,6 +2191,24 @@ waiting for it to be empty. The job belongs to the service process: a service th
 reason takes its servers with it, which is why nothing is left running for the next start to
 reclaim there.
 
+Elsewhere a server survives the service that started it, so a server can outlive the session it
+served, and three things stop it. A session record names the process it last started (pid, port
+and binary), and the start-up reap stops it only while the process there is that binary serving
+that port — for **every** readable record, including one that is listed `unknown` and not
+relaunched, and again when such a session is closed, whatever its state. A server whose record is
+already gone has nothing to be matched against, so the **start-up sweep** recognises it by its own
+environment instead: every server is started with `TMPDIR` (and `HOME`, and the `XDG_*` variables)
+inside its scoped directory under the session root, which a create cannot override. Before anything
+is resumed, a process that runs `serve --port N --hostname 127.0.0.1` as the leader of its own
+process group and carries a `TMPDIR` of `<session root>/muster-opencode-<digits>/tmp` is stopped,
+with one log line per process (pid, port and the scoped directory's name — never environment
+content, which includes the server's credential). The sweep runs only with a state directory, only
+reads the environment of the service user's own processes, and leaves a process alone whenever any
+part of that identity could not be seen. It needs a platform that can read another process's
+environment (macOS, Linux); elsewhere it does nothing. It does not remove scoped directories left
+without a record: those hold a conversation database, and deleting one is not the sweep's call.
+`muster doctor` reports the same processes, as the count in the `runtime.opencode.servers` row.
+
 **What isolation does not do, stated plainly.** (1) The model-provider key a session needs is *in
 its environment*, and the runtime exposes that environment to its tool shell (`env` lists it).
 Isolation scopes every *other* credential; it cannot protect the model key itself, so give each lane
