@@ -69,6 +69,16 @@ func (d *Driver) resumeOne(ctx context.Context, it loaded) {
 		return
 	}
 	rec := it.rec
+	// muster #398: the server the previous service left behind is stopped for
+	// EVERY readable record, before any branch below decides whether the session
+	// is relaunched. A record that is listed unknown (caller-supplied environment,
+	// a context file that is gone, a runtime that would not start) has no new
+	// server, but its old one is still running and still holds the session's
+	// database; nothing else ever stops it, because closing the record later
+	// finds no process attached.
+	if reapStale(rec) {
+		d.say("opencode: stopped a server left running by an earlier service (session %s, pid %d, port %d)", rec.ID, rec.Pid, rec.Port)
+	}
 	base := knownSession{
 		cwd: fleet.AbsolutePath(rec.Cwd), name: rec.Name, agent: rec.Agent, specAgent: rec.SpecAgent,
 		startedAt: time.UnixMilli(rec.StartedAtMs),
@@ -132,8 +142,8 @@ func (d *Driver) relaunch(ctx context.Context, rec *sessionRecord) (*server, *fl
 	if info, err := os.Stat(rec.Dir); err != nil || !info.IsDir() {
 		return nil, nil, fmt.Errorf("its scoped directory %q is gone, and with it the session's database", rec.Dir)
 	}
-	// A server the previous service left running holds this database too.
-	reapStale(rec)
+	// A server the previous service left running holds this database too; it was
+	// stopped by resumeOne before this was called (muster #398).
 
 	spec := fleet.SessionSpec{
 		Cwd: fleet.AbsolutePath(rec.Cwd), Agent: fleet.AgentId(rec.SpecAgent), Marker: rec.SpecMarker,
@@ -227,14 +237,25 @@ func (d *Driver) clearInterrupted(id string) {
 }
 
 // closeUnlaunched closes a session that was found on disk but is not running:
-// there is no process to stop and no runtime to ask, so closing it is removing
-// what it left — the record and the directory. The caller's expected start time
-// is still checked when both sides have one.
+// this service started no process for it and there is no runtime to ask, so
+// closing it is removing what it left — the record and the directory — and
+// stopping a server the previous service left running, if the record still names
+// one that matches (muster #398). The caller's expected start time is still
+// checked when both sides have one.
 func (d *Driver) closeUnlaunched(req fleet.Request, ref fleet.SessionRef, prior knownSession) (fleet.Ack, error) {
 	if want := req.Expect.StartedAt; want != nil && !prior.startedAt.IsZero() && !prior.startedAt.Equal(*want) {
 		return fleet.Ack{}, fmt.Errorf(
 			"%w: id %q holds a session started at %s; the caller meant the one started at %s",
 			fleet.ErrAmbiguousTarget, ref.ID, prior.startedAt.Format(time.RFC3339), want.Format(time.RFC3339))
+	}
+	// muster #398: "there is no process to stop" was only ever true of the new
+	// service. The previous one may have left a server behind, and the record
+	// being removed below is the last thing that names it; stop it first, on the
+	// same identity checks the start-up reap uses (the recorded binary serving the
+	// recorded port). Whatever state the session is in, closing it leaves no
+	// server for it.
+	if rec := d.store.load(ref.ID); rec != nil && reapStale(rec) {
+		d.say("opencode: stopped a server left running by an earlier service (session %s, pid %d, port %d)", rec.ID, rec.Pid, rec.Port)
 	}
 	if prior.dir != "" {
 		if err := os.RemoveAll(prior.dir); err != nil {

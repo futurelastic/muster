@@ -159,6 +159,25 @@ func (s *recordStore) remove(id string) error {
 	return nil
 }
 
+// load reads the record of id, or nil when there is none that this build can
+// understand. Closing a session that was not relaunched needs it (muster #398):
+// the in-memory entry for such a session does not keep which process the
+// previous service left behind, and the record still does.
+func (s *recordStore) load(id string) *sessionRecord {
+	if s == nil || !safeID(id) {
+		return nil
+	}
+	raw, err := os.ReadFile(s.path(id))
+	if err != nil {
+		return nil
+	}
+	var r sessionRecord
+	if json.Unmarshal(raw, &r) != nil || r.Version != recordVersion || r.ID != id {
+		return nil
+	}
+	return &r
+}
+
 // loaded is one record as read back; err is set when the file could not be
 // understood, so the session is still reported (as unknown) rather than lost.
 type loaded struct {

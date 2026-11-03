@@ -259,7 +259,9 @@ func TestResume_ACrashedServicesServerIsReapedBeforeRelaunch(t *testing.T) {
 	// kill-on-close), make it happen; elsewhere this does nothing and the
 	// reaping below is what stops the old server.
 	simulateCrash(d1)
-	d2 := newStateDriver(t, state)
+	// The start-up sweep is off so it is the reap of the RECORDED server that acts
+	// (muster #398); the sweep has its own tests.
+	d2 := newStateDriver(t, state, withoutStartSweep())
 	t.Cleanup(func() { _ = d2.Shutdown() })
 	waitGone(t, "the previous service's server", oldPid)
 	if got := listed(t, d2)[sess.ID].State.Status; got != fleet.StatusIdle {

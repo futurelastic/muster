@@ -339,7 +339,9 @@ order of this page and the order of its output are the same.
      stops the runtime offering it;
    - when `FLEET_RUNTIME_OPENCODE=1`, set `FLEET_OPENCODE_BIN` to the opencode
      binary's absolute path, for the same reason (row: `runtime.opencode`,
-     which resolves the binary and never runs it). A runtime that is enabled but
+     which resolves the binary and never runs it; row `runtime.opencode.servers`
+     counts server processes running with no session record, a `warn` that a
+     restart of the service clears). A runtime that is enabled but
      not usable does not stop the service: it is listed on `GET /v1/runtimes`
      as `unavailable` with a `cause`, and a version check that merely timed out
      under load is retried until it answers;

@@ -12,3 +12,14 @@ package opencode
 // The Unix half exists because a process group survives its parent; a job does
 // not. (#303, #306)
 func reapStale(r *sessionRecord) bool { return false }
+
+// scanServers finds nothing to sweep for the same reason (muster #398): a server
+// cannot outlive the service here, so there is no orphan to look for, and the
+// doctor row is skipped on the platform's ErrScanUnsupported.
+func scanServers(root string) ([]serverProc, int, error) { return nil, 0, ErrScanUnsupported }
+
+// inspectServer finds nothing: there is no orphan to look at twice.
+func inspectServer(pid int, root string) (serverProc, bool) { return serverProc{}, false }
+
+// stopGroups stops nothing: scanServers never finds anything to stop.
+func stopGroups(pids []int) []int { return nil }

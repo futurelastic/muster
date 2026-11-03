@@ -774,6 +774,9 @@ func main() {
 					// session's own configuration. The path is fixed here; the file is
 					// read again on every create. Empty defines none.
 					opencode.WithOperatorAgents(cfgFile.operatorAgentsFile()),
+					// muster #398: the driver says, one line per process, when it stops a
+					// server an earlier service left running.
+					opencode.WithLogf(func(format string, args ...any) { log.Printf("muster: "+format, args...) }),
 				}
 				if attempt > 0 {
 					// The first try gates startup, so it is short. The retries

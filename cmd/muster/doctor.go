@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -132,6 +133,10 @@ type doctorEnv struct {
 	// applicable" — which is what keeps a test independent of whichever clone
 	// it happens to run in.
 	Dir string
+	// OpencodeOrphans lists the opencode servers running with no session record
+	// (muster #398). Nil means the real scan of this machine; a test stubs it so
+	// the row never depends on what else is running.
+	OpencodeOrphans func(stateDir string) (pids []int, uninspected int, err error)
 }
 
 func usageDoctor() string {
@@ -335,6 +340,11 @@ func runChecks(ctx context.Context, env doctorEnv) []doctorRow {
 	c.add(checkTmuxVersion(ctx, runtime, getenv("FLEET_TMUX_BIN"), env))
 	c.add(checkAgentProgram(ctx, runtime, env.Timeout))
 	c.add(checkOpencodeRuntime(getenv("FLEET_RUNTIME_OPENCODE") == "1", getenv("FLEET_OPENCODE_BIN")))
+	orphans := env.OpencodeOrphans
+	if orphans == nil {
+		orphans = opencode.OrphanServers
+	}
+	c.add(checkOpencodeServers(getenv("FLEET_RUNTIME_OPENCODE") == "1", getenv("FLEET_STATE_DIR"), orphans))
 
 	// --- the service manager's own record (Windows only) -----------------------
 	// muster installs no service manager; where the supported one is a scheduled
@@ -1207,6 +1217,66 @@ func checkOpencodeRuntime(enabled bool, bin string) doctorRow {
 		row.Detail = "install opencode on the service's PATH or set FLEET_OPENCODE_BIN to its absolute path; the runtime is listed as unavailable on GET /v1/runtimes until then"
 	}
 	return row
+}
+
+// checkOpencodeServers is the runtime.opencode.servers row (muster #398): how
+// many opencode server processes run under the service's session directory with
+// no session record naming them. Such a process holds a conversation database
+// and 0.3-0.9 GB of memory for a session nobody can reach, and before this row a
+// leak was visible only to someone who counted processes by hand.
+//
+// The doctor is a separate process and cannot see which servers the running
+// service holds, so a server is "with no session" when no record under the state
+// directory names its pid. The one false positive is a create in flight — its
+// server is up a moment before its record is written — which is why a count is a
+// warning and never a failure. Like every row here it names no path.
+func checkOpencodeServers(enabled bool, stateDir string, scan func(string) ([]int, int, error)) doctorRow {
+	row := doctorRow{ID: "runtime.opencode.servers", Refs: []int{398}}
+	switch {
+	case !enabled:
+		row.Status = statusSkip
+		row.Summary = "FLEET_RUNTIME_OPENCODE is not 1 — there are no opencode servers to count"
+		return row
+	case stateDir == "":
+		row.Status = statusSkip
+		row.Summary = "FLEET_STATE_DIR is not set — opencode sessions are not remembered, so no server outlives the service to be counted"
+		return row
+	}
+	pids, uninspected, err := scan(stateDir)
+	switch {
+	case errors.Is(err, opencode.ErrScanUnsupported):
+		row.Status = statusSkip
+		row.Summary = "this platform cannot list running processes with their environment — opencode servers are not counted"
+	case err != nil:
+		row.Status = statusUnknown
+		row.Summary = "the running opencode servers could not be listed"
+		row.Detail = err.Error()
+	case len(pids) > 0:
+		row.Status = statusWarn
+		row.Summary = fmt.Sprintf("%d opencode server process(es) run with no session", len(pids))
+		row.Detail = fmt.Sprintf("pid %s. Each holds a conversation database and memory for a session nobody can reach. "+
+			"Restarting the service stops them (its start-up sweep does), or stop those process groups by hand. "+
+			"A server whose create is still in flight is counted for a moment before its record is written", joinInts(pids))
+		if uninspected > 0 {
+			row.Detail += fmt.Sprintf("; %d more look like servers but could not be inspected (run the doctor as the service user)", uninspected)
+		}
+	case uninspected > 0:
+		row.Status = statusWarn
+		row.Summary = fmt.Sprintf("%d process(es) look like opencode servers but could not be inspected", uninspected)
+		row.Detail = "another user's process, or one whose environment cannot be read — run the doctor as the service user"
+	default:
+		row.Status = statusPass
+		row.Summary = "no opencode server runs without a session"
+	}
+	return row
+}
+
+func joinInts(ns []int) string {
+	parts := make([]string, len(ns))
+	for i, n := range ns {
+		parts[i] = strconv.Itoa(n)
+	}
+	return strings.Join(parts, ", ")
 }
 
 func checkInboxIndex(runtime, dir string) doctorRow {
