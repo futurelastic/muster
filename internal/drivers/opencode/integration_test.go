@@ -77,13 +77,19 @@ func TestIntegration_NewSpawnsAndShutsDownARealServer(t *testing.T) {
 // Create against the real server, with no provider call — a session can be
 // created and read back without ever prompting it, so this does not need
 // FLEET_OPENCODE_INTEGRATION's provider-credential half at all.
+//
+// It does need a provider policy that lets the create through (muster #293):
+// the test holds no credential, so the only provider the runtime lists is its
+// built-in hosted one, which the default policy keeps off. The test never
+// prompts, so allowing it on purpose spends nothing — the same choice
+// TestIntegration_NoCredentialIsRefusedByDefaultAndAllowedOnPurpose makes.
 func TestIntegration_CreateAndCloseARealSession(t *testing.T) {
 	requireOpencodeIntegration(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	d, err := New(ctx, "test-machine")
+	d, err := New(ctx, "test-machine", WithProviders([]string{builtinProvider}))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
