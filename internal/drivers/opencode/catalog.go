@@ -8,6 +8,7 @@ import (
 	"time"
 
 	fleet "github.com/futurelastic/muster"
+	"github.com/futurelastic/muster/internal/driver"
 )
 
 // wireProviders is the subset of the runtime's GET /config/providers this
@@ -20,6 +21,27 @@ type wireProviders struct {
 		ID     string              `json:"id"`
 		Models map[string]struct{} `json:"models"`
 	} `json:"providers"`
+	// Default is the runtime's own pick per provider: provider id to model id.
+	// The runtime sends it as an empty object when it has none to name.
+	Default map[string]string `json:"default"`
+}
+
+// catalogAnswer is what one usable read of the runtime's catalog carried: every
+// "provider/model" id it listed, before any policy, and the runtime's own
+// default model per provider.
+type catalogAnswer struct {
+	ids      modelCatalog
+	defaults map[string]string
+}
+
+// catalogSnapshot is the last usable answer this driver read, and when
+// (muster #400). It is where GET /v1/runtimes gets the model list from: the
+// driver makes no request of its own to build it, so there is one read of the
+// catalog and one filter over it, and the list cannot disagree with what a
+// create accepts.
+type catalogSnapshot struct {
+	answer catalogAnswer
+	readAt time.Time
 }
 
 // modelCatalog is the runtime's answer flattened to "provider/model" ids, the
@@ -144,30 +166,111 @@ const (
 //
 // A server that does not answer at all is an error, because the create would
 // fail on it anyway.
-func (d *Driver) readCatalog(ctx context.Context, srv *server) (cat modelCatalog, read catalogRead, err error) {
+func (d *Driver) readCatalog(ctx context.Context, srv *server) (ans catalogAnswer, read catalogRead, err error) {
 	var wire wireProviders
 	if err := d.do(ctx, srv, "GET", "/config/providers", nil, &wire); err != nil {
 		if isUnreachable(err) {
-			return nil, catalogUnknown, err
+			return catalogAnswer{}, catalogUnknown, err
 		}
-		return nil, catalogUnknown, nil
+		return catalogAnswer{}, catalogUnknown, nil
 	}
 	if wire.Providers == nil {
-		return nil, catalogUnknown, nil
+		return catalogAnswer{}, catalogUnknown, nil
 	}
 	for _, p := range wire.Providers {
 		for id := range p.Models {
-			cat = append(cat, p.ID+"/"+id)
+			ans.ids = append(ans.ids, p.ID+"/"+id)
 		}
 	}
-	sort.Strings(cat)
-	if len(cat) == 0 {
-		return nil, catalogEmpty, nil
+	sort.Strings(ans.ids)
+	ans.defaults = wire.Default
+	// Every usable answer is the freshest the machine has, so it is what the
+	// runtime list reports (muster #400) — including each re-read in the
+	// settle window below, which is why the snapshot is the latest answer and
+	// never the union of several.
+	d.noteCatalog(ans)
+	if len(ans.ids) == 0 {
+		return ans, catalogEmpty, nil
 	}
-	return cat, catalogListed, nil
+	return ans, catalogListed, nil
 }
 
-// within returns the entries whose provider the policy permits.
+// noteCatalog records ans as the latest usable answer.
+func (d *Driver) noteCatalog(ans catalogAnswer) {
+	snap := &catalogSnapshot{answer: catalogAnswer{
+		ids:      append(modelCatalog(nil), ans.ids...),
+		defaults: make(map[string]string, len(ans.defaults)),
+	}, readAt: d.now().UTC()}
+	for p, m := range ans.defaults {
+		snap.answer.defaults[p] = m
+	}
+	d.catMu.Lock()
+	defer d.catMu.Unlock()
+	if d.lastCatalog != nil && snap.readAt.Before(d.lastCatalog.readAt) {
+		return
+	}
+	d.lastCatalog = snap
+}
+
+// Models is the list GET /v1/runtimes reports for this runtime (muster #400):
+// the ids a create on this machine would accept, from the last catalog read.
+// Before any create has read one there is nothing to report, and that is
+// "none", not an empty list the runtime vouched for.
+//
+// It is built by within, the same filter checkProviders and settleModel use, so
+// the list is exactly the catalog entries the operator's provider policy leaves
+// usable. It makes no request.
+func (d *Driver) Models() fleet.RuntimeModels {
+	d.catMu.Lock()
+	snap := d.lastCatalog
+	d.catMu.Unlock()
+	if snap == nil {
+		return fleet.NoModels()
+	}
+	ids := snap.answer.ids.within(d.providers)
+	readAt := snap.readAt
+	m := fleet.RuntimeModels{
+		Source: fleet.ModelsFromRuntime,
+		ReadAt: &readAt,
+		IDs:    []string(ids),
+	}
+	if def := snap.answer.soleDefault(ids); def != "" {
+		m.Default = &def
+	}
+	return m.Normalized()
+}
+
+var _ driver.ModelsReporter = (*Driver)(nil)
+
+// soleDefault is the model the runtime would use for a create that names none,
+// when this answer says so with certainty: exactly one provider lists models,
+// the answer names a default for it, and that model is among usable. With
+// several providers the runtime's pick depends on an order this driver has no
+// way to see, and a guess is worse than null.
+func (a catalogAnswer) soleDefault(usable modelCatalog) string {
+	providers := map[string]bool{}
+	for _, id := range a.ids {
+		providers[providerOfModel(id)] = true
+	}
+	if len(providers) != 1 {
+		return ""
+	}
+	for p := range providers {
+		def, ok := a.defaults[p]
+		if !ok || def == "" {
+			return ""
+		}
+		if id := p + "/" + def; usable.has(id) {
+			return id
+		}
+	}
+	return ""
+}
+
+// within returns the entries whose provider the policy permits. It is the one
+// place "is this id usable on this machine" is decided: checkProviders and
+// settleModel use it to accept a create, and Models uses it to list what a
+// create would accept (muster #400), so the two cannot drift.
 func (c modelCatalog) within(p providerPolicy) modelCatalog {
 	var out modelCatalog
 	for _, id := range c {
@@ -197,10 +300,11 @@ func (c modelCatalog) within(p providerPolicy) modelCatalog {
 // refused, with the nearest ids from every answer it saw — each of which this
 // check would accept.
 func (d *Driver) checkProviders(ctx context.Context, srv *server, model string) error {
-	cat, read, err := d.readCatalog(ctx, srv)
+	answer, read, err := d.readCatalog(ctx, srv)
 	if err != nil {
 		return err
 	}
+	cat := answer.ids
 	switch read {
 	case catalogUnknown:
 		return nil
@@ -252,7 +356,7 @@ func (d *Driver) settleModel(ctx context.Context, srv *server, model string, fir
 			return seen, nil
 		case <-tick.C:
 		}
-		cat, read, err := d.readCatalog(ctx, srv)
+		answer, read, err := d.readCatalog(ctx, srv)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
@@ -262,7 +366,7 @@ func (d *Driver) settleModel(ctx context.Context, srv *server, model string, fir
 		if read != catalogListed {
 			continue
 		}
-		seen = seen.union(cat.within(d.providers))
+		seen = seen.union(answer.ids.within(d.providers))
 		if seen.has(model) {
 			return seen, nil
 		}

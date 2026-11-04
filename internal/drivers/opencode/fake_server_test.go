@@ -49,6 +49,9 @@ type fakeServer struct {
 	// runtime that answers with the list built into its binary and later with
 	// the one it downloaded (muster #384).
 	catalogSeq []map[string][]string
+	// catalogDefaults is served as the `default` of GET /config/providers:
+	// provider id to the model the runtime would use (muster #400).
+	catalogDefaults map[string]string
 
 	// permissions are the asks GET /permission lists (muster #283);
 	// permissionStatus, when set, makes the endpoint answer that status instead
@@ -693,7 +696,7 @@ func (f *fakeServer) busConns() int {
 // {providers: [{id, models: {<model id>: {...}}}], default: {...}}.
 func (f *fakeServer) handleProviders(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
-	catalog, status := f.catalog, f.catalogStatus
+	catalog, status, defaults := f.catalog, f.catalogStatus, f.catalogDefaults
 	if len(f.catalogSeq) > 0 {
 		catalog = f.catalogSeq[0]
 		if len(f.catalogSeq) > 1 {
@@ -717,6 +720,9 @@ func (f *fakeServer) handleProviders(w http.ResponseWriter, r *http.Request) {
 		Providers []provider        `json:"providers"`
 		Default   map[string]string `json:"default"`
 	}{Providers: []provider{}, Default: map[string]string{}}
+	for p, m := range defaults {
+		out.Default[p] = m
+	}
 	for id, models := range catalog {
 		p := provider{ID: id, Models: map[string]struct{}{}}
 		for _, m := range models {

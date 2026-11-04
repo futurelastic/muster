@@ -220,6 +220,13 @@ type Driver struct {
 	catalogSettle time.Duration
 	catalogPoll   time.Duration
 
+	// lastCatalog is the latest usable answer a catalog read produced, kept so
+	// GET /v1/runtimes can list models without a request of its own (muster
+	// #400). Nil until the first create has read one. catMu guards it: creates
+	// run concurrently.
+	catMu       sync.Mutex
+	lastCatalog *catalogSnapshot
+
 	// sessionEnv is this machine's declared identity for its sessions (#94);
 	// sessionRoot is where session-scoped directories are made (the OS temp
 	// directory by default); runtimePath is the operator's extra PATH

@@ -97,6 +97,22 @@ func TestValidateConfigExtras_StartupSettings(t *testing.T) {
 			map[string]string{"FLEET_RUNTIME": "none"}, `opencode.agents "agents.json" must be an absolute path`},
 		{"opencode object without agents", map[string]any{"opencode": map[string]any{}}, tmux_, ""},
 
+		// muster #400: a declared model list is the Claude Code runtime's alone.
+		{"models, the terminal runtime", map[string]any{"models": map[string]any{string(tmux.DefaultRuntime): []string{"opus", "sonnet"}}}, tmux_, ""},
+		{"models, an empty list", map[string]any{"models": map[string]any{string(tmux.DefaultRuntime): []string{}}}, tmux_, ""},
+		{"models, the opencode runtime", map[string]any{"models": map[string]any{string(opencode.DefaultRuntime): []string{"deepseek/deepseek-flash"}}}, tmux_,
+			"a declared list would be a second source"},
+		{"models, a runtime that takes none", map[string]any{"models": map[string]any{"stub": []string{"x"}}}, tmux_,
+			`models.stub: "stub" has no declared model list`},
+		{"models, an id that is a flag", map[string]any{"models": map[string]any{string(tmux.DefaultRuntime): []string{"opus", "--dangerous"}}}, tmux_,
+			`"--dangerous" is not a model id`},
+		{"models, an empty id", map[string]any{"models": map[string]any{string(tmux.DefaultRuntime): []string{""}}}, tmux_,
+			"is not a model id"},
+		{"models, an id with a space", map[string]any{"models": map[string]any{string(tmux.DefaultRuntime): []string{"opus 4"}}}, tmux_,
+			`"opus 4" is not a model id (it contains whitespace)`},
+		{"models, a repeated id", map[string]any{"models": map[string]any{string(tmux.DefaultRuntime): []string{"opus", "opus"}}}, tmux_,
+			`"opus" is listed more than once`},
+
 		// Trust roots are the tmux driver's: another primary runtime never reads them.
 		{"relative trust root, tmux", map[string]any{"trustRoots": []string{"work/repos"}}, tmux_,
 			`trust root "work/repos" must be an absolute path`},

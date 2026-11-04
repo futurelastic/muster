@@ -282,6 +282,30 @@ func TestLoadConfigReadsOpencodeAgents(t *testing.T) {
 	}
 }
 
+// muster #400: the models object is read per runtime id, safe on no file, and an
+// unknown key beside it still fails the load (DisallowUnknownFields).
+func TestLoadConfigReadsDeclaredModels(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	body := `{"principals": [{"name": "op", "token": "tok"}], "models": {"claude-code-tmux": ["opus", "sonnet"]}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.declaredModels("claude-code-tmux"); len(got) != 2 || got[0] != "opus" || got[1] != "sonnet" {
+		t.Errorf("declaredModels = %v, want the configured two", got)
+	}
+	if got := cfg.declaredModels("opencode"); got != nil {
+		t.Errorf("declaredModels(opencode) = %v, want none", got)
+	}
+	var none *fileConfig
+	if got := none.declaredModels("claude-code-tmux"); got != nil {
+		t.Errorf("declaredModels on no config file = %v, want none", got)
+	}
+}
+
 // A typo inside the opencode object fails the load, like one inside a sessionEnv
 // entry: an `agent` that should have been `agents` must not silently define none.
 func TestLoadConfigRejectsATypoInsideTheOpencodeObject(t *testing.T) {

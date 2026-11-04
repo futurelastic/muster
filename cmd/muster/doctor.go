@@ -636,6 +636,11 @@ func validateConfigExtras(cfg *fileConfig, getenv func(string) string) error {
 	if p := cfg.operatorAgentsFile(); p != "" && !filepath.IsAbs(p) {
 		return fmt.Errorf("opencode.agents %q must be an absolute path", p)
 	}
+	// Declared model lists (muster #400): the shape is judged here so the start,
+	// the doctor and a reload agree.
+	if err := validateModelsConfig(cfg.Models); err != nil {
+		return err
+	}
 	// The default runtime must be one this machine runs. Whether its driver is up
 	// is the start's to say (above).
 	if cfg.DefaultRuntime != "" {
@@ -1767,4 +1772,44 @@ func writeDoctorJSON(w io.Writer, self string, rows []doctorRow) error {
 		Rows    []doctorRow       `json:"rows"`
 		Counts  map[rowStatus]int `json:"counts"`
 	}{fleet.SelfBuild().Short(), self, rows, countRows(rows)})
+}
+
+// validateModelsConfig judges the "models" object of the config file (muster
+// #400): which runtime a list may be declared for, and what an id may be.
+//
+// Only the Claude Code runtime takes a declared list. The opencode runtime
+// reports what its own runtime lists, and a declared list there would be a
+// second source for an answer that has one, drifting from what a create accepts.
+// An id is a value handed to the CLI's model flag, so it follows the rule the
+// driver applies where it builds that argv: non-empty, not starting with "-",
+// and, because a client offers these as choices, no whitespace and no repeats.
+func validateModelsConfig(models map[string][]string) error {
+	runtimes := make([]string, 0, len(models))
+	for rt := range models {
+		runtimes = append(runtimes, rt)
+	}
+	sort.Strings(runtimes)
+	for _, rt := range runtimes {
+		switch fleet.RuntimeId(rt) {
+		case tmuxdriver.DefaultRuntime:
+		case opencode.DefaultRuntime:
+			return fmt.Errorf("models.%s: the %s runtime reports the models its own runtime lists; "+
+				"a declared list would be a second source for the same answer", rt, rt)
+		default:
+			return fmt.Errorf("models.%s: %q has no declared model list (only %q takes one)", rt, rt, string(tmuxdriver.DefaultRuntime))
+		}
+		seen := map[string]bool{}
+		for _, id := range models[rt] {
+			switch {
+			case id == "" || strings.HasPrefix(id, "-"):
+				return fmt.Errorf("models.%s: %q is not a model id (it is empty or starts with \"-\")", rt, id)
+			case strings.ContainsAny(id, " \t\r\n"):
+				return fmt.Errorf("models.%s: %q is not a model id (it contains whitespace)", rt, id)
+			case seen[id]:
+				return fmt.Errorf("models.%s: %q is listed more than once", rt, id)
+			}
+			seen[id] = true
+		}
+	}
+	return nil
 }

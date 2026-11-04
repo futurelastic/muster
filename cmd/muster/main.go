@@ -682,6 +682,11 @@ func main() {
 			deliveryModules.Config.Logf = log.Printf
 			opts = append(opts, tmux.WithDeliveryModules(deliveryModules.Config))
 		}
+		// muster #400: the models a client may offer for a create here. Empty
+		// keeps the CLI's documented aliases.
+		if ids := cfgFile.declaredModels(tmux.DefaultRuntime); len(ids) > 0 {
+			opts = append(opts, tmux.WithModels(ids))
+		}
 		d := tmux.New(self, opts...)
 		// #180: this machine's own sessionEnv may not name a variable the
 		// delivery module reserves either — the module is the sole setter.

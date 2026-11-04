@@ -142,6 +142,15 @@ type fileConfig struct {
 	// refuses that create with the reason. docs/install.md has the file's shape.
 	Opencode *opencodeConfig `json:"opencode,omitempty"`
 
+	// Models declares, per runtime id, the model ids a client may offer for a
+	// create on that runtime (muster #400). It exists for a runtime that has no
+	// catalogue to ask, and today that is the Claude Code runtime alone: the
+	// opencode runtime reports what its own runtime lists, and a declared list
+	// there would be a second source for the same answer, so it is refused.
+	// Absent, the runtime reports the aliases its CLI documents. Per machine and
+	// read at start, like Opencode and SessionEnv: changing it needs a restart.
+	Models map[string][]string `json:"models,omitempty"`
+
 	// MaxInputBytes overrides this machine's limit on `prompt` (create) and
 	// `text` (input) — muster #130. Absent or zero means the shipped
 	// default applies unchanged (internal/service/http.go's
@@ -324,6 +333,15 @@ func (c *fileConfig) operatorAgentsFile() string {
 		return ""
 	}
 	return c.Opencode.Agents
+}
+
+// declaredModels is the operator's model list for runtime, or nil when none is
+// declared. Safe on a nil receiver (no config file at all).
+func (c *fileConfig) declaredModels(runtime fleet.RuntimeId) []string {
+	if c == nil {
+		return nil
+	}
+	return c.Models[string(runtime)]
 }
 
 // sessionEnv converts the wire shape into internal/sessionenv's own type,

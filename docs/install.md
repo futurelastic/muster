@@ -417,13 +417,14 @@ to it.
   Fix the file and the next check applies it.
 - Only the two tables move. `trustRoots`, `defaultRuntime`, `sessionEnv`,
   `opencode` (which file holds [the machine's opencode agents](#agents-every-opencode-session-on-this-machine-receives)),
+  `models` ([the model lists a client may offer](#models-a-client-may-offer-for-a-create)),
   `maxInputBytes`, `gateRemoteControlInput`, `closedRetentionDays`,
   `inputAuditRetentionDays` and `machineList` are read at start, so an edit that
   changes one of them is **refused whole**, naming it, and none of that edit —
   principals and peers included — is applied until the service restarts. The
   refusal also says whether the restart it points to would work: it runs the same
   file checks as `muster doctor`'s `config.load` row and as the start itself (the
-  principal table, trust roots, `sessionEnv`, `opencode.agents`, a `defaultRuntime` the machine does
+  principal table, trust roots, `sessionEnv`, `opencode.agents`, `models`, a `defaultRuntime` the machine does
   not run, `maxInputBytes`, the retention days, a `machineList` in mode `only`
   that does not verify, the peer list), and ends either "the file passes start-up
   validation" or "a restart would fail: <the start-up error>". Read that before
@@ -524,6 +525,30 @@ own configuration carries under that name: one definition per agent.
   session the sandbox, not the agent file, is the boundary.
 - It has no effect on a shared-mode driver (a test seam that talks to a server it
   did not start), which has no configuration of its own to write them into.
+
+### Models a client may offer for a create
+
+`GET /v1/runtimes` carries a `models` list on every row, so a client can offer a
+picker instead of a free-text box (`docs/api.md`, `GET /v1/runtimes`). The
+`opencode` runtime reports what its own runtime lists, filtered by the provider
+policy, and needs no configuration. The Claude Code runtime has no catalogue to
+ask, so it reports the aliases its CLI documents (`opus`, `sonnet`, `haiku`). To
+offer other ids, declare them in the file `FLEET_CONFIG` names, keyed by runtime
+id:
+
+```json
+{ "models": { "claude-code-tmux": ["opus", "sonnet", "haiku", "claude-opus-4-1"] } }
+```
+
+- The list is `source: "declared"`: a client still accepts a value outside it,
+  because nothing checks a typed model against the CLI before the first turn.
+- The `opencode` runtime takes no declared list (a second source for an answer it
+  already has, which would drift from what a create accepts), and no other
+  runtime id is accepted. An id is non-empty, does not start with `-`, has no
+  whitespace and is listed once; a list that breaks this stops the start and shows
+  as a `config.load` failure in `muster doctor`.
+- It is read at start. A reload that changes it is refused whole, like the other
+  start-only settings above.
 
 ## Windows
 

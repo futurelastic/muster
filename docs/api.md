@@ -298,9 +298,41 @@ absent key means an older build, never "not listed".
 
 ### `GET /v1/runtimes`
 
-`{items: [{machine, runtime, status, capabilities}], sources, complete}`. Consult
+`{items: [{machine, runtime, status, capabilities, models}], sources, complete}`. Consult
 this before relying on a capability — a driver that cannot do something says so
 here rather than failing at the call.
+
+**`models` lists the models a create on that runtime may name** (#400), so a
+form can offer a picker instead of a free-text box. Every row has one:
+
+```json
+"models": { "source": "runtime", "readAt": "2026-11-04T09:00:00Z",
+            "ids": ["deepseek/deepseek-flash", "deepseek/deepseek-v4-pro"],
+            "default": null }
+```
+
+- `source: "runtime"` — the runtime itself listed these when it was last asked.
+  This is what the opencode runtime reports, and `ids` is exactly what a create
+  on that machine would accept: the same read, and the same filter by the
+  operator's provider policy, as the check a create runs — so it leaves out a
+  model the machine does not permit even when the runtime offers it. The list is
+  filled by the catalogue reads creates make, so a machine reports
+  `source: "none"` until its first create, and the list can lag a change of
+  credentials until the next one. `readAt` says how old it is. It is a hint for
+  a picker: **the create is the authority**.
+- `source: "declared"` — the runtime has no catalogue to ask, so the operator's
+  configuration (`models` in the config file, keyed by runtime id), or the
+  aliases the runtime documents (`opus`, `sonnet`, `haiku` for Claude Code), name
+  these. A value outside the list may still work. **A client must still accept a
+  value outside the list whenever `source` is not `runtime`.**
+- `source: "none"` — the runtime cannot say, or has not yet. `ids` is `[]`; keep
+  free text. The set of sources is open: treat one you do not know as `none`.
+- `default` is the model the runtime uses when a create names none, when that is
+  known with certainty (one provider, and the runtime named its default); `null`
+  otherwise.
+- A peer's row carries the list the peer reported when its capabilities were last
+  read, with the peer's own `readAt`. It is `none` while those are unreached or
+  stale, and for a peer on an older build. No request is made to build any of it.
 
 A runtime the operator enabled is listed **even when it has no working driver**
 (#297). Its row has `status: "unavailable"`, a `cause` (`not-installed`,
