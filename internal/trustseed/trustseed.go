@@ -168,6 +168,13 @@ type Seeder struct {
 	// a concurrent external write into the exact window this package exists
 	// to survive. Nil in production.
 	afterRead func()
+
+	// onList and onLstat are test hooks for the periodic walk: onList is called
+	// with every directory it lists, onLstat with every directory it had to ask
+	// about directly instead. A test pins what a pass costs by counting them —
+	// the cost #406 was about. Nil in production.
+	onList  func(dir string)
+	onLstat func(dir string)
 }
 
 // New builds a Seeder. statePath is the runtime's own state file (in
@@ -347,6 +354,10 @@ func (r Result) String() string {
 // key and the two external-imports keys. Meant to be called once at startup and again on an interval, so a
 // worktree created a minute ago is seeded before anything launches into it.
 //
+// The walk is bounded (maxDepthBelowIsland): a repository nested deeper than
+// that below its enclosing repository is left to SeedPath, which seeds it just
+// before a session starts there.
+//
 // Never returns an error for a missing root or a lost race — both are
 // ordinary, expected outcomes of running against a filesystem and a file
 // something else keeps rewriting, and both are visible in the returned
@@ -473,6 +484,25 @@ func withinRoot(dir, root string) bool {
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
+// maxDepthBelowIsland bounds how far below its nearest enclosing repository
+// (or, for a stretch of the tree no repository encloses, below the configured
+// root) the periodic walk descends looking for a repository of its own. The
+// count restarts at every repository it finds, so a root that is itself a
+// repository, holding repositories, holding worktrees, is walked a few levels
+// per tier and never as one deep tree.
+//
+// Five is one more than the deepest nesting measured on a real fleet's roots
+// (four: an unrelated clone and its worktrees four directories under a
+// repository), and it is what keeps one application's generated fan-out out of
+// the pass: a file cache that names its entries by hash prefix is two hex
+// levels of up to 256 directories each, 65 536 directories no repository will
+// ever live in, and on that fleet it was 63 % of every pass (#406).
+//
+// A repository deeper than this is not missed by the service, only by this
+// pass: SeedPath seeds the enclosing repository of any directory a session is
+// started in, unbounded, just before the start.
+const maxDepthBelowIsland = 5
+
 // discoverIslands walks every configured root and returns every directory
 // under it that carries a .git entry — point 2's "islands", not every
 // directory. A root not found on disk is reported in missing rather than
@@ -490,6 +520,15 @@ func withinRoot(dir, root string) bool {
 // lookupKeys, given that spelling, can resolve its own symlink prefix
 // forward and recover the walked form as the second key it writes. Islands
 // are reported once each even when two configured roots happen to overlap.
+//
+// What a pass costs is the number of directories it opens, and nothing is
+// spent beyond one listing each (#406). Whether a directory is an island is
+// read off the listing already taken to descend into it — a ".git" entry of
+// any kind, which is what the Lstat this used to make per directory also
+// accepted — instead of a second syscall on the same directory; a directory
+// whose listing cannot be taken is the one place that still asks directly. And
+// the descent is bounded by maxDepthBelowIsland. Symbolic links are not
+// followed, as before.
 func (s *Seeder) discoverIslands() (islands []string, missing []string) {
 	seen := map[string]bool{}
 	for _, root := range s.roots {
@@ -498,33 +537,71 @@ func (s *Seeder) discoverIslands() (islands []string, missing []string) {
 			missing = append(missing, root.spelling)
 			continue
 		}
-		walkErr := filepath.WalkDir(root.walk, func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				// An unreadable subtree (permissions, a vanished directory
-				// mid-walk) is skipped, not fatal to the rest of the walk —
-				// the same "report, don't abort" shape as a missing root.
-				// Returning nil rather than the error is what tells WalkDir
-				// to continue past it instead of stopping the whole walk.
-				return nil
+		s.walkForIslands(root.walk, 0, func(path string) {
+			spelled := reSpell(path, root.walk, root.spelling)
+			if !seen[spelled] {
+				seen[spelled] = true
+				islands = append(islands, spelled)
 			}
-			if !d.IsDir() {
-				return nil
-			}
-			if path != root.walk && skipDescent(d.Name()) {
-				return filepath.SkipDir
-			}
-			if hasGitEntry(path) {
-				spelled := reSpell(path, root.walk, root.spelling)
-				if !seen[spelled] {
-					seen[spelled] = true
-					islands = append(islands, spelled)
-				}
-			}
-			return nil
 		})
-		_ = walkErr // WalkDir's own errors are already surfaced per-entry above
 	}
 	return islands, missing
+}
+
+// walkForIslands lists dir once, reports dir when it is an island, and
+// descends into each subdirectory it may. depth counts directory levels below
+// the nearest enclosing island (or the walked root), and restarts at zero in
+// every island.
+//
+// A listing that fails is not fatal to the rest of the walk, the same "report,
+// don't abort" shape as a missing root: an unreadable subtree is skipped, and
+// whatever entries were read before the failure are still used, as
+// filepath.WalkDir does. A directory that cannot be listed but can still be
+// searched can hold a .git entry, so that one case asks Lstat directly rather
+// than reporting it as not an island.
+func (s *Seeder) walkForIslands(dir string, depth int, found func(path string)) {
+	entries, err := os.ReadDir(dir)
+	if s.onList != nil {
+		s.onList(dir)
+	}
+	island := hasGitName(entries)
+	if !island && err != nil {
+		island = s.lstatHasGit(dir)
+	}
+	if island {
+		found(dir)
+		depth = 0
+	}
+	for _, e := range entries {
+		if !e.IsDir() || skipDescent(e.Name()) {
+			continue
+		}
+		if depth >= maxDepthBelowIsland {
+			continue
+		}
+		s.walkForIslands(filepath.Join(dir, e.Name()), depth+1, found)
+	}
+}
+
+// hasGitName reports whether a directory listing carries a .git entry: a
+// directory (a repository) or a file (a worktree, whose .git points at the
+// repository's own record of it), or anything else under that name.
+func hasGitName(entries []fs.DirEntry) bool {
+	for _, e := range entries {
+		if e.Name() == ".git" {
+			return true
+		}
+	}
+	return false
+}
+
+// lstatHasGit is hasGitEntry through the Seeder's test hook, for the walk's
+// one remaining direct question.
+func (s *Seeder) lstatHasGit(dir string) bool {
+	if s.onLstat != nil {
+		s.onLstat(dir)
+	}
+	return hasGitEntry(dir)
 }
 
 // reSpell rewrites path — found by walking walkRoot, the resolved form of a
