@@ -186,3 +186,139 @@ func TestState_OffPolicyTurnThatAlsoErroredCarriesBothReasons(t *testing.T) {
 		t.Errorf("LastTurn = %+v, want both the policy reason and the runtime's", st.LastTurn)
 	}
 }
+
+// ---- the provider-only policy, pinned as it is ------------------------------
+
+// muster #401 lets a policy name single models. A policy that names providers
+// only must behave exactly as it did before: the same words in every refusal,
+// the same bytes in the session's own configuration. This table pins those
+// words and bytes for the four shapes a provider-only policy takes — the
+// default, one provider, two, and the built-in provider on purpose — so a change
+// to the model-level code that moves one of them fails here, naming it.
+//
+// The expected strings are literal on purpose. Building them from the code under
+// test would pin nothing.
+func TestProviderOnlyPolicy_WordsAndBytesAreThoseOfBeforeModelRules(t *testing.T) {
+	const (
+		noUsableHead = `create: no model provider is usable: the runtime lists none that this machine allows (allowed: `
+		noUsableTail = `. Give the session a credential for an allowed provider, or change the operator's provider setting; ` +
+			`a session is never started on a provider nobody chose`
+	)
+	listed := modelCatalog{"anthropic/c1", "openai/g1", "anthropic/c2", "opencode/big-pickle"}
+
+	cases := []struct {
+		name string
+		ids  []string
+
+		describe string
+		keys     string
+		// pinBuiltIn is whether a create pinned to opencode/big-pickle is refused.
+		pinBuiltIn bool
+		// pinOther is whether a create pinned to zzz/model is refused.
+		pinOther bool
+		// turnProvider is a provider the policy refuses, for the turn-time reason.
+		turnProvider string
+	}{
+		{
+			name:         "default",
+			ids:          nil,
+			describe:     `any provider except the runtime's built-in hosted provider "opencode" (disabled by default)`,
+			keys:         `{"disabled_providers":["opencode"]}`,
+			pinBuiltIn:   true,
+			pinOther:     false,
+			turnProvider: "opencode",
+		},
+		{
+			name:         "one provider",
+			ids:          []string{"anthropic"},
+			describe:     `only "anthropic"`,
+			keys:         `{"enabled_providers":["anthropic"]}`,
+			pinBuiltIn:   true,
+			pinOther:     true,
+			turnProvider: "zzz",
+		},
+		{
+			name:         "two providers",
+			ids:          []string{"anthropic", "openai"},
+			describe:     `only "anthropic", "openai"`,
+			keys:         `{"enabled_providers":["anthropic","openai"]}`,
+			pinBuiltIn:   true,
+			pinOther:     true,
+			turnProvider: "zzz",
+		},
+		{
+			name:         "the built-in provider on purpose",
+			ids:          []string{"opencode"},
+			describe:     `only "opencode"`,
+			keys:         `{"enabled_providers":["opencode"]}`,
+			pinBuiltIn:   false,
+			pinOther:     true,
+			turnProvider: "zzz",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeServer(t)
+			d, err := newDriverWithOptions(t, f, WithProviders(tc.ids))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := d.providers.describe(); got != tc.describe {
+				t.Errorf("describe() = %q, want %q", got, tc.describe)
+			}
+			keys, err := json.Marshal(d.providers.configKeys())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(keys) != tc.keys {
+				t.Errorf("configKeys() = %s, want %s", keys, tc.keys)
+			}
+
+			refusal := func(model string) string {
+				t.Helper()
+				err := d.checkModelProvider(model)
+				if err == nil {
+					return ""
+				}
+				fe, ok := err.(*fleet.Error)
+				if !ok || fe.Kind != fleet.ErrorUnsupported {
+					t.Fatalf("checkModelProvider(%q) = %v, want an unsupported fleet error", model, err)
+				}
+				return fe.Message
+			}
+			if got, want := refusal("opencode/big-pickle"), `create: model "opencode/big-pickle" is on provider "opencode", `+
+				`which this machine does not allow (allowed: `+tc.describe+`)`; tc.pinBuiltIn && got != want {
+				t.Errorf("pin on the built-in provider:\n got %q\nwant %q", got, want)
+			} else if !tc.pinBuiltIn && got != "" {
+				t.Errorf("pin on the built-in provider = %q, want it to pass", got)
+			}
+			if got, want := refusal("zzz/model"), `create: model "zzz/model" is on provider "zzz", `+
+				`which this machine does not allow (allowed: `+tc.describe+`)`; tc.pinOther && got != want {
+				t.Errorf("pin on another provider:\n got %q\nwant %q", got, want)
+			} else if !tc.pinOther && got != "" {
+				t.Errorf("pin on another provider = %q, want it to pass", got)
+			}
+
+			noneNil := d.noUsableProvider(nil).(*fleet.Error)
+			wantNil := noUsableHead + tc.describe + `); it lists no provider at all, so the session has no credential for any` + noUsableTail
+			if noneNil.Kind != fleet.ErrorUnsupported || noneNil.Message != wantNil {
+				t.Errorf("noUsableProvider(nil):\n got %q\nwant %q", noneNil.Message, wantNil)
+			}
+			noneListed := d.noUsableProvider(listed).(*fleet.Error)
+			wantListed := noUsableHead + tc.describe + `); it lists only "anthropic", "openai", "opencode"` + noUsableTail
+			if noneListed.Kind != fleet.ErrorUnsupported || noneListed.Message != wantListed {
+				t.Errorf("noUsableProvider(listed):\n got %q\nwant %q", noneListed.Message, wantListed)
+			}
+
+			ref := createOne(t, d, "/work/x", "key-1")
+			f.setLastMessage(ref.ID, wireMessage{Info: wireMessageInfo{
+				Role: "assistant", ProviderID: tc.turnProvider, ModelID: "m1",
+			}})
+			st := idleTurnState(t, d, ref.ID)
+			wantReason := `the turn ran on provider "` + tc.turnProvider + `" (model "m1"), which this machine does not allow (allowed: ` + tc.describe + `)`
+			if st.LastTurn == nil || st.LastTurn.Outcome != "failed" || st.LastTurn.Retryable || st.LastTurn.Reason != wantReason {
+				t.Errorf("turn-time LastTurn = %+v, want failed, not retryable, reason %q", st.LastTurn, wantReason)
+			}
+		})
+	}
+}
