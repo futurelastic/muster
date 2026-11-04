@@ -66,8 +66,9 @@ type processRow struct {
 // processTableArgs is the one query agent discovery makes of the OS: every
 // process, with its parent, its process group, its terminal's foreground
 // process group, and its full argument vector (`-ww` so a long command line is
-// not cut at the terminal width). One call per listing, whatever the number of
-// sessions — List's constant-spawn contract holds.
+// not cut at the terminal width). One call per snapshot (processtable.go), and a
+// snapshot answers every listing inside its lifetime — whatever the number of
+// sessions or subscribers, List's constant-spawn contract holds.
 var processTableArgs = []string{"-A", "-ww", "-o", "pid=,ppid=,pgid=,tpgid=,args="}
 
 // parseProcessTable parses processTableArgs' output. args is everything after
@@ -124,12 +125,13 @@ func agentFromArgs(args string) (string, bool) {
 // processes disagree (see the file comment). Pure: the table in, the answer
 // out, so the rule is testable without a process table.
 func agentsFromTable(table []processRow, roots map[string]int) map[string]string {
-	byPID := make(map[int]processRow, len(table))
-	children := make(map[int][]int, len(table))
-	for _, p := range table {
-		byPID[p.pid] = p
-		children[p.ppid] = append(children[p.ppid], p.pid)
-	}
+	return agentsFromIndex(indexProcessTable(table), roots)
+}
+
+// agentsFromIndex is agentsFromTable over a table that is already indexed, so
+// a snapshot shared by many listings is indexed once, not once per listing.
+func agentsFromIndex(idx *procIndex, roots map[string]int) map[string]string {
+	byPID, children := idx.byPID, idx.children
 	out := make(map[string]string, len(roots))
 	for session, root := range roots {
 		if _, ok := byPID[root]; !ok {
@@ -171,9 +173,10 @@ func agentsFromTable(table []processRow, roots map[string]int) map[string]string
 	return out
 }
 
-// processAgents reads the process table once and answers, per listed session,
-// the agent its runtime was started with. ok is false when the table could not
-// be read — the caller must then not treat an absent agent as "none".
+// processAgents reads the machine's process table (a shared snapshot, see
+// processtable.go) and answers, per listed session, the agent its runtime was
+// started with. ok is false when the table could not be read — the caller must
+// then not treat an absent agent as "none".
 //
 // Off unless WithProcessAgent was set: a driver built for a test must not
 // query the real process table merely because it was constructed.
@@ -190,10 +193,10 @@ func (d *Driver) processAgents(ctx context.Context, rows []paneRow) (agents map[
 	if len(roots) == 0 {
 		return nil, true
 	}
-	out, err := d.psRun(ctx, d.psBin, processTableArgs...)
+	idx, err := d.processTable(ctx, roots)
 	if err != nil {
 		d.counters.incr(counterAgentUnread)
 		return nil, false
 	}
-	return agentsFromTable(parseProcessTable(string(out)), roots), true
+	return agentsFromIndex(idx, roots), true
 }

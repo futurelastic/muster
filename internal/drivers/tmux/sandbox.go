@@ -100,7 +100,14 @@ var agentProbeArgs = []string{"auth", "status"}
 
 const (
 	sandboxFoundTTL = 5 * time.Minute
-	sandboxFailTTL  = 30 * time.Second
+	// sandboxFailTTL is how long a failed measurement is trusted when somebody
+	// is waiting on it (a create). In the background it doubles with each
+	// consecutive failure, up to sandboxFailMaxTTL (muster #404): a host that
+	// cannot be confined (credentials in a store the profile denies) used to be
+	// re-measured every thirty seconds forever, each time starting a login shell
+	// twice and the agent CLI once.
+	sandboxFailTTL    = 30 * time.Second
+	sandboxFailMaxTTL = 5 * time.Minute
 
 	sandboxProbeBegin = "MUSTER_SANDBOX_PROBE_BEGIN"
 	agentPathMark     = "MUSTER_AGENT_PATH="
@@ -176,17 +183,25 @@ type sandboxMeasurement struct {
 	why        string
 	prog       string
 	refreshing bool
+	// failures is how many measurements in a row declared nothing.
+	failures int
 	// probeMu serialises the measurements themselves.
 	probeMu sync.Mutex
 }
 
 // ttl is how long the answer is trusted: a positive one for long, a negative
-// one briefly (the user may have just logged in).
-func (m *sandboxMeasurement) ttl() time.Duration {
+// one briefly (the user may have just logged in). strict is for a caller that is
+// about to act on the answer and waits for it (a create): it gets the short
+// negative lifetime however many failures came before, so a user who has just
+// logged in is not made to wait out a backoff that exists for the background.
+func (m *sandboxMeasurement) ttl(strict bool) time.Duration {
 	if m.sup != nil {
 		return sandboxFoundTTL
 	}
-	return sandboxFailTTL
+	if strict {
+		return sandboxFailTTL
+	}
+	return backoffTTL(sandboxFailTTL, sandboxFailMaxTTL, m.failures)
 }
 
 func copySandboxSupport(s *fleet.SandboxSupport) *fleet.SandboxSupport {
@@ -201,13 +216,14 @@ func copySandboxSupport(s *fleet.SandboxSupport) *fleet.SandboxSupport {
 }
 
 // peek returns the cached answer and whether it is still inside its lifetime.
-func (m *sandboxMeasurement) peek(now time.Time) (sup *fleet.SandboxSupport, why, prog string, known, fresh bool) {
+func (m *sandboxMeasurement) peek(now time.Time, strict bool) (sup *fleet.SandboxSupport, why, prog string, known, fresh bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if !m.valid {
 		return nil, "", "", false, false
 	}
-	return copySandboxSupport(m.sup), m.why, m.prog, true, now.Sub(m.at) < m.ttl()
+	age := now.Sub(m.at)
+	return copySandboxSupport(m.sup), m.why, m.prog, true, age >= 0 && age < m.ttl(strict)
 }
 
 // sandboxSupportNow is Capabilities' view: the support declared on this host, or
@@ -222,7 +238,7 @@ func (d *Driver) sandboxSupportNow() (*fleet.SandboxSupport, string) {
 		return nil, ""
 	}
 	m := &d.sandboxMeasured
-	sup, why, _, known, fresh := m.peek(d.now())
+	sup, why, _, known, fresh := m.peek(d.now(), false)
 	if known {
 		if !fresh {
 			d.refreshSandboxAsync()
@@ -231,7 +247,7 @@ func (d *Driver) sandboxSupportNow() (*fleet.SandboxSupport, string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), sandboxProbeTimeout+5*time.Second)
 	defer cancel()
-	sup, why, _ = d.sandboxCurrent(ctx)
+	sup, why, _ = d.sandboxCurrent(ctx, false)
 	return sup, why
 }
 
@@ -254,7 +270,7 @@ func (d *Driver) refreshSandboxAsync() {
 		}()
 		ctx, cancel := context.WithTimeout(context.Background(), sandboxProbeTimeout+5*time.Second)
 		defer cancel()
-		d.sandboxCurrent(ctx)
+		d.sandboxCurrent(ctx, false)
 	}
 	if d.sandboxGo != nil {
 		d.sandboxGo(run)
@@ -265,16 +281,17 @@ func (d *Driver) refreshSandboxAsync() {
 
 // sandboxCurrent returns a measurement inside its lifetime, taking a fresh one
 // when the cached one is stale. It waits: it is for a create, which is rare and
-// must not act on a stale answer. Concurrent callers share one probe.
-func (d *Driver) sandboxCurrent(ctx context.Context) (*fleet.SandboxSupport, string, string) {
+// must not act on a stale answer. Concurrent callers share one probe. strict is
+// true for a caller acting on the answer (see sandboxMeasurement.ttl).
+func (d *Driver) sandboxCurrent(ctx context.Context, strict bool) (*fleet.SandboxSupport, string, string) {
 	m := &d.sandboxMeasured
-	if sup, why, prog, known, fresh := m.peek(d.now()); known && fresh {
+	if sup, why, prog, known, fresh := m.peek(d.now(), strict); known && fresh {
 		return sup, why, prog
 	}
 	m.probeMu.Lock()
 	defer m.probeMu.Unlock()
 	// Another caller may have measured while this one waited.
-	if sup, why, prog, known, fresh := m.peek(d.now()); known && fresh {
+	if sup, why, prog, known, fresh := m.peek(d.now(), strict); known && fresh {
 		return sup, why, prog
 	}
 	sup, why, prog := d.measureSandbox(ctx)
@@ -285,6 +302,11 @@ func (d *Driver) sandboxCurrent(ctx context.Context) (*fleet.SandboxSupport, str
 	}
 	m.mu.Lock()
 	m.sup, m.why, m.prog, m.at, m.valid = copySandboxSupport(sup), why, prog, d.now(), true
+	if sup == nil {
+		m.failures++
+	} else {
+		m.failures = 0
+	}
 	m.mu.Unlock()
 	return sup, why, prog
 }
@@ -388,7 +410,7 @@ func (d *Driver) sandboxGate(ctx context.Context, spec fleet.SessionSpec) (strin
 			Machine: d.machine,
 		}
 	}
-	sup, why, prog := d.sandboxCurrent(ctx)
+	sup, why, prog := d.sandboxCurrent(ctx, true)
 	if sup == nil {
 		return "", d.refuseSandbox(why)
 	}
