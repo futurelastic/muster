@@ -1116,9 +1116,19 @@ contents and tool output went to a third party nobody chose. The local opencode 
 fails closed, by operator configuration and never by a request field: that provider is disabled
 in each session's own runtime configuration by default (at create and again at relaunch), and
 `FLEET_OPENCODE_PROVIDERS` names the only providers a session may use instead (naming the
-built-in one is how an operator asks for it). A create the policy leaves with no usable provider —
+built-in one is how an operator asks for it). An entry may also name single models: `provider/<model>`
+or `provider/<glob>` allows only the matching models of that provider, and `!provider/<glob>` denies
+them whatever else allows them (a deny beats any allow). The form to prefer is an allowlist of exact
+models, because a name pattern is not a reliable mark of a model's terms — a hosted provider's
+zero-cost models do not share a suffix, so a suffix deny does not keep them out. A malformed entry
+stops the start, naming it. A create the policy leaves with no usable provider —
 the runtime lists none that is allowed, or lists nothing at all — is refused `unsupported` with the
-reason, before any session exists; so is one whose `model` is on a provider outside the set. A
+reason, before any session exists; so is one whose `model` is outside the policy, the reason naming
+the rule that refused it. A create that names **no** model is refused when the model the runtime would
+pick for it is outside a policy that names models, or cannot be learned (the policy then fails closed
+and the refusal says to pin a model); a policy of providers alone never makes this check. Model rules
+are enforced at these checks and on the turn's own record; they are not in the session's own runtime
+configuration, which enables whole providers only. A
 runtime that does not answer the catalog read at all is still "could not tell", and the create
 proceeds. A turn that nevertheless ran on a provider outside the set reads as `idle` with
 `lastTurn: {"outcome":"failed","reason":"…"}` naming the provider and model, never as an
@@ -1998,10 +2008,10 @@ that died and a turn that finished leave the same screen: an error, a settled
 status line, an empty composer. Both are honestly `idle`, and a supervisor that
 cannot tell them apart silently abandons the work.
 
-A turn that finished normally but ran on a provider the machine's operator
-did not allow (muster #293) is reported here too, as `failed`, with the provider
-in `reason` — it is the only way an idle session says it went somewhere it
-should not have.
+A turn that finished normally but ran on a provider, or a model, the machine's
+operator did not allow (muster #293, #401) is reported here too, as `failed`, with
+the provider, the model and the rule that refused it in `reason` — it is the only
+way an idle session says it went somewhere it should not have.
 
 Absent means the screen said nothing about it — **not** that the turn
 succeeded (§5.7). `retryable` is the runtime's own word for the failure, not

@@ -368,3 +368,32 @@ func TestSessionEnvSameNameStartAndDoctorAgree(t *testing.T) {
 		})
 	}
 }
+
+// muster #401: the opencode provider policy lives in the environment, so an entry
+// that cannot be one stops the start with no config file at all, and only where
+// the opencode runtime is enabled.
+func TestValidateConfigExtras_OpencodeProviderPolicy(t *testing.T) {
+	if hostOS() == "windows" {
+		t.Skip("the runtime set differs on Windows (ADR 303)")
+	}
+	on := map[string]string{"FLEET_RUNTIME": "tmux", "FLEET_RUNTIME_OPENCODE": "1"}
+	with := func(policy string) func(string) string {
+		env := map[string]string{"FLEET_OPENCODE_PROVIDERS": policy}
+		for k, v := range on {
+			env[k] = v
+		}
+		return envOf(env)
+	}
+	if err := validateConfigExtras(nil, with("deepseek,opencode/deepseek-v4-pro,!opencode/*-free")); err != nil {
+		t.Fatalf("a valid policy was refused: %v", err)
+	}
+	err := validateConfigExtras(nil, with("deepseek,opencode/"))
+	if err == nil || !strings.Contains(err.Error(), "FLEET_OPENCODE_PROVIDERS") || !strings.Contains(err.Error(), `"opencode/"`) {
+		t.Fatalf("a malformed entry = %v, want a refusal naming the variable and the entry", err)
+	}
+	// With the runtime off, nothing reads the policy, so it is not judged.
+	off := envOf(map[string]string{"FLEET_RUNTIME": "tmux", "FLEET_OPENCODE_PROVIDERS": "opencode/"})
+	if err := validateConfigExtras(nil, off); err != nil {
+		t.Fatalf("a policy no runtime reads stopped the start: %v", err)
+	}
+}

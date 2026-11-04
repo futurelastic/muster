@@ -343,7 +343,10 @@ order of this page and the order of its output are the same.
      counts server processes running with no session record, a `warn` that a
      restart of the service clears; row `runtime.opencode.dirs` counts session
      directories no record names, a `warn` whose leftovers the next start removes
-     and whose directories that may hold a conversation it never does). A runtime that is enabled but
+     and whose directories that may hold a conversation it never does; row
+     `runtime.opencode.providers` shows which providers, and which models of them,
+     `FLEET_OPENCODE_PROVIDERS` lets a session use, and fails on an entry the service
+     will refuse to start on). A runtime that is enabled but
      not usable does not stop the service: it is listed on `GET /v1/runtimes`
      as `unavailable` with a `cause`, and a version check that merely timed out
      under load is retried until it answers;

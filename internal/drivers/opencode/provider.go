@@ -163,6 +163,28 @@ func newProviderPolicy(entries []string) (providerPolicy, error) {
 	return p, nil
 }
 
+// DescribeProviderPolicy parses the operator's policy entries and returns the
+// policy in words, or the error naming the entry that cannot be one. It is the
+// check the composition root and `muster doctor` run, so a malformed entry stops
+// the start and shows as a failed row, rather than only leaving the runtime
+// unavailable.
+func DescribeProviderPolicy(entries []string) (string, error) {
+	p, err := newProviderPolicy(entries)
+	if err != nil {
+		return "", err
+	}
+	return p.describe(), nil
+}
+
+// NarrowsModels reports whether the entries name single models (an allow of
+// provider/<model> or provider/<glob>, or a deny), as opposed to whole providers
+// only. A malformed list reports false: the error is DescribeProviderPolicy's to
+// give.
+func NarrowsModels(entries []string) bool {
+	p, err := newProviderPolicy(entries)
+	return err == nil && p.narrowsModels()
+}
+
 // matchGlob reports whether s matches pattern, where "*" matches any run of
 // bytes, including none and including "/", and every other byte matches itself
 // exactly (the runtime's ids are case-sensitive and so is this). The standard

@@ -344,6 +344,7 @@ func runChecks(ctx context.Context, env doctorEnv) []doctorRow {
 	c.add(checkTmuxVersion(ctx, runtime, getenv("FLEET_TMUX_BIN"), env))
 	c.add(checkAgentProgram(ctx, runtime, env.Timeout))
 	c.add(checkOpencodeRuntime(getenv("FLEET_RUNTIME_OPENCODE") == "1", getenv("FLEET_OPENCODE_BIN")))
+	c.add(checkOpencodeProviders(getenv("FLEET_RUNTIME_OPENCODE") == "1", getenv("FLEET_OPENCODE_PROVIDERS")))
 	orphans := env.OpencodeOrphans
 	if orphans == nil {
 		orphans = opencode.OrphanServers
@@ -615,6 +616,15 @@ func validateConfigExtras(cfg *fileConfig, getenv func(string) string) error {
 			if !filepath.IsAbs(r) {
 				return fmt.Errorf("trust root %q must be an absolute path", r)
 			}
+		}
+	}
+	// The opencode provider policy (muster #401): an entry that cannot be one stops
+	// the start, naming it, and shows in the doctor and a reload's refusal. Checked
+	// only where the runtime is enabled; a policy no runtime reads is not judged. It
+	// lives in the environment, so it is checked with no config file too.
+	if getenv("FLEET_RUNTIME_OPENCODE") == "1" {
+		if _, err := opencode.DescribeProviderPolicy(splitList(getenv("FLEET_OPENCODE_PROVIDERS"))); err != nil {
+			return fmt.Errorf("FLEET_OPENCODE_PROVIDERS: %w", err)
 		}
 	}
 	if cfg == nil {
@@ -1229,6 +1239,38 @@ func checkOpencodeRuntime(enabled bool, bin string) doctorRow {
 		row.Status = statusFail
 		row.Summary = "opencode runtime enabled, but its binary was not found (not-installed)"
 		row.Detail = "install opencode on the service's PATH or set FLEET_OPENCODE_BIN to its absolute path; the runtime is listed as unavailable on GET /v1/runtimes until then"
+	}
+	return row
+}
+
+// checkOpencodeProviders is the runtime.opencode.providers row (muster #293,
+// #401): which providers, and which models of them, an opencode session may use
+// on this machine — the policy the service will enforce, parsed the way the
+// service parses it. A malformed entry is a failure that names the entry, because
+// the service refuses to start on it; it runs whether or not FLEET_CONFIG is set,
+// since the policy lives in the environment. The policy itself is not a secret
+// and the row quotes it.
+func checkOpencodeProviders(enabled bool, raw string) doctorRow {
+	row := doctorRow{ID: "runtime.opencode.providers", Refs: []int{293, 401}}
+	if !enabled {
+		row.Status = statusSkip
+		row.Summary = "FLEET_RUNTIME_OPENCODE is not 1 — the opencode runtime is not enabled"
+		return row
+	}
+	entries := splitList(raw)
+	desc, err := opencode.DescribeProviderPolicy(entries)
+	if err != nil {
+		row.Status = statusFail
+		row.Summary = "FLEET_OPENCODE_PROVIDERS does not parse — the service refuses to start"
+		row.Detail = err.Error()
+		return row
+	}
+	row.Status = statusPass
+	row.Summary = "opencode sessions may use: " + desc
+	if opencode.NarrowsModels(entries) {
+		row.Detail = "model rules are checked when a session is created and on each turn's record; " +
+			"a session's own configuration enables whole providers only. " +
+			"Name exact models to allow: a name pattern is not a free-tier or data-retention filter"
 	}
 	return row
 }

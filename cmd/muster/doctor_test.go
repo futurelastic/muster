@@ -943,3 +943,55 @@ func TestHumanSize(t *testing.T) {
 		}
 	}
 }
+
+// muster #401: the runtime.opencode.providers row shows the policy the service
+// will enforce, and fails — naming the entry — on one it will refuse to start on.
+func TestCheckOpencodeProviders(t *testing.T) {
+	cases := []struct {
+		name    string
+		enabled bool
+		raw     string
+		want    rowStatus
+		summary string
+		detail  []string
+	}{
+		{"runtime not enabled", false, "opencode/", statusSkip, "not 1", nil},
+		{"unset", true, "", statusPass, `any provider except the runtime's built-in hosted provider "opencode"`, nil},
+		{"providers alone", true, "deepseek, opencode", statusPass, `only "deepseek", "opencode"`, nil},
+		{"an exact-model allowlist", true, "deepseek,opencode/deepseek-v4.1-flash,opencode/deepseek-v4-pro", statusPass,
+			`only "deepseek", "opencode/deepseek-v4.1-flash", "opencode/deepseek-v4-pro"`,
+			[]string{"model rules are checked when a session is created", "Name exact models", "not a free-tier"}},
+		{"a deny glob", true, "deepseek,opencode,!opencode/*-free", statusPass, `denied: "!opencode/*-free"`,
+			[]string{"model rules are checked"}},
+		{"a malformed entry", true, "deepseek,opencode/", statusFail, "does not parse",
+			[]string{`provider policy entry "opencode/"`, "nothing follows"}},
+		{"a deny with no model", true, "!opencode", statusFail, "does not parse", []string{`entry "!opencode"`, "a deny names models"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			row := checkOpencodeProviders(tc.enabled, tc.raw)
+			if row.ID != "runtime.opencode.providers" || row.Status != tc.want {
+				t.Fatalf("got %+v, want status %s", row, tc.want)
+			}
+			if !strings.Contains(row.Summary, tc.summary) {
+				t.Errorf("summary %q does not say %q", row.Summary, tc.summary)
+			}
+			for _, want := range tc.detail {
+				if !strings.Contains(row.Detail, want) {
+					t.Errorf("detail %q does not say %q", row.Detail, want)
+				}
+			}
+			if tc.want == statusPass && tc.raw == "deepseek, opencode" && row.Detail != "" {
+				t.Errorf("a policy of providers alone carries a model-rule note: %q", row.Detail)
+			}
+		})
+	}
+
+	// Through the whole run, with no FLEET_CONFIG: the policy is in the
+	// environment, so the row does not depend on the file.
+	env := testDoctorEnv(map[string]string{"FLEET_RUNTIME_OPENCODE": "1", "FLEET_OPENCODE_PROVIDERS": "opencode/"})
+	rows := runChecks(context.Background(), env)
+	if row := rowByID(t, rows, "runtime.opencode.providers"); row.Status != statusFail || !strings.Contains(row.Detail, `"opencode/"`) {
+		t.Errorf("through runChecks: %+v", row)
+	}
+}
