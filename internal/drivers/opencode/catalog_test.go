@@ -228,11 +228,14 @@ func TestCreate_NoModelStillReadsTheCatalog(t *testing.T) {
 	}
 }
 
-func TestWithProviders_RefusesAnIdThatIsAModel(t *testing.T) {
+// A provider entry that cannot be one stops the driver, naming the entry. Until
+// muster #401 any "provider/model" was refused here; it is now a model rule, so
+// the malformed shapes are the ones the grammar (provider_test.go) lists.
+func TestWithProviders_RefusesAMalformedEntryNamingIt(t *testing.T) {
 	f := newFakeServer(t)
-	_, err := newDriverWithOptions(t, f, WithProviders([]string{"anthropic/claude-sonnet-4-5"}))
-	if err == nil || !strings.Contains(err.Error(), "not a provider id") {
-		t.Fatalf("New = %v, want a refusal naming the bad id", err)
+	_, err := newDriverWithOptions(t, f, WithProviders([]string{"anthropic", "opencode/"}))
+	if err == nil || !strings.Contains(err.Error(), `"opencode/"`) || !strings.Contains(err.Error(), "provider policy entry") {
+		t.Fatalf("New = %v, want a refusal naming the offending entry", err)
 	}
 }
 
@@ -374,4 +377,180 @@ func TestCreate_DeadlineEndingDuringTheWaitIsNotAModelRefusal(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("err = %v, want the context deadline", err)
 	}
+}
+
+// ---- model rules (muster #401) ----------------------------------------------
+
+// refusalOf is the message of an unsupported refusal, "" when err is nil.
+func refusalOf(t *testing.T, err error) string {
+	t.Helper()
+	if err == nil {
+		return ""
+	}
+	var fe *fleet.Error
+	if !errors.As(err, &fe) || fe.Kind != fleet.ErrorUnsupported {
+		t.Fatalf("err = %v, want an unsupported fleet error", err)
+	}
+	return fe.Message
+}
+
+// requireNothingStarted asserts a refusal cost nothing: no session on the
+// runtime, and no request that would create one.
+func requireNothingStarted(t *testing.T, f *fakeServer) {
+	t.Helper()
+	if len(f.sessions) != 0 {
+		t.Errorf("sessions = %d, want none left behind", len(f.sessions))
+	}
+	for _, r := range f.requestsSnapshot() {
+		if r.method == "POST" && r.path == "/session" {
+			t.Error("the runtime was asked to create a session for a refused model")
+		}
+	}
+}
+
+// The policy an operator should write: whole providers, plus the EXACT models
+// wanted on one that also serves models they do not want. A name pattern is not
+// a reliable mark of a model's terms, so the allowlist names the models.
+func TestCreate_ExactModelAllowlist(t *testing.T) {
+	f := newFakeServer(t)
+	f.catalog = map[string][]string{
+		"deepseek": {"deepseek-flash", "deepseek-v4-pro"},
+		// The hosted provider serves paid models, a free one with the suffix, and
+		// a zero-cost one WITHOUT it.
+		"opencode": {"deepseek-v4.1-flash", "deepseek-v4-pro", "big-pickle", "grok-code", "big-free"},
+	}
+	d, err := newDriverWithOptions(t, f, WithProviders([]string{
+		"deepseek", "opencode/deepseek-v4.1-flash", "opencode/deepseek-v4-pro",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, model := range []string{"deepseek/deepseek-flash", "opencode/deepseek-v4.1-flash", "opencode/deepseek-v4-pro"} {
+		if _, err := createWithModel(t, d, model); err != nil {
+			t.Errorf("a create pinned to %s: %v, want it allowed", model, err)
+		}
+	}
+	// Every other model on the hosted provider is refused — the suffix-less
+	// zero-cost ones included, which no suffix rule would have caught.
+	for _, model := range []string{"opencode/big-pickle", "opencode/grok-code", "opencode/big-free"} {
+		f := newFakeServer(t)
+		f.catalog = map[string][]string{"deepseek": {"deepseek-flash"}, "opencode": {"big-pickle", "grok-code", "big-free", "deepseek-v4-pro"}}
+		d, err := newDriverWithOptions(t, f, WithProviders([]string{"deepseek", "opencode/deepseek-v4.1-flash", "opencode/deepseek-v4-pro"}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = createWithModel(t, d, model)
+		msg := refusalOf(t, err)
+		for _, want := range []string{model, `where this machine allows only some models and none matches it`,
+			`only "deepseek", "opencode/deepseek-v4.1-flash", "opencode/deepseek-v4-pro"`} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("%s: refusal %q does not say %q", model, msg, want)
+			}
+		}
+		requireNothingStarted(t, f)
+		for _, r := range f.requestsSnapshot() {
+			if r.path == "/config/providers" {
+				t.Errorf("%s: refused only after the runtime was asked for its catalog; the policy decides it before any process exists", model)
+			}
+		}
+	}
+	// A provider the policy never names stays refused as it always was.
+	if msg := refusalOf(t, d.checkModelProvider("elsewhere/model")); !strings.Contains(msg, `which this machine does not allow`) {
+		t.Errorf("a provider nobody named: %q", msg)
+	}
+}
+
+// A deny glob: the models an operator knows by a stable name. It is NOT a
+// free-tier filter — the zero-cost model without the suffix passes it, which is
+// why the exact allowlist above is the documented way to keep those out.
+func TestCreate_DenyGlobBeatsAnAllowAndIsNotAFreeTierFilter(t *testing.T) {
+	f := newFakeServer(t)
+	f.catalog = map[string][]string{"opencode": {"paid-x", "big-free", "big-pickle"}, "deepseek": {"deepseek-flash"}}
+	d, err := newDriverWithOptions(t, f, WithProviders([]string{"deepseek", "opencode", "!opencode/*-free"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := createWithModel(t, d, "opencode/paid-x"); err != nil {
+		t.Errorf("a model on the provider no deny matches: %v", err)
+	}
+	// The suffix-less zero-cost model is let through by a suffix deny.
+	if _, err := createWithModel(t, d, "opencode/big-pickle"); err != nil {
+		t.Errorf("opencode/big-pickle: %v (the deny matches by name only, and this name has no -free)", err)
+	}
+
+	msg := refusalOf(t, d.checkModelProvider("opencode/big-free"))
+	if !strings.Contains(msg, `model "opencode/big-free" is denied by !opencode/*-free on this machine`) {
+		t.Errorf("a model the deny matches: %q, want it to name the model and the rule", msg)
+	}
+	if !strings.Contains(msg, `denied: "!opencode/*-free"`) {
+		t.Errorf("refusal %q does not carry the effective policy", msg)
+	}
+	// Through the whole create, nothing is started and the catalog is never read.
+	g := newFakeServer(t)
+	g.catalog = f.catalog
+	e, err := newDriverWithOptions(t, g, WithProviders([]string{"deepseek", "opencode", "!opencode/*-free"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = createWithModel(t, e, "opencode/big-free")
+	if got := refusalOf(t, err); !strings.Contains(got, "denied by !opencode/*-free") {
+		t.Errorf("create: %q, want the deny named", got)
+	}
+	requireNothingStarted(t, g)
+}
+
+// Deny beats allow whichever is written first, and a deny alone narrows the
+// default posture without lifting the built-in provider's default-off.
+func TestCreate_DenyBeatsAllowInEitherOrder(t *testing.T) {
+	for _, entries := range [][]string{
+		{"opencode", "!opencode/big-*"},
+		{"!opencode/big-*", "opencode"},
+		{"opencode/big-pickle", "!opencode/big-*"},
+	} {
+		f := newFakeServer(t)
+		d, err := newDriverWithOptions(t, f, WithProviders(entries))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if msg := refusalOf(t, d.checkModelProvider("opencode/big-pickle")); !strings.Contains(msg, "denied by !opencode/big-*") {
+			t.Errorf("%v: %q, want the deny to win", entries, msg)
+		}
+	}
+	// A deny alone: everything but the built-in provider, minus the denied model.
+	f := newFakeServer(t)
+	d, err := newDriverWithOptions(t, f, WithProviders([]string{"!deepseek/v3*"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.checkModelProvider("deepseek/v4"); err != nil {
+		t.Errorf("deepseek/v4: %v, want it allowed", err)
+	}
+	if msg := refusalOf(t, d.checkModelProvider("deepseek/v3-old")); !strings.Contains(msg, "denied by !deepseek/v3*") {
+		t.Errorf("deepseek/v3-old: %q", msg)
+	}
+	if msg := refusalOf(t, d.checkModelProvider("opencode/anything")); !strings.Contains(msg, "does not allow") {
+		t.Errorf("a deny alone must not lift the built-in provider's default-off: %q", msg)
+	}
+}
+
+// The catalog check applies the model rules too: a catalog whose only models on
+// an allowed provider are outside the rules leaves nothing usable, and says why.
+func TestCreate_NothingUsableWhenEveryListedModelIsOutsideTheRules(t *testing.T) {
+	f := newFakeServer(t)
+	f.catalog = map[string][]string{"opencode": {"big-pickle", "grok-code"}}
+	d, err := newDriverWithOptions(t, f, WithProviders([]string{"opencode/deepseek-v4-pro"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = createWithModel(t, d, "")
+	msg := refusalOf(t, err)
+	for _, want := range []string{"no model provider is usable", `it lists only "opencode"`,
+		`every model it lists on "opencode" is outside the models this machine allows`} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("refusal %q does not say %q", msg, want)
+		}
+	}
+	requireNothingStarted(t, f)
 }

@@ -63,6 +63,9 @@ func TestModels_ListIsExactlyWhatACreateAccepts(t *testing.T) {
 		"default policy":   nil,
 		"named providers":  {WithProviders([]string{"deepseek", "opencode"})},
 		"one named, alone": {WithProviders([]string{"deepseek"})},
+		// Model rules (muster #401): the exact-model allowlist, and a deny glob.
+		"exact models": {WithProviders([]string{"deepseek", "opencode/paid-x"})},
+		"deny glob":    {WithProviders([]string{"deepseek", "opencode", "!opencode/*-free"})},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFakeServer(t)
@@ -71,8 +74,10 @@ func TestModels_ListIsExactlyWhatACreateAccepts(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			// One create reads the catalog and fills the list.
-			if _, err := createWithModel(t, d, ""); err != nil {
+			// One create reads the catalog and fills the list. It pins a model every
+			// policy above allows, so it does not depend on how a create that pins
+			// none is judged.
+			if _, err := createWithModel(t, d, "deepseek/deepseek-flash"); err != nil {
 				t.Fatalf("the filling create: %v", err)
 			}
 			got := d.Models()

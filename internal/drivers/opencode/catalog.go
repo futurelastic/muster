@@ -267,14 +267,15 @@ func (a catalogAnswer) soleDefault(usable modelCatalog) string {
 	return ""
 }
 
-// within returns the entries whose provider the policy permits. It is the one
-// place "is this id usable on this machine" is decided: checkProviders and
-// settleModel use it to accept a create, and Models uses it to list what a
+// within returns the entries the policy permits: those whose provider it allows
+// and, where it names models, whose model it allows and no deny matches. It is
+// the one place "is this id usable on this machine" is decided: checkProviders
+// and settleModel use it to accept a create, and Models uses it to list what a
 // create would accept (muster #400), so the two cannot drift.
 func (c modelCatalog) within(p providerPolicy) modelCatalog {
 	var out modelCatalog
 	for _, id := range c {
-		if p.permits(providerOfModel(id)) {
+		if p.permitsModel(id) {
 			out = append(out, id)
 		}
 	}
@@ -380,15 +381,31 @@ func (d *Driver) noUsableProvider(listed modelCatalog) error {
 	msg := "create: no model provider is usable: the runtime lists none that this machine allows (allowed: " +
 		d.providers.describe() + ")"
 	if len(listed) > 0 {
+		usable := map[string]bool{}
+		for _, id := range listed.within(d.providers) {
+			usable[providerOfModel(id)] = true
+		}
 		seen := map[string]bool{}
-		var skipped []string
+		var skipped, narrowed []string
 		for _, id := range listed {
-			if p := providerOfModel(id); !seen[p] {
-				seen[p] = true
-				skipped = append(skipped, p)
+			p := providerOfModel(id)
+			if seen[p] {
+				continue
+			}
+			seen[p] = true
+			skipped = append(skipped, p)
+			// A provider the policy allows, whose listed models the policy's model
+			// rules all leave out: not skipped for its provider, and the reason
+			// reads differently.
+			if d.providers.permits(p) && !usable[p] {
+				narrowed = append(narrowed, p)
 			}
 		}
 		msg += "; it lists only " + strings.Join(quoteAll(skipped), ", ")
+		if len(narrowed) > 0 {
+			msg += `; every model it lists on ` + strings.Join(quoteAll(narrowed), ", ") +
+				` is outside the models this machine allows`
+		}
 	} else {
 		msg += "; it lists no provider at all, so the session has no credential for any"
 	}
@@ -397,18 +414,27 @@ func (d *Driver) noUsableProvider(listed modelCatalog) error {
 	return &fleet.Error{Kind: fleet.ErrorUnsupported, Message: msg, Machine: d.machine}
 }
 
-// checkModelProvider refuses, before anything is started, a model whose
-// provider the policy does not allow.
+// checkModelProvider refuses, before anything is started, a model the policy
+// does not allow: one on a provider it does not allow, one a deny matches, or
+// one on a provider it allows only for other models.
 func (d *Driver) checkModelProvider(model string) error {
-	if p := providerOfModel(model); !d.providers.permits(p) {
-		return &fleet.Error{
-			Kind: fleet.ErrorUnsupported,
-			Message: fmt.Sprintf("create: model %q is on provider %q, which this machine does not allow (allowed: %s)",
-				model, p, d.providers.describe()),
-			Machine: d.machine,
-		}
+	provider, id, _ := strings.Cut(model, "/")
+	v, rule := d.providers.judge(provider, id)
+	var msg string
+	switch v {
+	case permitted:
+		return nil
+	case modelDenied:
+		msg = fmt.Sprintf("create: model %q is denied by %s on this machine (allowed: %s)",
+			model, rule, d.providers.describe())
+	case modelNotAllowed:
+		msg = fmt.Sprintf("create: model %q is on provider %q, where this machine allows only some models and none matches it (allowed: %s)",
+			model, provider, d.providers.describe())
+	default:
+		msg = fmt.Sprintf("create: model %q is on provider %q, which this machine does not allow (allowed: %s)",
+			model, provider, d.providers.describe())
 	}
-	return nil
+	return &fleet.Error{Kind: fleet.ErrorUnsupported, Message: msg, Machine: d.machine}
 }
 
 func quoteAll(in []string) []string {
