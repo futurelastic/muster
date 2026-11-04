@@ -178,13 +178,18 @@ GET /v1/runtimes
                                        "observedAt": "..." },
                      "posture": { "unattended": true, "files": true,   ← what `posture` can ask of it (#344);
                                   "network": ["open", "closed"],        absent on a peer not yet reached
-                                  "isolatedEnvironment": true } },
+                                  "isolatedEnvironment": true },
+                     "models": { "source": "runtime",           ← "runtime" | "declared" | "none" (#400)
+                                 "readAt": "...",                ← only when "runtime"
+                                 "ids": ["deepseek/deepseek-flash"],
+                                 "default": null } },
                    { "machine": "...", "runtime": "...",         ← enabled, no working driver
                      "status": "unavailable",
                      "cause": "probe-timeout",
                      "reason": "the ... runtime is enabled, but its version check did not answer in time; retrying in the background (attempt 3 failed)",
                      "capabilities": { "deadlineMs": 30000,
-                                       "source": "assumed" } } ],
+                                       "source": "assumed" },
+                     "models": { "source": "none", "ids": [], "default": null } } ],
         "sources": [...], "complete": true }
 
 POST /v1/posture/dry-run                                        ← needs only `read` (#344)
@@ -232,6 +237,40 @@ acceptable because the answer is a report and grants nothing.
 
 Clients **must** consult `/v1/runtimes` before relying on a capability, and
 degrade rather than assume. A driver never emulates (§5.6).
+
+**`models` is which models a create on that runtime may name** (muster #400), so a
+client can offer a picker instead of a free-text box.
+
+```
+RuntimeModels {
+  source   : "runtime" | "declared" | "none"
+  readAt?  : Timestamp           // only for "runtime": when the runtime last answered with this list
+  ids      : string[]            // the runtime's own spelling; [] (never null) when source is "none"
+  default  : string | null       // what the runtime uses when a create names no model, if known
+}
+```
+
+- `runtime` — the runtime itself listed these when it was last asked. The ids are
+  exactly the ones a create on this machine would accept at the time of that
+  read, so a client may offer them as the choices. The create stays the
+  authority: the list can lag a change of credentials or of the runtime's own
+  catalogue, and it is empty of any model the machine's operator does not
+  permit.
+- `declared` — the runtime has no catalogue to ask, so the operator's
+  configuration, or the aliases the runtime documents, name these. A value
+  outside the list may still work, and **a client must still accept one**.
+- `none` — this runtime cannot say, or has not yet (nothing has been read since
+  the service started). `ids` is `[]`. A client keeps free text.
+- **The set of `source` values is open on read:** a client must treat one it
+  does not know as `none`. A row from a build that predates the field has no
+  `models` at all, and that reads as `none`, never as "no model works".
+- No request is made to build the list: it is answered from what the service
+  already holds, as the rest of the row is. For a peer it comes from the same
+  cached row as its `capabilities`, so it is `none` while that cache is unreached
+  or stale. A peer's `readAt` is on **that peer's** clock and is passed through
+  unchanged.
+- `readAt` is omitted, not null, where nothing was read. `default` is always
+  present and is null when it is not known with certainty.
 
 **A runtime the operator enabled is listed even when it has no working
 driver** (muster #297). It used to be omitted — a runtime whose version check

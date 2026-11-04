@@ -162,6 +162,67 @@ type RuntimeInfo struct {
 	// runtime and on a peer whose capabilities have not been obtained: nobody
 	// has said, which is "unknown", never "nothing enforceable".
 	Posture *PostureSupport `json:"posture,omitempty"`
+	// Models is which models a create on this runtime may name (muster #400).
+	// This build sets it on every row it emits; a row from a build that predates
+	// it, or from a peer that does, has none, and the service reads that as
+	// NoModels() — "nobody said", never "no model works".
+	Models *RuntimeModels `json:"models,omitempty"`
+}
+
+// ModelsSource says where a RuntimeModels list came from, and so how far a
+// client may trust it (api-http.md §3.1, muster #400).
+//
+// The set is open on read: a client must treat a source it does not know as
+// ModelsNone, because a later build may name one this build never heard of.
+type ModelsSource string
+
+const (
+	// ModelsFromRuntime: the runtime itself listed these, the last time it was
+	// asked. A client may offer them as the choices; the create stays the
+	// authority.
+	ModelsFromRuntime ModelsSource = "runtime"
+	// ModelsDeclared: the operator's configuration, or the aliases the runtime
+	// documents, named these. The runtime has no list to ask, so a value outside
+	// them may still work and a client must keep accepting one.
+	ModelsDeclared ModelsSource = "declared"
+	// ModelsNone: this runtime cannot say, or has not yet. A client keeps free
+	// text.
+	ModelsNone ModelsSource = "none"
+)
+
+// RuntimeModels is the models block of a RuntimeInfo row (muster #400).
+type RuntimeModels struct {
+	Source ModelsSource `json:"source"`
+	// ReadAt is when the runtime last answered with this list, on the clock of
+	// the machine that read it — a peer's value is passed through, not
+	// re-stamped. Present only for ModelsFromRuntime: a declared or empty list
+	// was not read from anything.
+	ReadAt *Timestamp `json:"readAt,omitempty"`
+	// IDs are the model ids a create may name, in the runtime's own spelling.
+	// Never null; empty when Source is ModelsNone.
+	IDs []string `json:"ids"`
+	// Default is the id the runtime uses when a create names none, when this
+	// machine can say so with certainty; null otherwise.
+	Default *string `json:"default"`
+}
+
+// NoModels is the answer for a runtime that cannot say which models it takes.
+func NoModels() RuntimeModels {
+	return RuntimeModels{Source: ModelsNone, IDs: []string{}}
+}
+
+// Normalized fixes the two ways a value can be loosely formed: ids that are nil
+// become the empty list (the wire never carries null there), and a missing or
+// "none" source drops everything else, because a list with no stated origin is
+// not one a client may offer.
+func (m RuntimeModels) Normalized() RuntimeModels {
+	if m.Source == "" || m.Source == ModelsNone {
+		return NoModels()
+	}
+	if m.IDs == nil {
+		m.IDs = []string{}
+	}
+	return m
 }
 
 // Available reports whether the row describes a runtime with a working

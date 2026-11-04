@@ -245,6 +245,7 @@ func (s *Service) unavailableRowsLocked() []fleet.RuntimeInfo {
 			Status:       fleet.RuntimeUnavailable,
 			Cause:        u.cause,
 			Reason:       u.reason,
+			Models:       noModels(),
 		})
 	}
 	return out
@@ -376,6 +377,7 @@ func (s *Service) localRuntimeRows(ctx context.Context) []fleet.RuntimeInfo {
 			down = append(down, fleet.RuntimeInfo{
 				Machine: s.self, Runtime: rt, Capabilities: u.caps,
 				Status: fleet.RuntimeUnavailable, Cause: u.cause, Reason: u.reason,
+				Models: noModels(),
 			})
 			continue
 		}
@@ -383,7 +385,27 @@ func (s *Service) localRuntimeRows(ctx context.Context) []fleet.RuntimeInfo {
 		// of a posture; a row that is unavailable or has no driver carries none.
 		caps := d.Capabilities()
 		ps := fleet.PostureSupportFrom(caps)
-		up = append(up, fleet.RuntimeInfo{Machine: s.self, Runtime: rt, Capabilities: caps, Status: fleet.RuntimeAvailable, Posture: &ps})
+		up = append(up, fleet.RuntimeInfo{Machine: s.self, Runtime: rt, Capabilities: caps, Status: fleet.RuntimeAvailable, Posture: &ps,
+			Models: modelsOf(d)})
 	}
 	return append(append(up, down...), noDriver...)
+}
+
+// noModels is a pointer to the empty answer, for the row of a runtime that
+// cannot say which models it takes (muster #400).
+func noModels() *fleet.RuntimeModels {
+	m := fleet.NoModels()
+	return &m
+}
+
+// modelsOf is a driver's own account of the models a create may name, or
+// "none" when it has no way to say. It makes no network call: the optional
+// interface is answered from what the driver already holds.
+func modelsOf(d driver.Driver) *fleet.RuntimeModels {
+	r, ok := d.(driver.ModelsReporter)
+	if !ok {
+		return noModels()
+	}
+	m := r.Models().Normalized()
+	return &m
 }

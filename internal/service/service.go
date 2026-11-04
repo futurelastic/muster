@@ -985,7 +985,9 @@ func (s *Service) listRuntimes(ctx context.Context, withPeers bool) (fleet.Colle
 		// happens to report an empty runtime id is a different, genuine
 		// case this endpoint has no basis to hide.
 		if rt != "" || st == fleet.SourceOK {
-			row := fleet.RuntimeInfo{Machine: m, Runtime: rt, Capabilities: caps, Status: fleet.RuntimeAvailable}
+			// muster #400: a peer's list comes from the cache its capabilities
+			// came from, so no network call is made here either.
+			row := fleet.RuntimeInfo{Machine: m, Runtime: rt, Capabilities: caps, Status: fleet.RuntimeAvailable, Models: modelsOf(d)}
 			if caps.Source != fleet.CapabilitiesAssumed {
 				ps := fleet.PostureSupportFrom(caps)
 				row.Posture = &ps
