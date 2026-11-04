@@ -849,3 +849,70 @@ func TestIntegration_AnUnpinnedCreateIsJudgedAgainstTheRuntimesDefault(t *testin
 	}
 	_, _ = exact.Close(ctx, req, sess.SessionRef)
 }
+
+// muster #402, against the real runtime and with no turn: the listing carries an
+// agent's own model in the shape checkAgent decodes, a create naming an agent
+// whose model the policy does not allow is refused before a session exists, and
+// the session's configuration names the helper model the runtime then reads back
+// as its own `small_model`. It does not run a turn, so what it cannot show is the
+// helper call itself landing on that model; that was measured once, by hand, with
+// the runtime's own log (the issue records it).
+func TestIntegration_AnAgentsPinnedModelIsJudgedAndTheHelperModelIsPinned(t *testing.T) {
+	requireOpencodeIntegration(t)
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("no git on PATH: the runtime reads a project's agents from a git worktree")
+	}
+
+	cwd := t.TempDir()
+	if out, err := exec.Command("git", "-C", cwd, "init", "-q", ".").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	agentsDir := filepath.Join(cwd, ".opencode", "agents")
+	if err := os.MkdirAll(agentsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, model := range map[string]string{"allowed": "opencode/big-pickle", "refused": "opencode/some-other-model"} {
+		body := "---\ndescription: pins " + model + "\nmode: primary\nmodel: " + model + "\n---\nprompt\n"
+		if err := os.WriteFile(filepath.Join(agentsDir, name+".md"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	// The runtime's own default model is the one allowed model, so the unpinned
+	// check (muster #401) passes and the agent's model is what is left to judge.
+	d, err := New(ctx, "test-machine", WithSessionRoot(t.TempDir()), WithProviders([]string{"opencode/big-pickle"}))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer d.Shutdown()
+	req := fleet.RequestFrom(fleet.Caller{Principal: "integration-test"})
+
+	_, err = d.Create(ctx, req, "k-refused", fleet.SessionSpec{Cwd: fleet.AbsolutePath(cwd), Agent: "refused"})
+	var fe *fleet.Error
+	if !errors.As(err, &fe) || fe.Kind != fleet.ErrorUnsupported ||
+		!strings.Contains(fe.Message, `agent "refused" pins model "opencode/some-other-model"`) {
+		t.Fatalf("a create naming an agent whose model is outside the allowlist = %v, want the unsupported refusal naming the agent and the model", err)
+	}
+	t.Logf("refused as expected: %s", fe.Message)
+
+	sess, err := d.Create(ctx, req, "k-allowed", fleet.SessionSpec{Cwd: fleet.AbsolutePath(cwd), Agent: "allowed"})
+	if err != nil {
+		t.Fatalf("a create naming an agent whose model is allowed: %v", err)
+	}
+	known, ok := d.wasSeen(sess.ID)
+	if !ok || known.srv == nil {
+		t.Fatal("the session is not running")
+	}
+	var merged struct {
+		SmallModel string `json:"small_model"`
+	}
+	if err := d.do(ctx, known.srv, "GET", "/config?directory="+url.QueryEscape(cwd), nil, &merged); err != nil {
+		t.Fatalf("GET /config: %v", err)
+	}
+	if merged.SmallModel != "opencode/big-pickle" {
+		t.Errorf("the runtime's merged configuration names small_model %q, want the helper model the policy chose, opencode/big-pickle", merged.SmallModel)
+	}
+	_, _ = d.Close(ctx, req, sess.SessionRef)
+}

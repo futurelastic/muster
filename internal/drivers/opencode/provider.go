@@ -40,12 +40,33 @@ import (
 // without it. A deny glob is for the models an operator knows by a stable name,
 // never a stand-in for a pricing or data-retention filter.
 //
-// Model rules never reach the session's opencode.json. The file can only enable
-// whole providers, and a glob could only be expanded against a catalog that is
-// read from the very server the file configures. They are enforced where this
-// driver can act on them: when a create pins a model, when a create pins none
-// and the runtime's default must be learned (catalog.go), and on the turn's own
-// record (state.go). The provider-level file stays the outer wall.
+// A model is also chosen in two places a create does not name (muster #402),
+// and both are judged where this driver can see them:
+//
+//   - An AGENT may pin a model of its own. The runtime lists it with the agent,
+//     and checkAgent (agents.go) judges it at create, before a session exists.
+//   - The runtime makes HELPER calls of its own — measured against the real
+//     runtime: a session's first message makes a separate call, as the hidden
+//     `title` agent, on a small model the runtime picks from the session's
+//     provider (a different model from the session's own, with no configuration
+//     naming it), and the `summary` agent is the same kind of call. Nothing in
+//     the session's record names it, so no check afterwards can see it. It can
+//     be pinned: `small_model` in the session's configuration is the one key the
+//     helper agents read (an `agent.<name>.model` entry for each is the other
+//     way, and was measured to give the same result). So a policy that judges
+//     single models names an allowed helper model there, from the policy alone
+//     (helperModel) — the file is written before any catalog can be read.
+//     A name the runtime does not list is not an error to it: it falls back to
+//     the session's own model, which the turn-time check judges, so the pin
+//     fails toward a model that is already judged, never toward an unjudged one.
+//
+// Model rules never reach the session's opencode.json (the helper model above is
+// a name, not a rule). The file can only enable whole providers, and a glob could
+// only be expanded against a catalog that is read from the very server the file
+// configures. They are enforced where this driver can act on them: when a create
+// pins a model, when a create pins none and the runtime's default must be learned
+// (catalog.go), when a create names an agent that pins one (agents.go), and on
+// the turn's own record (state.go). The provider-level file stays the outer wall.
 
 // builtinProvider is the id of the hosted provider opencode ships with.
 const builtinProvider = "opencode"
@@ -292,16 +313,51 @@ func (p providerPolicy) permitsModel(id string) bool {
 	return v == permitted
 }
 
+// helperModel is the model the runtime's helper calls are pinned to under a
+// policy that judges single models (muster #402): the first model the operator
+// named exactly — a provider/<model> entry with no wildcard — that no deny
+// matches, so it is allowed by the operator's own words and needs no catalog to
+// be known. The order of the entries is therefore the operator's choice of
+// helper model, and the first one should be the cheaper of the models named.
+//
+// It is "" when there is none to name, and then nothing is written and the
+// runtime picks as it always did: a policy of providers alone (every model on an
+// allowed provider is allowed, whichever the runtime picks), or one whose allowed
+// models are all globs or whole providers, which cannot name one model without a
+// catalog. That last case is a gap this driver cannot close from the file; an
+// operator who wants the helper call judged writes one exact entry.
+func (p providerPolicy) helperModel() string {
+	if !p.narrowsModels() {
+		return ""
+	}
+	for _, r := range p.models {
+		if strings.Contains(r.pattern, "*") {
+			continue
+		}
+		if v, _ := p.judge(r.provider, r.pattern); v == permitted {
+			return r.provider + "/" + r.pattern
+		}
+	}
+	return ""
+}
+
 // configKeys are the opencode.json entries that express the policy.
 // enabled_providers is a whitelist and wins over disabled_providers in the
 // runtime, so only one of the two is ever written. A provider allowed for some
 // models only is enabled like any other: the runtime cannot serve one model of
-// a provider that is off. Model rules themselves are not in the file.
+// a provider that is off. Model rules themselves are not in the file; the one
+// model entry is the helper model (helperModel), a name and not a rule.
 func (p providerPolicy) configKeys() map[string]any {
+	keys := map[string]any{}
 	if !p.open() {
-		return map[string]any{"enabled_providers": p.enabled}
+		keys["enabled_providers"] = p.enabled
+	} else {
+		keys["disabled_providers"] = []string{builtinProvider}
 	}
-	return map[string]any{"disabled_providers": []string{builtinProvider}}
+	if m := p.helperModel(); m != "" {
+		keys["small_model"] = m
+	}
+	return keys
 }
 
 // describe is the policy in words a refusal can quote.

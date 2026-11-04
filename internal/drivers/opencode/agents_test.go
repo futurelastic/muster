@@ -278,3 +278,130 @@ func TestAgent_ARelaunchedSessionStillNamesItsAgent(t *testing.T) {
 		}
 	}
 }
+
+// An agent that pins a model of its own (muster #402) is judged against the
+// provider policy at create, before any session exists. The runtime lists the
+// model with the agent; a turn run as that agent uses it, whatever the create-time
+// checks read as the runtime's default, and only the turn-time check saw it.
+func TestAgent_ItsPinnedModelIsJudgedAgainstThePolicyAtCreate(t *testing.T) {
+	exact := []string{"opencode/deepseek-v4-pro"}
+	denyGlob := []string{"opencode", "!opencode/*-free"}
+	cases := []struct {
+		name       string
+		policy     []string
+		agentModel string // what the runtime lists the agent as pinning; "" lists none
+		createPin  string // the model the create itself pins; "" pins none
+		// wantErr is a phrase the refusal must carry; "" means the create succeeds.
+		wantErr string
+	}{
+		{
+			name:       "a deny glob matches the agent's model",
+			policy:     denyGlob,
+			agentModel: "opencode/big-free",
+			createPin:  "opencode/paid-x",
+			wantErr:    `agent "coder" pins model "opencode/big-free", which is denied by !opencode/*-free on this machine`,
+		},
+		{
+			name:       "the agent's model is not on the exact allowlist",
+			policy:     exact,
+			agentModel: "opencode/big-pickle",
+			createPin:  "opencode/deepseek-v4-pro",
+			wantErr:    `agent "coder" pins model "opencode/big-pickle", which is on provider "opencode", where this machine allows only some models and none matches it`,
+		},
+		{
+			name:       "the agent's model is on a provider the policy does not allow",
+			policy:     []string{"anthropic"},
+			agentModel: "openai/gpt-x",
+			createPin:  "anthropic/sonnet",
+			wantErr:    `agent "coder" pins model "openai/gpt-x", which is on provider "openai", which this machine does not allow`,
+		},
+		{
+			name:       "the agent's model is the built-in provider's under the default policy",
+			policy:     nil,
+			agentModel: "opencode/big-pickle",
+			createPin:  "deepseek/flash",
+			wantErr:    `agent "coder" pins model "opencode/big-pickle", which is on provider "opencode", which this machine does not allow`,
+		},
+		{
+			// The case the issue names: no model on the create, so the unpinned-default
+			// check judges only the runtime's default, an allowed one.
+			name: "the create pins no model and the runtime's default is allowed, the agent's is not",
+			// Every provider the fake lists has an allowed default, so the unpinned-default
+			// check (muster #401) passes and the agent's own model is what is left to judge.
+			policy:     []string{"opencode", "anthropic", "deepseek", "!opencode/*-free"},
+			agentModel: "opencode/big-free",
+			wantErr:    `agent "coder" pins model "opencode/big-free", which is denied by !opencode/*-free on this machine`,
+		},
+		{
+			name:       "the agent's model is allowed",
+			policy:     exact,
+			agentModel: "opencode/deepseek-v4-pro",
+			createPin:  "opencode/deepseek-v4-pro",
+		},
+		{
+			name:      "the agent pins no model: nothing to judge",
+			policy:    denyGlob,
+			createPin: "opencode/paid-x",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeServer(t)
+			f.agents = []string{"build", "coder"}
+			if tc.agentModel != "" {
+				f.agentModels = map[string]string{"coder": tc.agentModel}
+			}
+			f.catalog = map[string][]string{
+				"opencode":  {"paid-x", "big-free", "big-pickle", "deepseek-v4-pro"},
+				"anthropic": {"sonnet"},
+				"deepseek":  {"flash"},
+			}
+			f.catalogDefaults = map[string]string{"opencode": "paid-x", "anthropic": "sonnet", "deepseek": "flash"}
+			f.config = map[string]any{}
+			d, err := newDriverWithOptions(t, f, WithProviders(tc.policy))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = d.Create(context.Background(), testReq, "k", fleet.SessionSpec{
+				Cwd: "/work/x", Agent: "coder", Model: tc.createPin, Prompt: "go",
+			})
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Create: %v, want it allowed", err)
+				}
+				return
+			}
+			msg := refusalOf(t, err)
+			for _, want := range []string{"create: ", tc.wantErr, "(allowed: "} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("refusal %q does not say %q", msg, want)
+				}
+			}
+			requireNothingStarted(t, f)
+			if got := f.promptsSnapshot(); len(got) != 0 {
+				t.Errorf("prompts = %+v, want none: the refusal comes before any message", got)
+			}
+		})
+	}
+}
+
+// One half of a model alone is not a model: an entry that names a provider and no
+// model id (or the reverse) is an agent that pins nothing this driver can judge,
+// and it must not read as a refusal on the half it does name.
+func TestAgent_AHalfNamedModelIsNotJudged(t *testing.T) {
+	f := newFakeServer(t)
+	f.agentsBody = `[{"name":"coder","model":{"providerID":"opencode"}},{"name":"other","model":{"modelID":"big-free"}}]`
+	f.catalog = map[string][]string{"opencode": {"paid-x"}}
+	f.catalogDefaults = map[string]string{"opencode": "paid-x"}
+	f.config = map[string]any{}
+	d, err := newDriverWithOptions(t, f, WithProviders([]string{"anthropic", "!opencode/*"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, agent := range []string{"coder", "other"} {
+		got := d.checkAgent(context.Background(), d.shared, "/work/x", agent)
+		if got != nil {
+			t.Errorf("checkAgent(%q) = %v, want nil: a half-named model is nothing to judge", agent, got)
+		}
+	}
+}
