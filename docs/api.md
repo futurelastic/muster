@@ -298,9 +298,41 @@ absent key means an older build, never "not listed".
 
 ### `GET /v1/runtimes`
 
-`{items: [{machine, runtime, status, capabilities}], sources, complete}`. Consult
+`{items: [{machine, runtime, status, capabilities, models}], sources, complete}`. Consult
 this before relying on a capability — a driver that cannot do something says so
 here rather than failing at the call.
+
+**`models` lists the models a create on that runtime may name** (#400), so a
+form can offer a picker instead of a free-text box. Every row has one:
+
+```json
+"models": { "source": "runtime", "readAt": "2026-11-04T09:00:00Z",
+            "ids": ["deepseek/deepseek-flash", "deepseek/deepseek-v4-pro"],
+            "default": null }
+```
+
+- `source: "runtime"` — the runtime itself listed these when it was last asked.
+  This is what the opencode runtime reports, and `ids` is exactly what a create
+  on that machine would accept: the same read, and the same filter by the
+  operator's provider policy, as the check a create runs — so it leaves out a
+  model the machine does not permit even when the runtime offers it. The list is
+  filled by the catalogue reads creates make, so a machine reports
+  `source: "none"` until its first create, and the list can lag a change of
+  credentials until the next one. `readAt` says how old it is. It is a hint for
+  a picker: **the create is the authority**.
+- `source: "declared"` — the runtime has no catalogue to ask, so the operator's
+  configuration (`models` in the config file, keyed by runtime id), or the
+  aliases the runtime documents (`opus`, `sonnet`, `haiku` for Claude Code), name
+  these. A value outside the list may still work. **A client must still accept a
+  value outside the list whenever `source` is not `runtime`.**
+- `source: "none"` — the runtime cannot say, or has not yet. `ids` is `[]`; keep
+  free text. The set of sources is open: treat one you do not know as `none`.
+- `default` is the model the runtime uses when a create names none, when that is
+  known with certainty (one provider, and the runtime named its default); `null`
+  otherwise.
+- A peer's row carries the list the peer reported when its capabilities were last
+  read, with the peer's own `readAt`. It is `none` while those are unreached or
+  stale, and for a peer on an older build. No request is made to build any of it.
 
 A runtime the operator enabled is listed **even when it has no working driver**
 (#297). Its row has `status: "unavailable"`, a `cause` (`not-installed`,
@@ -820,12 +852,38 @@ the first three keep working for one release and are **deprecated** in its favou
 `isolateConfiguration` is the spelling a relay forwards.
 `unattended` needs `send` as well as `create`; the rest needs only `create`.
 
-**Providers an opencode session may use** (#293) are the operator's decision, not a field:
-`FLEET_OPENCODE_PROVIDERS` (comma-separated provider ids) is the whole allowed set, and when it
-is unset the runtime's built-in hosted provider is off — with no credential configured it is
-what would otherwise answer, silently. A create with no allowed provider usable on the runtime,
-or a `model` on a provider outside the set, is `unsupported` with the reason; a turn that still
-ran on one reads `state.lastTurn.outcome: "failed"` naming it.
+**Providers, and models, an opencode session may use** (#293, #401) are the operator's decision,
+not a field: `FLEET_OPENCODE_PROVIDERS` (comma-separated entries) is the whole allowed set, and
+when it is unset the runtime's built-in hosted provider is off — with no credential configured
+it is what would otherwise answer, silently. An entry is a provider id (every model on it), or
+`provider/<model>` (only that model). To use one paid model on a provider that also serves
+models whose terms you do not accept, **name the models you want, exactly**:
+
+```
+FLEET_OPENCODE_PROVIDERS=deepseek,opencode/deepseek-v4.1-flash,opencode/deepseek-v4-pro
+```
+
+This allows every `deepseek` model and exactly two on `opencode`; every other `opencode` model
+is refused. `provider/<glob>` (`*` is the only wildcard) allows the matching models, and
+`!provider/<glob>` denies them whatever else allows them — a deny beats any allow. **A name
+pattern is not a free-tier or data-retention filter:** the built-in provider's zero-cost models
+do not share a suffix (`big-pickle` and `grok-code` carry no `-free`), so `!opencode/*-free`
+lets them through. Use a deny for models you know by a stable name, and an exact allowlist to
+decide what may be used.
+
+A malformed entry stops the service from starting, naming it, and `muster doctor` shows the
+effective policy in the `runtime.opencode.providers` row. The same policy answers at three
+points: a create that pins a `model` outside it is `unsupported`, naming the rule that refused
+(`denied by !opencode/*-free`, or that the provider is allowed for other models only); a create
+that pins **no** model is refused when the model the runtime would pick — the one its
+configuration names, else its default for each provider it lists — is outside the policy, or
+cannot be learned, and says to pin a model (a policy of providers alone never asks); and a
+turn that still ran on a model outside it reads `state.lastTurn.outcome: "failed"` naming the
+provider, the model and the rule. A create with no allowed provider usable on the runtime is
+`unsupported` with the reason. Model rules are not written into a session's own
+configuration, which can enable whole providers only: they are enforced by these three checks,
+and a session relaunched after a stricter rule is caught by the third. `GET /v1/runtimes`
+lists only the ids this policy permits.
 
 **Which runtime a machine-declared variable reaches** (#294) is the operator's decision, in the
 configuration file's `sessionEnv`, not a field of the create. An entry's `appliesTo.runtimes` lists

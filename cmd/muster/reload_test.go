@@ -424,6 +424,29 @@ func TestReload_AChangeOfTheOpencodeAgentsFileIsRestartOnly(t *testing.T) {
 	}
 }
 
+// muster #400: the declared model lists are read at start, so a reload that
+// changes them is refused whole, like every other restart-only setting.
+func TestReload_AChangeOfTheDeclaredModelsIsRestartOnly(t *testing.T) {
+	r := newReloadRig(t, rlDoc(rlPrincipal("old", "tok-old", "read")))
+	doc := rlDoc(rlPrincipal("old", "tok-old", "read"), rlPrincipal("new", "tok-new", "read"))
+	doc["models"] = map[string]any{"claude-code-tmux": []string{"opus"}}
+	putCfg(t, r.path, doc)
+	r.rl.check("test")
+
+	row := checkReloadStatus(r.dir, r.path)
+	if row.Status != statusWarn {
+		t.Fatalf("doctor row = %+v, want a warn naming the refusal", row)
+	}
+	for _, want := range []string{"models", "only a restart applies"} {
+		if !strings.Contains(row.Detail, want) {
+			t.Errorf("the refusal %q does not say %q", row.Detail, want)
+		}
+	}
+	if code, _ := r.get("/v1/health", "tok-new"); code != 401 {
+		t.Errorf("a principal from the refused file = %d, want 401: nothing from the edit applies", code)
+	}
+}
+
 // #366: the same refusal for a restart-only change that WOULD start says so, so
 // the operator can restart knowing the file is the one the service will accept.
 func TestReload_RestartOnlyRefusalSaysTheFilePassesStartup(t *testing.T) {

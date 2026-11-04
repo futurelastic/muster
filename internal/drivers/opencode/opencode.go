@@ -220,6 +220,13 @@ type Driver struct {
 	catalogSettle time.Duration
 	catalogPoll   time.Duration
 
+	// lastCatalog is the latest usable answer a catalog read produced, kept so
+	// GET /v1/runtimes can list models without a request of its own (muster
+	// #400). Nil until the first create has read one. catMu guards it: creates
+	// run concurrently.
+	catMu       sync.Mutex
+	lastCatalog *catalogSnapshot
+
 	// sessionEnv is this machine's declared identity for its sessions (#94);
 	// sessionRoot is where session-scoped directories are made (the OS temp
 	// directory by default); runtimePath is the operator's extra PATH
@@ -384,16 +391,24 @@ func (d *Driver) sandboxUnavailable() string {
 // its own but can never widen the allow-lists the profile is built on.
 func WithSandboxReadPaths(dirs []string) Option { return func(d *Driver) { d.sandboxRead = dirs } }
 
-// WithProviders names the model providers a session may use, and no others
-// (muster #293). The list is written into each session's own configuration as
-// opencode's enabled_providers, a create whose model names another provider is
-// refused, and a create the runtime has no listed provider for is refused too.
+// WithProviders names the providers, and optionally single models, a session
+// may use, and no others (muster #293, #401). The providers are written into
+// each session's own configuration as opencode's enabled_providers, a create
+// whose model is outside the policy is refused, and a create the runtime has no
+// usable model for is refused too.
+//
+// An entry is a provider id (every model on it); provider/<model> or
+// provider/<glob> (only the matching models); or !provider/<glob>, a deny that
+// beats any allow. Prefer an allowlist of exact models to a deny pattern: a name
+// pattern such as a suffix is not a reliable mark of a model's terms. A malformed
+// entry makes New fail, naming it. Model rules are checked at create and on each
+// turn's record; they are not in the session's own configuration.
 //
 // Empty (the default) is not "anything goes": the runtime's built-in hosted
 // provider is disabled and every other provider the session has a credential
 // for is usable. Name that provider here (it is "opencode") to ask for it, on
-// purpose, for sessions that have no credential of their own. Each id is a
-// provider id as the runtime spells it, with no "/".
+// purpose, for sessions that have no credential of their own. Each provider id
+// is as the runtime spells it.
 func WithProviders(ids []string) Option { return func(d *Driver) { d.providerIDs = ids } }
 
 // WithOperatorAgents names a JSON file of opencode agents every isolated

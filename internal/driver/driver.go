@@ -862,6 +862,15 @@ type AddressReporter interface {
 	Address() (addr string, ok bool)
 }
 
+// ModelsReporter is another OPTIONAL capability, same shape: a driver that can
+// say which models a create may name, from what it already holds and without a
+// network call (muster #400). GET /v1/runtimes calls it for every row, so an
+// implementation must be as cheap as Capabilities(). A driver without it reads
+// as fleet.NoModels().
+type ModelsReporter interface {
+	Models() fleet.RuntimeModels
+}
+
 // CapabilityRefresher is a driver that can re-probe its peer on demand —
 // what GET /v1/machines?verify=1 asks for, instead of the cached cycle.
 type CapabilityRefresher interface {

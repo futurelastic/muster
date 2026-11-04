@@ -84,16 +84,25 @@
 //	                       service user's home and so is closed by default.
 //	                       Operator configuration only; a create cannot add to
 //	                       the allow-lists the profile is built on.
-//	FLEET_OPENCODE_PROVIDERS  comma-separated provider ids an opencode session
-//	                       may use, and no others (muster issue #293). Written
+//	FLEET_OPENCODE_PROVIDERS  comma-separated entries naming what an opencode
+//	                       session may use, and nothing else (muster issues
+//	                       #293, #401). An entry is a provider id (every model
+//	                       on it), provider/<model> (only that model),
+//	                       provider/<glob> ("*" is the only wildcard), or
+//	                       !provider/<glob>, a deny that beats any allow. Name
+//	                       exact models to allow, e.g.
+//	                       "deepseek,opencode/deepseek-v4-pro": a name pattern
+//	                       is not a free-tier filter. The providers are written
 //	                       into each session's own configuration as
-//	                       enabled_providers; a create naming a model on another
-//	                       provider, or one the runtime has no allowed provider
-//	                       for, is refused, and a turn that still ran on one is
-//	                       reported as failed. Unset is NOT "anything goes": the
-//	                       runtime's built-in hosted provider ("opencode") is
-//	                       disabled, because with no credential configured it is
-//	                       the one that would otherwise answer, silently. List
+//	                       enabled_providers; the model rules are checked at
+//	                       create (a pinned model, and for a create that pins
+//	                       none, the model the runtime would pick) and on each
+//	                       turn's record, where a model outside them is reported
+//	                       as failed. A malformed entry stops the start, naming
+//	                       it. Unset is NOT "anything goes": the runtime's
+//	                       built-in hosted provider ("opencode") is disabled,
+//	                       because with no credential configured it is the one
+//	                       that would otherwise answer, silently. List
 //	                       "opencode" here to allow it on purpose.
 //	FLEET_PEERS            comma-separated name=url list, e.g.
 //	                       "other=https://other.example:PORT". Peers are
@@ -681,6 +690,11 @@ func main() {
 		if len(deliveryModules.Enabled) > 0 {
 			deliveryModules.Config.Logf = log.Printf
 			opts = append(opts, tmux.WithDeliveryModules(deliveryModules.Config))
+		}
+		// muster #400: the models a client may offer for a create here. Empty
+		// keeps the CLI's documented aliases.
+		if ids := cfgFile.declaredModels(tmux.DefaultRuntime); len(ids) > 0 {
+			opts = append(opts, tmux.WithModels(ids))
 		}
 		d := tmux.New(self, opts...)
 		// #180: this machine's own sessionEnv may not name a variable the

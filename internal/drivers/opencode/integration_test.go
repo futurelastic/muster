@@ -753,3 +753,99 @@ func TestIntegration_OperatorAgentsMeetAProjectAgentOfTheSameName(t *testing.T) 
 		t.Error("a definition with a mode the runtime rejects started a session")
 	}
 }
+
+// muster #401: an unpinned create under model rules is judged against the model
+// the runtime would pick, which this driver learns from two reads of the
+// session's own server: GET /config (the merged configuration's `model`) and the
+// `default` of GET /config/providers. This pins, against the real runtime and
+// with no provider credential, that both are served in the shape those reads
+// decode, and logs what they hold. It does NOT run a turn, so it cannot say that
+// a fresh unpinned session then runs on the model they name; that needs a
+// credential and is the one claim left to a person (the repo's Human verify row).
+func TestIntegration_TheRuntimeServesTheDefaultsAnUnpinnedCheckReads(t *testing.T) {
+	requireOpencodeIntegration(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	// An exact-model rule on the built-in provider: a policy that judges models.
+	d, err := New(ctx, "test-machine", WithSessionRoot(t.TempDir()), WithProviders([]string{"opencode/big-pickle"}))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer d.Shutdown()
+
+	cwd := fleet.AbsolutePath(t.TempDir())
+	srv, err := d.startSessionServer(ctx, fleet.SessionSpec{Cwd: cwd})
+	if err != nil {
+		t.Fatalf("starting a session's own server: %v", err)
+	}
+	defer d.discardServer(srv)
+
+	model, known, err := d.readConfiguredModel(ctx, srv, cwd)
+	if err != nil {
+		t.Fatalf("GET /config: %v", err)
+	}
+	if !known {
+		t.Fatal("GET /config was not served in a shape readConfiguredModel decodes: the unpinned check would refuse every create as unlearnable")
+	}
+	t.Logf("GET /config?directory=…: configured model = %q (empty means none configured)", model)
+
+	answer, read, err := d.readCatalog(ctx, srv)
+	if err != nil {
+		t.Fatalf("GET /config/providers: %v", err)
+	}
+	if read == catalogUnknown {
+		t.Fatal("GET /config/providers was not served in a shape readCatalog decodes")
+	}
+	t.Logf("GET /config/providers: %d models listed, defaults per provider = %v", len(answer.ids), answer.defaults)
+}
+
+// muster #401, end to end against the real runtime and with no turn: a create
+// that pins no model is judged against the model the runtime would pick. The
+// built-in provider's default is a zero-cost model WITHOUT a "-free" suffix, so
+// the exact-model allowlist is what keeps it out — and what lets it in when the
+// operator names it.
+func TestIntegration_AnUnpinnedCreateIsJudgedAgainstTheRuntimesDefault(t *testing.T) {
+	requireOpencodeIntegration(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	req := fleet.RequestFrom(fleet.Caller{Principal: "test"})
+
+	// The operator allows one other model on the built-in provider, not its default.
+	other, err := New(ctx, "test-machine", WithSessionRoot(t.TempDir()), WithProviders([]string{"opencode/some-other-model"}))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer other.Shutdown()
+	_, err = other.Create(ctx, req, "k-other", fleet.SessionSpec{Cwd: fleet.AbsolutePath(t.TempDir())})
+	var fe *fleet.Error
+	if !errors.As(err, &fe) || fe.Kind != fleet.ErrorUnsupported || !strings.Contains(fe.Message, "create: no model was pinned") {
+		t.Fatalf("an unpinned create whose default is outside the allowlist = %v, want the unsupported refusal naming that no model was pinned", err)
+	}
+	t.Logf("refused as expected: %s", fe.Message)
+
+	// A suffix deny does not catch it: the default has no "-free" in its name.
+	suffix, err := New(ctx, "test-machine", WithSessionRoot(t.TempDir()), WithProviders([]string{"opencode", "!opencode/*-free"}))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer suffix.Shutdown()
+	sess, err := suffix.Create(ctx, req, "k-suffix", fleet.SessionSpec{Cwd: fleet.AbsolutePath(t.TempDir())})
+	if err != nil {
+		t.Fatalf("a suffix deny refused a default that has no such suffix: %v (the premise of the exact-model allowlist changed; revisit the docs)", err)
+	}
+	_, _ = suffix.Close(ctx, req, sess.SessionRef)
+
+	// The operator names the default exactly.
+	exact, err := New(ctx, "test-machine", WithSessionRoot(t.TempDir()), WithProviders([]string{"opencode/big-pickle"}))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer exact.Shutdown()
+	sess, err = exact.Create(ctx, req, "k-exact", fleet.SessionSpec{Cwd: fleet.AbsolutePath(t.TempDir())})
+	if err != nil {
+		t.Fatalf("an unpinned create whose default is on the exact allowlist: %v", err)
+	}
+	_, _ = exact.Close(ctx, req, sess.SessionRef)
+}

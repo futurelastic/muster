@@ -111,6 +111,9 @@ var specFieldTypes = map[string]any{
 
 	// #391: a working session that has stopped drawing.
 	"Stall": Stall{},
+
+	// #400: the models block of a GET /v1/runtimes row.
+	"RuntimeModels": RuntimeModels{},
 }
 
 // specFieldExceptions records a Go field that a normative type block

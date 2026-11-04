@@ -1284,3 +1284,71 @@ func TestRefreshCapabilitiesWithOnlyAnUnavailableRowIsAnError(t *testing.T) {
 		t.Error("capabilities read as known after only an unavailable row")
 	}
 }
+
+// muster #400: a peer's model list rides on the row its capabilities came from,
+// and is read from the same cache.
+func TestModelsComeFromThePeersRowAndAreAsFreshAsItsCapabilities(t *testing.T) {
+	readAt := time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)
+	def := "deepseek/deepseek-flash"
+	runtimes := map[string]any{
+		"items": []fleet.RuntimeInfo{{
+			Machine: "peerbox", Runtime: "opencode",
+			Capabilities: fleet.DriverCapabilities{DeadlineMs: 5000, Source: fleet.CapabilitiesObserved},
+			Models: &fleet.RuntimeModels{
+				Source: fleet.ModelsFromRuntime, ReadAt: &readAt,
+				IDs: []string{"deepseek/deepseek-flash", "deepseek/deepseek-v4-pro"}, Default: &def,
+			},
+		}},
+		"sources":  []fleet.SourceStatus{{Machine: "peerbox", Status: fleet.SourceOK, ObservedAt: time.Now()}},
+		"complete": true,
+	}
+	srv := peerServing(t, 200, runtimes, nil)
+	now := time.Now()
+	d := New("peerbox", srv.URL, withClock(func() time.Time { return now }))
+
+	if got := d.Models(); got.Source != fleet.ModelsNone || len(got.IDs) != 0 {
+		t.Fatalf("before the peer answered: %+v, want none", got)
+	}
+	if err := d.RefreshCapabilities(context.Background(), caller); err != nil {
+		t.Fatal(err)
+	}
+	got := d.Models()
+	if got.Source != fleet.ModelsFromRuntime || len(got.IDs) != 2 || got.IDs[1] != "deepseek/deepseek-v4-pro" {
+		t.Errorf("after the peer answered: %+v, want the peer's two ids", got)
+	}
+	if got.ReadAt == nil || !got.ReadAt.Equal(readAt) {
+		t.Errorf("readAt = %v, want the peer's %v passed through, not re-stamped", got.ReadAt, readAt)
+	}
+	if got.Default == nil || *got.Default != def {
+		t.Errorf("default = %v, want %q", got.Default, def)
+	}
+	// A caller that edits what it was handed must not reach the cache.
+	got.IDs[0] = "tampered"
+	if again := d.Models(); again.IDs[0] != "deepseek/deepseek-flash" {
+		t.Errorf("the cache was reached through the returned slice: %v", again.IDs)
+	}
+
+	now = now.Add(capabilityStaleness + time.Second)
+	if stale := d.Models(); stale.Source != fleet.ModelsNone || len(stale.IDs) != 0 {
+		t.Errorf("past capabilityStaleness: %+v, want none — a list the peer may no longer stand behind", stale)
+	}
+}
+
+func TestModelsOfAPeerThatPredatesTheFieldReadNone(t *testing.T) {
+	runtimes := map[string]any{
+		"items": []fleet.RuntimeInfo{{
+			Machine: "peerbox", Runtime: "claude-code-tmux",
+			Capabilities: fleet.DriverCapabilities{DeadlineMs: 5000, Source: fleet.CapabilitiesObserved},
+		}},
+		"sources":  []fleet.SourceStatus{{Machine: "peerbox", Status: fleet.SourceOK, ObservedAt: time.Now()}},
+		"complete": true,
+	}
+	srv := peerServing(t, 200, runtimes, nil)
+	d := New("peerbox", srv.URL)
+	if err := d.RefreshCapabilities(context.Background(), caller); err != nil {
+		t.Fatal(err)
+	}
+	if got := d.Models(); got.Source != fleet.ModelsNone || got.IDs == nil || len(got.IDs) != 0 {
+		t.Errorf("a row with no models: %+v, want none with an empty (not null) list", got)
+	}
+}

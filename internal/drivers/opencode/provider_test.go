@@ -3,6 +3,7 @@ package opencode
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -184,5 +185,422 @@ func TestState_OffPolicyTurnThatAlsoErroredCarriesBothReasons(t *testing.T) {
 	if st.LastTurn == nil || !strings.Contains(st.LastTurn.Reason, "does not allow") ||
 		!strings.Contains(st.LastTurn.Reason, "MessageOutputLengthError") {
 		t.Errorf("LastTurn = %+v, want both the policy reason and the runtime's", st.LastTurn)
+	}
+}
+
+// ---- the provider-only policy, pinned as it is ------------------------------
+
+// muster #401 lets a policy name single models. A policy that names providers
+// only must behave exactly as it did before: the same words in every refusal,
+// the same bytes in the session's own configuration. This table pins those
+// words and bytes for the four shapes a provider-only policy takes — the
+// default, one provider, two, and the built-in provider on purpose — so a change
+// to the model-level code that moves one of them fails here, naming it.
+//
+// The expected strings are literal on purpose. Building them from the code under
+// test would pin nothing.
+func TestProviderOnlyPolicy_WordsAndBytesAreThoseOfBeforeModelRules(t *testing.T) {
+	const (
+		noUsableHead = `create: no model provider is usable: the runtime lists none that this machine allows (allowed: `
+		noUsableTail = `. Give the session a credential for an allowed provider, or change the operator's provider setting; ` +
+			`a session is never started on a provider nobody chose`
+	)
+	listed := modelCatalog{"anthropic/c1", "openai/g1", "anthropic/c2", "opencode/big-pickle"}
+
+	cases := []struct {
+		name string
+		ids  []string
+
+		describe string
+		keys     string
+		// pinBuiltIn is whether a create pinned to opencode/big-pickle is refused.
+		pinBuiltIn bool
+		// pinOther is whether a create pinned to zzz/model is refused.
+		pinOther bool
+		// turnProvider is a provider the policy refuses, for the turn-time reason.
+		turnProvider string
+	}{
+		{
+			name:         "default",
+			ids:          nil,
+			describe:     `any provider except the runtime's built-in hosted provider "opencode" (disabled by default)`,
+			keys:         `{"disabled_providers":["opencode"]}`,
+			pinBuiltIn:   true,
+			pinOther:     false,
+			turnProvider: "opencode",
+		},
+		{
+			name:         "one provider",
+			ids:          []string{"anthropic"},
+			describe:     `only "anthropic"`,
+			keys:         `{"enabled_providers":["anthropic"]}`,
+			pinBuiltIn:   true,
+			pinOther:     true,
+			turnProvider: "zzz",
+		},
+		{
+			name:         "two providers",
+			ids:          []string{"anthropic", "openai"},
+			describe:     `only "anthropic", "openai"`,
+			keys:         `{"enabled_providers":["anthropic","openai"]}`,
+			pinBuiltIn:   true,
+			pinOther:     true,
+			turnProvider: "zzz",
+		},
+		{
+			name:         "the built-in provider on purpose",
+			ids:          []string{"opencode"},
+			describe:     `only "opencode"`,
+			keys:         `{"enabled_providers":["opencode"]}`,
+			pinBuiltIn:   false,
+			pinOther:     true,
+			turnProvider: "zzz",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeServer(t)
+			d, err := newDriverWithOptions(t, f, WithProviders(tc.ids))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := d.providers.describe(); got != tc.describe {
+				t.Errorf("describe() = %q, want %q", got, tc.describe)
+			}
+			keys, err := json.Marshal(d.providers.configKeys())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(keys) != tc.keys {
+				t.Errorf("configKeys() = %s, want %s", keys, tc.keys)
+			}
+
+			refusal := func(model string) string {
+				t.Helper()
+				err := d.checkModelProvider(model)
+				if err == nil {
+					return ""
+				}
+				fe, ok := err.(*fleet.Error)
+				if !ok || fe.Kind != fleet.ErrorUnsupported {
+					t.Fatalf("checkModelProvider(%q) = %v, want an unsupported fleet error", model, err)
+				}
+				return fe.Message
+			}
+			if got, want := refusal("opencode/big-pickle"), `create: model "opencode/big-pickle" is on provider "opencode", `+
+				`which this machine does not allow (allowed: `+tc.describe+`)`; tc.pinBuiltIn && got != want {
+				t.Errorf("pin on the built-in provider:\n got %q\nwant %q", got, want)
+			} else if !tc.pinBuiltIn && got != "" {
+				t.Errorf("pin on the built-in provider = %q, want it to pass", got)
+			}
+			if got, want := refusal("zzz/model"), `create: model "zzz/model" is on provider "zzz", `+
+				`which this machine does not allow (allowed: `+tc.describe+`)`; tc.pinOther && got != want {
+				t.Errorf("pin on another provider:\n got %q\nwant %q", got, want)
+			} else if !tc.pinOther && got != "" {
+				t.Errorf("pin on another provider = %q, want it to pass", got)
+			}
+
+			noneNil := d.noUsableProvider(nil).(*fleet.Error)
+			wantNil := noUsableHead + tc.describe + `); it lists no provider at all, so the session has no credential for any` + noUsableTail
+			if noneNil.Kind != fleet.ErrorUnsupported || noneNil.Message != wantNil {
+				t.Errorf("noUsableProvider(nil):\n got %q\nwant %q", noneNil.Message, wantNil)
+			}
+			noneListed := d.noUsableProvider(listed).(*fleet.Error)
+			wantListed := noUsableHead + tc.describe + `); it lists only "anthropic", "openai", "opencode"` + noUsableTail
+			if noneListed.Kind != fleet.ErrorUnsupported || noneListed.Message != wantListed {
+				t.Errorf("noUsableProvider(listed):\n got %q\nwant %q", noneListed.Message, wantListed)
+			}
+
+			ref := createOne(t, d, "/work/x", "key-1")
+			f.setLastMessage(ref.ID, wireMessage{Info: wireMessageInfo{
+				Role: "assistant", ProviderID: tc.turnProvider, ModelID: "m1",
+			}})
+			st := idleTurnState(t, d, ref.ID)
+			wantReason := `the turn ran on provider "` + tc.turnProvider + `" (model "m1"), which this machine does not allow (allowed: ` + tc.describe + `)`
+			if st.LastTurn == nil || st.LastTurn.Outcome != "failed" || st.LastTurn.Retryable || st.LastTurn.Reason != wantReason {
+				t.Errorf("turn-time LastTurn = %+v, want failed, not retryable, reason %q", st.LastTurn, wantReason)
+			}
+		})
+	}
+}
+
+// ---- model rules (muster #401) -----------------------------------------------
+
+func TestNewProviderPolicy_Grammar(t *testing.T) {
+	valid := []string{
+		"anthropic",
+		"anthropic/claude-sonnet-4-5",
+		"opencode/deepseek-v4.1-flash",
+		"opencode/*",
+		"opencode/deepseek-*",
+		"p/a*b",
+		"p/x/y", // the model part is everything after the first "/"
+		"!opencode/*-free",
+		"!p/x/y",
+	}
+	for _, e := range valid {
+		if _, err := newProviderPolicy([]string{e}); err != nil {
+			t.Errorf("%q: %v, want it accepted", e, err)
+		}
+	}
+
+	invalid := map[string]string{
+		"!p":      "a deny names models",
+		"/m":      "names no provider",
+		"p/":      `nothing follows the "/"`,
+		"!!p/x":   "a provider id has no whitespace",
+		"p*":      "a provider id has no whitespace",
+		"p*/m":    "a provider id has no whitespace",
+		"p/a?":    "a model pattern has no whitespace",
+		"p/[a]":   "a model pattern has no whitespace",
+		"p/a\\b":  "a model pattern has no whitespace",
+		"a b":     "a provider id has no whitespace",
+		"p/a b":   "a model pattern has no whitespace",
+		"!/x":     "names no provider",
+		"!p/":     `nothing follows the "/"`,
+		"!p/a[b]": "a model pattern has no whitespace",
+	}
+	for e, why := range invalid {
+		_, err := newProviderPolicy([]string{"anthropic", e})
+		if err == nil {
+			t.Errorf("%q was accepted", e)
+			continue
+		}
+		if !strings.Contains(err.Error(), "provider policy entry "+fmt.Sprintf("%q", e)) || !strings.Contains(err.Error(), why) {
+			t.Errorf("%q: %q, want the entry named and %q said", e, err, why)
+		}
+	}
+}
+
+// Blanks and exact repeats go; a model entry names its provider once in enabled.
+func TestNewProviderPolicy_ShapeOfTheParsedPolicy(t *testing.T) {
+	p, err := newProviderPolicy([]string{
+		" deepseek ", "", "opencode/deepseek-v4-pro", "deepseek", "opencode/deepseek-v4.1-flash", "!opencode/*-free", "opencode/*",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"deepseek", "opencode"}; !reflect.DeepEqual(p.allow, want) {
+		t.Errorf("allow = %v, want %v (opencode/* is the whole provider)", p.allow, want)
+	}
+	if len(p.models) != 2 || len(p.deny) != 1 {
+		t.Errorf("models = %v, deny = %v, want two model rules and one deny", p.models, p.deny)
+	}
+	if want := []string{"deepseek", "opencode"}; !reflect.DeepEqual(p.enabled, want) {
+		t.Errorf("enabled = %v, want %v: each provider once, in the order first named", p.enabled, want)
+	}
+	if want := []string{"deepseek", "opencode/deepseek-v4-pro", "opencode/deepseek-v4.1-flash", "opencode/*"}; !reflect.DeepEqual(p.allowed, want) {
+		t.Errorf("allowed = %v, want %v", p.allowed, want)
+	}
+}
+
+func TestMatchGlob(t *testing.T) {
+	cases := []struct {
+		pattern, s string
+		want       bool
+	}{
+		{"deepseek-v4-pro", "deepseek-v4-pro", true},
+		{"deepseek-v4-pro", "deepseek-v4-pro2", false},
+		{"deepseek-v4-pro", "Deepseek-v4-pro", false}, // case-sensitive, as the runtime is
+		{"*", "", true},
+		{"*", "anything/at/all", true},
+		{"*-free", "big-free", true},
+		{"*-free", "big-pickle", false}, // a suffix says nothing about a model without it
+		{"*-free", "-free", true},
+		{"big-*", "big-", true},
+		{"a*b", "a/b", true}, // "*" runs over "/", unlike path.Match
+		{"a*b", "ab", true},
+		{"a*b*c", "aXbYc", true},
+		{"a*b*c", "aXbY", false},
+		{"**", "x", true},
+		{"x*", "", false},
+		{"", "", true},
+		{"", "x", false},
+		{"deepseek-v4.1-*", "deepseek-v4.1-flash", true},
+		{"deepseek-v4.1-*", "deepseek-v4x1-flash", false}, // "." is a dot, not a wildcard
+	}
+	for _, c := range cases {
+		if got := matchGlob(c.pattern, c.s); got != c.want {
+			t.Errorf("matchGlob(%q, %q) = %v, want %v", c.pattern, c.s, got, c.want)
+		}
+	}
+}
+
+func TestJudge(t *testing.T) {
+	mk := func(entries ...string) providerPolicy {
+		t.Helper()
+		p, err := newProviderPolicy(entries)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	cases := []struct {
+		name     string
+		policy   providerPolicy
+		provider string
+		model    string
+		want     verdict
+		rule     string
+	}{
+		{"default, ordinary provider", mk(), "deepseek", "m", permitted, ""},
+		{"default, built-in provider", mk(), "opencode", "m", providerNotAllowed, ""},
+		{"whole provider", mk("deepseek"), "deepseek", "anything", permitted, ""},
+		{"a provider nobody named", mk("deepseek"), "other", "m", providerNotAllowed, ""},
+		// The exact-model allowlist, the form to prefer.
+		{"exact model, the one allowed", mk("opencode/deepseek-v4-pro"), "opencode", "deepseek-v4-pro", permitted, ""},
+		{"exact model, another on the same provider", mk("opencode/deepseek-v4-pro"), "opencode", "big-pickle", modelNotAllowed, ""},
+		{"exact model, its provider is not whole", mk("opencode/deepseek-v4-pro"), "deepseek", "m", providerNotAllowed, ""},
+		{"two exact models", mk("opencode/a", "opencode/b"), "opencode", "b", permitted, ""},
+		{"a glob allow", mk("opencode/deepseek-*"), "opencode", "deepseek-v4-pro", permitted, ""},
+		{"a glob allow, no match", mk("opencode/deepseek-*"), "opencode", "grok-code", modelNotAllowed, ""},
+		// Deny.
+		{"deny beats a whole-provider allow", mk("opencode", "!opencode/*-free"), "opencode", "big-free", modelDenied, "!opencode/*-free"},
+		{"deny beats it written first", mk("!opencode/*-free", "opencode"), "opencode", "big-free", modelDenied, "!opencode/*-free"},
+		{"deny beats a model allow", mk("opencode/big-free", "!opencode/*-free"), "opencode", "big-free", modelDenied, "!opencode/*-free"},
+		{"deny does not touch another model", mk("opencode", "!opencode/*-free"), "opencode", "paid-x", permitted, ""},
+		{"deny is per provider", mk("deepseek", "opencode", "!opencode/*"), "deepseek", "x", permitted, ""},
+		{"deny alone, an ordinary provider", mk("!deepseek/v3*"), "deepseek", "v3-old", modelDenied, "!deepseek/v3*"},
+		{"deny alone leaves the built-in provider off", mk("!deepseek/v3*"), "opencode", "m", providerNotAllowed, ""},
+		{"a model id with a slash of its own", mk("p/x/y"), "p", "x/y", permitted, ""},
+	}
+	for _, c := range cases {
+		v, rule := c.policy.judge(c.provider, c.model)
+		if v != c.want || rule != c.rule {
+			t.Errorf("%s: judge(%q, %q) = (%v, %q), want (%v, %q)", c.name, c.provider, c.model, v, rule, c.want, c.rule)
+		}
+	}
+	// permits is the provider-level answer: a provider allowed for some models is
+	// one the runtime must have on, and a deny never turns it off.
+	if p := mk("opencode/deepseek-v4-pro"); !p.permits("opencode") || p.permits("deepseek") {
+		t.Error("permits() must be true for a provider named by a model rule, false for one nobody named")
+	}
+	if p := mk("opencode", "!opencode/*"); !p.permits("opencode") {
+		t.Error("permits() must not be turned off by a deny")
+	}
+	// For a policy of providers alone, the model-level answer is the provider-level one.
+	for _, entries := range [][]string{nil, {"deepseek"}, {"deepseek", "opencode"}} {
+		p := mk(entries...)
+		for _, id := range []string{"deepseek/a", "opencode/b", "other/c"} {
+			if p.permitsModel(id) != p.permits(providerOfModel(id)) {
+				t.Errorf("%v: permitsModel(%q) disagrees with permits(%q)", entries, id, providerOfModel(id))
+			}
+		}
+	}
+}
+
+func TestConfigKeys_ModelRules(t *testing.T) {
+	keys := func(entries ...string) string {
+		t.Helper()
+		p, err := newProviderPolicy(entries)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := json.Marshal(p.configKeys())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	// A provider allowed for one model is still a provider the runtime must enable.
+	if got, want := keys("deepseek", "opencode/deepseek-v4-pro"), `{"enabled_providers":["deepseek","opencode"]}`; got != want {
+		t.Errorf("exact-model allowlist: %s, want %s", got, want)
+	}
+	if got, want := keys("opencode/a", "opencode/b"), `{"enabled_providers":["opencode"]}`; got != want {
+		t.Errorf("two models on one provider: %s, want %s", got, want)
+	}
+	// A deny alone is not an allow list: the default-off built-in provider stays.
+	if got, want := keys("!deepseek/v3*"), `{"disabled_providers":["opencode"]}`; got != want {
+		t.Errorf("deny alone: %s, want %s", got, want)
+	}
+	// Denies never reach the file; the provider-level list is the same without them.
+	if keys("deepseek", "opencode", "!opencode/*-free") != keys("deepseek", "opencode") {
+		t.Error("a deny changed the bytes written to the session's configuration")
+	}
+}
+
+func TestDescribe_ModelRules(t *testing.T) {
+	for _, c := range []struct {
+		entries []string
+		want    string
+	}{
+		{[]string{"deepseek", "opencode/deepseek-v4-pro"}, `only "deepseek", "opencode/deepseek-v4-pro"`},
+		{[]string{"deepseek", "opencode", "!opencode/*-free"}, `only "deepseek", "opencode"; denied: "!opencode/*-free"`},
+		{[]string{"!deepseek/v3*", "!deepseek/v2*"}, `any provider except the runtime's built-in hosted provider "opencode" (disabled by default); denied: "!deepseek/v3*", "!deepseek/v2*"`},
+	} {
+		p, err := newProviderPolicy(c.entries)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := p.describe(); got != c.want {
+			t.Errorf("%v: describe() = %q, want %q", c.entries, got, c.want)
+		}
+	}
+}
+
+// ---- the turn-time check with model rules ------------------------------------
+
+// createPinned creates a session pinned to model. A policy that judges single
+// models refuses a create that pins none unless the runtime's default is known,
+// and these tests are about the turn's record, not that.
+func createPinned(t *testing.T, d *Driver, model string) fleet.SessionRef {
+	t.Helper()
+	sess, err := d.Create(context.Background(), fleet.RequestFrom(fleet.Caller{Principal: "test"}), "key-"+model,
+		fleet.SessionSpec{Cwd: "/work/x", Name: "t", Model: model})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	return sess.SessionRef
+}
+
+func TestState_TurnOnAModelOutsideTheExactAllowlistIsFailed(t *testing.T) {
+	f := newFakeServer(t)
+	d, err := newDriverWithOptions(t, f, WithProviders([]string{"deepseek", "opencode/deepseek-v4-pro"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := createPinned(t, d, "opencode/deepseek-v4-pro")
+
+	f.setLastMessage(ref.ID, wireMessage{Info: wireMessageInfo{Role: "assistant", ProviderID: "opencode", ModelID: "deepseek-v4-pro"}})
+	if st := idleTurnState(t, d, ref.ID); st.LastTurn != nil {
+		t.Errorf("a turn on the allowed model: LastTurn = %+v, want none", st.LastTurn)
+	}
+
+	f.setLastMessage(ref.ID, wireMessage{Info: wireMessageInfo{Role: "assistant", ProviderID: "opencode", ModelID: "grok-code"}})
+	st := idleTurnState(t, d, ref.ID)
+	if st.LastTurn == nil || st.LastTurn.Outcome != "failed" || st.LastTurn.Retryable {
+		t.Fatalf("a turn on another model of that provider: LastTurn = %+v, want failed and not retryable", st.LastTurn)
+	}
+	for _, want := range []string{`provider "opencode" (model "grok-code")`, "no allowed model on it matches", `only "deepseek", "opencode/deepseek-v4-pro"`} {
+		if !strings.Contains(st.LastTurn.Reason, want) {
+			t.Errorf("Reason %q does not say %q", st.LastTurn.Reason, want)
+		}
+	}
+}
+
+func TestState_TurnOnADeniedModelNamesTheRule(t *testing.T) {
+	f := newFakeServer(t)
+	d, err := newDriverWithOptions(t, f, WithProviders([]string{"deepseek", "opencode", "!opencode/*-free"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := createPinned(t, d, "opencode/paid-x")
+	f.setLastMessage(ref.ID, wireMessage{Info: wireMessageInfo{
+		Role: "assistant", ProviderID: "opencode", ModelID: "big-free",
+		Error: &wireAssistantError{Name: "MessageOutputLengthError"},
+	}})
+	st := idleTurnState(t, d, ref.ID)
+	if st.LastTurn == nil || st.LastTurn.Outcome != "failed" {
+		t.Fatalf("LastTurn = %+v, want failed", st.LastTurn)
+	}
+	for _, want := range []string{"denied by !opencode/*-free", "MessageOutputLengthError"} {
+		if !strings.Contains(st.LastTurn.Reason, want) {
+			t.Errorf("Reason %q does not say %q", st.LastTurn.Reason, want)
+		}
+	}
+	// A record naming the provider and no model is judged on the provider alone.
+	f.setLastMessage(ref.ID, wireMessage{Info: wireMessageInfo{Role: "assistant", ProviderID: "opencode"}})
+	if st := idleTurnState(t, d, ref.ID); st.LastTurn != nil {
+		t.Errorf("a provider-only record on an allowed provider: LastTurn = %+v, want none", st.LastTurn)
 	}
 }

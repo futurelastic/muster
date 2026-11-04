@@ -151,7 +151,8 @@ rather than assume when one is missing:
                   "confirmsDelivery": true, "supportsResume": true,
                   "supportsPin": { "model": true, "effort": true, "agent": true },
                   "validatesModel": false,
-                  "source": "observed", "deadlineMs": 30000 }
+                  "source": "observed", "deadlineMs": 30000 },
+"models": { "source": "declared", "ids": ["opus", "sonnet", "haiku"], "default": null }
 ```
 
 Read `source` too. `assumed` means **nobody has confirmed these** — they are a
@@ -834,7 +835,12 @@ so rather than silently substituting a default — check `supportsPin` in
 (one model has different spellings on different runtimes), so also read
 `validatesModel`: `true` means an unknown `model` is refused `invalid` at
 creation, naming the id and the closest valid ones; `false` means it is
-accepted and fails only at the first turn. **A value that WOULD be
+accepted and fails only at the first turn. To let a person **choose** a model
+instead of typing one, read the row's `models` (#400): with `source: "runtime"`
+offer `ids` as the choices (the create is still the authority, and the list is
+as old as `readAt`); with `declared` or `none`, offer the list if there is one
+but **keep accepting a typed value**, because the runtime has no catalogue to
+check it against. Treat a `source` you do not know as `none`. **A value that WOULD be
 mistaken for a flag is refused outright at creation** (`invalid`, naming the
 field) rather than silently dropped; a value that reaches the runtime intact
 can still be defaulted or ignored there, which is what the response's `agent`

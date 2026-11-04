@@ -358,6 +358,11 @@ type Driver struct {
 	// so through withClaudeArgv.
 	buildsClaudeArgv bool
 
+	// declaredModels is the operator's list of model ids for a create on this
+	// runtime (WithModels, muster #400). Empty means the CLI's documented
+	// aliases are reported instead.
+	declaredModels []string
+
 	// muster #345: the sandbox this driver can put an agent in. sandboxCfg is
 	// nil unless the composition root enabled it (WithSandbox); whether it is
 	// then OFFERED is the host's answer, measured and cached in sandboxMeasured.

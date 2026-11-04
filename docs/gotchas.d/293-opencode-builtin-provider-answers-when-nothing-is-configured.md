@@ -37,3 +37,33 @@ the list is a different thing (could not tell), and the driver keeps them apart.
   outside the set.
 - Shared mode (one runtime the driver does not own) has no per-session file; the
   catalog filter and the turn report are its whole enforcement.
+
+## Single models (#401)
+
+The policy can also name models: `provider/<model>`, `provider/<glob>` and
+`!provider/<glob>` (a deny that beats any allow), in the same variable. What that
+changed, and what it could not:
+
+- **Allow exact models; do not deny by name.** The built-in provider serves paid
+  models, free ones whose terms allow retention or training on what is submitted,
+  and zero-cost ones that carry no `-free` suffix at all (its own default, measured
+  with no credential, is one). So `deepseek,opencode/deepseek-v4.1-flash,opencode/deepseek-v4-pro`
+  keeps all the others out, and `!opencode/*-free` does not.
+- **The session's own `opencode.json` cannot carry model rules.** `enabled_providers`
+  is the only key the policy can write, and a glob could only be expanded against a
+  catalog read from the very server that file configures. A provider allowed for some
+  models is still enabled there; the model rules are enforced where this driver can
+  act on them — the create's pinned model, a create that pins none, and the turn's
+  record.
+- **A create with no model pin lands on whatever the runtime picks.** Under model
+  rules that pick is learned first: the model the session's merged configuration
+  names for its directory (`GET /config`), else the `default` the catalog answer names
+  for each provider it lists (measured: one entry per listed provider, e.g. the
+  built-in provider's zero-cost default, with no credential). Every candidate must be
+  allowed, and one that cannot be learned is refused, saying to pin a model. A policy
+  of providers alone never makes this check. That a fresh session then runs on the
+  default the catalog names has not been measured with a real turn.
+- **A relaunched session is not re-checked at relaunch.** The session record stores no
+  model, so a model pinned under an older policy is caught by the turn-time check only.
+- Shared mode has no per-session file, so for model rules too the catalog filter, the
+  create checks and the turn report are the whole of it.

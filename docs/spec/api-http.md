@@ -178,13 +178,18 @@ GET /v1/runtimes
                                        "observedAt": "..." },
                      "posture": { "unattended": true, "files": true,   ← what `posture` can ask of it (#344);
                                   "network": ["open", "closed"],        absent on a peer not yet reached
-                                  "isolatedEnvironment": true } },
+                                  "isolatedEnvironment": true },
+                     "models": { "source": "runtime",           ← "runtime" | "declared" | "none" (#400)
+                                 "readAt": "...",                ← only when "runtime"
+                                 "ids": ["deepseek/deepseek-flash"],
+                                 "default": null } },
                    { "machine": "...", "runtime": "...",         ← enabled, no working driver
                      "status": "unavailable",
                      "cause": "probe-timeout",
                      "reason": "the ... runtime is enabled, but its version check did not answer in time; retrying in the background (attempt 3 failed)",
                      "capabilities": { "deadlineMs": 30000,
-                                       "source": "assumed" } } ],
+                                       "source": "assumed" },
+                     "models": { "source": "none", "ids": [], "default": null } } ],
         "sources": [...], "complete": true }
 
 POST /v1/posture/dry-run                                        ← needs only `read` (#344)
@@ -232,6 +237,40 @@ acceptable because the answer is a report and grants nothing.
 
 Clients **must** consult `/v1/runtimes` before relying on a capability, and
 degrade rather than assume. A driver never emulates (§5.6).
+
+**`models` is which models a create on that runtime may name** (muster #400), so a
+client can offer a picker instead of a free-text box.
+
+```
+RuntimeModels {
+  source   : "runtime" | "declared" | "none"
+  readAt?  : Timestamp           // only for "runtime": when the runtime last answered with this list
+  ids      : string[]            // the runtime's own spelling; [] (never null) when source is "none"
+  default  : string | null       // what the runtime uses when a create names no model, if known
+}
+```
+
+- `runtime` — the runtime itself listed these when it was last asked. The ids are
+  exactly the ones a create on this machine would accept at the time of that
+  read, so a client may offer them as the choices. The create stays the
+  authority: the list can lag a change of credentials or of the runtime's own
+  catalogue, and it is empty of any model the machine's operator does not
+  permit.
+- `declared` — the runtime has no catalogue to ask, so the operator's
+  configuration, or the aliases the runtime documents, name these. A value
+  outside the list may still work, and **a client must still accept one**.
+- `none` — this runtime cannot say, or has not yet (nothing has been read since
+  the service started). `ids` is `[]`. A client keeps free text.
+- **The set of `source` values is open on read:** a client must treat one it
+  does not know as `none`. A row from a build that predates the field has no
+  `models` at all, and that reads as `none`, never as "no model works".
+- No request is made to build the list: it is answered from what the service
+  already holds, as the rest of the row is. For a peer it comes from the same
+  cached row as its `capabilities`, so it is `none` while that cache is unreached
+  or stale. A peer's `readAt` is on **that peer's** clock and is passed through
+  unchanged.
+- `readAt` is omitted, not null, where nothing was read. `default` is always
+  present and is null when it is not known with certainty.
 
 **A runtime the operator enabled is listed even when it has no working
 driver** (muster #297). It used to be omitted — a runtime whose version check
@@ -1077,9 +1116,19 @@ contents and tool output went to a third party nobody chose. The local opencode 
 fails closed, by operator configuration and never by a request field: that provider is disabled
 in each session's own runtime configuration by default (at create and again at relaunch), and
 `FLEET_OPENCODE_PROVIDERS` names the only providers a session may use instead (naming the
-built-in one is how an operator asks for it). A create the policy leaves with no usable provider —
+built-in one is how an operator asks for it). An entry may also name single models: `provider/<model>`
+or `provider/<glob>` allows only the matching models of that provider, and `!provider/<glob>` denies
+them whatever else allows them (a deny beats any allow). The form to prefer is an allowlist of exact
+models, because a name pattern is not a reliable mark of a model's terms — a hosted provider's
+zero-cost models do not share a suffix, so a suffix deny does not keep them out. A malformed entry
+stops the start, naming it. A create the policy leaves with no usable provider —
 the runtime lists none that is allowed, or lists nothing at all — is refused `unsupported` with the
-reason, before any session exists; so is one whose `model` is on a provider outside the set. A
+reason, before any session exists; so is one whose `model` is outside the policy, the reason naming
+the rule that refused it. A create that names **no** model is refused when the model the runtime would
+pick for it is outside a policy that names models, or cannot be learned (the policy then fails closed
+and the refusal says to pin a model); a policy of providers alone never makes this check. Model rules
+are enforced at these checks and on the turn's own record; they are not in the session's own runtime
+configuration, which enables whole providers only. A
 runtime that does not answer the catalog read at all is still "could not tell", and the create
 proceeds. A turn that nevertheless ran on a provider outside the set reads as `idle` with
 `lastTurn: {"outcome":"failed","reason":"…"}` naming the provider and model, never as an
@@ -1959,10 +2008,10 @@ that died and a turn that finished leave the same screen: an error, a settled
 status line, an empty composer. Both are honestly `idle`, and a supervisor that
 cannot tell them apart silently abandons the work.
 
-A turn that finished normally but ran on a provider the machine's operator
-did not allow (muster #293) is reported here too, as `failed`, with the provider
-in `reason` — it is the only way an idle session says it went somewhere it
-should not have.
+A turn that finished normally but ran on a provider, or a model, the machine's
+operator did not allow (muster #293, #401) is reported here too, as `failed`, with
+the provider, the model and the rule that refused it in `reason` — it is the only
+way an idle session says it went somewhere it should not have.
 
 Absent means the screen said nothing about it — **not** that the turn
 succeeded (§5.7). `retryable` is the runtime's own word for the failure, not

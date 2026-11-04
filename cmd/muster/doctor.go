@@ -344,6 +344,7 @@ func runChecks(ctx context.Context, env doctorEnv) []doctorRow {
 	c.add(checkTmuxVersion(ctx, runtime, getenv("FLEET_TMUX_BIN"), env))
 	c.add(checkAgentProgram(ctx, runtime, env.Timeout))
 	c.add(checkOpencodeRuntime(getenv("FLEET_RUNTIME_OPENCODE") == "1", getenv("FLEET_OPENCODE_BIN")))
+	c.add(checkOpencodeProviders(getenv("FLEET_RUNTIME_OPENCODE") == "1", getenv("FLEET_OPENCODE_PROVIDERS")))
 	orphans := env.OpencodeOrphans
 	if orphans == nil {
 		orphans = opencode.OrphanServers
@@ -617,6 +618,15 @@ func validateConfigExtras(cfg *fileConfig, getenv func(string) string) error {
 			}
 		}
 	}
+	// The opencode provider policy (muster #401): an entry that cannot be one stops
+	// the start, naming it, and shows in the doctor and a reload's refusal. Checked
+	// only where the runtime is enabled; a policy no runtime reads is not judged. It
+	// lives in the environment, so it is checked with no config file too.
+	if getenv("FLEET_RUNTIME_OPENCODE") == "1" {
+		if _, err := opencode.DescribeProviderPolicy(splitList(getenv("FLEET_OPENCODE_PROVIDERS"))); err != nil {
+			return fmt.Errorf("FLEET_OPENCODE_PROVIDERS: %w", err)
+		}
+	}
 	if cfg == nil {
 		return nil
 	}
@@ -635,6 +645,11 @@ func validateConfigExtras(cfg *fileConfig, getenv func(string) string) error {
 	// create, because what it holds is read then and not before.
 	if p := cfg.operatorAgentsFile(); p != "" && !filepath.IsAbs(p) {
 		return fmt.Errorf("opencode.agents %q must be an absolute path", p)
+	}
+	// Declared model lists (muster #400): the shape is judged here so the start,
+	// the doctor and a reload agree.
+	if err := validateModelsConfig(cfg.Models); err != nil {
+		return err
 	}
 	// The default runtime must be one this machine runs. Whether its driver is up
 	// is the start's to say (above).
@@ -1228,6 +1243,38 @@ func checkOpencodeRuntime(enabled bool, bin string) doctorRow {
 	return row
 }
 
+// checkOpencodeProviders is the runtime.opencode.providers row (muster #293,
+// #401): which providers, and which models of them, an opencode session may use
+// on this machine — the policy the service will enforce, parsed the way the
+// service parses it. A malformed entry is a failure that names the entry, because
+// the service refuses to start on it; it runs whether or not FLEET_CONFIG is set,
+// since the policy lives in the environment. The policy itself is not a secret
+// and the row quotes it.
+func checkOpencodeProviders(enabled bool, raw string) doctorRow {
+	row := doctorRow{ID: "runtime.opencode.providers", Refs: []int{293, 401}}
+	if !enabled {
+		row.Status = statusSkip
+		row.Summary = "FLEET_RUNTIME_OPENCODE is not 1 — the opencode runtime is not enabled"
+		return row
+	}
+	entries := splitList(raw)
+	desc, err := opencode.DescribeProviderPolicy(entries)
+	if err != nil {
+		row.Status = statusFail
+		row.Summary = "FLEET_OPENCODE_PROVIDERS does not parse — the service refuses to start"
+		row.Detail = err.Error()
+		return row
+	}
+	row.Status = statusPass
+	row.Summary = "opencode sessions may use: " + desc
+	if opencode.NarrowsModels(entries) {
+		row.Detail = "model rules are checked when a session is created and on each turn's record; " +
+			"a session's own configuration enables whole providers only. " +
+			"Name exact models to allow: a name pattern is not a free-tier or data-retention filter"
+	}
+	return row
+}
+
 // checkOpencodeServers is the runtime.opencode.servers row (muster #398): how
 // many opencode server processes run under the service's session directory with
 // no session record naming them. Such a process holds a conversation database
@@ -1767,4 +1814,44 @@ func writeDoctorJSON(w io.Writer, self string, rows []doctorRow) error {
 		Rows    []doctorRow       `json:"rows"`
 		Counts  map[rowStatus]int `json:"counts"`
 	}{fleet.SelfBuild().Short(), self, rows, countRows(rows)})
+}
+
+// validateModelsConfig judges the "models" object of the config file (muster
+// #400): which runtime a list may be declared for, and what an id may be.
+//
+// Only the Claude Code runtime takes a declared list. The opencode runtime
+// reports what its own runtime lists, and a declared list there would be a
+// second source for an answer that has one, drifting from what a create accepts.
+// An id is a value handed to the CLI's model flag, so it follows the rule the
+// driver applies where it builds that argv: non-empty, not starting with "-",
+// and, because a client offers these as choices, no whitespace and no repeats.
+func validateModelsConfig(models map[string][]string) error {
+	runtimes := make([]string, 0, len(models))
+	for rt := range models {
+		runtimes = append(runtimes, rt)
+	}
+	sort.Strings(runtimes)
+	for _, rt := range runtimes {
+		switch fleet.RuntimeId(rt) {
+		case tmuxdriver.DefaultRuntime:
+		case opencode.DefaultRuntime:
+			return fmt.Errorf("models.%s: the %s runtime reports the models its own runtime lists; "+
+				"a declared list would be a second source for the same answer", rt, rt)
+		default:
+			return fmt.Errorf("models.%s: %q has no declared model list (only %q takes one)", rt, rt, string(tmuxdriver.DefaultRuntime))
+		}
+		seen := map[string]bool{}
+		for _, id := range models[rt] {
+			switch {
+			case id == "" || strings.HasPrefix(id, "-"):
+				return fmt.Errorf("models.%s: %q is not a model id (it is empty or starts with \"-\")", rt, id)
+			case strings.ContainsAny(id, " \t\r\n"):
+				return fmt.Errorf("models.%s: %q is not a model id (it contains whitespace)", rt, id)
+			case seen[id]:
+				return fmt.Errorf("models.%s: %q is listed more than once", rt, id)
+			}
+			seen[id] = true
+		}
+	}
+	return nil
 }

@@ -101,9 +101,7 @@ func (d *Driver) lastTurnFailure(ctx context.Context, srv *server, id string) *f
 	// muster #293: a turn that ran on a provider outside the operator's set
 	// is not an unremarkable idle, whatever its own outcome was. The runtime's
 	// words about an error on that turn, if it has one, ride along.
-	if info.ProviderID != "" && !d.providers.permits(info.ProviderID) {
-		reason := fmt.Sprintf("the turn ran on provider %q (model %q), which this machine does not allow (allowed: %s)",
-			info.ProviderID, info.ModelID, d.providers.describe())
+	if reason, off := d.offPolicyTurn(info.ProviderID, info.ModelID); off {
 		if info.Error != nil {
 			if te := d.turnFailure(ctx, srv, info.Error, time.Now(), false); te != nil {
 				reason += "; the runtime also reported: " + te.Reason
@@ -122,4 +120,34 @@ func (d *Driver) lastTurnFailure(ctx context.Context, srv *server, id string) *f
 		at = time.UnixMilli(info.Time.Created)
 	}
 	return d.turnFailure(ctx, srv, info.Error, at, false)
+}
+
+// offPolicyTurn reports whether a turn ran on a provider or model the policy
+// does not allow, and says why in words the turn's outcome can carry. A record
+// that names no provider is no evidence either way; one that names a provider
+// and no model is judged on the provider alone.
+func (d *Driver) offPolicyTurn(provider, model string) (string, bool) {
+	if provider == "" {
+		return "", false
+	}
+	v, rule := permitted, ""
+	if model == "" {
+		if !d.providers.permits(provider) {
+			v = providerNotAllowed
+		}
+	} else {
+		v, rule = d.providers.judge(provider, model)
+	}
+	switch v {
+	case providerNotAllowed:
+		return fmt.Sprintf("the turn ran on provider %q (model %q), which this machine does not allow (allowed: %s)",
+			provider, model, d.providers.describe()), true
+	case modelDenied:
+		return fmt.Sprintf("the turn ran on provider %q (model %q), which this machine does not allow: denied by %s (allowed: %s)",
+			provider, model, rule, d.providers.describe()), true
+	case modelNotAllowed:
+		return fmt.Sprintf("the turn ran on provider %q (model %q), which this machine does not allow: no allowed model on it matches (allowed: %s)",
+			provider, model, d.providers.describe()), true
+	}
+	return "", false
 }

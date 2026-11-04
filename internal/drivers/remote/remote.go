@@ -168,6 +168,10 @@ type Driver struct {
 	mu       sync.RWMutex
 	caps     fleet.DriverCapabilities
 	capsSeen bool
+	// models is what the peer said, on the probe that learned caps, about the
+	// models a create may name (muster #400). Nil when the peer's row carried
+	// none: a peer that predates the field has not said "no model works".
+	models *fleet.RuntimeModels
 	// refreshing is true while a capability probe triggered by
 	// noteSuccessfulContact is in flight, so a burst of concurrent traffic
 	// triggers at most one probe rather than one per call.
@@ -418,12 +422,53 @@ func (d *Driver) Capabilities() fleet.DriverCapabilities {
 	// these flags as an answer, but leaving true values sitting there
 	// under that label is still a claim this driver has no evidence for
 	// any more; a floor is the only value it can still stand behind.
-	if caps.ObservedAt != nil && d.now().Sub(*caps.ObservedAt) > capabilityStaleness {
+	if !d.capsFresh(caps) {
 		var floor fleet.DriverCapabilities
 		floor.DeadlineMs = caps.DeadlineMs
 		return floor.Assumed()
 	}
 	return caps
+}
+
+// capsFresh reports whether a cached capabilities value may still be presented
+// as an observation: it carries no observation time (nothing to age), or its
+// time is within capabilityStaleness. The one rule Capabilities and Models share,
+// so a peer's model list never outlives the capabilities it arrived with.
+func (d *Driver) capsFresh(caps fleet.DriverCapabilities) bool {
+	return caps.ObservedAt == nil || d.now().Sub(*caps.ObservedAt) <= capabilityStaleness
+}
+
+// Models is the list of models the peer said a create on its runtime may name,
+// from the cache the capabilities came from (muster #400). It is "none" when
+// the peer has not been reached, when the peer's row carried none (an older
+// build), and when the cached observation has gone stale: a list that may name
+// models the peer no longer has is worse than no list. The peer's own readAt is
+// passed through unchanged, on the peer's clock; a read this machine never made
+// is not re-stamped as one.
+func (d *Driver) Models() fleet.RuntimeModels {
+	d.mu.RLock()
+	caps, seen, models := d.caps, d.capsSeen, d.models
+	d.mu.RUnlock()
+	if !seen || models == nil || !d.capsFresh(caps) {
+		return fleet.NoModels()
+	}
+	return cloneModels(*models)
+}
+
+// cloneModels copies a models value so a caller cannot reach the cache through
+// its slices or pointers.
+func cloneModels(m fleet.RuntimeModels) fleet.RuntimeModels {
+	out := m
+	out.IDs = append([]string(nil), m.IDs...)
+	if m.ReadAt != nil {
+		at := *m.ReadAt
+		out.ReadAt = &at
+	}
+	if m.Default != nil {
+		def := *m.Default
+		out.Default = &def
+	}
+	return out.Normalized()
 }
 
 // RefreshCapabilities asks the peer what it can do and caches the answer.
@@ -475,6 +520,11 @@ func (d *Driver) RefreshCapabilities(ctx context.Context, req fleet.Request) err
 		// and freshness here is a local judgement about a local cache.
 		d.caps = ri.Capabilities.Observed(d.now())
 		d.capsSeen = true
+		d.models = nil
+		if ri.Models != nil {
+			m := cloneModels(*ri.Models)
+			d.models = &m
+		}
 		// The peer named its runtime in the same row. Discarding it and
 		// reporting "" was a placeholder that survived: a client cannot use
 		// ?runtime= to disambiguate a peer's session if the peer's runtime
@@ -974,6 +1024,7 @@ func (d *Driver) authKind() string {
 }
 
 var _ driver.PeerStandingReporter = (*Driver)(nil)
+var _ driver.ModelsReporter = (*Driver)(nil)
 
 // Runtime reports the peer's runtime id, empty until the peer has answered.
 func (d *Driver) Runtime() fleet.RuntimeId {

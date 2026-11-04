@@ -97,6 +97,22 @@ func TestValidateConfigExtras_StartupSettings(t *testing.T) {
 			map[string]string{"FLEET_RUNTIME": "none"}, `opencode.agents "agents.json" must be an absolute path`},
 		{"opencode object without agents", map[string]any{"opencode": map[string]any{}}, tmux_, ""},
 
+		// muster #400: a declared model list is the Claude Code runtime's alone.
+		{"models, the terminal runtime", map[string]any{"models": map[string]any{string(tmux.DefaultRuntime): []string{"opus", "sonnet"}}}, tmux_, ""},
+		{"models, an empty list", map[string]any{"models": map[string]any{string(tmux.DefaultRuntime): []string{}}}, tmux_, ""},
+		{"models, the opencode runtime", map[string]any{"models": map[string]any{string(opencode.DefaultRuntime): []string{"deepseek/deepseek-flash"}}}, tmux_,
+			"a declared list would be a second source"},
+		{"models, a runtime that takes none", map[string]any{"models": map[string]any{"stub": []string{"x"}}}, tmux_,
+			`models.stub: "stub" has no declared model list`},
+		{"models, an id that is a flag", map[string]any{"models": map[string]any{string(tmux.DefaultRuntime): []string{"opus", "--dangerous"}}}, tmux_,
+			`"--dangerous" is not a model id`},
+		{"models, an empty id", map[string]any{"models": map[string]any{string(tmux.DefaultRuntime): []string{""}}}, tmux_,
+			"is not a model id"},
+		{"models, an id with a space", map[string]any{"models": map[string]any{string(tmux.DefaultRuntime): []string{"opus 4"}}}, tmux_,
+			`"opus 4" is not a model id (it contains whitespace)`},
+		{"models, a repeated id", map[string]any{"models": map[string]any{string(tmux.DefaultRuntime): []string{"opus", "opus"}}}, tmux_,
+			`"opus" is listed more than once`},
+
 		// Trust roots are the tmux driver's: another primary runtime never reads them.
 		{"relative trust root, tmux", map[string]any{"trustRoots": []string{"work/repos"}}, tmux_,
 			`trust root "work/repos" must be an absolute path`},
@@ -350,5 +366,34 @@ func TestSessionEnvSameNameStartAndDoctorAgree(t *testing.T) {
 				t.Fatalf("config.load leaks a fromFile path: %+v", row)
 			}
 		})
+	}
+}
+
+// muster #401: the opencode provider policy lives in the environment, so an entry
+// that cannot be one stops the start with no config file at all, and only where
+// the opencode runtime is enabled.
+func TestValidateConfigExtras_OpencodeProviderPolicy(t *testing.T) {
+	if hostOS() == "windows" {
+		t.Skip("the runtime set differs on Windows (ADR 303)")
+	}
+	on := map[string]string{"FLEET_RUNTIME": "tmux", "FLEET_RUNTIME_OPENCODE": "1"}
+	with := func(policy string) func(string) string {
+		env := map[string]string{"FLEET_OPENCODE_PROVIDERS": policy}
+		for k, v := range on {
+			env[k] = v
+		}
+		return envOf(env)
+	}
+	if err := validateConfigExtras(nil, with("deepseek,opencode/deepseek-v4-pro,!opencode/*-free")); err != nil {
+		t.Fatalf("a valid policy was refused: %v", err)
+	}
+	err := validateConfigExtras(nil, with("deepseek,opencode/"))
+	if err == nil || !strings.Contains(err.Error(), "FLEET_OPENCODE_PROVIDERS") || !strings.Contains(err.Error(), `"opencode/"`) {
+		t.Fatalf("a malformed entry = %v, want a refusal naming the variable and the entry", err)
+	}
+	// With the runtime off, nothing reads the policy, so it is not judged.
+	off := envOf(map[string]string{"FLEET_RUNTIME": "tmux", "FLEET_OPENCODE_PROVIDERS": "opencode/"})
+	if err := validateConfigExtras(nil, off); err != nil {
+		t.Fatalf("a policy no runtime reads stopped the start: %v", err)
 	}
 }
