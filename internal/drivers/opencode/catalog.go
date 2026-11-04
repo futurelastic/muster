@@ -3,6 +3,7 @@ package opencode
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -300,7 +301,7 @@ func (c modelCatalog) within(p providerPolicy) modelCatalog {
 // if any answer lists it. Only an id that no answer in the window listed is
 // refused, with the nearest ids from every answer it saw — each of which this
 // check would accept.
-func (d *Driver) checkProviders(ctx context.Context, srv *server, model string) error {
+func (d *Driver) checkProviders(ctx context.Context, srv *server, model string, cwd fleet.AbsolutePath) error {
 	answer, read, err := d.readCatalog(ctx, srv)
 	if err != nil {
 		return err
@@ -308,6 +309,12 @@ func (d *Driver) checkProviders(ctx context.Context, srv *server, model string) 
 	cat := answer.ids
 	switch read {
 	case catalogUnknown:
+		// "Could not tell" proceeds as it always did, except where the policy
+		// judges single models and no model was pinned: then the runtime's
+		// default must be known to be allowed, and it was not learned.
+		if model == "" {
+			return d.checkUnpinnedDefault(ctx, srv, cwd, answer, read)
+		}
 		return nil
 	case catalogEmpty:
 		return d.noUsableProvider(nil)
@@ -316,7 +323,10 @@ func (d *Driver) checkProviders(ctx context.Context, srv *server, model string) 
 	if len(usable) == 0 {
 		return d.noUsableProvider(cat)
 	}
-	if model == "" || usable.has(model) {
+	if model == "" {
+		return d.checkUnpinnedDefault(ctx, srv, cwd, answer, read)
+	}
+	if usable.has(model) {
 		return nil
 	}
 	seen, err := d.settleModel(ctx, srv, model, usable)
@@ -331,6 +341,132 @@ func (d *Driver) checkProviders(ctx context.Context, srv *server, model string) 
 		msg += "; closest: " + strings.Join(quoteAll(near), ", ")
 	}
 	return &fleet.Error{Kind: fleet.ErrorInvalid, Message: msg, Machine: d.machine}
+}
+
+// wireConfig is the subset of the runtime's GET /config this driver reads: the
+// model the runtime is configured to use when a session names none.
+type wireConfig struct {
+	Model *string `json:"model"`
+}
+
+// readConfiguredModel asks the session's own server which model its merged
+// configuration names as the default, for the session's directory (a project may
+// configure its own). known is false when the runtime gave no usable answer — the
+// endpoint is absent, it answered an error, or its body is not an object — which
+// is "this driver could not tell", never "none configured". model is empty for an
+// object that names none. A server that does not answer at all is an error.
+func (d *Driver) readConfiguredModel(ctx context.Context, srv *server, cwd fleet.AbsolutePath) (model string, known bool, err error) {
+	var wire wireConfig
+	path := "/config?directory=" + url.QueryEscape(string(cwd))
+	if err := d.do(ctx, srv, "GET", path, nil, &wire); err != nil {
+		if isUnreachable(err) {
+			return "", false, err
+		}
+		return "", false, nil
+	}
+	if wire.Model == nil {
+		return "", true, nil
+	}
+	return *wire.Model, true, nil
+}
+
+// checkUnpinnedDefault refuses a create that pins no model when the policy
+// judges single models and the model the runtime would run it on is not one it
+// allows (muster #401).
+//
+// Without a pin the runtime picks: the model its configuration names, else a
+// default of one of the providers it lists. A provider-only policy needs no
+// check — the provider is already one the operator allowed — but a policy that
+// allows some models of a provider cannot say the same of whatever the runtime
+// picks, and the session's own configuration cannot carry model rules to stop it.
+// So the pick is learned first, from this server, and judged:
+//
+//   - a model the configuration names (for the session's directory) is the pick;
+//   - else every provider the first catalog answer lists contributes the default
+//     that answer names for it. The providers are not narrowed to the allowed
+//     ones: the runtime chooses among everything it lists, and in an isolated
+//     session the file has already narrowed that list.
+//
+// Every candidate must be allowed. Where the pick cannot be learned — no catalog
+// answer, no readable configuration, a listed provider with no default named —
+// the create is refused, in the repo's fail-closed posture for this policy: the
+// operator who wrote model rules is asking for exactly this, and the refusal says
+// to pin a model. The turn-time check (state.go) stays the backstop for a pick
+// that turns out different from the one judged here.
+func (d *Driver) checkUnpinnedDefault(ctx context.Context, srv *server, cwd fleet.AbsolutePath, answer catalogAnswer, read catalogRead) error {
+	if !d.providers.narrowsModels() {
+		return nil
+	}
+	configured, known, err := d.readConfiguredModel(ctx, srv, cwd)
+	if err != nil {
+		return err
+	}
+	var candidates []string
+	var why string
+	switch {
+	case known && configured != "":
+		candidates = []string{configured}
+	case read != catalogListed:
+		why = "the runtime did not list its models"
+		if !known {
+			why += " and its configuration could not be read"
+		}
+	default:
+		providers := map[string]bool{}
+		for _, id := range answer.ids {
+			providers[providerOfModel(id)] = true
+		}
+		names := make([]string, 0, len(providers))
+		for p := range providers {
+			names = append(names, p)
+		}
+		sort.Strings(names)
+		for _, p := range names {
+			def := answer.defaults[p]
+			if def == "" {
+				candidates = nil
+				why = fmt.Sprintf("the runtime named no default model for %q", p)
+				break
+			}
+			candidates = append(candidates, p+"/"+def)
+		}
+		if why == "" && !known {
+			// The listed defaults answer only where nothing is configured, and the
+			// configuration could not be read to say nothing is.
+			candidates, why = nil, "the runtime's configuration could not be read, and it may name a model of its own"
+		}
+	}
+	if why != "" {
+		return &fleet.Error{
+			Kind: fleet.ErrorUnsupported,
+			Message: fmt.Sprintf("create: no model was pinned, and this machine allows only some models, so the runtime's default "+
+				"must be known to be allowed; it could not be learned (%s). Pin a model this machine allows (allowed: %s)",
+				why, d.providers.describe()),
+			Machine: d.machine,
+		}
+	}
+	for _, c := range candidates {
+		provider, id, _ := strings.Cut(c, "/")
+		v, rule := d.providers.judge(provider, id)
+		var reason string
+		switch v {
+		case permitted:
+			continue
+		case modelDenied:
+			reason = "is denied by " + rule + " on this machine"
+		case modelNotAllowed:
+			reason = fmt.Sprintf("is on provider %q, where this machine allows only some models and none matches it", provider)
+		default:
+			reason = fmt.Sprintf("is on provider %q, which this machine does not allow", provider)
+		}
+		return &fleet.Error{
+			Kind: fleet.ErrorUnsupported,
+			Message: fmt.Sprintf("create: no model was pinned, and the runtime's default model %q %s; "+
+				"pin a model this machine allows (allowed: %s)", c, reason, d.providers.describe()),
+			Machine: d.machine,
+		}
+	}
+	return nil
 }
 
 // settleModel asks the runtime for its catalog again, every catalogPoll for up

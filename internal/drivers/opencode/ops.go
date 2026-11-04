@@ -187,7 +187,7 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 	// allows would otherwise answer on whatever it has, so that is a refusal too —
 	// read for every create, with or without a model. Refused before any session
 	// exists, and the process started for it is torn down again.
-	if err := d.checkProviders(ctx, srv, spec.Model); err != nil {
+	if err := d.checkProviders(ctx, srv, spec.Model, spec.Cwd); err != nil {
 		d.discardServer(srv)
 		return fleet.Session{}, err
 	}

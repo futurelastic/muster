@@ -554,3 +554,211 @@ func TestCreate_NothingUsableWhenEveryListedModelIsOutsideTheRules(t *testing.T)
 	}
 	requireNothingStarted(t, f)
 }
+
+// ---- an unpinned create under model rules (muster #401) -----------------------
+
+// requestsTo counts the requests the fake runtime saw for a method and path.
+func requestsTo(f *fakeServer, method, path string) int {
+	n := 0
+	for _, r := range f.requestsSnapshot() {
+		if r.method == method && r.path == path {
+			n++
+		}
+	}
+	return n
+}
+
+// A create that pins no model lands on whatever the runtime picks. Under a
+// policy that allows only some models of a provider, the pick must be known to
+// be one of them, so it is learned first and judged.
+func TestCreate_UnpinnedJudgesTheRuntimesDefaultAgainstTheModelRules(t *testing.T) {
+	exact := []string{"opencode/deepseek-v4.1-flash", "opencode/deepseek-v4-pro"}
+	denyGlob := []string{"opencode", "!opencode/*-free"}
+	cases := []struct {
+		name     string
+		policy   []string
+		catalog  map[string][]string
+		defaults map[string]string
+		config   map[string]any
+		status   int // GET /config status, 0 = serve config / 404 when nil
+		want     string
+		// wantErr is a phrase the refusal must carry; "" means the create succeeds.
+		wantErr string
+	}{
+		{
+			name:     "exact allowlist, the default is on it",
+			policy:   exact,
+			catalog:  map[string][]string{"opencode": {"deepseek-v4-pro", "big-pickle"}},
+			defaults: map[string]string{"opencode": "deepseek-v4-pro"},
+			config:   map[string]any{},
+		},
+		{
+			name:     "exact allowlist, the default is not on it",
+			policy:   exact,
+			catalog:  map[string][]string{"opencode": {"deepseek-v4-pro", "big-pickle"}},
+			defaults: map[string]string{"opencode": "big-pickle"},
+			config:   map[string]any{},
+			wantErr:  `the runtime's default model "opencode/big-pickle" is on provider "opencode", where this machine allows only some models and none matches it`,
+		},
+		{
+			name:     "deny glob, the default is denied",
+			policy:   denyGlob,
+			catalog:  map[string][]string{"opencode": {"paid-x", "big-free"}},
+			defaults: map[string]string{"opencode": "big-free"},
+			config:   map[string]any{},
+			wantErr:  `the runtime's default model "opencode/big-free" is denied by !opencode/*-free`,
+		},
+		{
+			name:     "deny glob, the default is allowed",
+			policy:   denyGlob,
+			catalog:  map[string][]string{"opencode": {"paid-x", "big-free"}},
+			defaults: map[string]string{"opencode": "paid-x"},
+			config:   map[string]any{},
+		},
+		{
+			name:     "the configuration names a denied model, over an allowed catalog default",
+			policy:   denyGlob,
+			catalog:  map[string][]string{"opencode": {"paid-x", "big-free"}},
+			defaults: map[string]string{"opencode": "paid-x"},
+			config:   map[string]any{"model": "opencode/big-free"},
+			wantErr:  `the runtime's default model "opencode/big-free" is denied by !opencode/*-free`,
+		},
+		{
+			name:     "the configuration names an allowed model, over a denied catalog default",
+			policy:   denyGlob,
+			catalog:  map[string][]string{"opencode": {"paid-x", "big-free"}},
+			defaults: map[string]string{"opencode": "big-free"},
+			config:   map[string]any{"model": "opencode/paid-x"},
+		},
+		{
+			name:     "two providers, both defaults allowed",
+			policy:   []string{"deepseek", "opencode/paid-x"},
+			catalog:  map[string][]string{"deepseek": {"deepseek-flash"}, "opencode": {"paid-x"}},
+			defaults: map[string]string{"deepseek": "deepseek-flash", "opencode": "paid-x"},
+			config:   map[string]any{},
+		},
+		{
+			name:     "two providers, one default is not allowed: the runtime may pick either",
+			policy:   []string{"deepseek", "opencode/paid-x"},
+			catalog:  map[string][]string{"deepseek": {"deepseek-flash"}, "opencode": {"paid-x", "big-pickle"}},
+			defaults: map[string]string{"deepseek": "deepseek-flash", "opencode": "big-pickle"},
+			config:   map[string]any{},
+			wantErr:  `the runtime's default model "opencode/big-pickle"`,
+		},
+		{
+			name:    "a listed provider names no default",
+			policy:  denyGlob,
+			catalog: map[string][]string{"opencode": {"paid-x"}},
+			config:  map[string]any{},
+			wantErr: `it could not be learned (the runtime named no default model for "opencode")`,
+		},
+		{
+			name:     "the configuration cannot be read",
+			policy:   denyGlob,
+			catalog:  map[string][]string{"opencode": {"paid-x"}},
+			defaults: map[string]string{"opencode": "paid-x"},
+			status:   500,
+			wantErr:  "it could not be learned (the runtime's configuration could not be read",
+		},
+		{
+			name:     "the runtime has no configuration endpoint",
+			policy:   denyGlob,
+			catalog:  map[string][]string{"opencode": {"paid-x"}},
+			defaults: map[string]string{"opencode": "paid-x"},
+			wantErr:  "it could not be learned",
+		},
+		{
+			name:    "the catalog cannot be read and the configuration names nothing",
+			policy:  denyGlob,
+			config:  map[string]any{},
+			wantErr: "it could not be learned (the runtime did not list its models)",
+		},
+		{
+			name:   "the catalog cannot be read but the configuration names an allowed model",
+			policy: denyGlob,
+			config: map[string]any{"model": "opencode/paid-x"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeServer(t)
+			f.catalog, f.catalogDefaults, f.config, f.configStatus = tc.catalog, tc.defaults, tc.config, tc.status
+			d, err := newDriverWithOptions(t, f, WithProviders(tc.policy))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = createWithModel(t, d, "")
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("create: %v, want it allowed", err)
+				}
+				return
+			}
+			msg := refusalOf(t, err)
+			for _, want := range []string{"create: no model was pinned", tc.wantErr, "(allowed: "} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("refusal %q does not say %q", msg, want)
+				}
+			}
+			requireNothingStarted(t, f)
+		})
+	}
+}
+
+// Only a policy that judges single models needs the runtime's default: a
+// provider-only policy never asks for the configuration, and a pinned create
+// has chosen its model.
+func TestCreate_TheConfigurationIsReadOnlyWhereTheDefaultMatters(t *testing.T) {
+	// Provider-only: today's behaviour, byte for byte, with no extra request.
+	f := newFakeServer(t)
+	f.catalog = map[string][]string{"deepseek": {"deepseek-flash"}}
+	d, err := newDriverWithOptions(t, f, WithProviders([]string{"deepseek"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := createWithModel(t, d, ""); err != nil {
+		t.Fatalf("provider-only, unpinned: %v", err)
+	}
+	if n := requestsTo(f, "GET", "/config"); n != 0 {
+		t.Errorf("a provider-only policy read GET /config %d times, want 0", n)
+	}
+
+	// Model rules, pinned to an allowed model: the pin is the answer.
+	g := newFakeServer(t)
+	g.catalog = map[string][]string{"opencode": {"paid-x", "big-free"}}
+	e, err := newDriverWithOptions(t, g, WithProviders([]string{"opencode", "!opencode/*-free"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := createWithModel(t, e, "opencode/paid-x"); err != nil {
+		t.Fatalf("pinned: %v", err)
+	}
+	if n := requestsTo(g, "GET", "/config"); n != 0 {
+		t.Errorf("a pinned create read GET /config %d times, want 0", n)
+	}
+}
+
+// The directory the session is created in is the one the configuration is read
+// for: a project may configure a model of its own.
+func TestCreate_TheConfiguredModelIsReadForTheSessionsDirectory(t *testing.T) {
+	f := newFakeServer(t)
+	f.catalog = map[string][]string{"opencode": {"paid-x"}}
+	f.catalogDefaults = map[string]string{"opencode": "paid-x"}
+	f.config = map[string]any{}
+	d, err := newDriverWithOptions(t, f, WithProviders([]string{"opencode", "!opencode/*-free"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := createWithModel(t, d, ""); err != nil {
+		t.Fatal(err)
+	}
+	var query string
+	for _, r := range f.requestsSnapshot() {
+		if r.method == "GET" && r.path == "/config" {
+			query = r.query
+		}
+	}
+	if !strings.Contains(query, "directory=%2Fwork%2Fx") {
+		t.Errorf("GET /config query = %q, want the session's directory", query)
+	}
+}

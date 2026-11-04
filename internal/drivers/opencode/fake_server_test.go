@@ -53,6 +53,12 @@ type fakeServer struct {
 	// provider id to the model the runtime would use (muster #400).
 	catalogDefaults map[string]string
 
+	// config, when non-nil, is served by GET /config (the merged configuration);
+	// nil makes the endpoint 404, like a runtime without it. configStatus, when
+	// set, makes it answer that status instead (muster #401).
+	config       map[string]any
+	configStatus int
+
 	// permissions are the asks GET /permission lists (muster #283);
 	// permissionStatus, when set, makes the endpoint answer that status instead
 	// (404 is a runtime without it).
@@ -213,6 +219,8 @@ func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 		f.handleCreate(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/config/providers":
 		f.handleProviders(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/config":
+		f.handleConfig(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/agent":
 		f.handleAgents(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/permission":
@@ -690,6 +698,24 @@ func (f *fakeServer) busConns() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.bus)
+}
+
+// handleConfig serves GET /config: the merged configuration, or the status the
+// test set.
+func (f *fakeServer) handleConfig(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	cfg, status := f.config, f.configStatus
+	f.mu.Unlock()
+	if status != 0 {
+		w.WriteHeader(status)
+		return
+	}
+	if cfg == nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(cfg)
 }
 
 // handleProviders serves GET /config/providers in the runtime's shape:

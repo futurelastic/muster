@@ -540,13 +540,26 @@ func TestDescribe_ModelRules(t *testing.T) {
 
 // ---- the turn-time check with model rules ------------------------------------
 
+// createPinned creates a session pinned to model. A policy that judges single
+// models refuses a create that pins none unless the runtime's default is known,
+// and these tests are about the turn's record, not that.
+func createPinned(t *testing.T, d *Driver, model string) fleet.SessionRef {
+	t.Helper()
+	sess, err := d.Create(context.Background(), fleet.RequestFrom(fleet.Caller{Principal: "test"}), "key-"+model,
+		fleet.SessionSpec{Cwd: "/work/x", Name: "t", Model: model})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	return sess.SessionRef
+}
+
 func TestState_TurnOnAModelOutsideTheExactAllowlistIsFailed(t *testing.T) {
 	f := newFakeServer(t)
 	d, err := newDriverWithOptions(t, f, WithProviders([]string{"deepseek", "opencode/deepseek-v4-pro"}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	ref := createOne(t, d, "/work/x", "key-1")
+	ref := createPinned(t, d, "opencode/deepseek-v4-pro")
 
 	f.setLastMessage(ref.ID, wireMessage{Info: wireMessageInfo{Role: "assistant", ProviderID: "opencode", ModelID: "deepseek-v4-pro"}})
 	if st := idleTurnState(t, d, ref.ID); st.LastTurn != nil {
@@ -571,7 +584,7 @@ func TestState_TurnOnADeniedModelNamesTheRule(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ref := createOne(t, d, "/work/x", "key-1")
+	ref := createPinned(t, d, "opencode/paid-x")
 	f.setLastMessage(ref.ID, wireMessage{Info: wireMessageInfo{
 		Role: "assistant", ProviderID: "opencode", ModelID: "big-free",
 		Error: &wireAssistantError{Name: "MessageOutputLengthError"},
