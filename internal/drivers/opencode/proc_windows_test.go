@@ -31,6 +31,13 @@ func shellCommand(cmd string) *exec.Cmd { return exec.Command("cmd.exe", "/c", c
 // ping.exe lives in the system directory, which is on that PATH.
 func longSleeper() *exec.Cmd { return exec.Command("ping", "-n", "600", "127.0.0.1") }
 
+// detachedStray is the test binary acting as a long-lived program; Windows has no
+// process that leaves a job to model (muster #405).
+func detachedStray() *exec.Cmd {
+	exe, _ := os.Executable()
+	return exec.Command(exe, "__stray")
+}
+
 // platformSessionEnv are the variables a session also receives on this
 // platform, beyond the ones every platform scopes.
 var platformSessionEnv = []string{

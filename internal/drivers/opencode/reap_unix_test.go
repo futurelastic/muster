@@ -253,6 +253,10 @@ func scopedTmp(root string, n int) string {
 	return filepath.Join(root, "muster-opencode-"+strconv.Itoa(n), "tmp")
 }
 
+// What this asserts is the SERVER sweep. The sweep for the other processes of a
+// session (muster #405) is off in this helper; strays_unix_test.go turns it on, and
+// a process that is not a group's leader but carries a session's TMPDIR is stopped
+// there.
 func TestSweep_StopsOnlyServersUnderItsRootThatAreLeadersOfTheirGroup(t *testing.T) {
 	needsProcessScan(t)
 	const secret = "planted-credential-6f1c2a"

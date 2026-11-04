@@ -50,6 +50,24 @@ func TestMain(m *testing.M) {
 			}
 			fmt.Println("fake-opencode 0.0.0")
 			os.Exit(0)
+		case "__stray":
+			// muster #405: a long-lived process standing in for a browser a tool
+			// started in a session of its own. The test binary rather than a system
+			// program, because macOS prints no environment for a protected one.
+			time.Sleep(10 * time.Minute)
+			os.Exit(0)
+		case "__stopfrom":
+			// muster #405: runs the stray sweep from inside a process, to show what it
+			// does to the one running it and to its parent.
+			stopped, left, err := stopStrays(os.Args[2], "")
+			fmt.Printf("stopped=%d left=%d err=%v\n", len(stopped), len(left), err)
+			os.Exit(0)
+		case "__relay":
+			// muster #405: a process that runs __stopfrom as its child.
+			exe, _ := os.Executable()
+			out, err := exec.Command(exe, "__stopfrom", os.Args[2]).CombinedOutput()
+			fmt.Printf("%s relay-alive err=%v\n", strings.TrimSpace(string(out)), err)
+			os.Exit(0)
 		case "serve":
 			if serveFailLoggedStub(os.Args[2:]) {
 				os.Exit(3)
@@ -311,6 +329,17 @@ func runFakeOpencode(args []string) {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
+			writeJSON(w, map[string]any{"pid": cmd.Process.Pid})
+		case path == "/__test/detach" && r.Method == http.MethodPost:
+			// A long-lived process that has LEFT the session's process group, as a
+			// browser a tool started with setsid does (muster #405). It inherits this
+			// server's environment, so its TMPDIR is the session's.
+			cmd := detachedStray()
+			if err := cmd.Start(); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			go func() { _ = cmd.Wait() }()
 			writeJSON(w, map[string]any{"pid": cmd.Process.Pid})
 		default:
 			http.NotFound(w, r)

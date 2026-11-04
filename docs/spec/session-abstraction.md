@@ -2208,6 +2208,29 @@ part of that identity could not be seen. It needs a platform that can read anoth
 environment (macOS, Linux); elsewhere it does nothing. `muster doctor` reports the same processes, as
 the count in the `runtime.opencode.servers` row.
 
+A process the session's tools started can also **leave the server's process group**: a browser or
+a watcher started in a session of its own (`setsid`) is reached by no group kill, is reparented to
+init when its launcher exits, and is named by nothing (#405). What names it is where it lives: it is
+tied to its scoped directory by any one of three facts — its **command line begins with a path inside
+the directory** (an executable a tool installed under the session's own temp area), it carries
+**`--user-data-dir=` with a path inside the directory** (a browser profile), or its **`TMPDIR` is the
+directory's `tmp`** (inherited from the server, as every process the server's tools start inherits it).
+Each fact is matched on the whole path — the session root, the scoped name's pattern and a separator —
+so a sibling directory, another root, a differently numbered session, or a process that merely has such
+a path among its arguments does not match. A process is stopped only at a moment its session is already
+over, never while it is live: when a server is torn down (a close, a session the runtime reports
+deleted, and the service stopping, where a persisted session keeps its directory but not what the old
+server started), when a session listed `unknown` is closed, and at the start-up sweep, **after** the
+servers are stopped and before anything is resumed, for every scoped directory under the root. It
+asks the processes to end, gives them two seconds, then kills those still matching, each by its own
+pid and never by its group, and reads the process table again rather than trust signal 0 (a zombie
+still answers it). It never signals the service's own process or its ancestors, nor another user's
+process; a process that will not stop is logged, with a count and the directory's name and nothing
+from its command line or environment. The environment is read only to match it. The start-up part runs
+only with a state directory; the sweep needs a platform that can list processes with their
+environments (macOS, Linux) and does nothing elsewhere, including Windows, where the server's Job Object
+already holds every descendant.
+
 A scoped directory that no record names is a second thing nothing used to remove (#399). What was
 measured on a machine that had them is not a tree whose record went missing: every one was the
 leftover of a removal that did not finish — only the runtime's cache and lock files, or only
