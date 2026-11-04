@@ -591,6 +591,9 @@ type Driver struct {
 	// seam beside it: a driver built for a test never queries the real
 	// process table merely because it was constructed. See WithProcessAgent.
 	agentFromProcess bool
+	// procTable is the machine's process-table snapshot, shared by every
+	// listing (muster #404, processtable.go).
+	procTable procTableCache
 
 	// inboxResolver and inboxDial are muster #119's own seam. Nil
 	// means unconfigured — the same off-by-default contract as

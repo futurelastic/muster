@@ -190,3 +190,58 @@ func TestProbeAgentProgram_PathNamesTheFile(t *testing.T) {
 		t.Errorf("absent file: found=%v known=%v, want missing and known", found, known)
 	}
 }
+
+func TestBackoffTTL(t *testing.T) {
+	for _, c := range []struct {
+		n    int
+		want time.Duration
+	}{
+		{0, 10 * time.Second}, {1, 10 * time.Second}, {2, 20 * time.Second}, {3, 40 * time.Second},
+		{5, 160 * time.Second}, {6, 5 * time.Minute}, {40, 5 * time.Minute},
+	} {
+		if got := backoffTTL(10*time.Second, 5*time.Minute, c.n); got != c.want {
+			t.Errorf("backoffTTL(n=%d) = %v, want %v", c.n, got, c.want)
+		}
+	}
+}
+
+// A probe that cannot answer (a loaded machine's login shell outlasting its
+// timeout) is not retried on a fixed short clock: each further unknown doubles
+// the wait, and a known answer starts it over (muster #404).
+func TestAgentProgramMissing_UnknownBacksOffAndAKnownAnswerResets(t *testing.T) {
+	skipWindows(t)
+	p := &probeExec{out: "no sentinel\n"}
+	now := time.Unix(1_800_000_000, 0)
+	d := New("m", withExec(p.exec), withClock(func() time.Time { return now }))
+
+	wantWaits := []time.Duration{agentUnknownTTL, 2 * agentUnknownTTL, 4 * agentUnknownTTL}
+	for i, wait := range wantWaits {
+		if _, missing := d.AgentProgramMissing(context.Background()); missing {
+			t.Fatal("an unknown answer must read as available")
+		}
+		if p.count() != i+1 {
+			t.Fatalf("round %d: probes = %d, want %d", i, p.count(), i+1)
+		}
+		now = now.Add(wait - time.Second) // still inside the wait
+		d.AgentProgramMissing(context.Background())
+		if p.count() != i+1 {
+			t.Fatalf("round %d: probed again %v after an unknown answer, want to hold for %v", i, wait-time.Second, wait)
+		}
+		now = now.Add(2 * time.Second) // past it
+	}
+	// It answers at last: the wait is the known answer's, and the count resets.
+	p.mu.Lock()
+	p.out = agentFoundMark + "\n"
+	p.mu.Unlock()
+	d.AgentProgramMissing(context.Background())
+	if d.agentProbe.unknowns != 0 {
+		t.Errorf("unknowns = %d after a known answer, want 0", d.agentProbe.unknowns)
+	}
+	// Found is long-lived.
+	n := p.count()
+	now = now.Add(agentFoundTTL - time.Second)
+	d.AgentProgramMissing(context.Background())
+	if p.count() != n {
+		t.Error("a found answer was retaken inside its lifetime")
+	}
+}

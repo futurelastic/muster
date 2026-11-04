@@ -45,12 +45,22 @@ import (
 // that as available. Taking a working runtime offline because a probe had a
 // bad day is the worse error.
 //
-// # Cached, but not for long
+// # Cached, and backed off when it cannot answer
 //
 // Listing the runtimes and every create ask, and each ask would start a login
-// shell. The answer is kept for a few seconds — long enough that a burst of
-// creates costs one shell, short enough that installing the program is
-// noticed without a restart.
+// shell, which sources the user's whole startup profile: its cost grows with
+// how busy the machine is. The answer is kept long enough that polling the
+// runtime list costs a shell every few minutes rather than every few seconds
+// (muster #404), and short enough that installing the program is noticed
+// without a restart.
+//
+// A probe that could not answer is the one to be careful with. On a loaded
+// machine the shell can outlast its timeout, and the answer is then "not known"
+// — which used to be asked again ten seconds later, forever, so a machine too
+// busy to answer spent a growing share of itself asking. Consecutive unknown
+// answers now double the wait, up to agentUnknownMaxTTL, and any answer that
+// is known starts it over. "Not known" is read as available either way, so the
+// longer wait costs nothing a caller could see.
 
 const defaultAgentProgram = "claude"
 
@@ -58,9 +68,12 @@ const defaultAgentProgram = "claude"
 var agentProbeTimeout = 8 * time.Second
 
 const (
-	agentFoundTTL   = 30 * time.Second
-	agentMissingTTL = 5 * time.Second
-	agentUnknownTTL = 10 * time.Second
+	agentFoundTTL   = 5 * time.Minute
+	agentMissingTTL = 30 * time.Second
+	// agentUnknownTTL is the wait after the first unknown answer; each further
+	// consecutive one doubles it, up to agentUnknownMaxTTL.
+	agentUnknownTTL    = 10 * time.Second
+	agentUnknownMaxTTL = 5 * time.Minute
 
 	agentFoundMark   = "MUSTER_AGENT_PROGRAM_FOUND"
 	agentMissingMark = "MUSTER_AGENT_PROGRAM_MISSING"
@@ -91,6 +104,33 @@ type agentProbeCache struct {
 	result agentProbeResult
 	at     time.Time
 	valid  bool
+	// unknowns is how many probes in a row came back unknown; it sets the wait
+	// before the next one (backoffTTL).
+	unknowns int
+}
+
+// ttl is how long the held answer is trusted.
+func (c *agentProbeCache) ttl() time.Duration {
+	switch c.result {
+	case agentFound:
+		return agentFoundTTL
+	case agentMissing:
+		return agentMissingTTL
+	}
+	return backoffTTL(agentUnknownTTL, agentUnknownMaxTTL, c.unknowns)
+}
+
+// backoffTTL is base after the first failure, doubling with each further
+// consecutive one, never more than limit. n counts the failures so far.
+func backoffTTL(base, limit time.Duration, n int) time.Duration {
+	d := base
+	for i := 1; i < n && d < limit; i++ {
+		d *= 2
+	}
+	if d > limit {
+		d = limit
+	}
+	return d
 }
 
 // AgentProgramMissing implements driver.AgentProgramReporter.
@@ -104,14 +144,7 @@ func (d *Driver) AgentProgramMissing(ctx context.Context) (string, bool) {
 	defer c.mu.Unlock()
 	now := d.now()
 	if c.valid {
-		ttl := agentUnknownTTL
-		switch c.result {
-		case agentFound:
-			ttl = agentFoundTTL
-		case agentMissing:
-			ttl = agentMissingTTL
-		}
-		if now.Sub(c.at) < ttl {
+		if age := now.Sub(c.at); age >= 0 && age < c.ttl() {
 			return prog, c.result == agentMissing
 		}
 	}
@@ -122,6 +155,11 @@ func (d *Driver) AgentProgramMissing(ctx context.Context) (string, bool) {
 		return prog, false
 	}
 	c.result, c.at, c.valid = res, now, true
+	if res == agentUnknown {
+		c.unknowns++
+	} else {
+		c.unknowns = 0
+	}
 	return prog, res == agentMissing
 }
 
