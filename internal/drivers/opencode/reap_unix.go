@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -282,4 +283,234 @@ func serverFromLine(line string, pid, pgid int, root string) (serverProc, bool) 
 		return serverProc{}, false
 	}
 	return serverProc{pid: pid, pgid: pgid, port: port, dir: dir}, true
+}
+
+// ---- processes that left their group (muster #405) -------------------------
+
+// strayGrace bounds each of the two waits in stopStrays: after the polite signal,
+// and after the kill. A process in uninterruptible sleep outlives a SIGKILL by a
+// few seconds (measured on the headless browsers this was written for), so the
+// wait is a bound and what is still there after it is reported, never waited for.
+const strayGrace = 2 * time.Second
+
+// strayPoll is how often the process table is read again while waiting.
+const strayPoll = 100 * time.Millisecond
+
+// stopStrays stops every process, in any process group, that belongs to a scoped
+// directory under root (strays.go says what that means); only, when non-empty,
+// narrows it to the directory of that name. The processes are asked to end, given
+// one grace period, and the ones still matching are killed. A process is signalled
+// by its own pid and never by its group: the group of a stray can hold a process
+// that is not one.
+//
+// A process is looked at again right before each signal, so a pid reused since the
+// scan is not signalled; the service's own process and its ancestors are never
+// signalled, whatever they carry (a service started from inside a session's tool
+// shell would otherwise stop itself). Whether a process is gone is read from the
+// process table again, not from signal 0, which a zombie still answers.
+//
+// err is the first scan's: ErrScanUnsupported where the platform cannot list
+// processes with their command lines and environments. left holds what was still
+// matching at the end.
+func stopStrays(root, only string) (stopped, left []strayProc, err error) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		return nil, nil, ErrScanUnsupported
+	}
+	found, err := scanStrays(root, only)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(found) == 0 {
+		return nil, nil, nil
+	}
+	protected := selfAndAncestors()
+	scan := func() ([]strayProc, error) {
+		all, err := scanStrays(root, only)
+		return withoutPids(all, protected), err
+	}
+	remaining := withoutPids(found, protected)
+	seen := map[int]strayProc{}
+	for _, step := range []syscall.Signal{syscall.SIGTERM, syscall.SIGKILL} {
+		if len(remaining) == 0 {
+			break
+		}
+		for _, p := range remaining {
+			seen[p.pid] = p
+			// Looked at again right before the signal.
+			if again, ok := inspectStray(p.pid, root, only); ok && again.dir == p.dir {
+				_ = syscall.Kill(p.pid, step)
+			}
+		}
+		remaining = waitStraysGone(scan, remaining)
+	}
+	still := map[int]bool{}
+	for _, p := range remaining {
+		still[p.pid] = true
+	}
+	for _, p := range seen {
+		if !still[p.pid] {
+			stopped = append(stopped, p)
+		}
+	}
+	sortStrays(stopped)
+	sortStrays(remaining)
+	return stopped, remaining, nil
+}
+
+// waitStraysGone reads the process table until nothing matches or strayGrace has
+// passed, and returns what still matched at the last read. A read that fails
+// leaves the answer as it was: it is not evidence that anything stopped.
+func waitStraysGone(scan func() ([]strayProc, error), prev []strayProc) []strayProc {
+	deadline := time.Now().Add(strayGrace)
+	for {
+		time.Sleep(strayPoll)
+		now, err := scan()
+		if err != nil {
+			return prev
+		}
+		if len(now) == 0 || !time.Now().Before(deadline) {
+			return now
+		}
+		prev = now
+	}
+}
+
+func withoutPids(procs []strayProc, skip map[int]bool) []strayProc {
+	var out []strayProc
+	for _, p := range procs {
+		if !skip[p.pid] {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func sortStrays(procs []strayProc) {
+	sort.Slice(procs, func(i, j int) bool { return procs[i].pid < procs[j].pid })
+}
+
+// selfAndAncestors returns this process's pid and those of its parents, up to the
+// first one that cannot be read.
+func selfAndAncestors() map[int]bool {
+	m := map[int]bool{}
+	for pid := os.Getpid(); pid > 1 && !m[pid] && len(m) < 64; pid = parentOf(pid) {
+		m[pid] = true
+	}
+	return m
+}
+
+func parentOf(pid int) int {
+	out, err := exec.Command("ps", "-o", "ppid=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return 0
+	}
+	ppid, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return 0
+	}
+	return ppid
+}
+
+// scanStrays lists the processes of the service user that belong to a scoped
+// directory under root, whatever process group they are in.
+func scanStrays(root, only string) ([]strayProc, error) {
+	switch runtime.GOOS {
+	case "darwin":
+		return scanStraysPS(root, only)
+	case "linux":
+		return scanStraysProc(root, only)
+	}
+	return nil, ErrScanUnsupported
+}
+
+// inspectStray reads one process again and reports it when it still belongs to a
+// scoped directory under root.
+func inspectStray(pid int, root, only string) (strayProc, bool) {
+	switch runtime.GOOS {
+	case "darwin":
+		out, err := exec.Command("ps", "-ww", "-E", "-p", strconv.Itoa(pid), "-o", "pid=,ppid=,uid=,command=").Output()
+		if err != nil {
+			return strayProc{}, false
+		}
+		return strayFromPSLine(strings.TrimSpace(string(out)), newStrayMatcher(root), only)
+	case "linux":
+		return inspectStrayProc(newStrayMatcher(root), pid, only)
+	}
+	return strayProc{}, false
+}
+
+// scanStraysPS reads the whole process table once, with each process's
+// environment after its command line: one `ps` is what keeps the scan cheap enough
+// to run on every close. Only the service user's own processes are looked at (ps
+// shows no one else's environment), and a line is matched in memory and dropped.
+// A protected system binary prints no environment, which here only means the
+// environment fact cannot be used for it.
+func scanStraysPS(root, only string) ([]strayProc, error) {
+	out, err := exec.Command("ps", "-axwwE", "-o", "pid=,ppid=,uid=,command=").Output()
+	if err != nil {
+		return nil, err
+	}
+	m := newStrayMatcher(root)
+	var found []strayProc
+	for _, line := range strings.Split(string(out), "\n") {
+		if p, ok := strayFromPSLine(line, m, only); ok {
+			found = append(found, p)
+		}
+	}
+	return found, nil
+}
+
+// strayFromPSLine matches one line of `ps -o pid=,ppid=,uid=,command=` (the
+// second number is the parent, not the group).
+func strayFromPSLine(line string, m *strayMatcher, only string) (strayProc, bool) {
+	pid, _, uid, cmd, ok := splitPSLine(line)
+	if !ok || pid <= 1 || uid != os.Getuid() {
+		return strayProc{}, false
+	}
+	return m.strayFromLine(cmd, pid, only)
+}
+
+func scanStraysProc(root, only string) ([]strayProc, error) {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil, err
+	}
+	m := newStrayMatcher(root)
+	var found []strayProc
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil || pid <= 1 {
+			continue
+		}
+		if p, ok := inspectStrayProc(m, pid, only); ok {
+			found = append(found, p)
+		}
+	}
+	return found, nil
+}
+
+// inspectStrayProc reads one /proc entry: the command line first (it settles the
+// executable and the profile), the environment only when that did not.
+func inspectStrayProc(m *strayMatcher, pid int, only string) (strayProc, bool) {
+	dir := filepath.Join("/proc", strconv.Itoa(pid))
+	info, err := os.Stat(dir)
+	if err != nil {
+		return strayProc{}, false
+	}
+	if st, ok := info.Sys().(*syscall.Stat_t); !ok || int(st.Uid) != os.Getuid() {
+		return strayProc{}, false
+	}
+	cmd, err := os.ReadFile(filepath.Join(dir, "cmdline"))
+	if err != nil || len(cmd) == 0 {
+		return strayProc{}, false
+	}
+	line := nulToSpace(cmd)
+	if p, ok := m.strayFromLine(line, pid, only); ok {
+		return p, true
+	}
+	env, err := os.ReadFile(filepath.Join(dir, "environ"))
+	if err != nil {
+		return strayProc{}, false
+	}
+	return m.strayFromLine(line+" "+nulToSpace(env), pid, only)
 }

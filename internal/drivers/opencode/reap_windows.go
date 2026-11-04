@@ -23,3 +23,10 @@ func inspectServer(pid int, root string) (serverProc, bool) { return serverProc{
 
 // stopGroups stops nothing: scanServers never finds anything to stop.
 func stopGroups(pids []int) []int { return nil }
+
+// stopStrays stops nothing, for the same reason (muster #405): every process a
+// session's tools start is in the job the server was assigned to, which the kernel
+// terminates as a whole, so there is no process that left it to look for.
+func stopStrays(root, only string) (stopped, left []strayProc, err error) {
+	return nil, nil, ErrScanUnsupported
+}

@@ -258,6 +258,12 @@ func (d *Driver) closeUnlaunched(req fleet.Request, ref fleet.SessionRef, prior 
 		d.say("opencode: stopped a server left running by an earlier service (session %s, pid %d, port %d)", rec.ID, rec.Pid, rec.Port)
 	}
 	if prior.dir != "" {
+		// muster #405: and what the session started outside the server's process
+		// group, found by the directory that is about to be removed.
+		if !d.noStraySweep {
+			stopped, left := stopStraysIn(prior.dir)
+			d.sayStrays("still running when their session was closed", stopped, left)
+		}
 		if err := os.RemoveAll(prior.dir); err != nil {
 			return fleet.Ack{}, fmt.Errorf("close: removing the session's directory: %w", err)
 		}

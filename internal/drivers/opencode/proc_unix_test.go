@@ -3,6 +3,7 @@
 package opencode
 
 import (
+	"os"
 	"os/exec"
 	"syscall"
 )
@@ -21,6 +22,16 @@ func shellCommand(cmd string) *exec.Cmd { return exec.Command("/bin/sh", "-c", c
 
 // longSleeper is a long-lived process found through the PATH the driver built.
 func longSleeper() *exec.Cmd { return exec.Command("sleep", "600") }
+
+// detachedStray is a long-lived process in a session of its own, so no process
+// group stop of whatever started it reaches it (muster #405). It is the test
+// binary acting as the program (TestMain, "__stray").
+func detachedStray() *exec.Cmd {
+	exe, _ := os.Executable()
+	cmd := exec.Command(exe, "__stray")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	return cmd
+}
 
 // platformSessionEnv are the variables a session also receives on this
 // platform, beyond the ones every platform scopes.

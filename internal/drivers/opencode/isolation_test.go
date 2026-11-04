@@ -31,7 +31,7 @@ func newIsolatedDriver(t *testing.T, extra ...Option) (*Driver, string) {
 		t.Fatal(err)
 	}
 	root := t.TempDir()
-	opts := append([]Option{WithBinary(exe), WithSessionRoot(root)}, extra...)
+	opts := append([]Option{WithBinary(exe), WithSessionRoot(root), withoutStraySweep()}, extra...)
 	d, err := New(context.Background(), "test-machine", opts...)
 	if err != nil {
 		t.Fatalf("New: %v", err)

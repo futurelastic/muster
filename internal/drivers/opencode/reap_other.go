@@ -17,3 +17,8 @@ func inspectServer(pid int, root string) (serverProc, bool) { return serverProc{
 
 // stopGroups stops nothing: scanServers never finds anything to stop.
 func stopGroups(pids []int) []int { return nil }
+
+// stopStrays has no process table to read here (muster #405).
+func stopStrays(root, only string) (stopped, left []strayProc, err error) {
+	return nil, nil, ErrScanUnsupported
+}
