@@ -503,10 +503,13 @@ func TestConfigKeys_ModelRules(t *testing.T) {
 		return string(b)
 	}
 	// A provider allowed for one model is still a provider the runtime must enable.
-	if got, want := keys("deepseek", "opencode/deepseek-v4-pro"), `{"enabled_providers":["deepseek","opencode"]}`; got != want {
+	// The one model entry is the helper model (muster #402): a name, not a rule.
+	if got, want := keys("deepseek", "opencode/deepseek-v4-pro"),
+		`{"enabled_providers":["deepseek","opencode"],"small_model":"opencode/deepseek-v4-pro"}`; got != want {
 		t.Errorf("exact-model allowlist: %s, want %s", got, want)
 	}
-	if got, want := keys("opencode/a", "opencode/b"), `{"enabled_providers":["opencode"]}`; got != want {
+	if got, want := keys("opencode/a", "opencode/b"),
+		`{"enabled_providers":["opencode"],"small_model":"opencode/a"}`; got != want {
 		t.Errorf("two models on one provider: %s, want %s", got, want)
 	}
 	// A deny alone is not an allow list: the default-off built-in provider stays.
@@ -602,5 +605,75 @@ func TestState_TurnOnADeniedModelNamesTheRule(t *testing.T) {
 	f.setLastMessage(ref.ID, wireMessage{Info: wireMessageInfo{Role: "assistant", ProviderID: "opencode"}})
 	if st := idleTurnState(t, d, ref.ID); st.LastTurn != nil {
 		t.Errorf("a provider-only record on an allowed provider: LastTurn = %+v, want none", st.LastTurn)
+	}
+}
+
+// The runtime's helper calls (muster #402) run on a small model the runtime picks
+// itself, and `small_model` is the key that pins it. Under a policy that judges
+// single models the file names an allowed one, from the policy alone; under any
+// other it names none and the runtime picks as it always did.
+func TestHelperModel(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		entries []string
+		want    string
+	}{
+		{"no entries: the default posture judges no model", nil, ""},
+		{"providers alone: every model on an allowed provider is allowed", []string{"deepseek", "opencode"}, ""},
+		{"the first exact entry, in the operator's order", []string{"deepseek", "opencode/b-cheap", "opencode/a-big"}, "opencode/b-cheap"},
+		{"a glob cannot name one model without a catalog", []string{"opencode/deepseek-*"}, ""},
+		{"a glob is skipped for the exact entry after it", []string{"opencode/deepseek-*", "opencode/deepseek-v4-pro"}, "opencode/deepseek-v4-pro"},
+		{"an exact entry a deny matches is not allowed, so it is skipped", []string{"opencode/a", "opencode/b", "!opencode/a"}, "opencode/b"},
+		{"every exact entry denied", []string{"opencode/a", "!opencode/a"}, ""},
+		{"a deny alone names no model to use", []string{"!opencode/*-free"}, ""},
+		{"a deny beside whole providers names no model to use", []string{"opencode", "!opencode/*-free"}, ""},
+	} {
+		p, err := newProviderPolicy(c.entries)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if got := p.helperModel(); got != c.want {
+			t.Errorf("%s: helperModel() = %q, want %q", c.name, got, c.want)
+		}
+		_, has := p.configKeys()["small_model"]
+		if has != (c.want != "") {
+			t.Errorf("%s: small_model written = %v, want %v", c.name, has, c.want != "")
+		}
+		// Whatever it names is an allowed model: the pin can never be the way a
+		// helper call reaches a model the policy refuses.
+		if c.want != "" && !p.permitsModel(c.want) {
+			t.Errorf("%s: the helper model %q is not allowed by the policy that chose it", c.name, c.want)
+		}
+	}
+}
+
+// The file a session is started with carries the helper model under a policy that
+// judges single models, and carries none otherwise — at create and at relaunch,
+// like the rest of the policy.
+func TestProviders_TheSessionsConfigPinsTheHelperModel(t *testing.T) {
+	d, _ := newIsolatedDriver(t, WithProviders([]string{"deepseek", "opencode/deepseek-v4.1-flash", "opencode/deepseek-v4-pro"}))
+	// The create pins an allowed model: the stand-in runtime lists none, so an
+	// unpinned create under a model-narrowing policy would be refused (muster #401).
+	sess := mustCreate(t, d, "k-helper", fleet.SessionSpec{Model: "opencode/deepseek-v4-pro"})
+	known, _ := d.wasSeen(sess.ID)
+	cfg := readSessionConfig(t, known.srv.dir)
+	if got, want := cfg["small_model"], "opencode/deepseek-v4.1-flash"; got != want {
+		t.Errorf("small_model = %v, want %q (the first model the operator named exactly, not the one the create pinned)", got, want)
+	}
+
+	for _, c := range []struct {
+		entries []string
+		model   string
+	}{
+		{nil, "deepseek/flash"},
+		{[]string{"anthropic"}, "anthropic/sonnet"},
+		{[]string{"opencode", "!opencode/*-free"}, "opencode/paid-x"},
+	} {
+		d, _ := newIsolatedDriver(t, WithProviders(c.entries))
+		sess := mustCreate(t, d, "k-nohelper", fleet.SessionSpec{Model: c.model})
+		known, _ := d.wasSeen(sess.ID)
+		if cfg := readSessionConfig(t, known.srv.dir); cfg["small_model"] != nil {
+			t.Errorf("policy %v wrote small_model = %v; nothing names an allowed helper model there", c.entries, cfg["small_model"])
+		}
 	}
 }

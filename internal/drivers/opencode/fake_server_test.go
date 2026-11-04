@@ -97,6 +97,10 @@ type fakeServer struct {
 	projectAgents map[string][]string
 	agentsStatus  int
 	agentsBody    string
+	// agentModels is the "provider/model" an agent pins, by agent name (muster
+	// #402); the listing carries it as `model: {providerID, modelID}`, and an
+	// agent with no entry is listed without the key, as the runtime does.
+	agentModels map[string]string
 
 	// prompts records every prompt_async that reached the runtime, in order
 	// (muster #362, #371): which agent each one named, what its system field
@@ -459,6 +463,7 @@ func (f *fakeServer) handleAgents(w http.ResponseWriter, r *http.Request) {
 	names := append([]string(nil), f.agents...)
 	project := f.projectAgents[r.URL.Query().Get("directory")]
 	none := f.agents == nil && f.projectAgents == nil
+	models := f.agentModels
 	f.mu.Unlock()
 	if status != 0 {
 		http.Error(w, "forced", status)
@@ -473,13 +478,23 @@ func (f *fakeServer) handleAgents(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	type agentModel struct {
+		ProviderID string `json:"providerID"`
+		ModelID    string `json:"modelID"`
+	}
 	type agent struct {
-		Name string `json:"name"`
-		Mode string `json:"mode"`
+		Name  string      `json:"name"`
+		Mode  string      `json:"mode"`
+		Model *agentModel `json:"model,omitempty"`
 	}
 	out := []agent{}
 	for _, n := range append(names, project...) {
-		out = append(out, agent{Name: n, Mode: "primary"})
+		a := agent{Name: n, Mode: "primary"}
+		if m, ok := models[n]; ok {
+			provider, id, _ := strings.Cut(m, "/")
+			a.Model = &agentModel{ProviderID: provider, ModelID: id}
+		}
+		out = append(out, a)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)

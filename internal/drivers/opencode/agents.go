@@ -27,12 +27,33 @@ import (
 //     replaced by a default at the first turn;
 //   - a pin is reported honoured only from the runtime's own record of a turn
 //     that ran (turnEvidence), never from the create response.
+//
+// An agent may also pin a model of its own (muster #402): an operator-defined
+// agent (operatoragents.go) or a project's own may carry one, and a turn run as
+// that agent uses it. Measured against the real runtime: an agent that pins
+// `model` is listed with `model: {providerID, modelID}`; one that does not is
+// listed without the key. checkAgent reads it from the same listing it already
+// reads for the name, and judges it against the provider policy before any
+// session exists.
 
 // wireAgent is the subset of one GET /agent entry this driver reads. The
 // runtime lists its built-in agents, the operator's configured ones and, when
 // the request carries the session's directory, the project's own.
 type wireAgent struct {
 	Name string `json:"name"`
+	// Model is the model the agent pins, absent for an agent that pins none.
+	Model *struct {
+		ProviderID string `json:"providerID"`
+		ModelID    string `json:"modelID"`
+	} `json:"model"`
+}
+
+// listedAgent is one agent the runtime listed: its name, and the
+// "provider/model" id it pins — the spelling a create asks for — or "" when it
+// pins none. One half of a model alone is not a model, as in turnEvidence.
+type listedAgent struct {
+	name  string
+	model string
 }
 
 // readAgents asks the session's own server which agents it would run a message
@@ -50,6 +71,16 @@ type wireAgent struct {
 // directed one, and a refusal built on the first would refuse the one way a
 // persona reaches an isolated session.
 func (d *Driver) readAgents(ctx context.Context, srv *server, cwd fleet.AbsolutePath) (names []string, listed bool, err error) {
+	agents, listed, err := d.readAgentEntries(ctx, srv, cwd)
+	for _, a := range agents {
+		names = append(names, a.name)
+	}
+	return names, listed, err
+}
+
+// readAgentEntries is readAgents with each agent's pinned model kept (muster
+// #402); listed means what it means there.
+func (d *Driver) readAgentEntries(ctx context.Context, srv *server, cwd fleet.AbsolutePath) (agents []listedAgent, listed bool, err error) {
 	var wire []wireAgent
 	path := "/agent?directory=" + url.QueryEscape(string(cwd))
 	if err := d.do(ctx, srv, "GET", path, nil, &wire); err != nil {
@@ -59,13 +90,18 @@ func (d *Driver) readAgents(ctx context.Context, srv *server, cwd fleet.Absolute
 		return nil, false, nil
 	}
 	for _, a := range wire {
-		if a.Name != "" {
-			names = append(names, a.Name)
+		if a.Name == "" {
+			continue
 		}
+		entry := listedAgent{name: a.Name}
+		if m := a.Model; m != nil && m.ProviderID != "" && m.ModelID != "" {
+			entry.model = m.ProviderID + "/" + m.ModelID
+		}
+		agents = append(agents, entry)
 	}
 	// A runtime always has agents of its own, so an answer naming none is a body
 	// this driver misread, not a positive "nothing exists".
-	return names, len(names) > 0, nil
+	return agents, len(agents) > 0, nil
 }
 
 // checkAgent refuses a create naming an agent the runtime does not list. Called
@@ -73,23 +109,35 @@ func (d *Driver) readAgents(ctx context.Context, srv *server, cwd fleet.Absolute
 // is read from the runtime on every create, never compiled in: agents change with
 // the project and the operator's configuration.
 //
+// A listed agent that pins a model is judged against the provider policy too
+// (muster #402): a turn run as that agent uses the agent's model, whatever the
+// create-time checks read as the runtime's default, and only the turn-time check
+// would have seen it, after the turn. It is judged whether or not the same
+// create also pins a model, because the runtime does not say which of the two a
+// turn would use and a refusal on the wrong one costs a re-create while a pass
+// on it costs a turn on a model nobody allowed. The judgement reads the whole
+// policy, the same one a pinned model is judged by, so a provider-only policy
+// refuses an agent whose model sits on a provider it does not allow.
+//
 // agent may be empty: the session then runs as the runtime's default, and there
 // is nothing to check.
 func (d *Driver) checkAgent(ctx context.Context, srv *server, cwd fleet.AbsolutePath, agent string) error {
 	if agent == "" {
 		return nil
 	}
-	names, listed, err := d.readAgents(ctx, srv, cwd)
+	agents, listed, err := d.readAgentEntries(ctx, srv, cwd)
 	if err != nil {
 		return err
 	}
 	if !listed {
 		return nil
 	}
-	for _, have := range names {
-		if have == agent {
-			return nil
+	names := make([]string, 0, len(agents))
+	for _, have := range agents {
+		if have.name == agent {
+			return d.checkAgentModel(agent, have.model)
 		}
+		names = append(names, have.name)
 	}
 	msg := fmt.Sprintf("create: agent %q is not in the runtime's own agent list", agent)
 	// The edit-distance helper belongs to the model catalog but works on any list
@@ -98,6 +146,36 @@ func (d *Driver) checkAgent(ctx context.Context, srv *server, cwd fleet.Absolute
 		msg += "; closest: " + strings.Join(quoteAll(near), ", ")
 	}
 	return &fleet.Error{Kind: fleet.ErrorInvalid, Message: msg, Machine: d.machine}
+}
+
+// checkAgentModel refuses an agent whose pinned model the provider policy does
+// not allow, naming the rule that refused. model is "" for an agent that pins
+// none, which has nothing to judge here: the model it then runs on is the
+// session's, judged where that is learned (catalog.go).
+func (d *Driver) checkAgentModel(agent, model string) error {
+	if model == "" {
+		return nil
+	}
+	provider, id, _ := strings.Cut(model, "/")
+	v, rule := d.providers.judge(provider, id)
+	var why string
+	switch v {
+	case permitted:
+		return nil
+	case modelDenied:
+		why = "is denied by " + rule + " on this machine"
+	case modelNotAllowed:
+		why = fmt.Sprintf("is on provider %q, where this machine allows only some models and none matches it", provider)
+	default:
+		why = fmt.Sprintf("is on provider %q, which this machine does not allow", provider)
+	}
+	return &fleet.Error{
+		Kind: fleet.ErrorUnsupported,
+		Message: fmt.Sprintf("create: agent %q pins model %q, which %s (allowed: %s); "+
+			"use an agent that pins no model or one this machine allows, or change the operator's provider setting",
+			agent, model, why, d.providers.describe()),
+		Machine: d.machine,
+	}
 }
 
 // turnEvidence is what the runtime's own message records say about the agent and

@@ -872,18 +872,38 @@ lets them through. Use a deny for models you know by a stable name, and an exact
 decide what may be used.
 
 A malformed entry stops the service from starting, naming it, and `muster doctor` shows the
-effective policy in the `runtime.opencode.providers` row. The same policy answers at three
+effective policy in the `runtime.opencode.providers` row. The same policy answers at four
 points: a create that pins a `model` outside it is `unsupported`, naming the rule that refused
 (`denied by !opencode/*-free`, or that the provider is allowed for other models only); a create
 that pins **no** model is refused when the model the runtime would pick — the one its
 configuration names, else its default for each provider it lists — is outside the policy, or
-cannot be learned, and says to pin a model (a policy of providers alone never asks); and a
+cannot be learned, and says to pin a model (a policy of providers alone never asks); a create
+naming an `agent` that itself pins a model outside the policy is `unsupported` too, naming the
+agent, its model and the rule (#402) — the runtime lists an agent's model with the agent, a turn
+run as that agent uses it, and the check reads the whole policy, so under a policy of providers
+alone it refuses an agent whose model sits on a provider that policy does not allow; and a
 turn that still ran on a model outside it reads `state.lastTurn.outcome: "failed"` naming the
 provider, the model and the rule. A create with no allowed provider usable on the runtime is
 `unsupported` with the reason. Model rules are not written into a session's own
-configuration, which can enable whole providers only: they are enforced by these three checks,
-and a session relaunched after a stricter rule is caught by the third. `GET /v1/runtimes`
-lists only the ids this policy permits.
+configuration, which can enable whole providers only: they are enforced by these checks,
+and a session relaunched after a stricter rule is caught by the last.
+
+**The runtime's helper model** (#402). Besides the session's model the runtime makes helper
+calls of its own — measured on the real runtime: the first message of a session makes a
+separate call, as its `title` agent, on a small model the runtime picks from the session's
+provider (not the session's model, and not one any configuration names), and its `summary`
+agent is the same kind of call. No record of a session names it, so no check afterwards can
+see it. A policy that judges single models therefore pins it: the session's own configuration
+gets `small_model` (the key both helper agents read) set to **the first model the policy names
+exactly** — a `provider/<model>` entry with no wildcard that no deny matches — so put the
+cheaper of your exact models first. A policy of providers alone writes nothing, because every
+model on an allowed provider is already allowed; and a policy that names models only by glob
+or by whole provider (`opencode`, `!opencode/*-free`) cannot name one model without a catalog,
+so it writes nothing and the runtime keeps picking its own helper model — that case is a gap
+this service cannot close from the file, and an operator who needs the helper call judged
+writes one exact entry. A helper model the runtime does not list is not an error to it: it
+falls back to the session's own model, which the turn-time check judges. Shared mode has no
+session configuration, so there the helper model is the runtime's own.
 
 **Which runtime a machine-declared variable reaches** (#294) is the operator's decision, in the
 configuration file's `sessionEnv`, not a field of the create. An entry's `appliesTo.runtimes` lists
