@@ -333,19 +333,27 @@ jobs:
   # What a Windows user does, against what was just published (#309): install
   # the launcher from the registry and run it. It runs only after a real
   # publish (a dry run has nothing on the registry), and on the same two
-  # runners as verify-windows. The registry can take a moment to serve a version
-  # the publish call has just returned for, so the whole install-and-run is
-  # retried for a few minutes; a launcher that installs but cannot find its
-  # platform package (an optional dependency that was not served yet) fails the
-  # `--version` and is retried with it. A failure that outlasts the budget is
-  # real: the run is red, and re-running it skips the packages that are already
-  # on npm and checks again.
+  # runners as verify-windows.
+  #
+  # The registry's read path is eventually consistent: a version the publish
+  # call has just returned for can go unserved for longer than five minutes
+  # (#407: 30 ETARGET answers over 5 minutes on a publish that had worked). So
+  # the step first WAITS, cheaply, with `npm view`, until the registry lists
+  # both the launcher and this runner's win32 package at this version, then
+  # installs once. The wait has a deadline (WAIT_MINUTES) and backs off between
+  # reads; an install that still answers ETARGET or E404 (another edge not
+  # caught up) waits inside the same deadline. Only "not listed yet" is waited
+  # on. Any other npm answer, or a launcher that installs but whose
+  # `muster --version` does not name the tag, fails at once. A package that is
+  # genuinely missing never gets listed, so it fails when the deadline runs out
+  # and the run is red; re-running it skips the packages that are already on npm
+  # and checks again.
   install-windows:
     name: Install from npm on Windows (${{ matrix.arch }})
     needs: [binaries, npm]
     if: ${{ !inputs.dry_run }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
+    timeout-minutes: 25 # the deadline below, plus one slow npm call, plus the setup
     permissions: {}
     strategy:
       fail-fast: false
@@ -383,6 +391,9 @@ jobs:
         if: steps.has.outputs.present == 'true'
         env:
           WANT_CPU: ${{ matrix.cpu }}
+          # How long the registry gets to list this version, in minutes: the
+          # slowest propagation seen was past 5 (#407), so this is three times that.
+          WAIT_MINUTES: 15
         run: |
           # The launcher chooses its platform package by process.arch, so a Node
           # that is not the runner's own (an x64 build emulated on arm64) would
@@ -393,22 +404,68 @@ jobs:
           }
           $version = $env:TAG.TrimStart('v')
           $spec = "@futurelastic/muster@$version"
-          $got = $null
-          for ($attempt = 1; $attempt -le 15; $attempt++) {
-            Write-Host "== attempt ${attempt}: npm i -g $spec"
-            npm install -g --prefer-online --no-audit --no-fund $spec
-            if ($LASTEXITCODE -eq 0) {
-              $prefix = (npm prefix -g).Trim()
-              $env:PATH = "$prefix;$env:PATH"
-              $out = (& muster --version 2>&1 | Out-String).Trim()
-              Write-Host $out
-              if ($LASTEXITCODE -eq 0 -and $out.StartsWith("muster $env:TAG ")) { $got = $out; break }
-              Write-Host "muster --version did not name $env:TAG yet"
+          $platformSpec = "@futurelastic/muster-win32-$env:WANT_CPU@$version"
+          $deadline = (Get-Date).AddMinutes([double]$env:WAIT_MINUTES)
+          $backoff = @{ Seconds = 10 }
+
+          # Run npm; hand back its exit code and everything it printed.
+          function Invoke-Npm([string[]]$NpmArgs) {
+            $ErrorActionPreference = 'Continue'
+            $out = (& npm @NpmArgs 2>&1 | Out-String).Trim()
+            [pscustomobject]@{ Code = $LASTEXITCODE; Out = $out }
+          }
+
+          # The one lag signature: the registry answers, but not with this
+          # version yet (E404 from a view, ETARGET from an install). Anything
+          # else npm says is not a wait.
+          function Test-NotListedYet([string]$text) { $text -match '\bcode (ETARGET|E404)\b' }
+
+          # Sleep before the next read, backing off to a minute; the budget message is
+          # the old one, so a publish that is really broken reads the same as before.
+          function Wait-ForTheRegistry([string]$why) {
+            $left = ($deadline - (Get-Date)).TotalSeconds
+            if ($left -le 0) {
+              throw "$spec did not install and run on windows-$env:ARCH within the retry budget"
             }
-            if ($attempt -lt 15) {
-              Write-Host 'the registry may not serve this version everywhere yet; waiting 20s'
-              Start-Sleep -Seconds 20
+            $nap = [int][Math]::Min($backoff.Seconds, [Math]::Ceiling($left))
+            Write-Host "$why; the registry may not serve this version everywhere yet; waiting ${nap}s ($([int]$left)s of the budget left)"
+            Start-Sleep -Seconds $nap
+            $backoff.Seconds = [Math]::Min([int]($backoff.Seconds * 1.5), 60)
+          }
+
+          # Poll the cheap read until the registry lists this exact version.
+          function Wait-Listed([string]$what) {
+            while ($true) {
+              $r = Invoke-Npm @('view', '--prefer-online', $what, 'version')
+              if ($r.Code -eq 0 -and $r.Out -eq $version) { Write-Host "$what is listed"; return }
+              if ($r.Code -eq 0 -and $r.Out -eq '') { Wait-ForTheRegistry "npm view of $what listed nothing"; continue }
+              if ($r.Code -ne 0 -and (Test-NotListedYet $r.Out)) { Wait-ForTheRegistry "$what is not listed yet"; continue }
+              Write-Host $r.Out
+              throw "npm view $what on windows-$env:ARCH answered exit $($r.Code), which is neither a listing nor the registry lagging"
             }
           }
-          if (-not $got) { throw "$spec did not install and run on windows-$env:ARCH within the retry budget" }
+
+          Wait-Listed $spec
+          Wait-Listed $platformSpec
+
+          while ($true) {
+            Write-Host "== npm i -g $spec"
+            $r = Invoke-Npm @('install', '-g', '--prefer-online', '--no-audit', '--no-fund', $spec)
+            Write-Host $r.Out
+            if ($r.Code -eq 0) { break }
+            if (-not (Test-NotListedYet $r.Out)) {
+              throw "npm install -g $spec failed on windows-$env:ARCH with exit $($r.Code), which is not the registry lagging"
+            }
+            Wait-ForTheRegistry "the install did not find $spec"
+          }
+
+          $prefix = (npm prefix -g).Trim()
+          $env:PATH = "$prefix;$env:PATH"
+          $got = (& muster --version 2>&1 | Out-String).Trim()
+          $code = $LASTEXITCODE
+          Write-Host $got
+          if ($code -ne 0 -or -not $got.StartsWith("muster $env:TAG ")) {
+            npm ls -g --all
+            throw "$spec installed on windows-$env:ARCH but 'muster --version' did not name $env:TAG (exit $code)"
+          }
           "- ``npm i -g $spec`` on windows-$env:ARCH ($nodeArch): ``$got``" >> $env:GITHUB_STEP_SUMMARY

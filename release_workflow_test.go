@@ -680,6 +680,77 @@ func TestReleaseNpmInstallsThePublishedPackageOnWindows(t *testing.T) {
 	}
 }
 
+// The registry serves a just-published version late, and for longer than the old
+// fixed five minutes (#407). The install step therefore waits by a deadline, on a
+// cheap `npm view` of both the launcher and this runner's win32 package, and only
+// then installs; it waits on "not listed yet" and on nothing else.
+func TestReleaseNpmInstallWaitsForTheRegistryBeforeInstalling(t *testing.T) {
+	wf := releaseNpmWorkflow(t)
+	install := jobBlock(t, wf, "install-windows")
+
+	for _, want := range []string{
+		"WAIT_MINUTES",                // the deadline is a named setting, not a loop count
+		"npm view",                    // the cheap read the wait polls
+		"@futurelastic/muster-win32-", // the platform package is waited on too, or an optional dependency is skipped silently
+		"ETARGET",                     // lag is told apart from every other npm answer...
+		"E404",                        // ...for the view too
+		"within the retry budget",     // the wording of a real failure is unchanged
+	} {
+		if !strings.Contains(install, want) {
+			t.Errorf("install-windows must carry %q", want)
+		}
+	}
+
+	// The old shape: a counted loop of fixed 20 s naps. A budget in attempts is
+	// what ran out before the registry caught up.
+	for _, gone := range []string{"-le 15", "Start-Sleep -Seconds 20", "$attempt"} {
+		if strings.Contains(install, gone) {
+			t.Errorf("install-windows must not keep the fixed retry loop (%q)", gone)
+		}
+	}
+
+	// The wait comes first: both reads precede the one install.
+	launcher := strings.Index(install, "Wait-Listed $spec\n")
+	platform := strings.Index(install, "Wait-Listed $platformSpec\n")
+	doInstall := strings.Index(install, "'install', '-g'")
+	if launcher < 0 || platform < 0 || doInstall < 0 {
+		t.Fatalf("install-windows must wait for the launcher and its platform package, then install (launcher %d, platform %d, install %d)", launcher, platform, doInstall)
+	}
+	if !(launcher < platform && platform < doInstall) {
+		t.Error("install-windows must wait for both packages to be listed before it installs")
+	}
+
+	// A launcher that installs but does not name the tag is a real failure and ends
+	// the step at once: nothing after the version check loops back to the install.
+	check := strings.Index(install, `.StartsWith("muster $env:TAG ")`)
+	if check < 0 {
+		t.Fatal("install-windows must still check that `muster --version` names the tag")
+	}
+	if tail := install[check:]; strings.Contains(tail, "continue") || strings.Contains(tail, "while ($true)") {
+		t.Error("a `muster --version` that does not name the tag must fail the step, not be waited on")
+	}
+}
+
+// A wait longer than the job's own timeout would end as a cancelled job with no
+// message instead of the step's own failure. The deadline must fit inside the
+// timeout with room for the setup and one slow npm call.
+func TestReleaseNpmInstallDeadlineFitsInsideTheJobTimeout(t *testing.T) {
+	install := jobBlock(t, releaseNpmWorkflow(t), "install-windows")
+	wait := regexp.MustCompile(`(?m)^\s*WAIT_MINUTES:\s*(\d+)\b`).FindStringSubmatch(install)
+	timeout := regexp.MustCompile(`(?m)^    timeout-minutes:\s*(\d+)\b`).FindStringSubmatch(install)
+	if wait == nil || timeout == nil {
+		t.Fatalf("install-windows must set WAIT_MINUTES and timeout-minutes (wait %v, timeout %v)", wait, timeout)
+	}
+	w, _ := strconv.Atoi(wait[1])
+	to, _ := strconv.Atoi(timeout[1])
+	if w < 10 {
+		t.Errorf("WAIT_MINUTES is %d: the slowest propagation measured (#407) was past 5 minutes, so the budget needs real headroom", w)
+	}
+	if to < w+5 {
+		t.Errorf("timeout-minutes %d leaves under 5 minutes beyond the %d-minute wait for setup and a slow npm call", to, w)
+	}
+}
+
 // A Windows check that may fail quietly is not a check, and release-auto.yml
 // starts from a CI whose Windows job already gates every candidate.
 func TestReleaseNpmNeverLetsAWindowsFailurePass(t *testing.T) {
