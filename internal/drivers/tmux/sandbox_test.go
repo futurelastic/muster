@@ -753,3 +753,46 @@ func TestSandboxLayoutNeverCollidesAcrossSessionNames(t *testing.T) {
 		t.Errorf("a directory name carries the session name: %s", a.dir)
 	}
 }
+
+// A host that declares nothing is re-measured less and less often in the
+// background, but a create that is waiting on the answer is never made to wait
+// out that backoff (muster #404).
+func TestSandboxFailureBacksOffInTheBackgroundButNotForACreate(t *testing.T) {
+	e := newSandboxEnv(t)
+	e.authJSON = `{"loggedIn": false}`
+	if e.d.Capabilities().Sandbox != nil {
+		t.Fatal("setup: a logged-out host declared the sandbox")
+	}
+	// Each consecutive failure doubles the background wait.
+	wait := sandboxFailTTL
+	for i := 0; i < 4; i++ {
+		before := e.probeCount()
+		e.advance(wait - time.Second)
+		e.d.Capabilities()
+		if e.probeCount() != before {
+			t.Fatalf("round %d: re-measured inside the %v wait", i, wait)
+		}
+		e.advance(2 * time.Second)
+		e.d.Capabilities() // stale: retaken behind the read
+		if e.probeCount() != before+1 {
+			t.Fatalf("round %d: not re-measured after the %v wait (%d -> %d)", i, wait, before, e.probeCount())
+		}
+		if wait *= 2; wait > sandboxFailMaxTTL {
+			wait = sandboxFailMaxTTL
+		}
+	}
+	// A create acts on the answer and waits for it: the short lifetime applies,
+	// whatever the backoff has grown to.
+	e.authJSON = `{"loggedIn": true}`
+	e.advance(sandboxFailTTL + time.Second)
+	if sup, why, _ := e.d.sandboxCurrent(context.Background(), true); sup == nil {
+		t.Fatalf("a create did not see the login it was waiting for: %s", why)
+	}
+	// And a success starts the count over.
+	e.d.sandboxMeasured.mu.Lock()
+	failures := e.d.sandboxMeasured.failures
+	e.d.sandboxMeasured.mu.Unlock()
+	if failures != 0 {
+		t.Errorf("failures = %d after a success, want 0", failures)
+	}
+}
