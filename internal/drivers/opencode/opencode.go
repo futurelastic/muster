@@ -267,6 +267,12 @@ type Driver struct {
 	// a recorded server (reapStale) can be asserted without the sweep stopping the
 	// same process first.
 	noStartSweep bool
+	// noStraySweep turns off the stop of processes a session started outside its
+	// server's process group (muster #405) — at close, at shutdown and at start-up.
+	// Each is one read of the machine's process table, so only a test sets it: the
+	// many that start and close sessions for another reason do not each pay for it,
+	// and the ones about the sweep turn it back on.
+	noStraySweep bool
 
 	// baseURL and password are the shared-mode seam's inputs (WithBaseURL,
 	// WithCredential); New folds them into shared.
@@ -430,6 +436,10 @@ func WithLogf(f func(format string, args ...any)) Option { return func(d *Driver
 // withoutStartSweep turns off the sweep New runs before it resumes. Unexported:
 // only a test needs the reap of a recorded server to be the one that acts.
 func withoutStartSweep() Option { return func(d *Driver) { d.noStartSweep = true } }
+
+// withoutStraySweep and withStraySweep set noStraySweep. Unexported: a test seam.
+func withoutStraySweep() Option { return func(d *Driver) { d.noStraySweep = true } }
+func withStraySweep() Option    { return func(d *Driver) { d.noStraySweep = false } }
 
 // WithStateDir makes sessions survive a service restart (muster #282): one
 // record per session, and the sessions' scoped directories, live under dir. With
@@ -601,6 +611,9 @@ func New(ctx context.Context, machine fleet.MachineId, opts ...Option) (*Driver,
 		// anything is resumed, whether or not a record still names it; at this point
 		// this driver holds no server, so every one found is not ours.
 		d.sweepOrphans()
+		// muster #405: and the processes its sessions started that left the server's
+		// process group, which no group stop reaches.
+		d.sweepOrphanStrays()
 		// muster #399: and the scoped directories no record names, after the
 		// servers that held them are gone and before a record can be resumed.
 		d.sweepOrphanDirs()
@@ -645,10 +658,12 @@ func (d *Driver) trackServer(s *server) bool {
 	if d.closed {
 		return false
 	}
+	s.straySweep = !d.noStraySweep
 	s.onTeardown = func(s *server) {
 		d.mu.Lock()
 		delete(d.live, s)
 		d.mu.Unlock()
+		d.sayStrays("still running when their session ended", s.strayStopped, s.strayLeft)
 	}
 	d.live[s] = struct{}{}
 	return true

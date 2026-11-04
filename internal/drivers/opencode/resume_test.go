@@ -23,7 +23,7 @@ func newStateDriver(t *testing.T, stateDir string, extra ...Option) *Driver {
 	if err != nil {
 		t.Fatal(err)
 	}
-	opts := append([]Option{WithBinary(exe), WithStateDir(stateDir)}, extra...)
+	opts := append([]Option{WithBinary(exe), WithStateDir(stateDir), withoutStraySweep()}, extra...)
 	d, err := New(context.Background(), "test-machine", opts...)
 	if err != nil {
 		t.Fatalf("New: %v", err)

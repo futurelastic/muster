@@ -174,6 +174,14 @@ type server struct {
 	// server whose session was closed, or never came to exist, removes it.
 	persisted atomic.Bool
 
+	// strayStopped and strayLeft are what the teardown found of the processes the
+	// session started outside the server's process group (muster #405): stopped, and
+	// still running after the wait. Written inside once, read by onTeardown.
+	strayStopped, strayLeft []strayProc
+	// straySweep is whether the teardown looks for them: set by the driver that
+	// tracks the server, so a server nobody tracks looks for none.
+	straySweep bool
+
 	once       sync.Once
 	onTeardown func(*server)
 }
@@ -193,6 +201,11 @@ func (s *server) stop(keepPersisted bool) {
 	}
 	s.once.Do(func() {
 		s.proc.stop()
+		// The group stop does not reach a process that left the group (muster #405);
+		// the scoped directory still names one, so this runs before it is removed.
+		if s.straySweep {
+			s.strayStopped, s.strayLeft = stopStraysIn(s.dir)
+		}
 		if s.dir != "" && !(keepPersisted && s.persisted.Load()) {
 			_ = os.RemoveAll(s.dir)
 		}
