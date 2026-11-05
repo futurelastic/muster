@@ -13,6 +13,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -1098,6 +1100,170 @@ func mustRead(t *testing.T, p string) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// ---- the manifest's update block (#409) ---------------------------------------------------------------------------------
+
+// The host's update client keeps an app current only when the manifest says how to do it safely: three shell
+// commands it runs with `sh -c` as the user. `version` prints the installed X.Y.Z, `busy` exits 75 for "in use" and 0
+// for "free" (any other exit means it cannot tell, and the app is not updated that run), `health` exits 0 when the
+// app works after the install. These tests run the commands the manifest actually carries, not a copy of them.
+
+func updateCommand(t *testing.T, key string) string {
+	t.Helper()
+	var m struct {
+		Update map[string]string `json:"update"`
+	}
+	if err := json.Unmarshal(mustRead(t, ".github/downloads/manifest.json"), &m); err != nil {
+		t.Fatal(err)
+	}
+	cmd := strings.TrimSpace(m.Update[key])
+	if cmd == "" {
+		t.Fatalf("the manifest's update block has no %q command: the host refuses a new app without one, and never updates one that has none", key)
+	}
+	return cmd
+}
+
+// runUpdateCommand runs one command as the client does and returns its output and exit status.
+func runUpdateCommand(t *testing.T, home, cmd string) (string, int) {
+	t.Helper()
+	requireTool(t, "sh", "ps", "grep", "sed")
+	if runtime.GOOS == "windows" {
+		t.Skip("the update commands are for the unix builds")
+	}
+	c := exec.Command("sh", "-c", cmd)
+	c.Env = append(os.Environ(), "HOME="+home)
+	out, err := c.CombinedOutput()
+	if ee, ok := err.(*exec.ExitError); ok {
+		return string(out), ee.ExitCode()
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	return string(out), 0
+}
+
+func installFakeMuster(t *testing.T, home, script string) {
+	t.Helper()
+	dir := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "muster"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestManifestUpdateBlockHasTheThreeCommandsTheHostReads(t *testing.T) {
+	for _, k := range []string{"version", "busy", "health"} {
+		_ = updateCommand(t, k)
+	}
+	// Every machine runs `muster serve`; a busy that counted it would leave the client "waiting" for ever.
+	if strings.Contains(updateCommand(t, "busy"), "muster serve") {
+		t.Error("busy must not look for a running service")
+	}
+}
+
+func TestUpdateVersionIsTheBinaryTheServiceRuns(t *testing.T) {
+	cmd := updateCommand(t, "version")
+	home := t.TempDir()
+	installFakeMuster(t, home, fakeMuster("1.2.3", "ok"))
+	if out, code := runUpdateCommand(t, home, cmd); code != 0 || strings.TrimSpace(out) != "1.2.3" {
+		t.Errorf("the installed release: want exactly 1.2.3 and exit 0, got %q (exit %d)", out, code)
+	}
+
+	// Nothing the client could mistake for a version: it takes the first X.Y.Z in the output of a command that
+	// exits 0, and a Go toolchain version looks like one.
+	cases := map[string]string{
+		"a build made without the release stamp":    "#!/bin/sh\necho 'muster abc1234 (go1.23.0)'\n",
+		"a candidate, which the host never carries": fakeMuster("1.2.3-rc.1", "ok"),
+		"a binary that does not run":                "#!/bin/sh\necho 'muster v1.2.3 (broken)' >&2\nexit 1\n",
+	}
+	for name, script := range cases {
+		h := t.TempDir()
+		installFakeMuster(t, h, script)
+		if out, code := runUpdateCommand(t, h, cmd); code == 0 || regexpVersion.MatchString(out) {
+			t.Errorf("%s: want a failure that names no version, got %q (exit %d)", name, out, code)
+		}
+	}
+	// A muster elsewhere on PATH is not the one the service runs.
+	path := t.TempDir()
+	if err := os.WriteFile(filepath.Join(path, "muster"), []byte(fakeMuster("9.9.9", "ok")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", path+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if out, code := runUpdateCommand(t, t.TempDir(), cmd); code == 0 || regexpVersion.MatchString(out) {
+		t.Errorf("with no installed copy, a muster on PATH must not answer: got %q (exit %d)", out, code)
+	}
+}
+
+var regexpVersion = regexp.MustCompile(`\d+\.\d+\.\d+`)
+
+// A process whose command line is `<dir>/<name> <args...>`, as a released Go binary's is: the test binary itself,
+// started under another argv[0] and kept alive until its stdin closes (when this test ends, or the test binary dies).
+func TestHeldProcessForTheBusyCheck(t *testing.T) {
+	if os.Getenv("FLEET_TEST_HOLD") != "1" {
+		t.Skip("not a test: the process the update busy check is pointed at")
+	}
+	_, _ = io.Copy(io.Discard, os.Stdin)
+}
+
+// holdProcess starts it and returns the function that ends it (also run when the test ends).
+func holdProcess(t *testing.T, argv ...string) (stop func()) {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(exe, "-test.run=^TestHeldProcessForTheBusyCheck$")
+	cmd.Args = append(append([]string{}, argv...), "-test.run=^TestHeldProcessForTheBusyCheck$")
+	cmd.Env = append(os.Environ(), "FLEET_TEST_HOLD=1")
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	var once sync.Once
+	stop = func() { once.Do(func() { _ = in.Close(); _ = cmd.Process.Kill(); _ = cmd.Wait() }) }
+	t.Cleanup(stop)
+	return stop
+}
+
+func TestUpdateBusyIsAnInstallInProgressAndNeverTheRunningService(t *testing.T) {
+	cmd := updateCommand(t, "busy")
+	home := t.TempDir()
+	bin := filepath.Join(t.TempDir(), "muster")
+	if _, code := runUpdateCommand(t, home, cmd); code != 0 {
+		t.Fatalf("an idle machine: want exit 0 (free), got %d", code)
+	}
+
+	// The service is the normal state of every machine, and so is a stop and a start.
+	holdProcess(t, bin, "serve")
+	holdProcess(t, bin, "service", "uninstall")
+	holdProcess(t, bin, "service", "status")
+	if out, code := runUpdateCommand(t, home, cmd); code != 0 {
+		t.Fatalf("a running service is not busy: want exit 0, got %d\n%s", code, out)
+	}
+
+	// Something that merely mentions it is not an install either: the command line has to start with the binary.
+	holdProcess(t, "/bin/sh", bin, "service", "install")
+	holdProcess(t, "tail", "-f", "muster service install")
+	if out, code := runUpdateCommand(t, home, cmd); code != 0 {
+		t.Fatalf("a command line that only mentions an install is not one: want exit 0, got %d\n%s", code, out)
+	}
+
+	// An install or update that is already running, whether by the installed binary or the downloaded build.
+	for name, argv := range map[string][]string{
+		"the installed binary": {bin, "service", "install"},
+		"the downloaded build": {filepath.Join(t.TempDir(), "muster-v1.2.3-linux-amd64"), "service", "install", "--addr", "127.0.0.1:9470"},
+	} {
+		stop := holdProcess(t, argv...)
+		if out, code := runUpdateCommand(t, home, cmd); code != 75 {
+			t.Errorf("%s running `service install`: want exit 75 (in use), got %d\n%s", name, code, out)
+		}
+		stop()
+	}
 }
 
 // ---- the shape of the workflows -----------------------------------------------------------------------------------------
