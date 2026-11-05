@@ -100,6 +100,34 @@ printf 'header = "Authorization: Bearer %s"\n' "$DL_TOKEN" | curl -fsSL -K - <ho
 `DL_TOKEN` needs `curl`: with only `wget` the installer refuses, because wget has no way to take a header off the
 command line.
 
+### Kept current by the host's update client
+
+A machine that installed muster from the host is also kept on the newest final by the host's update client (its
+periodic sync, or its update command for one app). The client updates an app on its own only when the app's manifest
+says how to do that safely, and `.github/downloads/manifest.json` does, in an `update` block of three shell commands.
+The client runs each with `sh -c`, as the user. The update itself is the installer above: it runs the new binary's
+`muster service install`, which restarts the service and waits for health, and puts the previous version back when
+the new one does not come up. The block only tells the client what is installed, when it may start and whether the
+result works.
+
+| Command | Runs | The client reads |
+|---|---|---|
+| `version` | `~/.local/bin/muster --version`, cut down to `X.Y.Z` | The release the service runs: the copy `muster service install` puts at that path, never whichever `muster` comes first on `PATH` (an npm launcher, a build in a checkout). It exits 1 and prints nothing when that file is missing, does not run, or names no release tag (an unstamped build, a candidate), and the client then falls back to what it recorded. |
+| `busy` | Looks in the process table for a `muster ... service install` | Exit 75: an install or update is running, try later. Exit 0: free. Any other exit: the client cannot tell and does not update on that run. |
+| `health` | `~/.local/bin/muster service status` | Exit 0: unit present, loaded, running, and `/v1/health` answering. Run after the installer; a failure blocks that version on this machine (never retried by the client) and shows the status rows. |
+
+- **`busy` is not "muster is running".** `muster serve` is the normal state of every machine; if it counted, the
+  client would report "waiting" on every machine for ever. Only a command line that *starts* with the binary and then
+  says `service install` counts, which is what the installer's step 4 and a hand-run `muster service install` look
+  like. The download and checksum steps before it are not visible in the process table, so `busy` does not hold back
+  an update while another is still downloading.
+- **A failed update leaves the previous version running.** That is the installer's put-back (above), not the block's.
+  A `health` failure after an installer that exited 0 blocks the version but cannot put anything back; the installer
+  has already run the same `muster service status` and would have exited 1 first.
+- **Changing a command** means changing it where the client reads it: the manifest is published with each final, so a
+  fix reaches machines with the next final. `release_downloads_test.go` runs the three commands as written
+  (`TestUpdateVersionIsTheBinaryTheServiceRuns`, `TestUpdateBusyIsAnInstallInProgressAndNeverTheRunningService`).
+
 ## What a working installation is
 
 Every row below is something an installation can be missing and still start.

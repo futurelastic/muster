@@ -26,5 +26,10 @@
         "The service stops when you log out: run loginctl enable-linger once (the installer prints this)."
       ]
     }
+  },
+  "update": {
+    "version": "\"$HOME/.local/bin/muster\" --version 2>/dev/null | sed -n 's/^muster v\\([0-9.]*\\) .*/\\1/p' | grep .",
+    "busy": "p=$(ps -A -o args=) || exit 2; printf '%s\\n' \"$p\" | grep -Eq '^ *[^ ]*muster[^ ]* service install( |$)' && exit 75; exit 0",
+    "health": "\"$HOME/.local/bin/muster\" service status"
   }
 }
