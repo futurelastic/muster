@@ -153,11 +153,13 @@ type fileConfig struct {
 
 	// MaxInputBytes overrides this machine's limit on `prompt` (create) and
 	// `text` (input) — muster #130. Absent or zero means the shipped
-	// default applies unchanged (internal/service/http.go's
-	// defaultMaxInputBytes) — the same "absent means the older behaviour"
-	// rule DefaultRuntime documents above, and required by #130 itself: an
-	// unconfigured deployment must behave exactly as it did before this
-	// setting existed.
+	// default applies (internal/service/http.go's defaultMaxInputBytes,
+	// 32768 since muster #412; it was 1024 before) — the same "absent
+	// means the default" rule DefaultRuntime documents above. The install
+	// writes no value on purpose, so a machine follows the default
+	// rather than a number it was given once. The override goes in both
+	// directions: a smaller value refuses more, a larger one (below the
+	// ceiling) accepts more.
 	//
 	// Config-file-only, like TrustRoots, DefaultRuntime and SessionEnv
 	// above: how quickly THIS machine's composer becomes ready — the

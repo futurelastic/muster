@@ -1081,22 +1081,20 @@ func createNeedsSend(body createSessionBody) string {
 // the request outright, before any driver is even resolved, turns that
 // silent failure into an immediate, actionable error.
 //
-// 1024 is a conservative default, not the bisected failure boundary — #114
-// says a real bisect is still open work, and #130 records that the
-// mechanism behind that boundary may be startup timing rather than size at
-// all, which is exactly why raising this default is deliberately NOT part
-// of making it configurable: #130 keeps this number unchanged and leaves
-// raising it to follow the bisect (#129), on evidence, per machine. The
-// cleanest data available (#110's one-line, no-newline sweep against the
-// input path) held reliable through 1200 bytes and broke at 1600; #112
-// separately measured a ~900-byte CREATE prompt stranding twice the same
-// day 3833- and 5139-byte prompts landed fine, so raw size alone is not the
-// whole story — multi-line shape and host load are named confounds there
-// too. 1024 sits inside the one controlled bisect with headroom below it,
-// and is far below the "detailed briefing material" case #114 itself says
-// belongs in a reference the agent reads deliberately, never a pasted
-// composer.
-const defaultMaxInputBytes = 1024
+// The default was 1024 until the owner's decision of 2026-11-06 (muster #412)
+// raised it to 32768. 1024 was a conservative guess, not the bisected failure
+// boundary: #114 left the bisect as open work, and #130 recorded that the
+// mechanism behind the boundary may be startup timing rather than size at all.
+// The field then settled what the number should be. A client that opens
+// sessions with a real briefing sends 8–15 KB, and on a fresh install every
+// one of those was refused (about 140 creates in half an hour) while the
+// machines that had set 32768 by hand have run that way without the
+// stranded composer #114 guarded against. The cap itself, the refusal shape
+// and the per-machine override are unchanged: the override still goes in
+// both directions (a smaller value refuses more), and the ceiling and
+// validation are untouched. docs/adr/114-length-cap-at-the-http-boundary.md
+// carries the follow-up note.
+const defaultMaxInputBytes = 32768
 
 // rejectOverLength returns a fleet.Error naming field, limit and the
 // caller's actual size when text exceeds limit, or nil when it does not.

@@ -2,6 +2,7 @@ package service
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -92,7 +93,7 @@ func TestRespondBoundsFreeTextAtTheHTTPBoundary(t *testing.T) {
 	if code != http.StatusBadRequest {
 		t.Errorf("an over-length text → %d, want 400", code)
 	}
-	if !strings.Contains(msg, "1024") {
+	if !strings.Contains(msg, strconv.Itoa(defaultMaxInputBytes)) {
 		t.Errorf("the refusal does not name the limit: %s", msg)
 	}
 	if code, _ := post(`{"text":"a fine answer","nonce":"n"}`); code == http.StatusBadRequest {
