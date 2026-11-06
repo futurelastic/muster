@@ -539,6 +539,10 @@ type Driver struct {
 	// state, and a slow drain must never contend with an in-flight List.
 	exitedMu      sync.Mutex
 	exitedPending []driver.CapturedExit
+	// recentExits remembers how sessions last exited, for a short while after
+	// DrainExits has handed the exit to the service (#411) — see ended.go.
+	// Guarded by exitedMu.
+	recentExits map[string]recentExit
 
 	// conversations locates the runtime's own record of each session — see
 	// conversation.go. Nil until a record root is configured, and nil is
@@ -3543,6 +3547,12 @@ func (d *Driver) deliverViaPane(ctx context.Context, ref fleet.SessionRef, text 
 		// read fails too (the usual case when tmux itself is gone); an empty
 		// digest is the documented honest degrade — resume then falls back to
 		// the id+cwd+text match and its own live re-verification.
+		// #411: a keystroke that failed because the pane's process had just
+		// exited is an ended session, not a stranded text.
+		if r, ended := d.endedReceipt(ctx, ref); ended {
+			d.forgetStranded(ref.ID)
+			return r, nil
+		}
 		d.noteStrandedLanding(ref.ID, target.cwd, text, d.currentComposerDigest(ctx, target.paneID), src, srcOK, land, false)
 		return fleet.DeliveryReceipt{}, fmt.Errorf("send: submitting (the text may be sitting in the composer "+
 			"unsent, and a stranded record was kept for it — retry the same send with resumeIfStranded to submit it): %w", err)
@@ -3569,6 +3579,15 @@ func (d *Driver) deliverViaPane(ctx context.Context, ref fleet.SessionRef, text 
 	submitConfirmed, submitEvidence, submitSignal, submitTurnProven := d.confirmSubmittedFromSourceTurn(ctx, target, text, key, atCount, src, srcOK)
 	tr.confirmedBy = submitSignal
 	if !submitConfirmed {
+		// #411: a confirmation that failed because the session's own process
+		// exited (a /quit, say) is not "the submit did not register". Asked
+		// BEFORE the stranded record is written, so none is kept for a session
+		// that no longer exists, and so the receipt does not advise a retry that
+		// has nowhere to land.
+		if r, ended := d.endedReceipt(ctx, ref); ended {
+			d.forgetStranded(ref.ID)
+			return r, nil
+		}
 		d.noteStrandedLanding(ref.ID, target.cwd, text, d.currentComposerDigest(ctx, target.paneID), src, srcOK, land, false)
 		if strings.HasPrefix(submitEvidence, differentTurnComposerEmptied) {
 			return fleet.DeliveryReceipt{
@@ -4850,6 +4869,7 @@ func (d *Driver) saveExitScreen(session string, c paneCapture) string {
 func (d *Driver) notePendingExit(id string, e fleet.SessionExit) {
 	d.exitedMu.Lock()
 	d.exitedPending = append(d.exitedPending, driver.CapturedExit{ID: id, Exit: e})
+	d.rememberExitLocked(id, e)
 	d.exitedMu.Unlock()
 }
 

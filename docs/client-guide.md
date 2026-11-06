@@ -647,6 +647,15 @@ without submitting must now send `"submit": false`. And a caller that asks for
 the terminal, `submit: false`, or a resume or replace on a session with a live
 lane is now refused.
 
+**If `send` answers `ended`, stop: the session is gone and there is nothing to
+retry (#411).** Its process exited while the delivery was being confirmed — most
+often a `/quit` that did exactly what it was sent to do. The `reason` gives the
+exit status when the service knows it, and does not say whether the text was read;
+`/v1/sessions/closed` carries the structured exit. Do not tell the person the
+command failed, and do not retry with `resumeIfStranded`: that advice below is for
+`unknown` on a session that still exists. A client that predates the value should
+read it as "not delivered", never as `queued`.
+
 **If `send` answers `unknown` on `delivery.route: "terminal"` (or with no
 route), retry it with `resumeIfStranded: true`** (on a session with no live lane; a live lane refuses it, above). That
 outcome means the text reached the composer but could not be confirmed in time,

@@ -146,7 +146,15 @@ func (m extModule) deliver(ctx context.Context, in delivery.Delivery, tr *module
 
 	res, err := c.Send(ctx, modclient.SendArgs{LaneKey: key, Text: in.Text, AllowLeadingSlash: allowSlash})
 	if err != nil {
-		return m.sendFailed(in.Ref.ID, err, tr), nil
+		out := m.sendFailed(in.Ref.ID, err, tr)
+		if out.Class == delivery.Unknown {
+			// #411: bytes may have gone out and no answer came because the
+			// session's process was exiting under them. Said so, not "unknown".
+			if ended, ok := m.endedResult(ctx, in.Ref); ok {
+				return ended, nil
+			}
+		}
+		return out, nil
 	}
 	if !res.Written {
 		return delivery.Result{Declined: fmt.Sprintf("module %q reported it wrote nothing", m.name)}, nil
@@ -162,6 +170,12 @@ func (m extModule) deliver(ctx context.Context, in delivery.Delivery, tr *module
 	verdict, err := m.awaitVerdict(ctx, c, key, res)
 	switch {
 	case err != nil:
+		// #411: unless the session itself is gone — then there is nothing to be
+		// said about a delivery to it except that it ended.
+		if ended, ok := m.endedResult(ctx, in.Ref); ok {
+			tr.lost = errors.Is(err, modclient.ErrLost)
+			return ended, nil
+		}
 		// The message is in the module's hands and nothing can be said about
 		// what became of it. Never resent, on any path.
 		m.h.count(m.name, "send_unknown")
@@ -198,6 +212,12 @@ func (m extModule) deliver(ctx context.Context, in delivery.Delivery, tr *module
 	case verdict == "queued":
 		// Enqueued; the turn had not started when the window ended. One of
 		// these is not a fault of the lane, so it is not degraded by itself.
+		if ended, ok := m.endedResult(ctx, in.Ref); ok {
+			// #411: the session exited with the message enqueued. Not a stalled
+			// lane either — a lane of a session that is gone says nothing about
+			// the lane.
+			return ended, nil
+		}
 		m.h.count(m.name, "send_unknown")
 		why := "the module saw the message enqueued but the turn had not started when the window ended"
 		if idleBefore && m.d.stillIdleSince(ctx, in.Req, in.Ref, sinceBefore) {
@@ -221,6 +241,9 @@ func (m extModule) deliver(ctx context.Context, in delivery.Delivery, tr *module
 		}
 		return unknownResult(m.name, why), nil
 	default: // silent
+		if ended, ok := m.endedResult(ctx, in.Ref); ok {
+			return ended, nil
+		}
 		m.h.count(m.name, "send_unknown")
 		m.h.degrade(in.Ref.ID, "the module saw no evidence the runtime took a message", false)
 		return unknownResult(m.name, "the module saw no evidence the runtime took the message"), nil
@@ -301,6 +324,20 @@ func (m extModule) sendFailed(id string, err error, tr *moduleTrace) delivery.Re
 		m.h.degrade(id, "a send got no answer", false)
 		return unknownResult(m.name, "the module did not answer the send")
 	}
+}
+
+// endedResult is the answer to a delivery whose session's process exited while
+// the module was still confirming it (#411): the session ended, with its exit
+// status when known — not "could not be confirmed ... NOT been sent", which
+// reads as an invitation to look and try again on a session that is gone. The
+// ledger records only unknown outcomes, so no earlier-send entry is kept for it.
+func (m extModule) endedResult(ctx context.Context, ref fleet.SessionRef) (delivery.Result, bool) {
+	r, ok := m.d.endedReceipt(ctx, ref)
+	if !ok {
+		return delivery.Result{}, false
+	}
+	m.h.count(m.name, "send_ended")
+	return delivery.Result{Receipt: r, Class: delivery.Ended}, true
 }
 
 func unknownResult(module, why string) delivery.Result {

@@ -1060,6 +1060,7 @@ service's.
 | `queued` | Accepted, submission unconfirmed | Done |
 | `refused` | The driver actively declined; `reason` says why | Read the reason — this is information, not a fault |
 | `stalled` | The session reads `working` and has drawn nothing for the whole stall bound (`state.stalled`, #391). **Nothing was written.** Not a `refused`: it does not clear by waiting | Do not send again — recover the session (client guide, *A session that stops drawing*) |
+| `ended` | The session's own process exited while the delivery was being confirmed (#411) — typically a `/quit` that worked. `reason` carries the exit status when known; it does not say the text was read. Nothing is kept for the session | **Do not retry** — there is no session to retry on. The structured exit is in `/v1/sessions/closed` |
 | `unknown` | Sent, outcome unverifiable. On `delivery.route: "terminal"` **the text may be sitting unsent** | On the terminal: retry with `resumeIfStranded: true`. On **`inbox`: do not** — the message may have arrived; see below |
 | `delivered` | The receiver's own transcript recorded the message as a peer message — reachable only on `delivery.route: "inbox"` | Done |
 
