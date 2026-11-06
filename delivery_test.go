@@ -21,6 +21,22 @@ func TestOutcome_JSONRoundTrip(t *testing.T) {
 	}
 }
 
+// muster #411: ended is part of the vocabulary — it crosses the wire, a peer
+// relay and a stored receipt without being rewritten.
+func TestOutcome_EndedRoundTrips(t *testing.T) {
+	b, err := json.Marshal(DeliveryReceipt{Outcome: OutcomeEnded, Reason: "the session's process exited (exit status 0)"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got DeliveryReceipt
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("Unmarshal(%s): %v", b, err)
+	}
+	if got.Outcome != OutcomeEnded || got.Reason == "" {
+		t.Fatalf("round trip: got %+v", got)
+	}
+}
+
 func TestOutcome_RejectsUnknownValue(t *testing.T) {
 	var o Outcome
 	if err := json.Unmarshal([]byte(`"maybe"`), &o); err == nil {

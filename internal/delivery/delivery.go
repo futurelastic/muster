@@ -92,6 +92,10 @@ const (
 	// would not have read it. Unlike the two refusals above, nothing a caller
 	// does to the send changes the answer, and waiting does not clear it.
 	Stalled Class = "stalled"
+	// Ended: the session's own process exited while the delivery was being
+	// confirmed (#411). No stranded or provisional record is kept, and the
+	// caller is told not to retry: there is no session left to retry on.
+	Ended Class = "ended"
 	// Stranded: the text reached the composer but was not confirmed
 	// submitted, and a record was kept so a resume can finish it.
 	Stranded Class = "stranded"

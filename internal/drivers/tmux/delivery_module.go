@@ -60,6 +60,8 @@ func (t sendTrace) class(r fleet.DeliveryReceipt) delivery.Class {
 			return delivery.RefusedBusy
 		}
 		return delivery.Refused
+	case fleet.OutcomeEnded:
+		return delivery.Ended
 	case fleet.OutcomeUnknown:
 		if t.stranded {
 			return delivery.Stranded

@@ -460,6 +460,11 @@ const (
 	// call's text. resumeIfStranded now refuses here instead of clearing.
 	counterSendRefusedResumeNoRecord = "send.refused_resume_no_record"
 
+	// counterSendEnded (#411) counts a delivery whose confirmation failed and
+	// whose session was then found ended (its pane dead, or gone), answered
+	// ended instead of unknown. No stranded record is kept for one.
+	counterSendEnded = "send.ended"
+
 	// counterResumeConfirmedByTranscriptOnEmptyComposer counts
 	// resumeIfStranded finding the composer ALREADY EMPTY (not busy) for a
 	// session with a matching stranded record, and confirming — from that

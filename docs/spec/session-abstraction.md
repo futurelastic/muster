@@ -770,7 +770,7 @@ for capabilities; it holds field by field.
 
 ```
 DeliveryReceipt {
-  outcome : "submitted" | "queued" | "refused" | "unknown" | "stalled"
+  outcome : "submitted" | "queued" | "refused" | "unknown" | "stalled" | "ended"
           | "delivered" | "held" | "denied" | "expired" | "dropped"
   reason? : string
   delivery? : DeliveryPath
@@ -798,6 +798,19 @@ Input delivery is **not** fire-and-forget, and not a boolean.
   resume its conversation) instead of sending again. A client that predates the
   value must treat an outcome it does not know as "not delivered", never as
   `queued`.
+- `ended` — the session's own process exited while the delivery was being
+  confirmed (muster #411), so there is nothing left to confirm it against.
+  `reason` says the session ended and, when the driver knows it, the exit
+  status; it does **not** say whether the text was read before the exit — a
+  `/quit` that ends the session and a runtime that crashed under the paste both
+  read `ended`, and the session's closed record (api-http.md, closed sessions)
+  and transcript say which. Distinct from `unknown`, whose remedy is to read the
+  session and perhaps send again: there is no session to read, so **a client
+  must not retry on `ended`** — a retry, `resumeIfStranded` included, has
+  nowhere to land — and the driver keeps no stranded or held record for it. The
+  exit status is in `reason` only; the structured status is the closed-session
+  record's. A client that predates the value treats it as "not delivered", as
+  for `stalled`.
 
 `delivery` names the path that made the receipt (#184): `terminal` (the
 session's composer — the text arrives as the user's own turn) or `inbox` (the

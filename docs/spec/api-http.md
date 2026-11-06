@@ -1846,7 +1846,7 @@ part in it.
 POST /v1/machines/{machine}/sessions/{id}/input?runtime=
 { "text": "..." }                      (submit defaults to true: §3.3)
 
-→ 200 { "outcome": "submitted" | "queued" | "refused" | "unknown" | "stalled",
+→ 200 { "outcome": "submitted" | "queued" | "refused" | "unknown" | "stalled" | "ended",
         "reason": "prompt holds unsent input",
         "delivery": { "route": "terminal" | "inbox" | "module",
                       "module"?: "<name>" },
@@ -1866,6 +1866,21 @@ delivered", never as `queued`** — the whole point of the answer is that `queue
 would have promised what cannot happen. Recovery is the client guide's section
 on a stalled session: `interrupt`, then `DELETE` the session and `create` again
 with `resume` if it stays stalled.
+
+**`ended` (muster #411) says the session's own process exited while the
+delivery was being confirmed.** It is an ordinary `200`, on the terminal route
+and on a module lane alike, and it is the honest answer to a `/quit` (sent with
+`human-relay`) that does end the session: the confirmation that was waiting for a
+turn or an emptied composer can never come, and `unknown` would have said the text
+is sitting there unsent and invited a retry on a session that no longer exists.
+`reason` names the exit status when the service knows it (the pane's own status;
+a session already gone from the listing carries the status the service captured at
+its exit, within ten minutes of it) and says plainly when none was recorded. It
+does not say the text was read. **Do not retry on `ended`**, `resumeIfStranded`
+included: nothing is kept for the session, and the next send to it is answered
+`refused`. Read the session's closed record
+(`/v1/sessions/closed`) for the structured exit. A client that does not know the
+value must treat it as "not delivered", as for `stalled`.
 
 **`delivery.route` (muster #184) names the path that made the receipt.** It
 is `inbox` for anything the inbox path decided — a delivery, an `unknown`, or a

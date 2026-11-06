@@ -40,6 +40,21 @@ const (
 	// action on the composer: a stall does not clear by itself, and no
 	// rewording of the send changes the answer.
 	OutcomeStalled Outcome = "stalled"
+	// OutcomeEnded means the session's own process exited while this delivery
+	// was being confirmed (muster #411). The delivery cannot be confirmed
+	// because there is nothing left to confirm it against; Reason says that the
+	// session ended and, when it is known, the exit status. It does NOT say the
+	// text was read: a /quit that ends the session and a runtime that crashed
+	// under the paste both read `ended`, and which one it was is for the
+	// session's closed-session record and transcript to answer.
+	//
+	// Distinct from OutcomeUnknown, whose remedy is to read the session and
+	// perhaps send again: there is no session to read, and a retry — through
+	// resumeIfStranded or otherwise — would land on a session that no longer
+	// exists. No stranded record is kept for it. The exit itself is the
+	// session's history record (api-http.md, closed sessions), not part of the
+	// receipt.
+	OutcomeEnded Outcome = "ended"
 
 	// The five values below are muster #119's own: a target's own
 	// inbox — reached only when a driver capability-detects one and
@@ -76,7 +91,7 @@ const (
 
 func (o Outcome) valid() bool {
 	switch o {
-	case OutcomeSubmitted, OutcomeQueued, OutcomeRefused, OutcomeUnknown, OutcomeStalled,
+	case OutcomeSubmitted, OutcomeQueued, OutcomeRefused, OutcomeUnknown, OutcomeStalled, OutcomeEnded,
 		OutcomeDelivered, OutcomeHeld, OutcomeDenied, OutcomeExpired, OutcomeDropped:
 		return true
 	default:
