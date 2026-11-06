@@ -236,6 +236,14 @@ order of this page and the order of its output are the same.
    Rows: `config.load`, `config.reload`, `token.source`, `principals.supervisor`,
    `principals.relay`, `local.mutations`.
 
+   The empty document is the whole starting config: a setting that is absent
+   takes its default, and the install writes none. One default is worth knowing
+   before the first client connects: `maxInputBytes`, the limit on a create
+   `prompt` and an `input` `text`, is **32768** bytes (1024 before muster #412),
+   enough for a real briefing. Set it in this file to move it either way — a
+   smaller value refuses more — and restart, because it is read at start;
+   `muster doctor` validates it (row `config.load`).
+
 6. **Peers, both halves** — only for a fleet. Each direction needs one secret
    in two places, and the far half is invisible from the near machine:
 

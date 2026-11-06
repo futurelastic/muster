@@ -113,7 +113,7 @@ GET /v1/health
         "build": { "known": true, "revision": "...", "modified": false,
                    "time": "...", "go": "go1.26.5",
                    "version": "v0.1.0-2-g3ce7e27" },  ← null when unstamped
-        "maxInputBytes": 1024,
+        "maxInputBytes": 32768,
         "labels": { "maxKeys": 16, "maxKeyBytes": 128, "maxValueBytes": 128 },
         "supportsConversationId": true,
         "supportsIsolateEnvironment": true,
@@ -139,7 +139,7 @@ GET /v1/machines[?verify=1]
                      "build": { "known": true, "revision": "...",
                                 "modified": false, "time": "...",
                                 "go": "go1.26.5" },
-                     "maxInputBytes": 1024,
+                     "maxInputBytes": 32768,
                      "address": "http://...",   ← a peer configured with several only
                      "peer": { "listsMeBack": true,
                                "grantsToMe": ["read", "send"],
@@ -827,22 +827,25 @@ third call with the same key gets the same 409, not a silently fresh session.
 The caller's fix is to mint a **new** `Idempotency-Key` — retrying this one is
 asking the same already-answered question again.
 
-**`prompt` is capped by this machine's effective limit** — 1024 bytes by
+**`prompt` is capped by this machine's effective limit** — 32768 bytes by
 default, and a machine setting rather than a compiled-in constant since
 muster #130 (see `maxInputBytes` in §3.1 for how to read it without
 triggering it). Over that, the create is rejected outright — `invalid`
 (400) naming the limit and the caller's actual size — instead of being
 accepted and left to strand in the composer with no delivery receipt to
 explain why (muster #114, #110, #112: the creation path measurably
-strands even shorter prompts than `input` does). 1024 is a conservative
-default, not the bisected true failure boundary, which #114 leaves as open
-work; #130 argues the mechanism behind that boundary may be startup timing
-rather than size at all, and deliberately keeps the default unchanged while
-making the limit configurable — raising it is a separate decision that
-follows a bisect (#129), on evidence, per machine. A caller with more to
-send should write it somewhere the agent can read deliberately and pass
-only a short pointer here — the same workaround #112 already adopted ad
-hoc.
+strands even shorter prompts than `input` does). The default was 1024 until
+muster #412: a conservative guess, not the bisected true failure boundary,
+which #114 leaves as open work and #130 argues may be startup timing rather
+than size at all. The field settled the number instead — a client that opens
+sessions with a real briefing sends 8–15 KB, every one of them was refused
+on a fresh install, and the machines that had set 32768 by hand ran that way
+without the stranding the cap was written to prevent. The cap and the refusal
+are unchanged, and the setting still moves either way: a smaller value
+refuses more, and `muster doctor` still validates it. A caller with more to
+send than a briefing should write it somewhere the agent can read
+deliberately and pass only a short pointer here — the same workaround #112
+already adopted ad hoc.
 
 **The driver that served the create builds this response, not the service
 layer relaying the caller's own request back at it** (muster #84, #85,

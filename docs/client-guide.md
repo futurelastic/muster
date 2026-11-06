@@ -951,10 +951,10 @@ that strands is still retried once, as before.
 
 **Prefer `contextRef` to a long `prompt` — the composer is the fragile
 surface, not a load-bearing one.** `prompt` is capped by this machine's
-`maxInputBytes` (1024 bytes by default; over it the create is refused
-outright rather than accepted and left to strand — see api-http.md §3.1 and
-§3.2), and even under that cap it still travels through the same composer
-keystrokes `input` does. Measured on live fleet operation: a roughly
+`maxInputBytes` (32768 bytes by default, 1024 before muster #412; over it the
+create is refused outright rather than accepted and left to strand — see
+api-http.md §3.1 and §3.2), and even under that cap it still travels through
+the same composer keystrokes `input` does. Measured on live fleet operation: a roughly
 1800-byte brief stranded in a composer and the prompt was simply lost
 (muster #128). None of that fragility is a property this API needs you
 to accept — `contextRef` (below) hands the runtime a PATH instead, and a

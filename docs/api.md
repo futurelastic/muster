@@ -1276,7 +1276,7 @@ never the text itself. It works on all three shapes:
   own box; that is what hands the text over.
 - **`text` cannot be combined with `choice` or `cancel`**; that, an empty or
   blank `text`, and a `text` over the same byte limit `input` is held to
-  (`maxInputBytes`, 1024 by default) are each a `400`, before any driver sees
+  (`maxInputBytes`, 32768 by default) are each a `400`, before any driver sees
   the body.
 
 Rules that follow from how the row behaves on the one runtime measured:

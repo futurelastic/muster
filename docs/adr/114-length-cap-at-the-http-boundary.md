@@ -3,6 +3,10 @@
 **Issue:** #114
 **Status:** decided
 
+> Amended by the follow-up at the end of this page (#412): the 1024 default is
+> superseded by the owner's decision of 2026-11-06. The cap, the refusal and
+> the per-machine override stand; only the number moved.
+
 ## Context
 
 A long `prompt` sent to session-create, or a long `text` sent to `input`,
@@ -97,3 +101,30 @@ kilobytes of context) without waiting on that measurement.
   endpoints — a future session tightening or loosening it from real bisect
   data updates one constant and this doc, not a driver-specific pattern
   list.
+
+## Follow-up (2026-11-06, #412) — the default is 32768
+
+**The 1024 default above is superseded.** The owner decided on 2026-11-06 to
+raise the default `maxInputBytes` to **32768**, on field evidence this ADR did
+not have:
+
+- On a fresh install, a client that opens sessions with a real briefing prompt
+  (8–15 KB) had about 140 creates refused in 30 minutes with
+  `400 … over the 1024-byte limit`. Sessions opened by hand with short prompts
+  worked, so the client looked switched on and nothing happened.
+- Machines whose operators had set `maxInputBytes: 32768` by hand had run that
+  way for a long time without the stranded composer this ADR was written to
+  prevent. That is the bisect this ADR left open, answered by operation rather
+  than by a controlled sweep.
+
+What does not change: the cap sits at the HTTP boundary and is checked before
+any driver is resolved; the refusal is still `invalid` (400) naming the field,
+the limit and the caller's size; `prompt` and `text` still share one number; the
+setting is still a per-machine override read at start, validated by
+`muster doctor`, and it still moves in both directions — a configured 1024
+refuses a 15 KB prompt exactly as before. The install writes no value, so a
+machine follows the default instead of a number it was handed once.
+
+The "conservative default" reasoning in Decision and Consequences above is kept
+as the record of what was known then. `docs/spec/api-http.md` and
+`docs/client-guide.md` name 32768.
