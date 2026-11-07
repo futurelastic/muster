@@ -570,6 +570,7 @@ func (d *Driver) State(ctx context.Context, req fleet.Request, ref fleet.Session
 		// that failed or found the session gone has no figures worth adding.
 		if st.Status != fleet.StatusDead && st.Status != fleet.StatusUnknown {
 			st.Usage = d.usageForState(ctx, known.srv, ref.ID, st.Status == fleet.StatusIdle)
+			st.Scratch = d.scratchOf(known.srv) // muster #419: the last walk's figure, never a wait
 		}
 	}
 	return st, nil
@@ -985,6 +986,9 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 			// muster #285: what a State read or a turn's end last learned, with no
 			// request made here; AsOf says how old it is.
 			st.Usage = d.usageSnapshot(id, st.Status == fleet.StatusIdle)
+			if st.Status != fleet.StatusDead {
+				st.Scratch = d.scratchOf(info.srv) // muster #419
+			}
 		}
 		startedAt := info.startedAt
 		sess := fleet.Session{

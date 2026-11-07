@@ -1580,7 +1580,8 @@ not in the response.
       "source": "inferred", "asOf": "…",
       "lastTurn": { "at": "…", "input": 311, "output": 42, "cacheRead": 3013, "cacheWrite": 60 },
       "context": { "tokens": 142000, "window": null, "model": "…", "at": "…" }
-    }
+    },
+    "scratch": { "bytes": 3100000000, "asOf": "…" }
   }
 }
 ```
@@ -1658,6 +1659,17 @@ a runtime that does not record per-request figures, a read that failed):
 arrive. Whether the context is "full" is the client's policy; nothing here judges
 it. Only counts, a model name and a timestamp leave the runtime's record — no
 content. A change fires `session.state`.
+
+**`scratch`** (#419) — how much the session's scratch directory holds, so a
+session waiting for review on gigabytes of test fixtures can be seen before the
+disk is full. `bytes` is the sum of the sizes of the regular files under it (not
+the space they occupy; a link is not followed). It is measured in the background,
+bounded, at most every few minutes — never on the request path — so `asOf` says
+when, and `partial: true` means the walk stopped at its bound or could not read part
+of the tree and `bytes` is a lower bound. **Absent means no figure** (no such
+directory, or not measured yet), never zero. Nothing is removed while the session
+lives; closing it removes the directory. Not a material change: it moves with every
+file written, so it does not fire `session.state`.
 
 **`waitingOn`** — `prompt` (a dialog is attached) or `unsent-input` (the
 composer holds text nobody submitted; do not send to it).

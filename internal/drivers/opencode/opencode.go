@@ -305,6 +305,10 @@ type Driver struct {
 	dirSweepEvery time.Duration
 	dirScan       func(string) ([]serverProc, int, error)
 
+	// scratchLimits bound the measurement of a session's scratch directory
+	// (scratch.go). The zero value means the production bounds.
+	scratchLimits scratchLimits
+
 	// statusTTL is how long a read of a server's status is kept (muster #419;
 	// statuscache.go). Set to the production windows in New; a test sets it.
 	statusTTL statusTTLs

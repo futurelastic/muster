@@ -333,6 +333,13 @@ SessionState {
   sandbox?       : SandboxState    // the profile the session runs under (#281): mechanism, denied classes, network, granted paths (defaults included), package cache; absent = not sandboxed
   warnings?      : Warning[]       // footer notices the driver read below the composer (#230); absent = none found, not merely unobserved
   usage?         : Usage           // what the session has spent, as its RUNTIME reports it (#285): summed over every request; absent = not yet known, never zero
+  scratch?       : ScratchUsage    // how much the session's scratch directory holds (#419); absent = no such directory, or not measured yet — never zero
+}
+
+ScratchUsage {
+  bytes    : integer       // the sum of the sizes of the regular files under the directory, as the file system reports them (not the space they occupy); a link is not followed
+  asOf     : Timestamp     // when the directory was measured, not when this state was read — a driver measures at most every few minutes, off the request path
+  partial? : boolean       // true when the walk stopped at its bound (a very large tree); `bytes` is then a lower bound
 }
 
 Usage {
@@ -605,6 +612,23 @@ Stall {
 > progress is in the cumulative figures and is not yet `lastTurn`. A change in any
 > figure fires `session.state` (§4 of api-http.md): once per completed request,
 > never per repaint. It never changes `status`.
+
+> **`scratch` is how much the session's scratch directory holds (muster issue
+> #419).** A session that waits for a person for a day can sit on gigabytes of
+> test fixtures and build output in its temporary directory, and nothing said so
+> until the disk was full. `bytes` is the sum of the sizes of the regular files
+> under the directory, as the file system reports them — not the space they occupy,
+> and a link is not followed. It is **measured, not live**: a driver walks the
+> directory in the background, bounded, at most every few minutes, and never on the
+> request path, so `asOf` says when and a reader seeing a size that stopped moving
+> can tell a quiet directory from a reader that stopped reading. `partial` is true
+> when the walk stopped at its bound or could not read part of the tree, so `bytes`
+> is then a lower bound. **Absent means no figure** — the driver keeps no such
+> directory for the session, or has not measured it yet — **never zero** (§5.7).
+> Nothing is removed while the session lives, because a tool may be using the
+> files; closing the session removes the directory (the opencode driver). It is not
+> a material change: it moves with every file written, so a feed that fired on it
+> would storm. A poller reads it off the state.
 
 > **`warnings` lists footer notices the driver read below the composer's closing
 > rule (muster issue #230), the same region `controlChannel` and
