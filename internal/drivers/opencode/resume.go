@@ -35,6 +35,10 @@ import (
 //     runtime would not start, the runtime no longer has the session. The record and
 //     the directory stay, so a later start tries again, and Close removes them.
 //
+// A session whose record says it was parked (muster #423) is not relaunched while
+// the idle bound that parked it still holds: it is listed with the stopped server
+// it had, and its first input starts it (parkedServerFor).
+//
 // Relaunches run concurrently, a few at a time: each waits for a server to answer.
 
 // resumeParallel bounds how many servers are starting at once.
@@ -110,6 +114,15 @@ func (d *Driver) resumeOne(ctx context.Context, it loaded) {
 		}
 		base.context = text
 	}
+	// muster #423: a session that was parked stays parked, with nothing started.
+	if srv := d.parkedServerFor(rec); srv != nil {
+		base.srv = srv
+		base.conversation = unconfirmed("the session was left parked, so its runtime has not been asked; " +
+			"the input that starts it confirms the record")
+		d.markSeen(rec.ID, base)
+		d.say("opencode: session %s was parked before the restart and is left parked; its next input starts it", rec.ID)
+		return
+	}
 	rctx, cancel := d.bounded(ctx)
 	defer cancel()
 	srv, interrupted, err := d.relaunch(rctx, rec)
@@ -133,29 +146,13 @@ func (d *Driver) resumeOne(ctx context.Context, it loaded) {
 // The second holds the session's lifecycle lock and ignores the interrupted turn
 // this returns, because a server is only parked while it has no turn.
 func (d *Driver) relaunch(ctx context.Context, rec *sessionRecord) (*server, *fleet.TurnEnd, error) {
-	if rec.PermissionMode != "" && rec.Sandbox == nil {
-		// Cannot arise from a create this driver accepted; a record edited by hand
-		// is refused rather than relaunched pre-approved with nothing confining it.
-		return nil, nil, fmt.Errorf("its record asks for permission mode %q without a sandbox, which this driver never starts", rec.PermissionMode)
-	}
-	if rec.Sandbox != nil && d.sandbox == nil {
-		return nil, nil, fmt.Errorf("it was created in a sandbox and this driver can no longer enforce one (%s); "+
-			"it is not relaunched unconfined", d.sandboxWhy)
-	}
-	if !d.ownsDir(rec.Dir) {
-		return nil, nil, fmt.Errorf("its recorded directory %q is not one this driver made", rec.Dir)
-	}
-	if info, err := os.Stat(rec.Dir); err != nil || !info.IsDir() {
-		return nil, nil, fmt.Errorf("its scoped directory %q is gone, and with it the session's database", rec.Dir)
+	if err := d.checkRelaunchable(rec); err != nil {
+		return nil, nil, err
 	}
 	// A server the previous service left running holds this database too; it was
 	// stopped by resumeOne before this was called (muster #398).
 
-	spec := fleet.SessionSpec{
-		Cwd: fleet.AbsolutePath(rec.Cwd), Agent: fleet.AgentId(rec.SpecAgent), Marker: rec.SpecMarker,
-		Sandbox: rec.Sandbox, PermissionMode: rec.PermissionMode,
-	}
-	srv, err := d.startServerIn(ctx, spec, rec.Dir, rec.CacheCopy)
+	srv, err := d.startServerIn(ctx, rec.spec(), rec.Dir, rec.CacheCopy)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -168,11 +165,110 @@ func (d *Driver) relaunch(ctx context.Context, rec *sessionRecord) (*server, *fl
 		return nil, nil, fmt.Errorf("the runtime restarted but the session could not be read back: %w", err)
 	}
 	d.stampProcess(rec, srv)
+	// muster #423: a process serves the session now, so the record no longer says
+	// parked, in the same write that names the process.
+	rec.Parked = nil
 	if err := d.store.write(rec); err != nil {
 		srv.pauseForShutdown()
 		return nil, nil, err
 	}
 	return srv, d.interruptedTurn(ctx, srv, rec.ID), nil
+}
+
+// spec is the create's request as the record kept it: what a start needs to build
+// the session's environment, sandbox and permission posture again.
+func (r *sessionRecord) spec() fleet.SessionSpec {
+	return fleet.SessionSpec{
+		Cwd: fleet.AbsolutePath(r.Cwd), Agent: fleet.AgentId(r.SpecAgent), Marker: r.SpecMarker,
+		Sandbox: r.Sandbox, PermissionMode: r.PermissionMode,
+	}
+}
+
+// checkRelaunchable is what a start of rec's session needs to be true before any
+// process exists: a posture this driver still enforces and a directory it made and
+// that still holds the session's database. Shared by relaunch, which refuses on it,
+// and by parkedServerFor, which will not leave parked a session that could not be
+// started.
+func (d *Driver) checkRelaunchable(rec *sessionRecord) error {
+	if rec.PermissionMode != "" && rec.Sandbox == nil {
+		// Cannot arise from a create this driver accepted; a record edited by hand
+		// is refused rather than relaunched pre-approved with nothing confining it.
+		return fmt.Errorf("its record asks for permission mode %q without a sandbox, which this driver never starts", rec.PermissionMode)
+	}
+	if rec.Sandbox != nil && d.sandbox == nil {
+		return fmt.Errorf("it was created in a sandbox and this driver can no longer enforce one (%s); "+
+			"it is not relaunched unconfined", d.sandboxWhy)
+	}
+	if !d.ownsDir(rec.Dir) {
+		return fmt.Errorf("its recorded directory %q is not one this driver made", rec.Dir)
+	}
+	if info, err := os.Stat(rec.Dir); err != nil || !info.IsDir() {
+		return fmt.Errorf("its scoped directory %q is gone, and with it the session's database", rec.Dir)
+	}
+	return nil
+}
+
+// parkedServerFor is the stopped server a session is listed with after a restart
+// when its record says it was parked (muster #423), or nil when the session is to
+// be started the ordinary way. It starts nothing and reads nothing from a runtime:
+// it is the server the park left, rebuilt from what the record kept — the scoped
+// directory, the sandbox and permission posture a state read reports, and the note
+// that says why it is stopped — so phaseOf reads it parked and the first input
+// revives it exactly as it would have before the restart.
+//
+// nil, and so a start, in every case where leaving the session parked would trust
+// something the service cannot stand behind:
+//   - the record does not say parked, or this driver is in shared mode;
+//   - no idle bound is set now. Nothing would park the session again, and a parked
+//     session is only ever made with the bound set (its lock is taken only then);
+//   - the bound is lower than the one the park was decided under: the fact belongs
+//     to a policy that has since been replaced, so the session is started and the
+//     new bound decides afresh, one bound of memory later at most. A bound that is
+//     the same or higher keeps it parked: it would have been parked by the new one;
+//   - a start of it would fail before any process exists (checkRelaunchable, the
+//     environment files, the operator's agents file, the sandbox plan). Those are
+//     refused at a restart as they always were — the session is listed unknown, with
+//     the reason — rather than left parked behind a first input that cannot start it.
+//
+// The one thing left unchecked is that the runtime still holds the session in its
+// store, which only a process can say. relaunch reads it back when the first input
+// starts the session, and a failure there is the retryable one a parked session
+// already has.
+func (d *Driver) parkedServerFor(rec *sessionRecord) *server {
+	p := rec.Parked
+	if p == nil || d.shared != nil || d.idleStop <= 0 || d.idleStop < time.Duration(p.BoundMs)*time.Millisecond {
+		return nil
+	}
+	if d.checkRelaunchable(rec) != nil {
+		return nil
+	}
+	spec := rec.spec()
+	if _, err := d.sessionEnvFor(spec); err != nil {
+		return nil
+	}
+	if _, err := d.operatorAgentsFor(); err != nil {
+		return nil
+	}
+	srv := &server{dir: rec.Dir}
+	if spec.PermissionMode == fleet.PermissionModeBypass {
+		srv.permission = fleet.PermissionModeBypass
+	}
+	if spec.Sandbox != nil {
+		if pc := spec.Sandbox.PackageCache; pc != nil && pc.Mode != fleet.PackageCacheShared && rec.CacheCopy == "" {
+			// Planning would make the session's private cache again, here and then
+			// once more by the start this falls back to: not a side effect to take twice.
+			return nil
+		}
+		plan, err := d.planSandboxFor(spec, rec.Dir, rec.CacheCopy)
+		if err != nil {
+			return nil
+		}
+		srv.sandbox = plan.state()
+	}
+	srv.persisted.Store(true)
+	srv.touch(d.now())
+	srv.park.Store(noteFromRecord(p))
+	return srv
 }
 
 // interruptedTurn reports a turn the previous process was in the middle of: the

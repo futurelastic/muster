@@ -1,6 +1,6 @@
 # ADR: an idle opencode server can be parked, and is started again by the next input
 
-**Issues:** #421 (the remainder of #419)
+**Issues:** #421 (the remainder of #419); #423 (what a service restart does to a parked session)
 **Status:** decided; off by default for the release that introduces it
 
 ## Context
@@ -100,10 +100,75 @@ been seen working on a deployment.
 - The session's `tmp/` is kept, and still measured, so a parked session can still
   sit on gigabytes of it. #419 reports the size in `state.scratch`; removing it is
   not this change.
-- A service restart starts every record again, parked ones included, so the memory
-  comes back after a deploy until the sweep parks those sessions once more. Starting
-  them parked is a separate change.
+- A service restart leaves a parked session parked while the bound that parked it
+  still holds (see "A restart leaves a parked session parked", below). Every other
+  session is started again at a restart, as before, and holds its memory for one
+  bound before the sweep considers it.
+- A session left parked by a restart reports no `usage` until its first input: the
+  figures are read from the runtime and kept in memory, and there is no process to
+  read them from. Its sandbox and permission posture and its last failed turn are
+  still reported; its conversation reads unconfirmed until that input (below).
 - A runtime that publishes a change event while idle would keep stamping the
   activity clock and never be parked. If a deployment shows that, the list of events
   that count narrows.
 - Shared mode (a server the driver did not start) is never parked.
+
+## A restart leaves a parked session parked (#423)
+
+Without this, every restart of the service — a deploy — started every record on
+disk, parked ones included, because a record did not say it had been parked. After a
+deploy every idle session held its memory again for one bound, on exactly the
+machines that had turned the bound on to give it back.
+
+**The record says so.** A park writes an optional `parked` object to the session's
+record (when, how long it had been quiet, the bound in force, and how the newest turn
+had ended) **before** the process is stopped. The write that records the process
+started in its place clears it, so the fact is never present beside a running
+process. The field is optional and the record's format version is unchanged: a record
+written before it reads as not parked, and a build that does not know it ignores it
+and starts the session, as every build before did. If the write fails the session is
+still parked — freeing the memory is the point — and the log says a restart will
+start it.
+
+**What a restart does with it.** The stopped server is rebuilt from the record
+without starting anything: the scoped directory, the sandbox and permission posture a
+state read reports (the sandbox plan is made again from the record, which is a pure
+computation when the record names the private cache copy it already made), and the
+park note. The session is listed `idle`, observed, with `parked:` evidence that also
+says the service has restarted since; the first `input`, `interrupt` or `respond`
+starts it through the same path any parked session takes.
+
+**When it does not.** The session is started the ordinary way, and so can never be
+left stranded, when:
+
+- **no bound is set.** Nothing would park the session again, and a parked session is
+  only made with the bound set — the per-session lock that serialises a start
+  against a park is only taken then. This is the case the issue called out.
+- **the bound is lower than the one the park was decided under** (the question the
+  issue left open: it starts). The fact belongs to a policy that has since been
+  replaced; the new bound decides afresh from live evidence, one bound of memory
+  later at most. The same or a higher bound keeps the session parked: it is a
+  session the new bound would have parked too.
+- **a start would fail before any process exists:** the posture can no longer be
+  enforced, the directory is gone, a required environment file or the operator's
+  agents file cannot be read, the sandbox cannot be planned. These are refused at a
+  restart as they always were — listed unknown, with the reason — rather than left
+  parked behind a first input that cannot start the session.
+
+**What is not checked.** That the runtime still holds the session in its store: only
+a process can say, and none is started. The start the first input causes reads the
+session back by id, as every start does, and a failure there is the retryable one a
+parked session already has (the session stays parked, with the failure in its
+evidence).
+
+**Conversation.** A restart confirms a session's conversation id by reading it back
+from the relaunched runtime. A session left parked has no runtime to ask, so its
+`conversation` reads unconfirmed — never the remembered id served on its own — until
+the input that starts it, whose read-back confirms it.
+
+**Considered and not done.** Writing the usage figures into the record: they are a
+per-message memo, large and changing with every turn, and the field is optional and
+cheap to add later. Starting each parked session briefly at a restart to read its
+usage and last turn: that is the memory spike this change exists to avoid, multiplied
+by every idle session at once.
+

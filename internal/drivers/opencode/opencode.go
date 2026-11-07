@@ -167,9 +167,11 @@
 // the service stopping stops it, and the session keeps its record and its
 // directory. The next Send, Interrupt or Respond starts a server on that directory
 // again (relaunch). A parked session reads idle, with evidence that says so —
-// never dead, never closed — and no read starts it. park.go has the lifecycle, the
-// one classifier (phaseOf) every "has the process exited" reader goes through, and
-// the locking; docs/adr/421-… has the decisions and what they cost.
+// never dead, never closed — and no read starts it. A service restart leaves it
+// parked while the bound that parked it still holds (muster #423): the record says
+// so, and resume rebuilds the stopped server instead of starting one. park.go has
+// the lifecycle, the one classifier (phaseOf) every "has the process exited" reader
+// goes through, and the locking; docs/adr/421-… has the decisions and what they cost.
 //
 // KeySender is not implemented at all — this substrate has no screen for a
 // raw key to land on, and DeliversRawKeys: false says so structurally

@@ -78,6 +78,28 @@ type sessionRecord struct {
 	Pid  int    `json:"pid,omitempty"`
 	Port int    `json:"port,omitempty"`
 	Bin  string `json:"bin,omitempty"`
+	// Parked is present while the session's server is stopped for being idle (muster
+	// #423): written by the park, cleared by the write that records the process
+	// started in its place. It is what lets a service restart leave the session
+	// stopped instead of starting a process that would be stopped again one bound
+	// later. Optional, so a record from before it existed reads as "not parked" and
+	// the record's version is unchanged; a build that does not know the field
+	// ignores it and starts the session, as every build before #423 did.
+	Parked *parkedRecord `json:"parked,omitempty"`
+}
+
+// parkedRecord is the part of a parkNote (park.go) that outlives the service: when
+// the stop happened, how long the session had been quiet, the idle bound in force
+// when it was decided, and how the session's newest turn had ended — read before
+// the stop, while there was a process to ask, so a session left stopped reports it
+// without one.
+type parkedRecord struct {
+	AtMs      int64 `json:"atMs"`
+	IdleForMs int64 `json:"idleForMs"`
+	// BoundMs is FLEET_OPENCODE_IDLE_STOP when the park was decided. A restart with
+	// a lower bound, or none, does not trust the fact: it starts the session.
+	BoundMs  int64          `json:"boundMs"`
+	LastTurn *fleet.TurnEnd `json:"lastTurn,omitempty"`
 }
 
 // recreateReason is what a session created with caller-supplied env is listed

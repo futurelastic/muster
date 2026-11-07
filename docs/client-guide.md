@@ -770,6 +770,10 @@ otherwise, so a supervisor that waits for `idle` needs no change. What differs:
 - **Reading never wakes it.** Poll `state` as often as you like; it stays parked.
 - **`GET …/turns` is `409` while parked.** That is not the stale-cursor `409` and
   retrying without `since` does not clear it: send the session input first, then read.
+- **A restart of the service does not wake it** (muster #423) while the operator's bound
+  still holds: you see the same `parked:` idle after a deploy, with `evidence` saying the
+  service restarted since, and no `usage` or confirmed `conversation` until your next
+  `input` has started it.
 - **No event announces the park or the start.** The session never closed; the events
   you receive after an input come from the restarted runtime as usual.
 - Whatever the session had started on the machine (a dev server, a watcher) was

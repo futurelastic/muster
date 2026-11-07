@@ -2221,8 +2221,12 @@ the park. A `send`, an `interrupt` or a `respond` starts the runtime on the same
 directory first, and then does what was asked; if it cannot start, the call fails
 `unreachable` with `retryable: true`, nothing was sent, and the session remains
 parked with the failure in `evidence`. `close` removes it without starting anything.
-`GET …/turns` is `409` while it is parked. A peer built before this sends none of
-this and reads as it always did.
+`GET …/turns` is `409` while it is parked. A service restart (muster #423) does not
+start it: while the bound is still set and not lower than the one that parked it, the
+session is listed parked after the restart, `evidence` adds that the service restarted
+since, `usage` is absent and `conversation` is unconfirmed until the input that starts
+it; with no bound, or a lower one, it is started like every other session. A peer built
+before this sends none of this and reads as it always did.
 
 `state.usage.context` — when present — is how large the context was at the
 session's most recent request (muster #313):

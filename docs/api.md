@@ -1686,7 +1686,11 @@ the start fails the call is `unreachable` with `retryable: true` and nothing was
 sent, and the session stays parked with the failure in `evidence`. `DELETE` removes
 it as it removes any session. `GET …/turns` on a parked session is `409`
 (`conflict`), because the history is read from the runtime's process; send it input
-first.
+first. **A service restart does not start it** (#423): a session parked before the
+restart is listed parked after it, while the bound is still set and not lower than the
+one that parked it, and its `evidence` then also says the service restarted since. Until
+the input that starts it, `usage` is absent and `conversation` reads unconfirmed; with
+no bound, or a lower one, the restart starts the session as it starts every other.
 
 **`waitingOn`** — `prompt` (a dialog is attached) or `unsent-input` (the
 composer holds text nobody submitted; do not send to it).
