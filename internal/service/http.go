@@ -520,7 +520,7 @@ func parseDeadline(r *http.Request) time.Duration {
 
 func handleHealth(svc *Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{
+		body := map[string]any{
 			"epoch": svc.epoch,
 			// The event plane is real now, so this reports the actual
 			// high-water mark. It used to be a hardcoded 0 with a comment
@@ -604,7 +604,16 @@ func handleHealth(svc *Service) http.HandlerFunc {
 			// describes — looking at a healthy-looking number that is
 			// actually just recent.
 			"counters": svc.counterSnapshot(),
-		})
+		}
+		// muster #414: which external delivery modules the operator enabled and
+		// which of them were found. Present only when one was configured, so a
+		// machine that never used the feature answers as it always did. A module
+		// that is configured and skipped leaves everything else here ok; this is
+		// the one place a poller can see it.
+		if modules := svc.deliveryModulesStatus(); modules != nil {
+			body["modules"] = modules
+		}
+		writeJSON(w, http.StatusOK, body)
 	}
 }
 

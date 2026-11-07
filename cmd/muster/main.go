@@ -249,7 +249,10 @@
 //	                       <prefix>/libexec/muster/modules, <prefix> being the
 //	                       parent of this binary's directory after symlinks
 //	                       resolve — set it explicitly when the binary is reached
-//	                       through a symlink.
+//	                       through a symlink. When the binary was installed by npm
+//	                       (it runs out of a platform package) <prefix> is the npm
+//	                       install prefix instead, so both install shapes share
+//	                       one default (#414).
 //	FLEET_DELIVERY_MODULE_ENV
 //	                       comma-separated environment names forwarded to a module
 //	                       child; nothing else is, beyond PATH HOME USER LANG
@@ -847,6 +850,10 @@ func main() {
 	if err := svc.SetDeliveryModuleRoutes(deliveryModules.Enabled); err != nil {
 		log.Fatalf("muster: %v", err)
 	}
+	// #414: what GET /v1/health says about them — enabled, found, and skipped
+	// with the reason — so a module the log says was skipped is visible to a
+	// poller too. Nothing is reported when none was configured.
+	svc.SetDeliveryModulesStatus(deliveryModules.healthStatus())
 	// A negative number of days was refused above (validateConfigExtras); zero is
 	// "not set" and leaves the default in force.
 	if cfgFile != nil && cfgFile.ClosedRetentionDays != 0 {

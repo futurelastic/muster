@@ -323,13 +323,21 @@ order of this page and the order of its output are the same.
    feature does. To enable one, put its executable in the modules directory
    (`FLEET_MODULES_DIR`, default `<prefix>/libexec/muster/modules` where
    `<prefix>` is the parent of the daemon binary's directory — set it explicitly
-   when the binary is reached through a symlink), one file per module named by
+   when the binary is reached through a symlink; **under an npm install,
+   `<prefix>` is the npm prefix** — the `--prefix` of `npm install -g`, the one
+   whose `bin/muster` is the launcher — not the platform package the binary runs
+   from, so both install shapes share `<prefix>/libexec/muster/modules`. A
+   package manager that keeps its packages in a store of its own (pnpm) has no
+   such prefix: set `FLEET_MODULES_DIR`), one file per module named by
    the module, not writable by anyone but the service's account (on Unix: mode not
    group- or world-writable; on Windows: an access list that grants no other
    account, apart from system and administrators, a write, delete or
    change-permissions right), and list the name. A name with
    no executable is logged once and skipped: a machine that could not fetch the
-   module is a supported state. `scripts/deploy.sh` can install one for you
+   module is a supported state. It is also reported by `GET /v1/health` under
+   `modules` (`enabled`, `loaded`, `skipped` with a reason — absent when no module
+   is configured), so an updater or a monitor can fail on a skipped module without
+   reading the journal. `scripts/deploy.sh` can install one for you
    (`deploy.md`, "Optional delivery modules"). Row: `delivery.modules`, which
    only ever warns.
 

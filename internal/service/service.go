@@ -181,6 +181,13 @@ type Service struct {
 	// defaultRuntime and maxInputBytes follow.
 	deliveryModuleRoutes []string
 
+	// deliveryModules is what GET /v1/health reports about the external
+	// delivery modules (#414): which were enabled and which of those were
+	// found at startup. Nil means the operator enabled none, and the health
+	// body then has no `modules` key at all — byte-for-byte what it was before
+	// the key existed. Set once at startup by SetDeliveryModulesStatus.
+	deliveryModules *DeliveryModulesStatus
+
 	// selfGrants evaluates this machine's own authorization model for a
 	// credential — installed by NewMux, which is where the model lives. Nil
 	// for a Service used without a mux, whose self standing then reads
@@ -555,6 +562,66 @@ func (s *Service) SetDeliveryModuleRoutes(names []string) error {
 	s.deliveryModuleRoutes = out
 	s.mu.Unlock()
 	return nil
+}
+
+// DeliveryModulesStatus is the `modules` block of GET /v1/health (#414): what
+// this machine's operator asked for and what startup found. It exists because a
+// module that is enabled and skipped leaves the daemon healthy by every other
+// measure — one log line and a delivery lane that is quietly gone — and nothing
+// that polls health could tell.
+//
+// Enabled is every valid name the operator listed, in their order of preference.
+// Loaded is the subset whose executable was found and passed the checks;
+// Skipped lists the rest, each with the reason the log line carries. A name the
+// operator listed that is not a legal module name is never Enabled, but is
+// Skipped too: it is configured and dropped the same way. A monitor that wants
+// "something I configured is not running" reads len(Skipped) > 0. All three are
+// arrays, never null.
+//
+// "Loaded" is a statement about discovery at startup, not about whether the
+// module process is answering now; that is the driver's to say on a send.
+type DeliveryModulesStatus struct {
+	Enabled []string                `json:"enabled"`
+	Loaded  []string                `json:"loaded"`
+	Skipped []SkippedDeliveryModule `json:"skipped"`
+}
+
+// SkippedDeliveryModule is one configured delivery module that was not loaded.
+// Reason is a short fixed phrase naming what is wrong (no executable installed,
+// modules directory absent, ...) — never a path.
+type SkippedDeliveryModule struct {
+	Name   string `json:"name"`
+	Reason string `json:"reason"`
+}
+
+// SetDeliveryModulesStatus records what GET /v1/health reports under `modules`
+// (#414). Meant to be called at most once, at startup, with the zero value or
+// not at all when no module is configured: that leaves the key out of the
+// health body entirely. Nil slices in the argument are reported as empty
+// arrays.
+func (s *Service) SetDeliveryModulesStatus(st DeliveryModulesStatus) {
+	if len(st.Enabled) == 0 && len(st.Skipped) == 0 {
+		s.mu.Lock()
+		s.deliveryModules = nil
+		s.mu.Unlock()
+		return
+	}
+	out := DeliveryModulesStatus{
+		Enabled: append([]string{}, st.Enabled...),
+		Loaded:  append([]string{}, st.Loaded...),
+		Skipped: append([]SkippedDeliveryModule{}, st.Skipped...),
+	}
+	s.mu.Lock()
+	s.deliveryModules = &out
+	s.mu.Unlock()
+}
+
+// deliveryModulesStatus returns what health reports under `modules`, or nil to
+// report nothing. The value is never mutated after SetDeliveryModulesStatus.
+func (s *Service) deliveryModulesStatus() *DeliveryModulesStatus {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.deliveryModules
 }
 
 // deliveryModuleRouteNames returns the module names a caller may force, in the
