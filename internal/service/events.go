@@ -59,6 +59,34 @@ import (
 
 const defaultRetention = 512
 
+// cursorReserveBlock is how many cursor numbers one durable write reserves
+// (#415).
+//
+// # Why the file holds a ceiling, not the cursor
+//
+// The file used to be rewritten with the exact cursor on EVERY published event:
+// a temp file, a sync, a rename, for 65 bytes. The sync is the expensive part —
+// on macOS Go's File.Sync is fcntl(F_FULLFSYNC), which flushes the drive's own
+// cache — and it measured as a third of all busy CPU on a machine publishing
+// a few events a second, with every publisher queued behind the flush in
+// progress.
+//
+// What a restart needs is not the last cursor handed out; it is a number no
+// cursor handed out can exceed (§7.3: a service that reuses numbers it already
+// issued is worse than one announcing a new instance). So the file stores a
+// CEILING, and the hub writes a new one only when the cursor reaches the
+// current one: one write per block of events instead of one per event, and
+// never after the fact — an event past the ceiling is not handed to anyone
+// until the larger ceiling is durable. The price is that a restart continues
+// from the ceiling, not from the last event: up to one block of numbers is
+// skipped, which no subscriber can observe (a cursor from before a restart
+// already answers resync_required or an empty backlog — the window is not
+// persisted either), and an int64 does not run out.
+//
+// 1024 is ~49 writes a day at the ~50 000 events a day measured on a busy
+// machine, against ~49 000 before.
+const cursorReserveBlock = 1024
+
 // defaultLinger is how long the driver-side stream stays up after the last
 // subscriber leaves.
 //
@@ -112,10 +140,18 @@ type hub struct {
 	cwds     map[sessionKey]string
 	cwdTried map[sessionKey]time.Time
 
-	// persist records the cursor high-water mark so a restart continues the
-	// sequence rather than reusing numbers (§7.3). Called under the lock and
-	// therefore kept cheap; nil when running without durable state.
-	persist func(int64)
+	// reserve makes a cursor ceiling durable, so a restart continues the
+	// sequence rather than reusing numbers (§7.3); nil when running without
+	// durable state, in which case nothing below gates. reserved is the ceiling
+	// already durable: every cursor handed out is <= it (see cursorReserveBlock).
+	// reserve is called WITHOUT mu held — it is a disk flush — and only ever
+	// under extend, so two writers never race the same file.
+	reserve  func(ceiling int64) error
+	reserved int64
+	// block is how far past the cursor one reservation reaches; a field so a
+	// test can count writes in a handful of events rather than a thousand.
+	block  int64
+	extend sync.Mutex
 
 	// driver-side stream, kept alive while somebody is listening and for
 	// linger after the last of them leaves. The local lane's state is the
@@ -166,6 +202,7 @@ func newHub(self fleet.MachineId, epoch string) *hub {
 		epoch:     epoch,
 		self:      self,
 		retention: defaultRetention,
+		block:     cursorReserveBlock,
 		linger:    defaultLinger,
 		subs:      map[int]*subscriber{},
 		cwds:      map[sessionKey]string{},
@@ -179,12 +216,28 @@ func newHub(self fleet.MachineId, epoch string) *hub {
 func (h *hub) publish(ev fleet.Event) {
 	h.mu.Lock()
 
+	// Before stamping, make sure the number about to be handed out is covered by
+	// a durable ceiling. Almost always it is and this is one comparison; once
+	// per block it is not, and the write happens here with h.mu RELEASED so the
+	// flush queues nobody who is merely subscribing, polling or reading the
+	// cursor. A loop, because by the time the write finishes concurrent
+	// publishers may have used the whole new block.
+	for h.reserve != nil && h.cursor >= h.reserved {
+		h.mu.Unlock()
+		ok := h.extendReservation()
+		h.mu.Lock()
+		if !ok {
+			// The disk would not take it. Stamp anyway and ask again on the next
+			// event: a feed that stops because a state file could not be written
+			// is a worse failure than the one this guards against, and it is what
+			// the per-event write this replaced did (its error was dropped).
+			break
+		}
+	}
+
 	h.cursor++
 	ev.Cursor = h.cursor
 	ev.Epoch = h.epoch
-	if h.persist != nil {
-		h.persist(h.cursor)
-	}
 
 	fact := h.factFor(ev)
 	h.ring = append(h.ring, ev)
@@ -230,6 +283,37 @@ func (h *hub) publish(ev fleet.Event) {
 	for _, followUp := range h.observeRenameCorroboration(ev) {
 		h.publish(followUp)
 	}
+}
+
+// extendReservation makes the next block of cursor numbers durable. It reports
+// whether the ceiling now covers the cursor; false means the write failed and
+// nothing changed.
+//
+// Serialised by h.extend, and re-checked under it: a publisher that waited
+// behind another's write finds the ceiling already raised and returns without
+// writing, so a burst of events arriving at the boundary costs one flush, not
+// one per publisher.
+func (h *hub) extendReservation() bool {
+	h.extend.Lock()
+	defer h.extend.Unlock()
+
+	h.mu.Lock()
+	cursor, reserved, reserve, block := h.cursor, h.reserved, h.reserve, h.block
+	h.mu.Unlock()
+	if reserve == nil || cursor < reserved {
+		return true
+	}
+	if block < 1 {
+		block = 1
+	}
+	ceiling := cursor + block
+	if err := reserve(ceiling); err != nil {
+		return false
+	}
+	h.mu.Lock()
+	h.reserved = ceiling
+	h.mu.Unlock()
+	return true
 }
 
 // add registers a subscriber resuming from (cursor, epoch). It returns the

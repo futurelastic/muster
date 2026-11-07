@@ -3842,7 +3842,13 @@ obvious way to stop every restart resyncing every subscriber is to keep the
 epoch — and doing only that would be a lie, because a service reusing numbers
 it had already issued is worse than one announcing a new instance.
 
-So the cursor high-water mark is persisted alongside. The retained event
+So the cursor high-water mark is persisted alongside — as a **reserved
+ceiling**, not the last cursor handed out (muster #415): the file is rewritten
+once per block of 1024 events, before the first event past the previous ceiling
+is delivered, because a durable write per event was a full drive flush per event
+(~49 000 a day on a busy machine, a third of the service's busy CPU). A restart
+therefore continues from the ceiling and skips up to one block of numbers;
+cursors are ordered, never contiguous. The retained event
 *window* deliberately is not: a subscriber resuming from an old cursor still
 gets `resync_required`, but now with the truthful reason — the sequence
 continued, this service simply cannot replay that far back. Persisting the

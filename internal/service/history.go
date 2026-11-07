@@ -151,16 +151,41 @@ type historyDoc struct {
 }
 
 type historyStore struct {
-	mu        sync.Mutex
-	self      fleet.MachineId
-	seen      map[labelKey]*seenRecord
-	launches  map[labelKey]*launchRecord
-	closed    []fleet.ClosedSession
+	mu       sync.Mutex
+	self     fleet.MachineId
+	seen     map[labelKey]*seenRecord
+	launches map[labelKey]*launchRecord
+	closed   []fleet.ClosedSession
+	// closeKeys is the set of (runtime, id, startedAt) that hold a ClosedByClose
+	// tombstone in closed, so withdrawLocked can answer "nothing to withdraw" —
+	// its answer for nearly every live session on nearly every pass — without
+	// walking the whole retained history (#415). Built on demand and dropped
+	// (nil) by every change to closed (closedChangedLocked); a stale entry
+	// could only cost a scan, but a MISSING one would leave a premature
+	// tombstone standing, so the rule is rebuild, never patch.
+	closeKeys map[tombKey]struct{}
+	// scanned counts the tombstones withdrawLocked has examined. It exists so a
+	// test can measure what the index removes; nothing reads it in production.
+	scanned   int64
 	retention time.Duration
 	st        *state.Store
 	savedAt   time.Time
 	now       func() time.Time
 }
+
+// tombKey identifies the one run a ClosedByClose tombstone describes: the same
+// runtime, id and start instant withdrawLocked matches on. The instant is
+// compared as nanoseconds because time.Equal is by instant, not by
+// representation.
+type tombKey struct {
+	runtime   fleet.RuntimeId
+	id        string
+	startedAt int64
+}
+
+// closedChangedLocked drops the withdraw index. Called wherever closed gains,
+// loses or is replaced.
+func (h *historyStore) closedChangedLocked() { h.closeKeys = nil }
 
 func newHistoryStore(self fleet.MachineId) *historyStore {
 	return &historyStore{
@@ -199,6 +224,7 @@ func (h *historyStore) load(st *state.Store) error {
 		h.seen[labelKey{r.Runtime, r.ID}] = &r
 	}
 	h.closed = doc.Closed
+	h.closedChangedLocked()
 	for i := range doc.Launches {
 		l := doc.Launches[i]
 		if l.Conversation == "" {
@@ -301,6 +327,9 @@ func (h *historyStore) pruneLocked(now time.Time) bool {
 		kept = append(kept, c)
 	}
 	h.closed = kept
+	if changed {
+		h.closedChangedLocked()
+	}
 	for k, r := range h.seen {
 		if r.LastSeen.Before(cut) {
 			delete(h.seen, k)
@@ -492,6 +521,7 @@ func (h *historyStore) tombstoneLocked(r *seenRecord, at time.Time, by fleet.Clo
 		ClosedBy:     by,
 		Evidence:     evidence,
 	})
+	h.closedChangedLocked()
 }
 
 // tombstoneExitLocked writes the tombstone for a session an ExitReporter
@@ -519,6 +549,7 @@ func (h *historyStore) tombstoneExitLocked(r *seenRecord, e driver.CapturedExit)
 		Evidence:     fmt.Sprintf("captured its own exit status (%d) before removing the session", exit.Status),
 		Exit:         &exit,
 	})
+	h.closedChangedLocked()
 }
 
 // created records a session this service just started, so a close that
@@ -697,19 +728,46 @@ func carryIndex(r *seenRecord, fresh []fleet.Session) int {
 
 // withdrawLocked removes a ClosedByClose tombstone for a session that is
 // demonstrably still running (same runtime, id and startedAt).
+//
+// Called for every live session on every observe pass, so the answer that
+// matters is the common one — no such tombstone. That is a set lookup (#415):
+// walking the whole retained history for each live session was O(live x
+// closed), ~670 000 comparisons a pass at 80 sessions over 8 400 tombstones.
+// The walk is kept for the rare hit, where it is also what finds which entry
+// to remove, so the index only ever says "certainly not here", never "here".
 func (h *historyStore) withdrawLocked(rt fleet.RuntimeId, s fleet.Session) bool {
 	if s.StartedAt == nil {
 		return false
 	}
+	if _, ok := h.closeKeysLocked()[tombKey{rt, s.ID, s.StartedAt.UnixNano()}]; !ok {
+		return false
+	}
 	for i := len(h.closed) - 1; i >= 0; i-- {
+		h.scanned++
 		c := h.closed[i]
 		if c.ClosedBy == fleet.ClosedByClose && c.Runtime == rt && c.ID == s.ID &&
 			c.StartedAt != nil && c.StartedAt.Equal(*s.StartedAt) {
 			h.closed = append(h.closed[:i], h.closed[i+1:]...)
+			h.closedChangedLocked()
 			return true
 		}
 	}
 	return false
+}
+
+// closeKeysLocked returns the withdraw index, building it from closed when a
+// change has dropped it.
+func (h *historyStore) closeKeysLocked() map[tombKey]struct{} {
+	if h.closeKeys == nil {
+		keys := make(map[tombKey]struct{}, len(h.closed))
+		for _, c := range h.closed {
+			if c.ClosedBy == fleet.ClosedByClose && c.StartedAt != nil {
+				keys[tombKey{c.Runtime, c.ID, c.StartedAt.UnixNano()}] = struct{}{}
+			}
+		}
+		h.closeKeys = keys
+	}
+	return h.closeKeys
 }
 
 // list returns the retained tombstones that closed at or after since (zero
