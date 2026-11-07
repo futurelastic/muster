@@ -12,6 +12,7 @@ import (
 	"time"
 
 	fleet "github.com/futurelastic/muster"
+	"github.com/futurelastic/muster/internal/privfs"
 )
 
 // Finding sessions again after a restart (muster #282).
@@ -264,7 +265,7 @@ func (d *Driver) closeUnlaunched(req fleet.Request, ref fleet.SessionRef, prior 
 			stopped, left := stopStraysIn(prior.dir)
 			d.sayStrays("still running when their session was closed", stopped, left)
 		}
-		if err := os.RemoveAll(prior.dir); err != nil {
+		if err := privfs.RemoveAll(prior.dir); err != nil {
 			return fleet.Ack{}, fmt.Errorf("close: removing the session's directory: %w", err)
 		}
 	}

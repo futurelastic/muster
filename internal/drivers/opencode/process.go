@@ -9,7 +9,6 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
-	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -19,6 +18,7 @@ import (
 	"time"
 
 	fleet "github.com/futurelastic/muster"
+	"github.com/futurelastic/muster/internal/privfs"
 	"github.com/futurelastic/muster/internal/procgroup"
 )
 
@@ -207,7 +207,7 @@ func (s *server) stop(keepPersisted bool) {
 			s.strayStopped, s.strayLeft = stopStraysIn(s.dir)
 		}
 		if s.dir != "" && !(keepPersisted && s.persisted.Load()) {
-			_ = os.RemoveAll(s.dir)
+			_ = privfs.RemoveAll(s.dir)
 		}
 		if s.onTeardown != nil {
 			s.onTeardown(s)

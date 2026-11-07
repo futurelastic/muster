@@ -4,13 +4,13 @@ import (
 	"context"
 	"fmt"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"time"
 
 	fleet "github.com/futurelastic/muster"
 	"github.com/futurelastic/muster/internal/driver"
+	"github.com/futurelastic/muster/internal/privfs"
 )
 
 // Create starts a session (§3), honouring the caller's idempotency key
@@ -313,7 +313,7 @@ func (d *Driver) startServerIn(ctx context.Context, spec fleet.SessionSpec, exis
 	}
 	cleanup := func() {
 		if fresh {
-			_ = os.RemoveAll(dir)
+			_ = privfs.RemoveAll(dir)
 		}
 	}
 	// muster #281: the sandbox request is resolved and validated here, before a
@@ -372,7 +372,7 @@ func (d *Driver) startServerIn(ctx context.Context, spec fleet.SessionSpec, exis
 	if !d.trackServer(srv) {
 		srv.pauseForShutdown()
 		if fresh {
-			_ = os.RemoveAll(dir)
+			_ = privfs.RemoveAll(dir)
 		}
 		return nil, &fleet.Error{Kind: fleet.ErrorUnreachable, Message: "create: this driver has been shut down", Machine: d.machine}
 	}
