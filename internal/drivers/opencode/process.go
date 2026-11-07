@@ -173,6 +173,9 @@ type server struct {
 	// directory — the session's database is what a restart finds again — while a
 	// server whose session was closed, or never came to exist, removes it.
 	persisted atomic.Bool
+	// status keeps what this driver read of the server between requests, so a
+	// listing does not ask it again (muster #419; statuscache.go). Zero value ready.
+	status statusCache
 
 	// strayStopped and strayLeft are what the teardown found of the processes the
 	// session started outside the server's process group (muster #405): stopped, and

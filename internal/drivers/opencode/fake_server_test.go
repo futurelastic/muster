@@ -38,6 +38,10 @@ type fakeServer struct {
 	// transport error (connection reset) rather than answering — the
 	// read-failure half of #55's discrimination.
 	statusDown bool
+	// statusHold, when non-nil, makes GET /session/status wait until it is closed
+	// before answering — a read that is in flight while the test does something
+	// else (muster #419).
+	statusHold chan struct{}
 
 	// catalog, when non-nil, is served by GET /config/providers as provider id
 	// to model ids; nil makes the endpoint 404, like a runtime without it.
@@ -392,7 +396,15 @@ func (f *fakeServer) handlePermission(w http.ResponseWriter, r *http.Request) {
 func (f *fakeServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	down := f.statusDown
+	hold := f.statusHold
 	f.mu.Unlock()
+	if hold != nil {
+		select {
+		case <-hold:
+		case <-r.Context().Done():
+			return
+		}
+	}
 	if down {
 		hj, ok := w.(http.Hijacker)
 		if ok {
@@ -626,6 +638,9 @@ func newDriverWithOptions(t *testing.T, f *fakeServer, extra ...Option) (*Driver
 		WithBaseURL(f.baseURL()),
 		WithCredential(f.username, f.password),
 		WithHTTPClient(f.srv.Client()),
+		// The cache is off unless a test turns it on (muster #419): these tests flip
+		// the fake runtime's status with no write and no event in between.
+		withStatusTTL(0, 0),
 	}, extra...)
 	d, err := New(context.Background(), "test-machine", opts...)
 	if d != nil {

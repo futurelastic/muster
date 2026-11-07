@@ -199,6 +199,10 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 		return fleet.Session{}, err
 	}
 
+	// muster #419: a session is about to appear on this server, and a prompt may
+	// start it; whatever was read of the server before is no longer the truth.
+	defer d.invalidateStatus(srv)
+
 	var sess wireSession
 	path := "/session?directory=" + url.QueryEscape(string(spec.Cwd))
 	if err := d.do(ctx, srv, "POST", path, body, &sess); err != nil {
@@ -521,6 +525,9 @@ func (d *Driver) Send(ctx context.Context, req fleet.Request, ref fleet.SessionR
 	}
 	ctx, cancel := d.bounded(ctx)
 	defer cancel()
+	// muster #419: the runtime accepts a prompt before it reports the session
+	// working; a status read made in between must not be kept.
+	defer d.invalidateStatus(known.srv)
 
 	if err := d.sendPrompt(ctx, known.srv, ref.ID, text, known.specAgent, known.context); err != nil {
 		if isNotFound(err) {
@@ -562,7 +569,7 @@ func (d *Driver) State(ctx context.Context, req fleet.Request, ref fleet.Session
 		// muster #285: only where the session has a live server to ask. A read
 		// that failed or found the session gone has no figures worth adding.
 		if st.Status != fleet.StatusDead && st.Status != fleet.StatusUnknown {
-			st.Usage = d.usageOf(ctx, known.srv, ref.ID, st.Status == fleet.StatusIdle)
+			st.Usage = d.usageForState(ctx, known.srv, ref.ID, st.Status == fleet.StatusIdle)
 		}
 	}
 	return st, nil
@@ -589,8 +596,8 @@ func (d *Driver) readState(ctx context.Context, ref fleet.SessionRef) (fleet.Ses
 	ctx, cancel := d.bounded(ctx)
 	defer cancel()
 
-	var statuses statusMap
-	if err := d.do(ctx, srv, "GET", "/session/status", nil, &statuses); err != nil {
+	statuses, err := d.statusOf(ctx, srv)
+	if err != nil {
 		// §5.7, applied at the single-session grain: the read failed, so
 		// this is an error — never a synthesized idle. Propagated as-is,
 		// which the HTTP layer maps to 504/401 (writeDriverError adopts
@@ -607,31 +614,72 @@ func (d *Driver) readState(ctx context.Context, ref fleet.SessionRef) (fleet.Ses
 	// still exists before calling it idle — a session this driver saw
 	// before but that has since been deleted (by another client, or by
 	// this driver's own Close) is `dead`, not `idle`.
-	var sess wireSession
-	err := d.do(ctx, srv, "GET", "/session/"+url.PathEscape(ref.ID), nil, &sess)
-	switch {
-	case err == nil:
-		refreshed := known
-		refreshed.cwd, refreshed.name, refreshed.agent = fleet.AbsolutePath(sess.Directory), sess.Title, sess.Agent
-		refreshed.startedAt = time.UnixMilli(sess.Time.Created)
-		d.markSeen(sess.ID, refreshed)
-		st := classify(false, wireStatus{})
-		// #77: absent from the status map is idle ONLY when the last thing
-		// that happened was not a turn the provider refused. classify has
-		// no way to see that on its own — it only ever sees the status map
-		// — so it is checked here, once, on the one path that reaches a
-		// confirmed-idle verdict.
-		st.LastTurn = d.lastTurnFailure(ctx, srv, ref.ID)
-		if st.LastTurn == nil {
-			st.LastTurn = known.interrupted // muster #282
+	//
+	// muster #419: what this confirmation reads is kept for the window
+	// (statuscache.go), so a session polled while idle costs the runtime one
+	// confirmation per window and not one per poll.
+	var (
+		sess     wireSession
+		lastTurn *fleet.TurnEnd
+	)
+	if m, kept := d.idleFor(srv, ref.ID); kept {
+		sess, lastTurn = m.sess, copyTurnEnd(m.lastTurn)
+	} else {
+		gen := srv.status.generation()
+		err := d.do(ctx, srv, "GET", "/session/"+url.PathEscape(ref.ID), nil, &sess)
+		switch {
+		case err == nil:
+			// #77: absent from the status map is idle ONLY when the last thing
+			// that happened was not a turn the provider refused. classify has
+			// no way to see that on its own — it only ever sees the status map
+			// — so it is checked here, once, on the one path that reaches a
+			// confirmed-idle verdict.
+			lastTurn = d.lastTurnFailure(ctx, srv, ref.ID)
+			d.keepIdle(srv, ref.ID, gen, idleMemo{sess: sess, lastTurn: copyTurnEnd(lastTurn)})
+		case isNotFound(err):
+			d.forgetIdle(srv, ref.ID)
+			return fleet.InferredState(fleet.StatusDead,
+				"session was previously observed and no longer exists on the runtime", nil), nil
+		default:
+			return fleet.SessionState{}, err
 		}
-		return st, nil
-	case isNotFound(err):
-		return fleet.InferredState(fleet.StatusDead,
-			"session was previously observed and no longer exists on the runtime", nil), nil
-	default:
-		return fleet.SessionState{}, err
 	}
+	refreshed := known
+	refreshed.cwd, refreshed.name, refreshed.agent = fleet.AbsolutePath(sess.Directory), sess.Title, sess.Agent
+	refreshed.startedAt = time.UnixMilli(sess.Time.Created)
+	d.markSeen(sess.ID, refreshed)
+	st := classify(false, wireStatus{})
+	st.LastTurn = lastTurn
+	if st.LastTurn == nil {
+		st.LastTurn = known.interrupted // muster #282
+	}
+	return st, nil
+}
+
+// copyTurnEnd returns a copy a caller may hold: a kept one is shared.
+func copyTurnEnd(t *fleet.TurnEnd) *fleet.TurnEnd {
+	if t == nil {
+		return nil
+	}
+	c := *t
+	return &c
+}
+
+// usageForState is the usage figures State attaches. For a session that is idle
+// they are kept for the window with the rest of its confirmation, so polling an
+// idle session does not read its message record on every poll; for any other it
+// reads, as before.
+func (d *Driver) usageForState(ctx context.Context, srv *server, id string, idle bool) *fleet.Usage {
+	if !idle {
+		return d.usageOf(ctx, srv, id, false)
+	}
+	if m, kept := d.idleFor(srv, id); kept && m.haveUsage {
+		return copyUsage(m.usage)
+	}
+	gen := srv.status.generation()
+	u := d.usageOf(ctx, srv, id, true)
+	d.keepIdleUsage(srv, id, gen, copyUsage(u))
+	return u
 }
 
 // Respond answers the tool-permission ask a session is parked on (§3, muster
@@ -652,6 +700,7 @@ func (d *Driver) Respond(ctx context.Context, req fleet.Request, ref fleet.Sessi
 	}
 	ctx, cancel := d.bounded(ctx)
 	defer cancel()
+	defer d.invalidateStatus(known.srv) // muster #419: an answered ask changes the status
 	return d.answerAsk(ctx, known.srv, ref.ID, resp)
 }
 
@@ -667,6 +716,7 @@ func (d *Driver) Interrupt(ctx context.Context, req fleet.Request, ref fleet.Ses
 	}
 	ctx, cancel := d.bounded(ctx)
 	defer cancel()
+	defer d.invalidateStatus(known.srv) // muster #419: an aborted turn changes the status
 	path := "/session/" + url.PathEscape(ref.ID) + "/abort"
 	if err := d.do(ctx, known.srv, "POST", path, nil, nil); err != nil {
 		if isNotFound(err) {
@@ -705,6 +755,7 @@ func (d *Driver) Close(ctx context.Context, req fleet.Request, ref fleet.Session
 	isolated := d.shared == nil
 	ctx, cancel := d.bounded(ctx)
 	defer cancel()
+	defer d.invalidateStatus(srv) // muster #419: in shared mode the server outlives the close
 
 	var sess wireSession
 	liveStart := priorStart
@@ -810,6 +861,19 @@ func (d *Driver) Rename(ctx context.Context, req fleet.Request, ref fleet.Sessio
 // after the substrate's own listing endpoint turned out not to be usable
 // for it.
 //
+// # One call per server per window, not per listing (muster #419)
+//
+// In isolated mode every session has a server of its own, so that one call is
+// one per live server, and a listing made once a second made every idle server
+// answer a request every second — measured at about 2 % of a core per request
+// per second, for servers that were doing nothing else. The status map is
+// therefore read through a cache (statuscache.go): shared by concurrent
+// listings, kept for a short window, and dropped as soon as the runtime's event
+// stream or one of this driver's own writes says it changed. A listing can show
+// a change the runtime made on its own up to the window late — 2 s with no event
+// stream attached to the server, 30 s with one that went quiet while staying
+// open — and never a change of this driver's making.
+//
 // The cost carried forward: a session this driver's cache still holds but
 // that was deleted by another client (never through this driver's own
 // Close) keeps appearing here — as idle, since it is absent from the status
@@ -868,7 +932,7 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 		wg.Add(1)
 		go func(srv *server, r *statusRead) {
 			defer wg.Done()
-			r.err = d.do(ctx, srv, "GET", "/session/status", nil, &r.statuses)
+			r.statuses, r.err = d.statusOf(ctx, srv)
 		}(srv, r)
 	}
 	wg.Wait()

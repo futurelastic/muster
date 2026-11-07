@@ -150,6 +150,15 @@
 // connection per session process; subscribe.go has the mapping, what is
 // dropped, and how a dropped connection is reported (muster #284).
 //
+// # What an idle session costs (muster #419)
+//
+// A server nobody talks to is cheap; what is not cheap is being asked. Every
+// listing asks every live server for its status, and a server pays about 2 % of
+// a core per request per second. So the status of a server, the asks it holds and
+// the confirmation of an idle session are read once per window and shared, and
+// dropped the moment the event stream or one of this driver's own writes says
+// they changed. statuscache.go has the windows and what a reader can lose.
+//
 // KeySender is not implemented at all — this substrate has no screen for a
 // raw key to land on, and DeliversRawKeys: false says so structurally
 // rather than through a stub that always refuses.
@@ -286,6 +295,10 @@ type Driver struct {
 	// (muster #285); usageMu guards the map, each memo its own contents.
 	usageMu    sync.Mutex
 	usageMemos map[string]*usageMemo
+
+	// statusTTL is how long a read of a server's status is kept (muster #419;
+	// statuscache.go). Set to the production windows in New; a test sets it.
+	statusTTL statusTTLs
 
 	// subs are the open event streams (subscribe.go); subMu guards the set.
 	subMu sync.Mutex
@@ -540,6 +553,7 @@ func New(ctx context.Context, machine fleet.MachineId, opts ...Option) (*Driver,
 		inflight:     make(map[string]chan struct{}),
 	}
 	d.catalogSettle, d.catalogPoll = defaultCatalogSettle, defaultCatalogPoll
+	d.statusTTL = statusTTLs{bus: statusTTLBus, bare: statusTTLBare}
 	for _, o := range opts {
 		o(d)
 	}
@@ -816,8 +830,10 @@ func (d *Driver) wasSeen(id string) (knownSession, bool) {
 // bug for a worse one.
 func (d *Driver) forgetSeen(id string) {
 	d.mu.Lock()
+	gone := d.seen[id]
 	delete(d.seen, id)
 	d.mu.Unlock()
+	d.forgetIdle(gone.srv, id) // muster #419
 	d.forgetUsage(id)
 	if d.store != nil {
 		// Only ever called once the runtime confirmed the session is gone, which is
