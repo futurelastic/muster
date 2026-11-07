@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -135,6 +136,78 @@ func TestModuleConfig_DefaultDirFromExecutable(t *testing.T) {
 		t.Errorf("looked in %q, want %q", gotDir, wantDir)
 	}
 	_ = path
+}
+
+// #414: the same default under an npm install. The daemon there runs out of a
+// platform package, not out of <prefix>/bin, and the module an operator put at
+// <prefix>/libexec/muster/modules/<m> — where the standalone binary finds it —
+// must be loaded with FLEET_MODULES_DIR unset, the unit's usual state.
+func TestModuleConfig_DefaultDirUnderAnNpmInstall(t *testing.T) {
+	prefix, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// npm's global layout is <prefix>/lib/node_modules, except on Windows.
+	nodeModules := filepath.Join(prefix, "lib", "node_modules")
+	if runtime.GOOS == "windows" {
+		nodeModules = filepath.Join(prefix, "node_modules")
+	}
+	exe := filepath.Join(nodeModules, "@futurelastic", "muster-linux-x64", "bin", "muster")
+	if err := os.MkdirAll(filepath.Dir(exe), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(exe, nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	modules := filepath.Join(prefix, "libexec", "muster", "modules")
+	installFakeModule(t, modules, "relay-a")
+
+	vars := map[string]string{"FLEET_DELIVERY_MODULES": "relay-a"}
+	got := loadDeliveryModules(envOf(vars), exe, "")
+	if len(got.Problems) != 0 || len(got.Config.Clients) != 1 {
+		t.Fatalf("the module at <prefix>/libexec/muster/modules was not loaded: problems=%+v clients=%+v",
+			got.Problems, got.Config.Clients)
+	}
+	if gotDir := filepath.Dir(got.Config.Clients[0].Path); gotDir != modules {
+		t.Errorf("looked in %q, want %q", gotDir, modules)
+	}
+}
+
+// #414: what GET /v1/health is handed. Enabled-and-found is loaded; enabled and
+// not found is skipped with the reason the log line carries; an illegal name is
+// skipped too; and no switch at all is the zero status, which the service
+// reports as no `modules` key.
+func TestModuleConfig_HealthStatus(t *testing.T) {
+	if st := loadDeliveryModules(envOf(nil), "", "").healthStatus(); len(st.Enabled)+len(st.Loaded)+len(st.Skipped) != 0 {
+		t.Errorf("no switch: %+v, want the zero status", st)
+	}
+
+	dir := t.TempDir()
+	installFakeModule(t, dir, "relay-a")
+	st := loadDeliveryModules(envOf(map[string]string{
+		"FLEET_DELIVERY_MODULES": "relay-a, relay-b, Bad Name",
+		"FLEET_MODULES_DIR":      dir,
+	}), "", "").healthStatus()
+	if strings.Join(st.Enabled, ",") != "relay-a,relay-b" || strings.Join(st.Loaded, ",") != "relay-a" {
+		t.Errorf("enabled=%v loaded=%v, want [relay-a relay-b] and [relay-a]", st.Enabled, st.Loaded)
+	}
+	if len(st.Skipped) != 2 ||
+		st.Skipped[0].Name != "Bad Name" || st.Skipped[0].Reason != "not a legal module name" ||
+		st.Skipped[1].Name != "relay-b" || st.Skipped[1].Reason != "no executable installed" {
+		t.Errorf("skipped = %+v, want the illegal name then relay-b: no executable installed", st.Skipped)
+	}
+	for _, s := range st.Skipped {
+		if strings.Contains(s.Reason, dir) {
+			t.Errorf("a reason names the modules directory: %q", s.Reason)
+		}
+	}
+
+	// The case from the issue: enabled, FLEET_MODULES_DIR unset, nothing at the
+	// default — the whole list is skipped, and health can say so.
+	gone := loadDeliveryModules(envOf(map[string]string{"FLEET_DELIVERY_MODULES": "relay-a"}), filepath.Join(dir, "bin", "muster"), "").healthStatus()
+	if len(gone.Loaded) != 0 || len(gone.Skipped) != 1 || gone.Skipped[0].Name != "relay-a" {
+		t.Errorf("enabled with nothing at the default directory: %+v, want relay-a skipped", gone)
+	}
 }
 
 // FLEET_DELIVERY_MODULE_ENV names the only extras a module child receives, and

@@ -3,6 +3,7 @@ package modclient
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/futurelastic/muster/internal/delivery"
@@ -41,7 +42,24 @@ func ParseModuleList(s string) (valid []string, invalid []string) {
 // real binary; when it does not (a link farm), the operator sets the directory
 // explicitly. If the path cannot be resolved (it does not exist yet) the
 // lexical path is used. An empty exePath yields "".
+//
+// An npm install is the one layout where the binary does not sit under the
+// prefix the operator chose (#414). `npm install -g --prefix <P>` puts a link
+// <P>/bin/muster to a launcher, and the launcher runs the binary out of a
+// platform package, so the process's own path is
+// <root>/node_modules/@futurelastic/muster-<platform>/bin/muster and the rule
+// above would yield a directory inside that package — one that never exists and
+// that the next upgrade would replace. That layout is recognised by its path
+// and the default becomes the install prefix's, the same as for a standalone
+// binary: <P>/libexec/muster/modules. See npmInstallPrefix for what the prefix
+// is and which layouts are not recognised.
 func DefaultModulesDir(exePath string) string {
+	return defaultModulesDir(exePath, runtime.GOOS)
+}
+
+// defaultModulesDir is DefaultModulesDir with the host OS as a parameter, so a
+// test can drive both of npm's global layouts from one machine.
+func defaultModulesDir(exePath, goos string) string {
 	if exePath == "" {
 		return ""
 	}
@@ -49,8 +67,52 @@ func DefaultModulesDir(exePath string) string {
 	if err != nil {
 		resolved = filepath.Clean(exePath)
 	}
-	prefix := filepath.Dir(filepath.Dir(resolved))
+	prefix, ok := npmInstallPrefix(resolved, goos)
+	if !ok {
+		prefix = filepath.Dir(filepath.Dir(resolved))
+	}
 	return filepath.Join(prefix, "libexec", "muster", "modules")
+}
+
+// npmScope and npmPlatformPrefix name the platform packages the npm launcher
+// runs: @futurelastic/muster-<os>-<cpu>. They restate what
+// npm/launcher/bin/muster.js and scripts/assemble-npm.mjs name, and a test
+// (TestNpmPackageNamesMatchTheLauncher) fails if either moves.
+const (
+	npmScope          = "@futurelastic"
+	npmPlatformPrefix = "muster-"
+)
+
+// npmInstallPrefix reports the install prefix of a binary that lives in an npm
+// platform package: the directory whose bin/ holds the link to the launcher.
+// resolved is the symlink-resolved path of the executable.
+//
+// The layout is npm's: node_modules is <prefix>/lib/node_modules for a global
+// install on Unix and <prefix>/node_modules on Windows (goos picks which), and
+// <project>/node_modules for a local install, whose "prefix" is the project.
+// ok is false when resolved is not <root>/node_modules/@futurelastic/muster-*/bin/<file>.
+//
+// Not recognised, deliberately, because there is no prefix to name: a package
+// manager that keeps packages in its own store (pnpm's .pnpm directory is the
+// usual one) puts the binary where this reads a store entry, not a prefix. An
+// operator there sets FLEET_MODULES_DIR, as a standalone binary reached through
+// a link farm already must.
+func npmInstallPrefix(resolved, goos string) (prefix string, ok bool) {
+	binDir := filepath.Dir(resolved)
+	pkgDir := filepath.Dir(binDir)
+	scopeDir := filepath.Dir(pkgDir)
+	nodeModules := filepath.Dir(scopeDir)
+	if filepath.Base(binDir) != "bin" ||
+		!strings.HasPrefix(filepath.Base(pkgDir), npmPlatformPrefix) ||
+		filepath.Base(scopeDir) != npmScope ||
+		filepath.Base(nodeModules) != "node_modules" {
+		return "", false
+	}
+	root := filepath.Dir(nodeModules)
+	if goos != "windows" && filepath.Base(root) == "lib" {
+		return filepath.Dir(root), true
+	}
+	return root, true
 }
 
 // Found is a module executable that passed discovery.

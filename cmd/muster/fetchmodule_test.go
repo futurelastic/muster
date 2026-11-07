@@ -800,6 +800,48 @@ func TestFetchModule_DeploySectionDefaultsToTheDaemonsDirectory(t *testing.T) {
 	fmNoDebris(t, "default directory", modulesDir, "fake")
 }
 
+// #414: under an npm install the unit's executable is <prefix>/bin/muster, a
+// link to the launcher, and the daemon looks in <prefix>/libexec/muster/modules
+// (the same default as a standalone binary — modclient.DefaultModulesDir reads
+// the npm layout). The deploy step must land the module in that same place when
+// FLEET_MODULES_DIR is unset, and must not follow the link into the package.
+func TestFetchModule_DeploySectionDefaultsToTheSamePlaceUnderAnNpmInstall(t *testing.T) {
+	fmRequireTools(t)
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix := filepath.Join(base, "prefix")
+	launcher := filepath.Join(prefix, "lib", "node_modules", "@futurelastic", "muster", "bin", "muster.js")
+	if err := os.MkdirAll(filepath.Dir(launcher), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(launcher, []byte("#!/usr/bin/env node\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(prefix, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(prefix, "bin", "muster")
+	if err := os.Symlink(filepath.Join("..", "lib", "node_modules", "@futurelastic", "muster", "bin", "muster.js"), link); err != nil {
+		t.Skip("symlinks unavailable:", err)
+	}
+	env, _ := fmEnv(t, "FLEET_MODULE_SOURCES=fake="+fmTinyModule(t))
+
+	code, so, se := fmRunDeploySection(t, env, "local", link)
+	if code != 0 || se != "" || !strings.Contains(so, "HARNESS-DONE") {
+		t.Fatalf("exit=%d stdout=%q stderr=%q", code, so, se)
+	}
+	installed := filepath.Join(prefix, "libexec", "muster", "modules", "fake")
+	got, err := exec.Command(installed).Output()
+	if err != nil || strings.TrimSpace(string(got)) != fmMarker {
+		t.Errorf("no working module at %s: out=%q err=%v", installed, got, err)
+	}
+	if _, err := os.Stat(filepath.Join(prefix, "lib", "node_modules", "@futurelastic", "muster", "libexec")); err == nil {
+		t.Error("the module directory was created inside the npm package")
+	}
+}
+
 // The skip is total: a source that cannot be fetched installs nothing, prints
 // nothing, does not fail the deploy, and does not remove the module an earlier
 // deploy put there.

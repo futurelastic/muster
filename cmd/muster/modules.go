@@ -12,7 +12,9 @@ package main
 //	                            as it did before modules existed
 //	FLEET_MODULES_DIR           where module executables live; default
 //	                            <prefix>/libexec/muster/modules, <prefix>
-//	                            being the parent of this binary's directory
+//	                            being the parent of this binary's directory,
+//	                            or the npm install prefix when this binary was
+//	                            installed by npm (#414)
 //	FLEET_DELIVERY_MODULE_ENV   comma-separated environment names forwarded to
 //	                            the module child; nothing else is, and a FLEET_
 //	                            name never is
@@ -27,6 +29,7 @@ import (
 
 	"github.com/futurelastic/muster/internal/delivery/modclient"
 	"github.com/futurelastic/muster/internal/drivers/tmux"
+	"github.com/futurelastic/muster/internal/service"
 )
 
 // deliveryModuleSetup is what the switch resolves to.
@@ -102,6 +105,26 @@ func (s deliveryModuleSetup) describe() []string {
 		out = append(out, fmt.Sprintf("delivery modules configured: %s (#185)", strings.Join(names, ", ")))
 	}
 	return out
+}
+
+// healthStatus is what GET /v1/health reports under `modules` (#414): the same
+// facts describe() logs, in a form a poller can read. Entries the operator
+// listed that are not legal module names come first in Skipped, then the enabled
+// names that were not found, each with the reason discovery gave — the order
+// describe() logs them in. Names and reasons only, never a path, for the same
+// reason describe() carries none.
+func (s deliveryModuleSetup) healthStatus() service.DeliveryModulesStatus {
+	st := service.DeliveryModulesStatus{Enabled: s.Enabled}
+	for _, n := range s.Invalid {
+		st.Skipped = append(st.Skipped, service.SkippedDeliveryModule{Name: n, Reason: "not a legal module name"})
+	}
+	for _, p := range s.Problems {
+		st.Skipped = append(st.Skipped, service.SkippedDeliveryModule{Name: p.Name, Reason: p.Reason})
+	}
+	for _, c := range s.Config.Clients {
+		st.Loaded = append(st.Loaded, c.Name)
+	}
+	return st
 }
 
 // checkDeliveryModules is the doctor row `delivery.modules`. Per ADR 160 it

@@ -403,8 +403,12 @@ this step does not run at all and a deploy is what it always was.
   warning line naming its position and never its source.
 - `FLEET_MODULES_DIR` — where the modules are installed on the host. Default: the
   parent of the directory `REMOTE_PATH` lives in, plus
-  `libexec/muster/modules` — the place the daemon looks. If you set it here,
-  set the same value in the service's own environment.
+  `libexec/muster/modules` — the place the daemon looks. For an npm install
+  `REMOTE_PATH` is the `<prefix>/bin/muster` link `npm install -g` makes, so that is
+  `<prefix>/libexec/muster/modules`, and it is where the daemon looks too: it
+  recognises the platform package it runs out of and answers the npm prefix, not a
+  directory inside the package (#414). If you set it here, set the same value in
+  the service's own environment.
 
 A launcher is called as `install-module --dir <dir>` where `<dir>` is an empty
 private directory whose last element is the module's name; it must leave one
@@ -425,7 +429,10 @@ its final name and renamed into place, as the daemon binary is. The daemon lists
 modules directory at startup, so the restart step is what makes a newly installed
 module visible; it also needs `FLEET_DELIVERY_MODULES` naming the module in the
 service's environment (`install.md`). Nothing here enables a module on any
-machine by itself.
+machine by itself. Once the service is restarted, `GET /v1/health` lists the
+module under `modules.loaded`; a module that is named and not found is in
+`modules.skipped` with the reason, which is what a deploy's own check should read
+(`api-http.md` §3.1).
 
 ## Running the backup and the revert
 
