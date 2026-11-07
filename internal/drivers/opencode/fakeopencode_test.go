@@ -229,7 +229,23 @@ func runFakeOpencode(args []string) {
 			}
 			writeJSON(w, list)
 		case path == "/session/status":
+			// muster #421: a marker in the session's working directory makes the stand-in
+			// report its session busy, as a runtime in the middle of a turn does.
+			if session != nil && fileExists(".fake-busy") {
+				writeJSON(w, statusMap{session.ID: wireStatus{Type: "busy"}})
+				return
+			}
 			writeJSON(w, statusMap{})
+		case path == "/permission" && r.Method == http.MethodGet:
+			// muster #421: one tool-permission ask for the session while the marker is
+			// there; none otherwise.
+			asks := []wirePermissionAsk{}
+			if session != nil && fileExists(".fake-ask") {
+				asks = append(asks, wirePermissionAsk{ID: "per_fake", SessionID: session.ID, Permission: "bash"})
+			}
+			writeJSON(w, asks)
+		case path == "/question" && r.Method == http.MethodGet:
+			writeJSON(w, []wireQuestionAsk{})
 		case path == "/session/"+sessionID && r.Method == http.MethodGet && session != nil:
 			writeJSON(w, session)
 		case path == "/session/"+sessionID && r.Method == http.MethodDelete && session != nil:

@@ -127,6 +127,11 @@ func (d *Driver) resumeOne(ctx context.Context, it loaded) {
 
 // relaunch starts a server for rec's session and confirms the runtime has it.
 // On any failure the server is stopped and the session's directory is left alone.
+//
+// Two callers: resumeOne, at the service's start, and revive (park.go, muster
+// #421), when an input reaches a session whose server was stopped for being idle.
+// The second holds the session's lifecycle lock and ignores the interrupted turn
+// this returns, because a server is only parked while it has no turn.
 func (d *Driver) relaunch(ctx context.Context, rec *sessionRecord) (*server, *fleet.TurnEnd, error) {
 	if rec.PermissionMode != "" && rec.Sandbox == nil {
 		// Cannot arise from a create this driver accepted; a record edited by hand

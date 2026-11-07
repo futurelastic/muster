@@ -180,6 +180,23 @@ type server struct {
 	// scratch.go). Zero value ready.
 	scratch scratchMemo
 
+	// park is non-nil once the driver stopped this server on purpose because its
+	// session had nothing to do (muster #421; park.go). It is stored BEFORE the
+	// process is stopped, so whoever sees the process gone also sees why. A
+	// stopped server never runs again — a revive builds a new one — so the flag
+	// stays for this server's life, and a failed revive replaces the note, never
+	// edits it.
+	park atomic.Pointer[parkNote]
+	// lastActive is when this server last did something for its session, in unix
+	// nanoseconds: it started, this driver wrote to it, or its event stream said the
+	// session changed (park.go).
+	lastActive atomic.Int64
+	// watch is set when a park check found the session busy: it is then checked on
+	// every sweep, whatever lastActive says, until it is first seen idle, and that
+	// moment is when its quiet time starts. It is how a long turn nobody was
+	// subscribed to is still waited out for a full bound afterwards.
+	watch atomic.Bool
+
 	// strayStopped and strayLeft are what the teardown found of the processes the
 	// session started outside the server's process group (muster #405): stopped, and
 	// still running after the wait. Written inside once, read by onTeardown.

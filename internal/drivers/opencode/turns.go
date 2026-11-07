@@ -105,6 +105,11 @@ func (d *Driver) Turns(ctx context.Context, req fleet.Request, ref fleet.Session
 	if err := d.requireLive(known); err != nil {
 		return fleet.TurnsPage{}, err
 	}
+	if d.phaseOf(known.srv) == phaseParked {
+		// muster #421: the history lives in the runtime's store, which only its process
+		// reads, and a read does not start one (a poll would keep the session awake).
+		return fleet.TurnsPage{}, d.parkedError("turns")
+	}
 	ctx, cancel := d.bounded(ctx)
 	defer cancel()
 	srv := known.srv

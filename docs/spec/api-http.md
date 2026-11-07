@@ -1256,7 +1256,8 @@ GET /v1/machines/{machine}/sessions/{id}/turns?since=&limit=&startedAt=&runtime=
 → 404 not_found      no such session; or the session exists but no readable record
                      of its conversation could be identified (retryable: true)
 → 409 conflict       startedAt disagrees with the live session; or `since` was issued
-                     for another conversation / points past the end of the record
+                     for another conversation / points past the end of the record;
+                     or the session is parked (muster #421): no read starts it
 → 501 unsupported    the runtime, or the peer's build, cannot read turns
 ```
 
@@ -2208,6 +2209,20 @@ stopped at its bound and `bytes` is a lower bound. **Absent means no figure, nev
 zero.** A peer built before the field sends no key, and a relay passes the block
 through untouched. It is **not** a material change (§4): it moves with every file
 written, so a feed that fired on it would storm.
+
+**A parked session** (muster #421) is an `opencode` session whose runtime process the
+service stopped on purpose, after the configured bound (`FLEET_OPENCODE_IDLE_STOP`)
+with nothing to do, to free its memory. Its `state` is `idle`, `observed`, and its
+`evidence` begins `parked:`. It is not `dead` and not `unknown`; the service emits no
+`session.closed`, no process-gone event and no gap for it, and the session stays in
+every listing. **No read starts it** — a single-session GET, a listing and a
+subscription are answered from what was last read, so a client's polling cannot undo
+the park. A `send`, an `interrupt` or a `respond` starts the runtime on the same
+directory first, and then does what was asked; if it cannot start, the call fails
+`unreachable` with `retryable: true`, nothing was sent, and the session remains
+parked with the failure in `evidence`. `close` removes it without starting anything.
+`GET …/turns` is `409` while it is parked. A peer built before this sends none of
+this and reads as it always did.
 
 `state.usage.context` — when present — is how large the context was at the
 session's most recent request (muster #313):

@@ -154,13 +154,16 @@ func (d *Driver) Subscribe(ctx context.Context, req fleet.Request, filter driver
 		if !filter.Matches(id, string(info.cwd)) {
 			continue
 		}
-		if info.srv == nil || (d.shared == nil && info.srv.proc.exited()) {
-			continue // a dead or unlaunched session has no bus to listen to
+		if d.phaseOf(info.srv) != phaseRunning {
+			continue // a dead, parked (muster #421) or unlaunched session has no bus to listen to
 		}
 		servers[info.srv] = struct{}{}
 	}
 	for srv := range servers {
 		if err := s.attach(srv); err != nil {
+			if d.phaseOf(srv) == phaseParked {
+				continue // parked between the snapshot and the connect (muster #421): nothing to follow
+			}
 			_ = s.Close()
 			return nil, err
 		}
@@ -458,6 +461,10 @@ func (s *subscription) handle(srv *server, ev busEvent) {
 	// handlers) therefore see the change they were told about.
 	if busEventDrops(ev.Type) {
 		srv.status.invalidate()
+		// muster #421: the same events mean the session is doing something. Heartbeats
+		// and the connection notice are not among them: a stream the service keeps
+		// open would otherwise keep every server awake for ever.
+		srv.touch(s.d.now())
 	}
 	var p busProps
 	if len(ev.Properties) > 0 {
@@ -695,6 +702,15 @@ func (d *Driver) busEnded(s *subscription, srv *server, cause error) {
 		case <-s.ctx.Done():
 			return
 		}
+		if srv.park.Load() != nil {
+			// muster #421: stopped on purpose, to be started again by the next input.
+			// Not a gap and not a closed session: the stream was told the session was
+			// idle and it still is. It is attached to the new server when there is one.
+			s.mu.Lock()
+			delete(s.attached, srv)
+			s.mu.Unlock()
+			return
+		}
 		d.mu.RLock()
 		shut := d.closed
 		d.mu.RUnlock()
@@ -794,6 +810,9 @@ func (d *Driver) announceClosed(srv *server, known knownSession, ref fleet.Sessi
 // process behind them exited without anyone closing it. The sessions stay in the
 // driver's cache, as State and List already report them dead.
 func (d *Driver) announceProcessGone(srv *server) {
+	if srv.park.Load() != nil {
+		return // muster #421: parked on purpose, not gone
+	}
 	if !srv.gone.CompareAndSwap(false, true) {
 		return
 	}
