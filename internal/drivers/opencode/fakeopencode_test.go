@@ -156,6 +156,7 @@ func runFakeOpencode(args []string) {
 	host := fs.String("hostname", "127.0.0.1", "")
 	printLogs := fs.Bool("print-logs", false, "") // muster #288: the stand-in logs to stderr only when told to, like the runtime
 	_ = fs.Bool("pure", false, "")                // muster #283: a bypass session starts with it
+	_ = fs.String("log-level", "", "")            // muster #420: the log is capped, as the real runtime accepts
 	_ = fs.Parse(args)
 
 	if fileExists(".fake-fail-ready") {
