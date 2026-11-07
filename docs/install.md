@@ -386,8 +386,9 @@ order of this page and the order of its output are the same.
      which resolves the binary and never runs it; row `runtime.opencode.servers`
      counts server processes running with no session record, a `warn` that a
      restart of the service clears; row `runtime.opencode.dirs` counts session
-     directories no record names, a `warn` whose leftovers the next start removes
-     and whose directories that may hold a conversation it never does; row
+     directories no record names, a `warn` whose leftovers the service removes by
+     itself (at its next start, and hourly while it runs) and whose directories that
+     may hold a conversation it never does; row
      `runtime.opencode.providers` shows which providers, and which models of them,
      `FLEET_OPENCODE_PROVIDERS` lets a session use, and fails on an entry the service
      will refuse to start on). A runtime that is enabled but

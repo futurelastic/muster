@@ -1334,8 +1334,9 @@ func checkOpencodeServers(enabled bool, stateDir string, scan func(string) ([]in
 // the row splits what the service removes by itself from what it never does:
 //
 //   - a directory holding nothing a session owns (only scratch, caches and lock
-//     files — what a removal that did not finish leaves) is removed by the next
-//     start of the service once nothing has written to it for an hour;
+//     files — what a removal that did not finish leaves) is removed by the service,
+//     at its next start and then hourly while it runs, once nothing has written to
+//     it for an hour;
 //   - a directory that may hold a session's own data stays until a person removes
 //     it, because deleting a conversation is not something the service decides.
 //
@@ -1377,7 +1378,7 @@ func checkOpencodeDirs(enabled bool, stateDir string, scan func(string) (opencod
 		row.Summary = fmt.Sprintf("%d opencode session directory(ies) without a session record (%s)", rep.Total(), humanSize(rep.RemovableBytes+rep.HoldStoreBytes))
 		if rep.Removable > 0 {
 			detail = append(detail, fmt.Sprintf("%d (%s) hold nothing a session owns — leftovers of a removal that did not finish. "+
-				"The next start of the service removes those nothing has written to for an hour", rep.Removable, humanSize(rep.RemovableBytes)))
+				"The service removes those nothing has written to for an hour, at its next start and hourly while it runs", rep.Removable, humanSize(rep.RemovableBytes)))
 		}
 		if rep.HoldStore > 0 {
 			detail = append(detail, fmt.Sprintf("%d (%s) may hold a session's conversation database and are never removed automatically; "+

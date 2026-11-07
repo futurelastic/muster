@@ -2248,8 +2248,9 @@ A scoped directory that no record names is a second thing nothing used to remove
 measured on a machine that had them is not a tree whose record went missing: every one was the
 leftover of a removal that did not finish — only the runtime's cache and lock files, or only
 scratch — and none held the conversation database. So the start-up sweep, **after** it has stopped
-the servers and before anything is resumed, removes a record-less directory only when all of these
-hold: it is a real directory directly under the session root named as a session directory is; no
+the servers and before anything is resumed — and then the same sweep once an hour while the service
+runs, because a directory can lose its record or its server long after start-up — removes a
+record-less directory only when all of these hold: it is a real directory directly under the session root named as a session directory is; no
 readable record names it (compared by the last path element); no running server holds it; **nothing in
 it has been written for an hour** (the newest modification time anywhere in the tree, because a
 directory's own time does not move when a file deeper in it is written); and **it holds nothing that
@@ -2260,7 +2261,7 @@ read or a process that looks like a server cannot be inspected, because either c
 nothing where the platform cannot list processes. Each removal is one log line (the directory's name
 and size, never a path). A directory that fails only the last check is **never removed
 automatically**; `muster doctor` counts it, in the `runtime.opencode.dirs` row, apart from the
-leftovers the next start removes, and removing it is a person's decision.
+leftovers the service removes by itself, and removing it is a person's decision.
 
 **What isolation does not do, stated plainly.** (1) The model-provider key a session needs is *in
 its environment*, and the runtime exposes that environment to its tool shell (`env` lists it).

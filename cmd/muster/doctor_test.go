@@ -896,7 +896,7 @@ func TestDoctorOpencodeDirsRow(t *testing.T) {
 		{"the listing failed", true, "/state", scanning(opencode.OrphanDirReport{}, errors.New("read: denied")), statusUnknown, "could not be listed", []string{"read: denied"}},
 		{"none", true, "/state", scanning(opencode.OrphanDirReport{}, nil), statusPass, "no opencode session directory", nil},
 		{"leftovers only", true, "/state", scanning(opencode.OrphanDirReport{Removable: 14, RemovableBytes: 42 * mib}, nil), statusWarn,
-			"14 opencode session directory(ies)", []string{"14 (42.0 MiB) hold nothing a session owns", "next start of the service removes"}},
+			"14 opencode session directory(ies)", []string{"14 (42.0 MiB) hold nothing a session owns", "hourly while it runs"}},
 		{"a directory that may hold a conversation", true, "/state", scanning(opencode.OrphanDirReport{HoldStore: 2, HoldStoreBytes: 3 << 30}, nil), statusWarn,
 			"2 opencode session directory(ies)", []string{"2 (3.0 GiB) may hold a session's conversation database", "never removed automatically"}},
 		{"both kinds", true, "/state", scanning(opencode.OrphanDirReport{Removable: 1, RemovableBytes: 2048, HoldStore: 1, HoldStoreBytes: 5 * mib}, nil), statusWarn,

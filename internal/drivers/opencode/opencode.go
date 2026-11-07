@@ -296,6 +296,15 @@ type Driver struct {
 	usageMu    sync.Mutex
 	usageMemos map[string]*usageMemo
 
+	// sweepStop ends the goroutine that repeats the sweep of directories no record
+	// names, sweepDone is closed when it has (orphans.go; muster #419). dirSweepEvery
+	// and dirScan are test seams: the interval, and the listing of running servers.
+	sweepStop     chan struct{}
+	sweepDone     chan struct{}
+	sweepStopOnce sync.Once
+	dirSweepEvery time.Duration
+	dirScan       func(string) ([]serverProc, int, error)
+
 	// statusTTL is how long a read of a server's status is kept (muster #419;
 	// statuscache.go). Set to the production windows in New; a test sets it.
 	statusTTL statusTTLs
@@ -520,6 +529,12 @@ func WithCredential(username, password string) Option {
 
 func withClock(f func() time.Time) Option { return func(d *Driver) { d.now = f } }
 
+// withDirSweep sets the interval of the repeated directory sweep and the listing of
+// running servers it uses. Unexported: a test seam.
+func withDirSweep(every time.Duration, scan func(string) ([]serverProc, int, error)) Option {
+	return func(d *Driver) { d.dirSweepEvery, d.dirScan = every, scan }
+}
+
 // New builds a Driver. Unless WithBaseURL was supplied it probes for the
 // opencode binary (never a startup crash when it is absent — see Probe) and
 // starts NOTHING: a server is started for each session, at Create.
@@ -632,6 +647,9 @@ func New(ctx context.Context, machine fleet.MachineId, opts ...Option) (*Driver,
 		// servers that held them are gone and before a record can be resumed.
 		d.sweepOrphanDirs()
 		d.resume(ctx)
+		// muster #419: and again from time to time, for the directories that lose
+		// their owner while the service runs.
+		d.startDirSweep()
 	}
 	return d, nil
 }
@@ -649,6 +667,9 @@ func (d *Driver) Shutdown() error {
 	}
 	d.seen = make(map[string]knownSession)
 	d.mu.Unlock()
+	// Before the servers are paused: no sweep may be listing or removing
+	// directories while they are being stopped (muster #419).
+	d.stopDirSweep()
 	d.endSubscriptions()
 
 	var wg sync.WaitGroup
