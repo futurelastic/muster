@@ -191,7 +191,7 @@ func sessionDirs(root string) (dir string, err error) {
 	}
 	for _, sub := range sessionSubdirs() {
 		if err := privfs.MkdirAll(filepath.Join(dir, sub)); err != nil {
-			_ = os.RemoveAll(dir)
+			_ = privfs.RemoveAll(dir)
 			return "", fmt.Errorf("opencode: creating the session directory: %w", err)
 		}
 	}

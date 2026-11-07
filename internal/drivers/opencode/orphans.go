@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/futurelastic/muster/internal/privfs"
 )
 
 // Servers nobody holds (muster #398).
@@ -366,7 +368,7 @@ func (d *Driver) sweepOrphanDirsWith(scan func(string) ([]serverProc, int, error
 		if !o.removable(now) {
 			continue
 		}
-		if err := os.RemoveAll(filepath.Join(d.sessionRoot, o.name)); err != nil {
+		if err := privfs.RemoveAll(filepath.Join(d.sessionRoot, o.name)); err != nil {
 			d.say("opencode: a session directory no record names could not be removed (%s): %v", o.name, err)
 			continue
 		}
