@@ -44,6 +44,11 @@ import (
 // problem justifies. The one question a lost window leaves a consumer unable
 // to answer — which sessions ended, and when — has its own small record
 // instead (history.go, muster #179).
+//
+// Cursor is a CEILING, not the last cursor handed out: no cursor this instance
+// stamped exceeds it, and a restart continues from it (#415, cursorReserveBlock).
+// The field keeps its name so a file written by an older build reads as a
+// ceiling that happens to be exact.
 type eventSequence struct {
 	Epoch  string `json:"epoch"`
 	Cursor int64  `json:"cursor"`
@@ -280,14 +285,17 @@ func NewWithState(self fleet.MachineId, st *state.Store) (*Service, error) {
 		svc.epoch = seq.Epoch
 		svc.events.epoch = seq.Epoch
 		svc.events.cursor = seq.Cursor
-		svc.events.persist = func(c int64) {
-			_ = st.Save("events", eventSequence{Epoch: seq.Epoch, Cursor: c})
+		// What the file holds is a ceiling (see cursorReserveBlock), so this
+		// run starts at it and the first event past it raises it.
+		svc.events.reserved = seq.Cursor
+		svc.events.reserve = func(c int64) error {
+			return st.Save("events", eventSequence{Epoch: seq.Epoch, Cursor: c})
 		}
 		return svc, nil
 	}
 	epoch := svc.epoch
-	svc.events.persist = func(c int64) {
-		_ = st.Save("events", eventSequence{Epoch: epoch, Cursor: c})
+	svc.events.reserve = func(c int64) error {
+		return st.Save("events", eventSequence{Epoch: epoch, Cursor: c})
 	}
 	return svc, st.Save("events", eventSequence{Epoch: epoch})
 }

@@ -95,7 +95,54 @@ const (
 	// this bound; a session that is actually working changes its screen and is
 	// read every time.
 	streamRecordMaxAge = 5 * time.Second
+
+	// relistDutyFactor and relistMaxGap pace the stream's full listings by what
+	// each one costs (#415). A pass enumerates the multiplexer, reads the process
+	// table, captures every pane and classifies every screen, so its cost grows
+	// with the fleet while how often it runs grows with how many sessions are
+	// printing. On a machine with ~80 sessions a pass took 0.5-0.8 s, so one
+	// session that merely animated a spinner kept the loop running pass after
+	// pass, for ~1 core around the clock — most of it kernel time (forks,
+	// pipes, captures). The coalesce window above bounds a burst, not a
+	// sustained stream of them.
+	//
+	// After a pass that took t, the next one waits until relistDutyFactor*t has
+	// passed since it ended: the loop spends at most 1/(1+factor) of the wall
+	// clock listing — a third at 2 — however many sessions are active, and the
+	// gap shrinks as the fleet does. It is proportional on purpose, not a fixed
+	// floor: a 20-session machine lists in tens of milliseconds, its gap is
+	// shorter than the coalesce window, and its feed is exactly what it was.
+	// Only a fleet whose listing is expensive is paced, and then by an amount
+	// that scales with the expense. relistMaxGap keeps a pathologically slow
+	// listing from stretching the gap with it.
+	//
+	// What it costs a subscriber, stated: under sustained activity on a large
+	// fleet a state change is reported up to about relistDutyFactor passes later
+	// (~1.5 s at the measured 0.7 s) instead of one. A quiet fleet is not
+	// affected — the first pass after a lull has nothing to wait for. What it
+	// does NOT do is lose an edge: every trigger that arrives while waiting is
+	// drained into the pass that follows, which reads current state.
+	//
+	// The other way to spend less — re-reading only the panes that fired — is
+	// not done: Driver.List is one pass over all of them (observation memory,
+	// stall verdicts, identity reconciliation all read the whole set), so a
+	// partial listing would be a second path through it, free to drift.
+	relistDutyFactor = 2
+	relistMaxGap     = 5 * time.Second
 )
+
+// relistGap is how long the stream waits after a full listing that took cost
+// before taking the next (see relistDutyFactor).
+func relistGap(cost time.Duration) time.Duration {
+	gap := relistDutyFactor * cost
+	if gap > relistMaxGap {
+		gap = relistMaxGap
+	}
+	if gap < 0 {
+		return 0
+	}
+	return gap
+}
 
 // defaultSettleDelays is the bounded follow-up schedule for a session whose
 // state is not yet settled (#343): the reads taken after the one that first
@@ -692,6 +739,11 @@ func (s *eventStream) run(ctx context.Context, trigger <-chan struct{}, known ma
 	}
 	rearm()
 
+	// When the next full listing may start (#415, relistDutyFactor). Zero until
+	// the first pass has said what a listing costs here, so the first change
+	// after a lull waits only for the burst to settle.
+	var nextPass time.Time
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -712,15 +764,27 @@ func (s *eventStream) run(ctx context.Context, trigger <-chan struct{}, known ma
 		}
 
 		// Let a burst settle. An agent mid-turn emits many notifications
-		// per second; its state changes far more slowly.
+		// per second; its state changes far more slowly. And let a listing that
+		// was expensive be paid for: wait out the gap the last one earned
+		// (relistDutyFactor) when that is longer than the burst needs. One timer
+		// either way, and everything that fires while it runs is drained below
+		// into the single pass that follows.
+		wait := coalesceWindow
+		if gap := time.Until(nextPass); gap > wait {
+			wait = gap
+		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(coalesceWindow):
+		case <-time.After(wait):
 		}
 		drain(trigger)
 
+		passStart := time.Now()
 		cur, err := s.d.List(ctx, s.req, driver.ListFilter{CwdPrefix: s.filter.CwdPrefix, RecordMaxAge: streamRecordMaxAge})
+		// Set before the error check: a listing that failed slowly cost as much
+		// as one that succeeded, and retrying it back to back is the same storm.
+		nextPass = time.Now().Add(s.d.relistGapFor(time.Since(passStart)))
 		if err != nil {
 			rearm()
 			continue
@@ -1112,4 +1176,13 @@ func (s *eventStream) Close() error {
 		_ = c.Close()
 	}
 	return nil
+}
+
+// relistGapFor is the pacing function the stream uses: the production one
+// unless a test replaced it.
+func (d *Driver) relistGapFor(cost time.Duration) time.Duration {
+	if d.relistGap != nil {
+		return d.relistGap(cost)
+	}
+	return relistGap(cost)
 }
