@@ -533,7 +533,14 @@ func TestPark_ASendRacingThePassIsSafe(t *testing.T) {
 	sess := mustCreate(t, d, "k1", fleet.SessionSpec{})
 	data := inside(t, d, sess.ID).vars()["XDG_DATA_HOME"]
 
-	const sends = 8
+	// Send at least minSends messages, and go on until the sweep has parked the
+	// session and a send has started it again, or until the deadline. A fixed number
+	// of sends can finish before a loaded machine has run the sweep goroutine at all,
+	// and then nothing was raced (muster #424): the number of sends is what the
+	// scheduler decides, not the test.
+	const minSends = 8
+	deadline := time.Now().Add(4 * wait)
+	cycled := func() bool { return sink.has("started parked session " + sess.ID) }
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
 	wg.Add(1)
@@ -549,11 +556,12 @@ func TestPark_ASendRacingThePassIsSafe(t *testing.T) {
 			d.parkIdle()
 		}
 	}()
-	for i := 0; i < sends; i++ {
-		if _, err := sendText(t, d, sess.SessionRef, fmt.Sprintf("msg-%d", i)); err != nil {
+	sent := 0
+	for ; sent < minSends || (!cycled() && time.Now().Before(deadline)); sent++ {
+		if _, err := sendText(t, d, sess.SessionRef, fmt.Sprintf("msg-%d", sent)); err != nil {
 			close(stop)
 			wg.Wait()
-			t.Fatalf("Send %d racing the sweep: %v", i, err)
+			t.Fatalf("Send %d racing the sweep: %v", sent, err)
 		}
 	}
 	close(stop)
@@ -561,7 +569,8 @@ func TestPark_ASendRacingThePassIsSafe(t *testing.T) {
 
 	// The race was real: the sweep did park the session, and a send did start it again.
 	if !sink.has("parked session "+sess.ID) || !sink.has("started parked session "+sess.ID) {
-		t.Error("the sweep and the sends never met: no park and start cycle happened, so this proved nothing")
+		t.Errorf("the sweep and the sends never met in %d sends over %s: no park and start cycle happened, so this proved nothing",
+			sent, 4*wait)
 	}
 	known, _ := d.wasSeen(sess.ID)
 	if got := d.phaseOf(known.srv); got != phaseRunning && got != phaseParked {
@@ -571,7 +580,7 @@ func TestPark_ASendRacingThePassIsSafe(t *testing.T) {
 		t.Errorf("%d servers tracked for one session", n)
 	}
 	raw, _ := os.ReadFile(filepath.Join(data, "fake-prompts.jsonl"))
-	for i := 0; i < sends; i++ {
+	for i := 0; i < sent; i++ {
 		if !strings.Contains(string(raw), fmt.Sprintf("msg-%d", i)) {
 			t.Errorf("message %d never reached a runtime", i)
 		}

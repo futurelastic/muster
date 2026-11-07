@@ -40,8 +40,14 @@ func TestDirSweep_RemovesWhatLostItsOwnerWhileTheServiceRuns(t *testing.T) {
 	old := 3 * time.Hour
 	orphan := f.dir("muster-opencode-1", old, remnantXDG)
 	held := f.dir("muster-opencode-2", old, remnantXDG)
+	// The record is written before the directory it names exists. The other way
+	// round there is a gap in which the directory is old and no record names it, and
+	// the timer, ticking every 20 ms, removes it if the test goroutine is descheduled
+	// there (muster #424). Written first, there is no moment at which it can be seen
+	// as an orphan.
+	namedDir := filepath.Join(f.root, "muster-opencode-3")
+	f.record("ses_named", namedDir)
 	named := f.dir("muster-opencode-3", old, remnantXDG)
-	f.record("ses_named", named)
 	store := f.dir("muster-opencode-4", old, withStore)
 	recent := f.dir("muster-opencode-5", 5*time.Minute, remnantXDG)
 	scratch := f.dir("muster-opencode-6", old, remnantTmp)
