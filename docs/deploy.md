@@ -356,8 +356,11 @@ begins `parked:`, never `dead`; **everything the session had started is stopped*
 with its server (a dev server a tool launched, for one), exactly as when the service
 stops; its scratch directory is kept; `GET …/turns` on a parked session is `409`
 (see [`api.md`](api.md)) because the history is read from the runtime's process; and
-a service restart starts every session again, parked ones too, until the next sweep
-parks them. The log has one line for each stop and each start
+a service restart leaves a session parked when it was parked before and the bound is
+still set and not lower than the one that parked it (a record from before #423 has no
+such fact, so its first restart starts it); every other session is started again, and
+with no bound, or a lower one, the parked ones too. A session left parked reports no
+`usage` until its first input. The log has one line for each stop and each start
 (`parked session …`, `started parked session …`). A session created with
 caller-supplied environment is never stopped, since it could not be started again as
 it was created.

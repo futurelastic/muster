@@ -50,6 +50,18 @@ import (
 // on every pass until it is first seen idle; that moment is when its quiet time
 // starts, so a long unobserved turn is still waited out for a whole bound.
 //
+// # Across a service restart (muster #423)
+//
+// A park is written to the session's record (persist.go, parkedRecord) before the
+// process is stopped, and the write that records the process started in its place
+// clears it. At the service's start, with the bound still set and not lower than
+// the one the park was decided under, resumeOne rebuilds the stopped server from
+// the record instead of starting a process (parkedServerFor, resume.go): the
+// session is listed idle and parked, and its first input pays the start any parked
+// session pays. A record the restart cannot trust — no bound now, a lower one, a
+// start that would not succeed as things are — is started the ordinary way, so no
+// session is ever left parked that the service could not start again.
+//
 // # Locking
 //
 // With the bound set, every operation that writes to a session, and Close, runs
@@ -114,6 +126,27 @@ type parkNote struct {
 	// reviveErr and reviveAt are set when starting the session again failed.
 	reviveErr string
 	reviveAt  time.Time
+	// restored is set on a note rebuilt from the session's record at a service
+	// restart (muster #423): the stop was an earlier service's, and the runtime has
+	// not been asked anything about the session since.
+	restored bool
+}
+
+// record is the part of the note that is kept on disk, under the bound that decided
+// the park.
+func (n *parkNote) record(bound time.Duration) *parkedRecord {
+	return &parkedRecord{
+		AtMs: n.at.UnixMilli(), IdleForMs: n.idleFor.Milliseconds(), BoundMs: bound.Milliseconds(),
+		LastTurn: copyTurnEnd(n.lastTurn),
+	}
+}
+
+// noteFromRecord is the parkNote a restart rebuilds from a record that says parked.
+func noteFromRecord(p *parkedRecord) *parkNote {
+	return &parkNote{
+		at: time.UnixMilli(p.AtMs), idleFor: time.Duration(p.IdleForMs) * time.Millisecond,
+		lastTurn: copyTurnEnd(p.LastTurn), restored: true,
+	}
 }
 
 // touch records that the server's session did something now.
@@ -138,6 +171,9 @@ func (d *Driver) parkedState(k knownSession) fleet.SessionState {
 	if note != nil {
 		ev = fmt.Sprintf("parked: the runtime's process was stopped after %s with nothing to do, to free its memory; "+
 			"the next input starts it again", note.idleFor.Round(time.Second))
+		if note.restored {
+			ev += "; the service has restarted since and left it stopped"
+		}
 		if note.reviveErr != "" {
 			ev += fmt.Sprintf("; starting it again failed at %s: %s", note.reviveAt.UTC().Format(time.RFC3339), note.reviveErr)
 		}
@@ -269,6 +305,11 @@ func (d *Driver) revive(ctx context.Context, id string, k knownSession) (knownSe
 	if still && !closed && cur.srv == old {
 		cur.srv = srv
 		cur.interrupted = nil
+		if n := old.park.Load(); n != nil && n.restored {
+			// relaunch read the session back by this id, which is the confirmation a
+			// session left parked by a restart was waiting for (muster #423).
+			cur.conversation = confirmedAfterRestart(id)
+		}
 		d.seen[id] = cur
 	}
 	d.mu.Unlock()
@@ -413,7 +454,8 @@ func (d *Driver) tryPark(id string, srv *server) bool {
 	if k.srv != srv || d.phaseOf(srv) != phaseRunning || !srv.persisted.Load() {
 		return false
 	}
-	if rec := d.store.load(id); rec == nil || rec.recreateReason() != "" {
+	rec := d.store.load(id)
+	if rec == nil || rec.recreateReason() != "" {
 		return false // it could not be started again as it was: never stop it
 	}
 
@@ -447,8 +489,18 @@ func (d *Driver) tryPark(id string, srv *server) bool {
 		return false
 	}
 
+	note := &parkNote{at: d.now(), idleFor: quiet, lastTurn: lastTurn}
+	// muster #423: the record says so before the process stops, so a restart that
+	// finds the process gone finds the reason beside it. The write is the one place a
+	// park can fail for want of disk: the session is parked regardless, because
+	// freeing the memory is the point and a record without the fact only means the
+	// next restart starts the session, as it always did.
+	rec.Parked = note.record(d.idleStop)
+	if err := d.store.write(rec); err != nil {
+		d.say("opencode: parked session %s but could not record it, so a service restart will start it again: %v", id, err)
+	}
 	// Before the stop: whoever then sees the process gone also sees why.
-	srv.park.Store(&parkNote{at: d.now(), idleFor: quiet, lastTurn: lastTurn})
+	srv.park.Store(note)
 	srv.pauseForShutdown()
 	d.say("opencode: parked session %s after %s with nothing to do", id, quiet.Round(time.Second))
 	return true
