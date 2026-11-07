@@ -353,6 +353,12 @@ func (d *Driver) startServerIn(ctx context.Context, spec fleet.SessionSpec, exis
 		cleanup()
 		return nil, &fleet.Error{Kind: fleet.ErrorInvalid, Message: "create: " + err.Error(), Machine: d.machine}
 	}
+	// muster #420: the runtime's own log is owner-only before the runtime can write
+	// to it, on a relaunch as on a first start.
+	if err := privateRuntimeLog(dir); err != nil {
+		cleanup()
+		return nil, &fleet.Error{Kind: fleet.ErrorInvalid, Message: "create: " + err.Error(), Machine: d.machine}
+	}
 	if bypass {
 		args = bypassArgs()
 	}
