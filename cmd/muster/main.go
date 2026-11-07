@@ -104,6 +104,16 @@
 //	                       because with no credential configured it is the one
 //	                       that would otherwise answer, silently. List
 //	                       "opencode" here to allow it on purpose.
+//	FLEET_OPENCODE_IDLE_STOP  how long an opencode session's server may have
+//	                       nothing to do before it is stopped to free its
+//	                       memory (muster #421): a Go duration of at least
+//	                       5m, e.g. "30m". The session keeps its record and
+//	                       its directory, reads idle with `parked` evidence,
+//	                       and the next Send, Interrupt or Respond starts the
+//	                       server again, so that one input pays a process
+//	                       start. Off when unset, `0` or `off`; needs
+//	                       FLEET_STATE_DIR. A malformed value is reported and
+//	                       ignored.
 //	FLEET_PEERS            comma-separated name=url list, e.g.
 //	                       "other=https://other.example:PORT". Peers are
 //	                       statically configured; there is no discovery
@@ -764,6 +774,10 @@ func main() {
 	stopOpencode := func() {}
 	if getenv("FLEET_RUNTIME_OPENCODE", "") == "1" {
 		bin := os.Getenv("FLEET_OPENCODE_BIN")
+		idleStop, idleStopNote := parseIdleStop(os.Getenv("FLEET_OPENCODE_IDLE_STOP"))
+		if idleStopNote != "" {
+			log.Print("muster: " + idleStopNote)
+		}
 		if cfgFile.operatorAgentsFile() != "" {
 			log.Printf("muster: opencode operator agents configured (#396)")
 		}
@@ -794,6 +808,11 @@ func main() {
 					// muster #398: the driver says, one line per process, when it stops a
 					// server an earlier service left running.
 					opencode.WithLogf(func(format string, args ...any) { log.Printf("muster: "+format, args...) }),
+				}
+				// muster #421: stop a session's server after this long with nothing to do and
+				// start it again on the next input. Off unless set; needs FLEET_STATE_DIR.
+				if idleStop > 0 {
+					opts = append(opts, opencode.WithIdleStop(idleStop))
 				}
 				if attempt > 0 {
 					// The first try gates startup, so it is short. The retries

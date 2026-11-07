@@ -159,6 +159,18 @@
 // dropped the moment the event stream or one of this driver's own writes says
 // they changed. statuscache.go has the windows and what a reader can lose.
 //
+// # Parking an idle server (muster #421)
+//
+// What an idle server holds is memory, and reading it more cheaply gives none of
+// it back. With WithIdleStop set (and a state directory), a session whose server
+// has had nothing to do for the bound is PARKED: the process group is stopped as
+// the service stopping stops it, and the session keeps its record and its
+// directory. The next Send, Interrupt or Respond starts a server on that directory
+// again (relaunch). A parked session reads idle, with evidence that says so —
+// never dead, never closed — and no read starts it. park.go has the lifecycle, the
+// one classifier (phaseOf) every "has the process exited" reader goes through, and
+// the locking; docs/adr/421-… has the decisions and what they cost.
+//
 // KeySender is not implemented at all — this substrate has no screen for a
 // raw key to land on, and DeliversRawKeys: false says so structurally
 // rather than through a stub that always refuses.
@@ -304,6 +316,21 @@ type Driver struct {
 	sweepStopOnce sync.Once
 	dirSweepEvery time.Duration
 	dirScan       func(string) ([]serverProc, int, error)
+
+	// idleStop is how long a session's server may have nothing to do before this
+	// driver stops it and starts it again on the next input (muster #421; park.go).
+	// Zero is off, and it stays off without a state directory. idleSweepEvery is how
+	// often the sweep runs (a test seam); idleStopCh and idleDone are the sweep
+	// goroutine's stop and its end, nil when there is none.
+	idleStop       time.Duration
+	idleSweepEvery time.Duration
+	idleStopCh     chan struct{}
+	idleDone       chan struct{}
+	idleStopOnce   sync.Once
+	// life holds one lifecycle lock per session (park.go); lifeMu guards the map and
+	// is a leaf.
+	lifeMu sync.Mutex
+	life   map[string]*sync.Mutex
 
 	// scratchLimits bound the measurement of a session's scratch directory
 	// (scratch.go). The zero value means the production bounds.
@@ -654,6 +681,13 @@ func New(ctx context.Context, machine fleet.MachineId, opts ...Option) (*Driver,
 		// muster #419: and again from time to time, for the directories that lose
 		// their owner while the service runs.
 		d.startDirSweep()
+		// muster #421: and the sessions that have nothing to do are parked, once
+		// every one that could be started again has been (above).
+		d.startIdleSweep()
+	} else if d.idleStop > 0 {
+		d.say("opencode: an idle stop was configured but there is no state directory, so a stopped session could not be " +
+			"started again; no session will be stopped")
+		d.idleStop = 0
 	}
 	return d, nil
 }
@@ -674,6 +708,7 @@ func (d *Driver) Shutdown() error {
 	// Before the servers are paused: no sweep may be listing or removing
 	// directories while they are being stopped (muster #419).
 	d.stopDirSweep()
+	d.stopIdleSweep() // muster #421: a park in progress finishes first
 	d.endSubscriptions()
 
 	var wg sync.WaitGroup
@@ -834,6 +869,19 @@ func (d *Driver) markSeen(id string, info knownSession) {
 	d.mu.Unlock()
 }
 
+// refreshSeen changes what is known of id in place, under the lock, and only if id
+// is still known: unlike markSeen it neither writes back an older copy of the entry
+// (whose server may have been replaced since, muster #421) nor brings back a
+// session that was forgotten meanwhile.
+func (d *Driver) refreshSeen(id string, change func(*knownSession)) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if k, ok := d.seen[id]; ok {
+		change(&k)
+		d.seen[id] = k
+	}
+}
+
 func (d *Driver) wasSeen(id string) (knownSession, bool) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
@@ -860,6 +908,7 @@ func (d *Driver) forgetSeen(id string) {
 	d.mu.Unlock()
 	d.forgetIdle(gone.srv, id) // muster #419
 	d.forgetUsage(id)
+	d.dropLifeLock(id) // muster #421
 	if d.store != nil {
 		// Only ever called once the runtime confirmed the session is gone, which is
 		// also when it stops being worth finding again (muster #282).

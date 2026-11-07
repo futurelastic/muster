@@ -757,6 +757,24 @@ Omitting it is allowed and gives you a weaker guarantee — the driver
 corroborates against its own sightings instead of against what *you* saw — and
 the refusal tells you which one you got.
 
+### A session whose runtime was stopped to save memory
+
+On an `opencode` machine whose operator set `FLEET_OPENCODE_IDLE_STOP` (muster #421),
+a session that has had nothing to do for that long has its process stopped. You see
+`status: idle` with `evidence` starting `parked:` — the same idle you would see
+otherwise, so a supervisor that waits for `idle` needs no change. What differs:
+
+- **The next `input` is slower.** It starts the runtime again before delivering, so
+  allow seconds more than usual. If it cannot start, you get `unreachable` with
+  `retryable: true` and **nothing was sent**; send again.
+- **Reading never wakes it.** Poll `state` as often as you like; it stays parked.
+- **`GET …/turns` is `409` while parked.** That is not the stale-cursor `409` and
+  retrying without `since` does not clear it: send the session input first, then read.
+- **No event announces the park or the start.** The session never closed; the events
+  you receive after an input come from the restarted runtime as usual.
+- Whatever the session had started on the machine (a dev server, a watcher) was
+  stopped with it.
+
 ### A session that stops drawing
 
 A hung runtime paints exactly like a busy one: `status: working`, a spinner on

@@ -179,6 +179,8 @@ func (c *statusCache) detached() {
 func (d *Driver) invalidateStatus(srv *server) {
 	if srv != nil {
 		srv.status.invalidateAfterWrite(d.now())
+		// muster #421: every write of this driver's own is activity of the session.
+		srv.touch(d.now())
 	}
 }
 

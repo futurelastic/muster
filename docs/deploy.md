@@ -343,6 +343,25 @@ already far outside one. The quiet clock is the service's own memory and starts
 again after a restart, so right after a deploy a session that was already hung
 reads stalled only once the bound has elapsed since the restart.
 
+`FLEET_OPENCODE_IDLE_STOP` (#421) stops an opencode session's server when it has had
+nothing to do for that long, to give its memory back (several hundred megabytes
+each), and starts it again on the next `input`, `interrupt` or `respond`. A Go
+duration of at least `5m` (`30m`, `2h`); unset, `0` or `off` never stops one, which
+is the default for this release. It needs `FLEET_STATE_DIR`, because a session is
+started again from its record; without one the setting is dropped and the log says
+so. An unparsable value, or one under five minutes, is logged at startup and
+ignored. What to know before turning it on: the first input after a stop waits for a
+process start (seconds), and the session meanwhile reads `idle` with evidence that
+begins `parked:`, never `dead`; **everything the session had started is stopped**
+with its server (a dev server a tool launched, for one), exactly as when the service
+stops; its scratch directory is kept; `GET …/turns` on a parked session is `409`
+(see [`api.md`](api.md)) because the history is read from the runtime's process; and
+a service restart starts every session again, parked ones too, until the next sweep
+parks them. The log has one line for each stop and each start
+(`parked session …`, `started parked session …`). A session created with
+caller-supplied environment is never stopped, since it could not be started again as
+it was created.
+
 ## Running it
 
 ```sh

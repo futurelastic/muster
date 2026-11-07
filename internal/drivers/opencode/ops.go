@@ -386,6 +386,7 @@ func (d *Driver) startServerIn(ctx context.Context, spec fleet.SessionSpec, exis
 		}
 		return nil, &fleet.Error{Kind: fleet.ErrorUnreachable, Message: "create: this driver has been shut down", Machine: d.machine}
 	}
+	srv.touch(d.now()) // muster #421: a server that has just started is not idle
 	return srv, nil
 }
 
@@ -522,13 +523,13 @@ func (d *Driver) Send(ctx context.Context, req fleet.Request, ref fleet.SessionR
 	if !opts.Submit {
 		return fleet.DeliveryReceipt{}, driver.ErrUnsupported
 	}
-	known, ok := d.wasSeen(ref.ID)
-	if !ok {
-		return fleet.DeliveryReceipt{}, fmt.Errorf("%w: %q", fleet.ErrNoSuchSession, ref.ID)
-	}
-	if err := d.requireLive(known); err != nil {
+	// muster #421: a session whose server was stopped for being idle is started
+	// again here, under the session's lock, and held until the prompt is accepted.
+	known, unlock, err := d.liveFor(ctx, ref.ID)
+	if err != nil {
 		return fleet.DeliveryReceipt{}, err
 	}
+	defer unlock()
 	ctx, cancel := d.bounded(ctx)
 	defer cancel()
 	// muster #419: the runtime accepts a prompt before it reports the session
@@ -575,7 +576,12 @@ func (d *Driver) State(ctx context.Context, req fleet.Request, ref fleet.Session
 		// muster #285: only where the session has a live server to ask. A read
 		// that failed or found the session gone has no figures worth adding.
 		if st.Status != fleet.StatusDead && st.Status != fleet.StatusUnknown {
-			st.Usage = d.usageForState(ctx, known.srv, ref.ID, st.Status == fleet.StatusIdle)
+			if d.phaseOf(known.srv) == phaseParked {
+				// muster #421: no process to ask, so what was read before the stop.
+				st.Usage = d.usageSnapshot(ref.ID, true)
+			} else {
+				st.Usage = d.usageForState(ctx, known.srv, ref.ID, st.Status == fleet.StatusIdle)
+			}
 			st.Scratch = d.scratchOf(known.srv) // muster #419: the last walk's figure, never a wait
 		}
 	}
@@ -595,8 +601,13 @@ func (d *Driver) readState(ctx context.Context, ref fleet.SessionRef) (fleet.Ses
 	// muster #280: in isolated mode the session IS its process. One that has
 	// exited is a session that no longer exists — read from the process itself,
 	// not inferred from a failed HTTP call (which would be "unreachable", a
-	// different and retryable thing).
-	if d.shared == nil && srv.proc.exited() {
+	// different and retryable thing). Unless this driver stopped it on purpose
+	// (muster #421): that is an idle session, read from memory — a state read never
+	// starts a process.
+	switch d.phaseOf(srv) {
+	case phaseParked:
+		return d.parkedState(known), nil
+	case phaseExited:
 		return fleet.InferredState(fleet.StatusDead,
 			"the session's runtime process has exited", nil), nil
 	}
@@ -651,10 +662,13 @@ func (d *Driver) readState(ctx context.Context, ref fleet.SessionRef) (fleet.Ses
 			return fleet.SessionState{}, err
 		}
 	}
-	refreshed := known
-	refreshed.cwd, refreshed.name, refreshed.agent = fleet.AbsolutePath(sess.Directory), sess.Title, sess.Agent
-	refreshed.startedAt = time.UnixMilli(sess.Time.Created)
-	d.markSeen(sess.ID, refreshed)
+	// Merged into the entry as it is now, not written back from the copy read above:
+	// the session's server may have been replaced meanwhile (muster #421), and a
+	// session closed meanwhile must not be put back.
+	d.refreshSeen(sess.ID, func(k *knownSession) {
+		k.cwd, k.name, k.agent = fleet.AbsolutePath(sess.Directory), sess.Title, sess.Agent
+		k.startedAt = time.UnixMilli(sess.Time.Created)
+	})
 	st := classify(false, wireStatus{})
 	st.LastTurn = lastTurn
 	if st.LastTurn == nil {
@@ -698,13 +712,11 @@ func (d *Driver) usageForState(ctx context.Context, srv *server, id string, idle
 // the guessed mapping §5.6 forbids: such a session is answered `unsupported`,
 // with the reason, and the caller still has Interrupt.
 func (d *Driver) Respond(ctx context.Context, req fleet.Request, ref fleet.SessionRef, resp fleet.Response) (fleet.DeliveryReceipt, error) {
-	known, ok := d.wasSeen(ref.ID)
-	if !ok {
-		return fleet.DeliveryReceipt{}, fmt.Errorf("%w: %q", fleet.ErrNoSuchSession, ref.ID)
-	}
-	if err := d.requireLive(known); err != nil {
+	known, unlock, err := d.liveFor(ctx, ref.ID) // muster #421: starts a parked session again
+	if err != nil {
 		return fleet.DeliveryReceipt{}, err
 	}
+	defer unlock()
 	ctx, cancel := d.bounded(ctx)
 	defer cancel()
 	defer d.invalidateStatus(known.srv) // muster #419: an answered ask changes the status
@@ -714,13 +726,11 @@ func (d *Driver) Respond(ctx context.Context, req fleet.Request, ref fleet.Sessi
 // Interrupt asks the runtime to abort a session's current turn (§3, 202
 // intent-only semantics on the wire — see fleet.Ack).
 func (d *Driver) Interrupt(ctx context.Context, req fleet.Request, ref fleet.SessionRef) (fleet.Ack, error) {
-	known, ok := d.wasSeen(ref.ID)
-	if !ok {
-		return fleet.Ack{}, fmt.Errorf("%w: %q", fleet.ErrNoSuchSession, ref.ID)
-	}
-	if err := d.requireLive(known); err != nil {
+	known, unlock, err := d.liveFor(ctx, ref.ID) // muster #421: starts a parked session again
+	if err != nil {
 		return fleet.Ack{}, err
 	}
+	defer unlock()
 	ctx, cancel := d.bounded(ctx)
 	defer cancel()
 	defer d.invalidateStatus(known.srv) // muster #419: an aborted turn changes the status
@@ -750,11 +760,21 @@ func (d *Driver) Interrupt(ctx context.Context, req fleet.Request, ref fleet.Ses
 // reason to refuse — the caller's expectation is then checked against the
 // cached start time, and the process is torn down regardless.
 func (d *Driver) Close(ctx context.Context, req fleet.Request, ref fleet.SessionRef) (fleet.Ack, error) {
+	// muster #421: under the session's lock, so a close and a park or a start of the
+	// same session do not interleave.
+	defer d.lockSession(ref.ID)()
 	prior, seen := d.wasSeen(ref.ID)
 	if !seen {
 		return fleet.Ack{}, fmt.Errorf("%w: %q", fleet.ErrNoSuchSession, ref.ID)
 	}
 	if prior.srv == nil {
+		return d.closeUnlaunched(req, ref, prior)
+	}
+	if d.phaseOf(prior.srv) == phaseParked {
+		// muster #421: no process to stop and none to ask, exactly as for a session
+		// found on disk and never started: closing it is removing what it left. The
+		// directory is the server's, so it is handed over here.
+		prior.dir = prior.srv.dir
 		return d.closeUnlaunched(req, ref, prior)
 	}
 	priorStart := prior.startedAt
@@ -933,8 +953,8 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 	}
 	var wg sync.WaitGroup
 	for srv, r := range reads {
-		if d.shared == nil && srv.proc.exited() {
-			continue
+		if d.phaseOf(srv) != phaseRunning {
+			continue // exited, or parked (muster #421): nothing to ask
 		}
 		wg.Add(1)
 		go func(srv *server, r *statusRead) {
@@ -952,7 +972,9 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 		switch {
 		case info.srv == nil:
 			st = fleet.UnknownState(fleet.ConfidenceObserved, info.unknown)
-		case d.shared == nil && info.srv.proc.exited():
+		case d.phaseOf(info.srv) == phaseParked:
+			st = d.parkedState(info) // muster #421: idle, from memory; a listing never starts a process
+		case d.phaseOf(info.srv) == phaseExited:
 			st = fleet.InferredState(fleet.StatusDead, "the session's runtime process has exited", nil)
 		case r.err != nil:
 			// Session identity is known (this driver's own cache); which of

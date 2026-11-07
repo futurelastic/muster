@@ -585,7 +585,9 @@ finished is `state`. Not to be confused with `state.turns`, the liveness count.
 
 `next` is returned even when `turns` is empty, so a poller always has a place to
 resume; call again until it stops moving. A cursor from another conversation (a
-`/clear`, a relaunch) is `409` — read without `since` to start again. A session
+`/clear`, a relaunch) is `409` — read without `since` to start again. So is a read of a
+**parked** `opencode` session (#421): its message says it is parked, and reading
+without `since` does not help — send it input to start it again, then read. A session
 whose conversation record cannot be identified yet is `404` with `retryable`,
 which is not the same as an agent that has said nothing (`200`, `turns: []`).
 A turn over 64 KiB is cut and marked `"truncated": true`.
@@ -1670,6 +1672,21 @@ of the tree and `bytes` is a lower bound. **Absent means no figure** (no such
 directory, or not measured yet), never zero. Nothing is removed while the session
 lives; closing it removes the directory. Not a material change: it moves with every
 file written, so it does not fire `session.state`.
+
+**A parked session** (#421) — on an `opencode` runtime whose service sets
+`FLEET_OPENCODE_IDLE_STOP`, a session that has had nothing to do for that long has its
+runtime process stopped to free memory. It reads `status: idle`, `confidence:
+observed`, with `evidence` that begins `parked:`; read the prefix only to tell it
+from an ordinary idle, never to branch on the prose after it. It is **not** `dead`
+or `unknown`, no `session.closed` and no gap is emitted when it parks, and it is
+still listed. **A read never starts it** — a state read, a listing, a subscription —
+so polling a parked session does not undo the park. The next `input`, `interrupt` or
+`respond` starts the runtime again first, so that one call takes seconds longer. If
+the start fails the call is `unreachable` with `retryable: true` and nothing was
+sent, and the session stays parked with the failure in `evidence`. `DELETE` removes
+it as it removes any session. `GET …/turns` on a parked session is `409`
+(`conflict`), because the history is read from the runtime's process; send it input
+first.
 
 **`waitingOn`** — `prompt` (a dialog is attached) or `unsent-input` (the
 composer holds text nobody submitted; do not send to it).

@@ -65,7 +65,8 @@ Stopping a server that has been idle for a while and starting it again on the ne
 input. It is the only thing that gives the memory back (an idle server holds
 several hundred megabytes), and it is a lifecycle of its own: a stopped session
 must read as idle and not dead or unknown, a send racing the stop must be safe,
-every open subscription must re-attach. It is filed as its own issue.
+every open subscription must re-attach. It is filed as its own issue and decided in
+[ADR 421](421-an-idle-opencode-server-is-parked-and-started-again-on-input.md).
 
 ## Consequences
 

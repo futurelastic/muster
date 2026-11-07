@@ -237,7 +237,7 @@ func (d *Driver) observedTurn(ctx context.Context, srv *server, id string) turnE
 // model, and reads nothing for one that pinned neither or whose runtime is not
 // running.
 func (d *Driver) turnEvidenceFor(ctx context.Context, known knownSession, id string, spec fleet.SessionSpec) turnEvidence {
-	if (spec.Agent == "" && spec.Model == "") || known.srv == nil {
+	if (spec.Agent == "" && spec.Model == "") || known.srv == nil || known.srv.park.Load() != nil {
 		return turnEvidence{}
 	}
 	ctx, cancel := d.bounded(ctx)
