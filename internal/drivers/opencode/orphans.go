@@ -334,8 +334,11 @@ func (o orphanDir) removable(now time.Time) bool {
 }
 
 // sweepOrphanDirs removes the record-less scoped directories that hold nothing of
-// a session's, once, at start-up. It runs after sweepOrphans (so a server that
-// sweep stopped no longer holds its directory) and before anything is resumed.
+// a session's. It runs once at start-up, after sweepOrphans (so a server that
+// sweep stopped no longer holds its directory) and before anything is resumed, and
+// then every orphanDirSweepEvery while the service runs (dirSweepLoop; muster
+// #419): a directory can lose its record or its server long after start-up, and
+// until the next start nothing else would look at it.
 //
 // It removes nothing when a record could not be read, when a process that looks
 // like a server could not be inspected, or when the platform cannot list
@@ -352,7 +355,7 @@ func (d *Driver) sweepOrphanDirsWith(scan func(string) ([]serverProc, int, error
 	dirs, unreadable, uninspected, err := orphanDirs(d.store.dir, d.sessionRoot, scan)
 	if err != nil {
 		if !errors.Is(err, ErrScanUnsupported) {
-			d.say("opencode: the start-up sweep could not list session directories: %v", err)
+			d.say("opencode: the sweep could not list session directories: %v", err)
 		}
 		return
 	}
@@ -375,6 +378,64 @@ func (d *Driver) sweepOrphanDirsWith(scan func(string) ([]serverProc, int, error
 		d.say("opencode: removed a session directory no record names, no server holds and nothing has written to for %s (%s, %d KiB)",
 			now.Sub(o.newest).Round(time.Minute), o.name, (o.bytes+1023)/1024)
 	}
+}
+
+// orphanDirSweepEvery is how often the sweep above runs while the service is up.
+// It equals orphanDirGrace on purpose: a directory that lost its owner is removed
+// between one and two grace periods after its last write, and a sweep that ran
+// more often would only find the same directories still inside the grace.
+const orphanDirSweepEvery = time.Hour
+
+// startDirSweep starts the goroutine that repeats sweepOrphanDirs. It runs only
+// with a state directory (the sweep is a no-op without one) and stops with
+// Shutdown. Every safety rule of the start-up sweep applies unchanged; the one
+// thing a repeat meets that the first run cannot is a create in flight, whose
+// directory is protected twice over: it was written moments ago, which is inside
+// the grace, and from the exec onward its server holds it.
+func (d *Driver) startDirSweep() {
+	if d.noStartSweep || d.store == nil || d.sweepStop != nil {
+		return
+	}
+	every := d.dirSweepEvery
+	if every <= 0 {
+		every = orphanDirSweepEvery
+	}
+	scan := d.dirScan
+	if scan == nil {
+		scan = scanServers
+	}
+	d.sweepStop = make(chan struct{})
+	d.sweepDone = make(chan struct{})
+	stop, done := d.sweepStop, d.sweepDone
+	go func() {
+		defer close(done)
+		t := time.NewTicker(every)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+			}
+			d.mu.RLock()
+			closed := d.closed
+			d.mu.RUnlock()
+			if closed {
+				return
+			}
+			d.sweepOrphanDirsWith(scan)
+		}
+	}()
+}
+
+// stopDirSweep ends the goroutine and waits for it, so no sweep overlaps what
+// Shutdown does next. Safe to call any number of times.
+func (d *Driver) stopDirSweep() {
+	if d.sweepStop == nil {
+		return
+	}
+	d.sweepStopOnce.Do(func() { close(d.sweepStop) })
+	<-d.sweepDone
 }
 
 // OrphanDirReport is what the doctor says about the scoped directories no record

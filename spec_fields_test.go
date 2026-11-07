@@ -112,6 +112,9 @@ var specFieldTypes = map[string]any{
 	// #391: a working session that has stopped drawing.
 	"Stall": Stall{},
 
+	// #419: how much a session's scratch directory holds.
+	"ScratchUsage": ScratchUsage{},
+
 	// #400: the models block of a GET /v1/runtimes row.
 	"RuntimeModels": RuntimeModels{},
 }

@@ -281,6 +281,9 @@ func (s *subscription) attach(srv *server) error {
 		s.mu.Unlock()
 		return err
 	}
+	// muster #419: the server's status may be kept for longer while a stream
+	// announces its changes (statuscache.go).
+	srv.status.attached()
 	go s.read(srv, body)
 	return nil
 }
@@ -378,6 +381,9 @@ func (s *subscription) read(srv *server, body io.ReadCloser) {
 		}
 		s.handle(srv, ev)
 	})
+	// Before the wait busEnded makes: from here nothing announces this server's
+	// changes any more.
+	srv.status.detached()
 	if s.ctx.Err() != nil {
 		return
 	}
@@ -446,6 +452,13 @@ func readBoundedLine(br *bufio.Reader, limit int) ([]byte, error) {
 
 // handle maps one bus event. It runs on the reader goroutine of its server.
 func (s *subscription) handle(srv *server, ev busEvent) {
+	// muster #419: first, and for every session on the server whether or not this
+	// subscription follows it — what the driver has read of the server is the
+	// server's, not the subscription's. Reads made below (the idle and permission
+	// handlers) therefore see the change they were told about.
+	if busEventDrops(ev.Type) {
+		srv.status.invalidate()
+	}
 	var p busProps
 	if len(ev.Properties) > 0 {
 		_ = json.Unmarshal(ev.Properties, &p)

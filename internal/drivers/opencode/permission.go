@@ -284,17 +284,37 @@ type wirePermissionAsk struct {
 // pendingAsk returns the oldest ask the runtime is holding for session id, or
 // nil when the read succeeded and there is none. An error means the question
 // could not be asked, which is not the same as "no".
+//
+// This read is never served from memory: the answer to an ask (answerAsk) must be
+// made to the ask that exists now, not to the one a listing saw a moment ago.
 func (d *Driver) pendingAsk(ctx context.Context, srv *server, id string) (*wirePermissionAsk, error) {
 	var asks []wirePermissionAsk
 	if err := d.do(ctx, srv, "GET", "/permission", nil, &asks); err != nil {
 		return nil, err
 	}
+	return askListedFor(asks, id), nil
+}
+
+// pendingAskShared is pendingAsk for a state read: the list of asks is read once
+// per window and shared (statuscache.go), because a session parked on an ask is
+// listed as working and would otherwise cost one read of the list per listing.
+func (d *Driver) pendingAskShared(ctx context.Context, srv *server, id string) (*wirePermissionAsk, error) {
+	asks, err := d.asksOf(ctx, srv)
+	if err != nil {
+		return nil, err
+	}
+	return askListedFor(asks, id), nil
+}
+
+// askListedFor picks the oldest ask listed for session id, or nil.
+func askListedFor(asks []wirePermissionAsk, id string) *wirePermissionAsk {
 	for i := range asks {
 		if asks[i].SessionID == id {
-			return &asks[i], nil
+			a := asks[i] // a copy: the list may be shared
+			return &a
 		}
 	}
-	return nil, nil
+	return nil
 }
 
 // askQuestionMax bounds the question text: a pattern is a command line and can be long.
@@ -330,7 +350,7 @@ func (d *Driver) withPermission(ctx context.Context, srv *server, id string, st 
 	if st.Status != fleet.StatusWorking {
 		return st
 	}
-	ask, err := d.pendingAsk(ctx, srv, id)
+	ask, err := d.pendingAskShared(ctx, srv, id)
 	if err != nil {
 		st.Evidence += " (whether the runtime is waiting on a permission ask could not be read: " + err.Error() + ")"
 		return st

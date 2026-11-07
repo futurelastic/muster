@@ -2199,6 +2199,16 @@ arrive (an unreached peer reports it `assumed`). A peer built before the field
 sends no key, and a relay passes the block through untouched. A change in any
 figure fires `session.state` (§4); it never changes `status`.
 
+`state.scratch` — when present — is how much the session's scratch directory
+holds (muster #419): `{"bytes":3100000000,"asOf":"…","partial":true}`. `bytes` is
+the sum of the sizes of the regular files under it, a link not followed; `asOf` is
+when a driver last walked the directory (at most every few minutes, off the request
+path), not when the state was read; `partial` is present and true when the walk
+stopped at its bound and `bytes` is a lower bound. **Absent means no figure, never
+zero.** A peer built before the field sends no key, and a relay passes the block
+through untouched. It is **not** a material change (§4): it moves with every file
+written, so a feed that fired on it would storm.
+
 `state.usage.context` — when present — is how large the context was at the
 session's most recent request (muster #313):
 `{"tokens":142000,"window":null,"model":"…","at":"…"}`. It is **not** a sum:

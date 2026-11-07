@@ -150,6 +150,15 @@
 // connection per session process; subscribe.go has the mapping, what is
 // dropped, and how a dropped connection is reported (muster #284).
 //
+// # What an idle session costs (muster #419)
+//
+// A server nobody talks to is cheap; what is not cheap is being asked. Every
+// listing asks every live server for its status, and a server pays about 2 % of
+// a core per request per second. So the status of a server, the asks it holds and
+// the confirmation of an idle session are read once per window and shared, and
+// dropped the moment the event stream or one of this driver's own writes says
+// they changed. statuscache.go has the windows and what a reader can lose.
+//
 // KeySender is not implemented at all — this substrate has no screen for a
 // raw key to land on, and DeliversRawKeys: false says so structurally
 // rather than through a stub that always refuses.
@@ -286,6 +295,23 @@ type Driver struct {
 	// (muster #285); usageMu guards the map, each memo its own contents.
 	usageMu    sync.Mutex
 	usageMemos map[string]*usageMemo
+
+	// sweepStop ends the goroutine that repeats the sweep of directories no record
+	// names, sweepDone is closed when it has (orphans.go; muster #419). dirSweepEvery
+	// and dirScan are test seams: the interval, and the listing of running servers.
+	sweepStop     chan struct{}
+	sweepDone     chan struct{}
+	sweepStopOnce sync.Once
+	dirSweepEvery time.Duration
+	dirScan       func(string) ([]serverProc, int, error)
+
+	// scratchLimits bound the measurement of a session's scratch directory
+	// (scratch.go). The zero value means the production bounds.
+	scratchLimits scratchLimits
+
+	// statusTTL is how long a read of a server's status is kept (muster #419;
+	// statuscache.go). Set to the production windows in New; a test sets it.
+	statusTTL statusTTLs
 
 	// subs are the open event streams (subscribe.go); subMu guards the set.
 	subMu sync.Mutex
@@ -507,6 +533,12 @@ func WithCredential(username, password string) Option {
 
 func withClock(f func() time.Time) Option { return func(d *Driver) { d.now = f } }
 
+// withDirSweep sets the interval of the repeated directory sweep and the listing of
+// running servers it uses. Unexported: a test seam.
+func withDirSweep(every time.Duration, scan func(string) ([]serverProc, int, error)) Option {
+	return func(d *Driver) { d.dirSweepEvery, d.dirScan = every, scan }
+}
+
 // New builds a Driver. Unless WithBaseURL was supplied it probes for the
 // opencode binary (never a startup crash when it is absent — see Probe) and
 // starts NOTHING: a server is started for each session, at Create.
@@ -540,6 +572,7 @@ func New(ctx context.Context, machine fleet.MachineId, opts ...Option) (*Driver,
 		inflight:     make(map[string]chan struct{}),
 	}
 	d.catalogSettle, d.catalogPoll = defaultCatalogSettle, defaultCatalogPoll
+	d.statusTTL = statusTTLs{bus: statusTTLBus, bare: statusTTLBare}
 	for _, o := range opts {
 		o(d)
 	}
@@ -618,6 +651,9 @@ func New(ctx context.Context, machine fleet.MachineId, opts ...Option) (*Driver,
 		// servers that held them are gone and before a record can be resumed.
 		d.sweepOrphanDirs()
 		d.resume(ctx)
+		// muster #419: and again from time to time, for the directories that lose
+		// their owner while the service runs.
+		d.startDirSweep()
 	}
 	return d, nil
 }
@@ -635,6 +671,9 @@ func (d *Driver) Shutdown() error {
 	}
 	d.seen = make(map[string]knownSession)
 	d.mu.Unlock()
+	// Before the servers are paused: no sweep may be listing or removing
+	// directories while they are being stopped (muster #419).
+	d.stopDirSweep()
 	d.endSubscriptions()
 
 	var wg sync.WaitGroup
@@ -816,8 +855,10 @@ func (d *Driver) wasSeen(id string) (knownSession, bool) {
 // bug for a worse one.
 func (d *Driver) forgetSeen(id string) {
 	d.mu.Lock()
+	gone := d.seen[id]
 	delete(d.seen, id)
 	d.mu.Unlock()
+	d.forgetIdle(gone.srv, id) // muster #419
 	d.forgetUsage(id)
 	if d.store != nil {
 		// Only ever called once the runtime confirmed the session is gone, which is

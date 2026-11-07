@@ -642,6 +642,12 @@ type SessionState struct {
 	// thing: there is no separate turn-end event to miss (api-http.md §4).
 	Usage *Usage `json:"usage,omitempty"`
 
+	// Scratch is how much the session's scratch directory holds (muster #419; see
+	// ScratchUsage), so a session that waits for review on gigabytes of fixtures
+	// can be seen before the disk is full. Absent means no figure, never zero.
+	// Not a material change: it moves with every file written.
+	Scratch *ScratchUsage `json:"scratch,omitempty"`
+
 	// CredentialGeneration is the local credential store's own modification
 	// time, as read at the moment this state was produced (#12).
 	//
@@ -759,6 +765,11 @@ func UnknownState(confidence Confidence, evidence string) SessionState {
 // changes only when the footer's own set of notices changes, which is not a
 // per-keystroke event, so it cannot produce a storm the way ScreenDigest
 // would.
+//
+// Scratch (#419) is deliberately NOT material: it moves with every file the
+// session or its tools write, so a feed that fired on it would storm. A poller
+// reads it off the state; a subscriber's mirror of it is as fresh as the last
+// material change, like Evidence.
 //
 // Stalled (#391) is material by the same rule: a session going quiet while it
 // still reads `working` moves nothing else here. It is compared by Since and
