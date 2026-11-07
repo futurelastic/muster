@@ -129,7 +129,11 @@ GET /v1/health
                        "cause": "probe-timeout",
                        "reason": "the ... runtime is enabled, but ...",
                        "capabilities": { "deadlineMs": 30000,
-                                         "source": "assumed" } } ] }
+                                         "source": "assumed" } } ],
+        "modules": { "enabled": ["relay-a", "relay-b"],   ← only when a delivery module is configured (#414)
+                     "loaded": ["relay-a"],
+                     "skipped": [ { "name": "relay-b",
+                                    "reason": "no executable installed" } ] } }
 
 GET /v1/machines[?verify=1]
 // A principal pinned to this machine (§5, #395) is answered with the self item
@@ -326,6 +330,26 @@ enabled" for the same reason it did on `GET /v1/runtimes`. A `drivers` row from
 a build that predates #300 has no `status` and is available; a reader that
 needs to know whether a runtime can serve reads `status`, never the row's
 presence.
+
+**`modules` on `GET /v1/health` says what became of the external delivery modules
+the operator enabled** (muster #414; `FLEET_DELIVERY_MODULES`, #185). A module
+that is enabled and not found is not an error: the daemon logs one line, answers
+`ok`, and sends through the built-in terminal path. Before this key, nothing but
+that line told an updater or a monitor that a delivery lane had gone. `enabled`
+is every valid name the operator listed, in their order of preference; `loaded`
+is the subset whose executable was found and passed the checks at startup; and
+`skipped` is each name that was not loaded with a short `reason` — a fixed phrase
+(`no executable installed`, `modules directory absent`, …), never a path. A listed
+name that is not a legal module name is never in `enabled`, but is in `skipped`
+(reason `not a legal module name`): it was configured and dropped the same way. A
+reader that wants "something configured is not running" tests `skipped` for
+non-empty. The three are arrays, never `null`. **The key is absent when no module
+is configured**, so a machine that does not use the feature answers as it always
+did, and absence reads "none configured", never "none skipped". `loaded` is a
+statement about discovery at startup, not about whether the module process is
+answering now; a send's receipt names the route that delivered it
+(`delivery.route`, §3.2). A build that
+predates #414 has no key and a reader treats that as "unknown", not as "fine".
 
 **`capabilities.serverContext` on a macOS host's terminal runtime names the
 security-session context its sessions run in** (muster #336). Every process in a
