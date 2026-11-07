@@ -245,10 +245,24 @@ func generateCredential() (string, error) {
 	return hex.EncodeToString(buf[:]), nil
 }
 
+// runtimeLogLevel is the most the runtime may write to its log (muster #420).
+//
+// The runtime's own permission check logs "evaluated permission=bash
+// pattern=<the whole command>" at INFO, to stderr and to the log file in the
+// session's directory, so a secret a client passed on a command line is kept in
+// plaintext. The runtime has no redaction hook; the one control it offers is
+// this level, and it applies to the file as well as to stderr (measured on
+// v1.18.3: at WARN neither carries the line, whether the command was allowed,
+// denied or asked). WARN rather than ERROR because everything this driver reads
+// is ERROR, and WARN is the quietest level that still shows an operator the
+// runtime's own warnings; no WARN line carried command text in those runs.
+const runtimeLogLevel = "WARN"
+
 // buildServeCmd builds the exec.Cmd for `opencode serve`, and is the one
 // place that decides its argv and environment — factored out of startServer so
 // process_test.go can assert its shape directly (credential via env only,
-// never argv; --mdns never present; --print-logs always present) against the real code path rather than a
+// never argv; --mdns never present; --print-logs always present; the log
+// capped at runtimeLogLevel) against the real code path rather than a
 // duplicate of it.
 //
 // env is the BUILT environment (env.go): the child gets exactly that plus its
@@ -262,6 +276,12 @@ func buildServeCmd(bin, workdir string, port int, username, password string, env
 		// the bounded capture (logcapture.go) has no error name to read.
 		// One slice feeds both the plain and the sandboxed command.
 		"--print-logs",
+		// muster #420: at its default level the runtime logs every permission it
+		// evaluates, the FULL bash command included, into its per-session log. A
+		// command that carries a credential (an auth header, a token in a URL)
+		// then sits in plaintext for as long as the session directory lives.
+		// The cap keeps ERROR (what #288 reads) and drops those lines.
+		"--log-level", runtimeLogLevel,
 		// Deliberately no --mdns: it defaults the bind to 0.0.0.0
 		// (measured on #55), which nothing here wants — this server is
 		// reached only by this driver, over loopback.
