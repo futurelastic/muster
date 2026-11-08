@@ -42,6 +42,10 @@ type fakeServer struct {
 	// before answering — a read that is in flight while the test does something
 	// else (muster #419).
 	statusHold chan struct{}
+	// messagesDown, when true, makes GET /session/{id}/message fail as a transport
+	// error: a runtime that answered the status read and not the message read
+	// (muster #426).
+	messagesDown bool
 
 	// catalog, when non-nil, is served by GET /config/providers as provider id
 	// to model ids; nil makes the endpoint 404, like a runtime without it.
@@ -532,6 +536,19 @@ func (f *fakeServer) handleAbort(w http.ResponseWriter, r *http.Request) {
 // the same as a freshly created one that has never taken a turn.
 func (f *fakeServer) handleMessages(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/session/"), "/message")
+	f.mu.Lock()
+	down := f.messagesDown
+	f.mu.Unlock()
+	if down {
+		if hj, ok := w.(http.Hijacker); ok {
+			if conn, _, err := hj.Hijack(); err == nil {
+				conn.Close()
+				return
+			}
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
 	f.mu.Lock()
 	all := append([]json.RawMessage(nil), f.messages[id]...)
 	f.mu.Unlock()

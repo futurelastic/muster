@@ -385,6 +385,9 @@ type knownSession struct {
 	// interrupted is set on a relaunched session whose last turn did not finish
 	// before the service stopped. A new turn (Send) clears it.
 	interrupted *fleet.TurnEnd
+	// turn is what this driver has learned of how the session's newest turn ended
+	// (muster #426; lastturn.go), kept so a listing can say so without asking.
+	turn turnRecord
 
 	// contextRef is the file the create named as the session's context, and
 	// context the text it held when this driver read it (muster #371). The path is

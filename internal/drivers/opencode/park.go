@@ -482,7 +482,9 @@ func (d *Driver) tryPark(id string, srv *server) bool {
 	}
 
 	// What the parked state will report, read while there is still a process to ask.
-	lastTurn := d.lastTurnFailure(ctx, srv, id)
+	res := d.turnVerdict(ctx, srv, id)
+	lastTurn := res.turn
+	d.noteTurn(id, k.turn.gen, res, true) // muster #426: the session is idle, so this read is the turn's end
 	d.usageOf(ctx, srv, id, true)
 	// A bus event may have arrived while those reads ran.
 	if d.now().Sub(time.Unix(0, srv.lastActive.Load())) < d.idleStop {
