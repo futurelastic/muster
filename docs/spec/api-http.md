@@ -2401,14 +2401,18 @@ the only place the call is reported.
 
 `state.prompt.autoDenyAt` (muster issue #353) is when the runtime will deny the
 request by itself, as an RFC 3339 time, for a tool-permission dialog that shows an
-unattended-session countdown ("will automatically deny this request in m:ss").
+unattended-session countdown ("will automatically deny this request in m:ss", or
+"will automatically block this request in m:ss" in later runtime versions).
 The service computes it from the countdown when the screen is read. The countdown
 row is read out of `question` and is not part of `nonce`: it changes every second
 while the dialog does not, so a client's `respond` with a nonce read a few seconds
-earlier still matches the same dialog. Recognition is anchored on the phrase
-"automatically deny this request in <m:ss>" and nothing around it. The field is
-additive and fails to absent (§5.7): omitted when no countdown is shown, and on a
-peer that predates it — absent is not "never denied".
+earlier still matches the same dialog. Recognition is anchored on the structure
+"automatically <word> this request in <m:ss or h:mm:ss>" and nothing around it —
+not on the verb, which has already been reworded once (muster issue #429), so
+both wordings and one not yet seen are read. The field name `autoDenyAt` is part
+of the API and does not follow the runtime's wording. The field is additive and
+fails to absent (§5.7): omitted when no countdown is shown, and on a peer that
+predates it — absent is not "never denied".
 
 `state.prompt.optionDetails` carries what an option is drawn with besides its
 label (muster issue #324): one `{label, description?, preview?}` per entry of

@@ -368,11 +368,13 @@ type SessionPrompt struct {
 
 	// AutoDenyAt is when the runtime will deny this request by itself, for a
 	// dialog that carries an unattended-session countdown ("will automatically
-	// deny this request in 1:13", muster#353). It is computed from the
-	// countdown when the screen is read, to the second, so two reads of one
-	// dialog agree to within the second they were taken in — and a client can
-	// show "auto-denied in 1:13", or tell a denial by the clock from an answer
-	// someone gave.
+	// deny this request in 1:13", or "automatically block …" in later runtime
+	// versions: the row is matched by its structure, not its verb; muster#353,
+	// #429). The field keeps its name whichever way the runtime words it. It is
+	// computed from the countdown when the screen is read, to the second, so
+	// two reads of one dialog agree to within the second they were taken in —
+	// and a client can show "auto-denied in 1:13", or tell a denial by the
+	// clock from an answer someone gave.
 	//
 	// The countdown row itself is not in Question and not in Nonce: it changes
 	// every second while the dialog does not, and a nonce that moved with it
