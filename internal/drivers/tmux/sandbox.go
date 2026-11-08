@@ -212,6 +212,7 @@ func copySandboxSupport(s *fleet.SandboxSupport) *fleet.SandboxSupport {
 	c.Denies = append([]fleet.SandboxDeny(nil), s.Denies...)
 	c.Network = append([]fleet.SandboxNetwork(nil), s.Network...)
 	c.PackageCache = append([]fleet.PackageCacheMode{}, s.PackageCache...)
+	c.PackageManagers = append([]fleet.PackageManager{}, s.PackageManagers...)
 	return &c
 }
 
@@ -770,6 +771,7 @@ func (d *Driver) measureSandbox(ctx context.Context) (*fleet.SandboxSupport, str
 	switch {
 	case ok && loggedIn:
 		sup.PackageCache = []fleet.PackageCacheMode{}
+		sup.PackageManagers = []fleet.PackageManager{}
 		return sup, "", prog
 	case ok:
 		return nil, "the agent CLI is not logged in when it runs under the profile on this host; its credentials are most likely in a store " +

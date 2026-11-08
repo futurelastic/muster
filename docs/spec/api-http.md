@@ -165,7 +165,8 @@ GET /v1/runtimes
                                        "sandbox": { "mechanism": "macos-sandbox-exec",
                                                     "denies": ["files", "unixSockets", "systemServices"],
                                                     "network": ["open", "closed"],
-                                                    "packageCache": ["shared", "private"] },  ← absent where cannot
+                                                    "packageCache": ["shared", "private"],
+                                                    "packageManagers": ["cargo", "go", "npm"] },  ← absent where cannot (#432)
                                        "sandboxUnavailable": "…",   ← why it is absent, where it could in principle be offered (#345)
                                        "supportsPin": { "model": true,
                                                         "effort": false,
@@ -182,7 +183,9 @@ GET /v1/runtimes
                                        "observedAt": "..." },
                      "posture": { "unattended": true, "files": true,   ← what `posture` can ask of it (#344);
                                   "network": ["open", "closed"],        absent on a peer not yet reached
-                                  "isolatedEnvironment": true },
+                                  "isolatedEnvironment": true,
+                                  "packageCache": ["shared", "private"],   ← the modes and managers a posture's
+                                  "packageManagers": ["cargo", "go", "npm"] },  package-cache seed may use (#432)
                      "models": { "source": "runtime",           ← "runtime" | "declared" | "none" (#400)
                                  "readAt": "...",                ← only when "runtime"
                                  "ids": ["deepseek/deepseek-flash"],
@@ -944,8 +947,11 @@ and `isolateConfiguration`** (muster #344, #392). It says what the work needs an
 spells it: `attendance` (`attended`, the default, or `unattended` — no permission prompts),
 `files` (present: file access confined to the working directory and the session's private
 directory plus the `writePaths` and `readPaths` named), `network` (`open` or `closed`),
-`isolatedEnvironment` and `configuration` (`inherit`, the default, or `given`: the session loads
-only the configuration the create names). Every field present is a requirement. The service lowers
+`isolatedEnvironment`, `configuration` (`inherit`, the default, or `given`: the session loads
+only the configuration the create names) and `packageCache` (muster #432: a `seed` directory, a `mode`
+of `private` — the default, a per-session copy — or `shared`, and the `managers` of `cargo`, `go`,
+`npm` the session uses, each handed the variable it reads, pointing into the session's copy; naming a
+seed implies a confined session, like `unattended`; see api.md). Every field present is a requirement. The service lowers
 it onto the per-runtime fields using only what the resolved runtime declares in `/v1/runtimes`
 (`posture` on each row says which parts it can enforce), and **refuses with `unsupported`,
 `reason: "posture-unenforceable"`, before anything is started** when it cannot enforce all of

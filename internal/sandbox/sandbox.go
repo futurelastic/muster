@@ -142,6 +142,9 @@ func HostSupport() (*fleet.SandboxSupport, string) {
 		Denies:       Denies(),
 		Network:      []fleet.SandboxNetwork{fleet.SandboxNetworkOpen, fleet.SandboxNetworkClosed},
 		PackageCache: []fleet.PackageCacheMode{},
+		// muster #432: a driver that starts sessions from a package cache says
+		// which managers it points at one; the default is none.
+		PackageManagers: []fleet.PackageManager{},
 	}, ""
 }
 

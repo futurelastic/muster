@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"fmt"
+	"slices"
 )
 
 // The session posture a create may ask for (muster #344).
@@ -91,6 +92,31 @@ type PostureFiles struct {
 	ReadPaths []AbsolutePath `json:"readPaths,omitempty"`
 }
 
+// PosturePackageCache is the package-cache part of a posture (muster #432): a
+// directory the operator keeps warm, which each session starts from a copy of.
+//
+// Naming one implies a confined session, as unattended does: the guarantee is
+// that a session cannot write to the seed, and nothing but the sandbox stops an
+// unconfined process writing wherever the account can.
+type PosturePackageCache struct {
+	// Seed is the directory on the machine the session runs on. It holds one
+	// directory per package manager the session uses — `cargo/`, `go/`, `npm/`.
+	// Refreshing it is the operator's job; a session never writes to it.
+	Seed AbsolutePath `json:"seed"`
+	// Mode is "private" (the default): the session starts from its own copy of
+	// the seed, so what it installs reaches no other session and not the seed. The
+	// alternative, "shared", grants the seed itself WRITABLE to every session that
+	// names it, which removes the wall between sessions (docs/api.md); it is not
+	// recommended for an unattended one.
+	Mode PackageCacheMode `json:"mode,omitempty"`
+	// Managers names the package managers the session uses, which is what decides
+	// the variables it is handed: CARGO_HOME for "cargo", GOMODCACHE for "go",
+	// npm_config_cache for "npm", each pointing at that manager's directory in the
+	// session's copy. At least one; a manager whose directory the seed lacks
+	// refuses the create.
+	Managers []PackageManager `json:"managers"`
+}
+
 // Posture is the optional `posture` field of a create (muster #344). Every field
 // present is a requirement; an absent one asks for nothing.
 type Posture struct {
@@ -109,6 +135,9 @@ type Posture struct {
 	// "given" the session loads only the configuration the create named. Like
 	// IsolatedEnvironment it only narrows what the session reaches.
 	Configuration Configuration `json:"configuration,omitempty"`
+	// PackageCache, when present, starts the session from a package-cache seed
+	// and points the named package managers at it (muster #432).
+	PackageCache *PosturePackageCache `json:"packageCache,omitempty"`
 }
 
 // Unattended reports whether the posture asks for a prompt-free session.
@@ -131,6 +160,25 @@ func (p Posture) Validate() error {
 	case "", ConfigurationInherit, ConfigurationGiven:
 	default:
 		return fmt.Errorf("posture.configuration %q is not one of %q, %q", string(p.Configuration), ConfigurationInherit, ConfigurationGiven)
+	}
+	if pc := p.PackageCache; pc != nil {
+		if err := checkSandboxPath("posture.packageCache.seed", pc.Seed); err != nil {
+			return err
+		}
+		switch pc.Mode {
+		case "", PackageCacheShared, PackageCachePrivate:
+		default:
+			return fmt.Errorf("posture.packageCache.mode %q is not one of %q, %q",
+				string(pc.Mode), PackageCacheShared, PackageCachePrivate)
+		}
+		if len(pc.Managers) == 0 {
+			return fmt.Errorf("posture.packageCache.managers: name at least one of %q, %q, %q — "+
+				"the managers are what decide which variables the session is given",
+				PackageManagerCargo, PackageManagerGo, PackageManagerNpm)
+		}
+		if err := checkPackageManagers("posture.packageCache.managers", pc.Managers); err != nil {
+			return err
+		}
 	}
 	if p.Files != nil {
 		for _, path := range p.Files.ReadPaths {
@@ -156,9 +204,10 @@ func (p Posture) Validate() error {
 func (p Posture) Given() bool { return p.Configuration == ConfigurationGiven }
 
 // Confines reports whether the posture needs an enforced sandbox: it names file
-// access or a closed network, or it is unattended (which implies confinement).
+// access or a closed network, it is unattended (which implies confinement), or it
+// names a package-cache seed (whose protection from the session is the sandbox's).
 func (p Posture) Confines() bool {
-	return p.Files != nil || p.Network == SandboxNetworkClosed || p.Unattended()
+	return p.Files != nil || p.Network == SandboxNetworkClosed || p.Unattended() || p.PackageCache != nil
 }
 
 // PostureSupport is what a runtime can enforce of a posture, derived from its
@@ -178,6 +227,11 @@ type PostureSupport struct {
 	// GivenConfiguration: the session can be started with only the configuration
 	// the create named (muster #392).
 	GivenConfiguration bool `json:"givenConfiguration"`
+	// PackageCache lists the modes a posture's package cache may use (muster
+	// #432). Empty when the runtime cannot start a session from a cache seed.
+	PackageCache []PackageCacheMode `json:"packageCache"`
+	// PackageManagers lists the package managers it can point at one.
+	PackageManagers []PackageManager `json:"packageManagers"`
 }
 
 // PostureSupportFrom derives what a runtime can enforce from what it declares.
@@ -187,12 +241,17 @@ type PostureSupport struct {
 // that was measured, and on every host that has no sandbox mechanism
 // (docs/api.md, #344, #345).
 func PostureSupportFrom(c DriverCapabilities) PostureSupport {
-	s := PostureSupport{Network: []SandboxNetwork{}, IsolatedEnvironment: c.IsolatesEnvironment, GivenConfiguration: c.IsolatesConfiguration}
+	s := PostureSupport{
+		Network: []SandboxNetwork{}, IsolatedEnvironment: c.IsolatesEnvironment, GivenConfiguration: c.IsolatesConfiguration,
+		PackageCache: []PackageCacheMode{}, PackageManagers: []PackageManager{},
+	}
 	if c.Sandbox == nil {
 		return s
 	}
 	s.Files = true
 	s.Network = append(s.Network, c.Sandbox.Network...)
+	s.PackageCache = append(s.PackageCache, c.Sandbox.PackageCache...)
+	s.PackageManagers = append(s.PackageManagers, c.Sandbox.PackageManagers...)
 	for _, m := range c.CreatePermissionModes {
 		if m == PermissionModeBypass {
 			s.Unattended = true
@@ -233,6 +292,15 @@ func (p Posture) Lower(caps DriverCapabilities) (PostureMapping, error) {
 		if p.Files != nil {
 			m.Sandbox.ReadPaths = append([]AbsolutePath(nil), p.Files.ReadPaths...)
 			m.Sandbox.WritePaths = append([]AbsolutePath(nil), p.Files.WritePaths...)
+		}
+	}
+	if pc := p.PackageCache; pc != nil {
+		mode := pc.Mode
+		if mode == "" {
+			mode = PackageCachePrivate
+		}
+		m.Sandbox.PackageCache = &SandboxPackageCache{
+			Path: pc.Seed, Mode: mode, Managers: append([]PackageManager(nil), pc.Managers...),
 		}
 	}
 	m.IsolateEnvironment = p.IsolatedEnvironment
@@ -279,6 +347,17 @@ func (p Posture) Lower(caps DriverCapabilities) (PostureMapping, error) {
 	}
 	if p.Given() && !sup.GivenConfiguration {
 		return refuse("it cannot start a session with only the configuration the create names (it would also load the account's own settings and tool servers)")
+	}
+	if pc := m.Sandbox; pc != nil && pc.PackageCache != nil {
+		mode := pc.PackageCache.Mode
+		if !slices.Contains(sup.PackageCache, mode) {
+			return refuse("it cannot start a session with a %s package cache", string(mode))
+		}
+		for _, want := range pc.PackageCache.Managers {
+			if !slices.Contains(sup.PackageManagers, want) {
+				return refuse("it cannot point %s at a package cache (%s)", string(want), want.EnvVar())
+			}
+		}
 	}
 	return m, nil
 }
