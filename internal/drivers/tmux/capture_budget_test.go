@@ -39,27 +39,47 @@ type budgetMux struct {
 	// onCapture runs at the start of every capture invocation, before it
 	// stalls or answers (for example, to cancel the caller mid-call).
 	onCapture func(n int)
-	captures  int
-	deadlines []time.Time // each capture invocation's context deadline, if any
-	started   []time.Time
+	// stallOver, when positive, hangs every capture invocation that names more
+	// than this many panes: a multiplexer that cannot answer a large batch in
+	// time and can answer a small one (muster#428).
+	stallOver int
+	// stallPane, when set, hangs every capture invocation that names this pane:
+	// one pane whose capture never returns.
+	stallPane string
+	// partialFirst, when positive, makes capture invocation 0 print the output
+	// of its first N panes and then hang until killed: what a killed
+	// invocation hands back (muster#428).
+	partialFirst int
+	captures     int
+	deadlines    []time.Time // each capture invocation's context deadline, if any
+	started      []time.Time
+	panes        []int // how many panes each capture invocation named
 }
 
 func (b *budgetMux) exec(ctx context.Context, name string, args ...string) ([]byte, error) {
 	if len(args) == 0 || args[0] != "display-message" {
 		return b.fakeMux.exec(ctx, name, args...)
 	}
+	np := namedPanes(args)
 	b.mu.Lock()
 	n := b.captures
 	b.captures++
 	dl, _ := ctx.Deadline()
 	b.deadlines = append(b.deadlines, dl)
 	b.started = append(b.started, time.Now())
+	b.panes = append(b.panes, np)
 	b.mu.Unlock()
 
 	if b.onCapture != nil {
 		b.onCapture(n)
 	}
-	if b.stall != nil && b.stall(n) {
+	partial := b.partialFirst > 0 && n == 0
+	if partial || (b.stall != nil && b.stall(n)) || (b.stallOver > 0 && np > b.stallOver) ||
+		(b.stallPane != "" && namesPane(args, b.stallPane)) {
+		var out []byte
+		if partial {
+			out, _ = b.fakeMux.exec(ctx, name, firstPanes(args, b.partialFirst)...)
+		}
 		<-ctx.Done()
 		// Exactly what exec.CommandContext reports for a process it had to
 		// kill mid-run, or for one whose context was already cancelled
@@ -67,12 +87,54 @@ func (b *budgetMux) exec(ctx context.Context, name string, args ...string) ([]by
 		if errors.Is(ctx.Err(), context.Canceled) {
 			return nil, context.Canceled
 		}
-		return nil, errors.New("signal: killed")
+		return out, errors.New("signal: killed")
 	}
 	if b.delay > 0 {
 		time.Sleep(b.delay)
 	}
 	return b.fakeMux.exec(ctx, name, args...)
+}
+
+// namedPanes is how many panes one batched capture invocation reads.
+func namedPanes(args []string) int {
+	n := 0
+	for _, a := range args {
+		if a == "display-message" {
+			n++
+		}
+	}
+	return n
+}
+
+func namesPane(args []string, pane string) bool {
+	for _, a := range args {
+		if a == pane {
+			return true
+		}
+	}
+	return false
+}
+
+// firstPanes cuts a batched capture's arguments down to its first n panes.
+func firstPanes(args []string, n int) []string {
+	seen := 0
+	for i, a := range args {
+		if a != "display-message" {
+			continue
+		}
+		seen++
+		if seen == n+1 {
+			return args[:i-1] // drop the ";" that joined this pane to the last
+		}
+	}
+	return args
+}
+
+// paneCounts is a copy of how many panes each capture invocation named, in order.
+func (b *budgetMux) paneCounts() []int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]int(nil), b.panes...)
 }
 
 func (b *budgetMux) captureCount() int {
@@ -146,7 +208,9 @@ func unknownCount(items []fleet.Session) int {
 // The failure #156 reported: one invocation stops answering. Before the fix
 // it took the call's whole deadline, every pane in the chunk read as a
 // driver malfunction, and there was no budget left to ask again. Now it
-// gets a slice, is killed at the end of it, and is asked once more.
+// gets a slice, is killed at the end of it, and its panes are asked for again
+// in smaller chunks (muster#428; #156 asked for the same chunk once more, which
+// is still what a one-pane chunk gets).
 func TestCaptureChunkStuckIsRetriedOnceWithinCallBudget(t *testing.T) {
 	logs := captureLog(t)
 	const deadline = 900 * time.Millisecond
@@ -165,8 +229,8 @@ func TestCaptureChunkStuckIsRetriedOnceWithinCallBudget(t *testing.T) {
 	if src := got.Sources(); len(src) != 1 || src[0].Status != fleet.SourceOK {
 		t.Errorf("source should read ok after a recovered retry, got %+v", src)
 	}
-	if c := b.captureCount(); c != 2 {
-		t.Errorf("want exactly 2 capture invocations (the stalled one plus one retry), got %d", c)
+	if got, want := b.paneCounts(), []int{2, 1, 1}; !equalInts(got, want) {
+		t.Errorf("capture invocations named %v pane(s), want %v (the stalled chunk, then its panes one at a time)", got, want)
 	}
 	if elapsed >= deadline {
 		t.Errorf("List took %v, at or past the %v declared deadline; the stall should have "+
@@ -187,8 +251,10 @@ func TestCaptureChunkStuckIsRetriedOnceWithinCallBudget(t *testing.T) {
 }
 
 // A stall across the whole server: every invocation hangs. There is exactly
-// one retry per enumeration, not one per chunk, and no invocation is allowed
-// to run past the call's declared deadline.
+// one recovery pass per enumeration, not one per chunk, the pass is capped at
+// captureRecoveryMaxInvocations (muster#428; it was a single same-size retry
+// before), and no invocation is allowed to run past the call's declared
+// deadline.
 //
 // That last property used to be asserted as "List returned within the
 // deadline plus 150 ms", by wall clock (muster#186). It failed once
@@ -211,9 +277,13 @@ func TestCaptureRetryBoundedToOnePerEnumeration(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		fleet *fakeMux
+		// recovery is how many invocations the one recovery pass starts: two
+		// single panes for two panes, and the cap once there are enough panes
+		// to keep splitting.
+		recovery int
 	}{
-		{"one chunk", twoSessions()},
-		{"several chunks", bigFleet(200)},
+		{"one chunk", twoSessions(), 2},
+		{"several chunks", bigFleet(200), captureRecoveryMaxInvocations},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			captureLog(t)
@@ -230,8 +300,9 @@ func TestCaptureRetryBoundedToOnePerEnumeration(t *testing.T) {
 			if err != nil {
 				t.Fatalf("List: %v", err)
 			}
-			if c := b.captureCount(); c != chunks+1 {
-				t.Errorf("want %d capture invocations (%d chunk(s) + one retry), got %d", chunks+1, chunks, c)
+			if c := b.captureCount(); c != chunks+tc.recovery {
+				t.Errorf("want %d capture invocations (%d chunk(s) + one recovery pass of %d), got %d",
+					chunks+tc.recovery, chunks, tc.recovery, c)
 			}
 			if n := unknownCount(got.Items()); n != len(tc.fleet.sessions) {
 				t.Errorf("every session should read unknown when nothing was captured; %d/%d did",
@@ -369,4 +440,16 @@ func TestCaptureSliceNeverExceedsHalfRemaining(t *testing.T) {
 			t.Errorf("captureSlice(%v, %d) = %v, more than half of what is left", tc.remaining, tc.pending, got)
 		}
 	}
+}
+
+func equalInts(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

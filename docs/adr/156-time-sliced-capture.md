@@ -56,7 +56,8 @@ Counters: `capture.chunk_failed`, `capture.retry_recovered`,
 - **Budget scaled by pane count.** Contradicted by the 3–4-pane failures.
 - **Retry by splitting the chunk in half.** It doubles process spawns against
   a server that is already slow, and gains nothing when the stall covers the
-  whole server.
+  whole server. *(Revisited in [428](428-split-recovery-for-an-unread-capture-chunk.md),
+  which adds it for callers that read the captures, with the spawns capped.)*
 
 ## Consequences
 

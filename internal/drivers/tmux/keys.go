@@ -122,7 +122,7 @@ func (d *Driver) Keys(ctx context.Context, req fleet.Request, ref fleet.SessionR
 	ctx, cancel := d.bounded(ctx)
 	defer cancel()
 
-	rows, captures, err := d.enumerate(ctx)
+	rows, captures, err := d.enumerateScreens(ctx)
 	if err != nil {
 		return fleet.DeliveryReceipt{}, err
 	}
@@ -357,7 +357,7 @@ func (d *Driver) Keys(ctx context.Context, req fleet.Request, ref fleet.SessionR
 	// the one direction of this confirmation that must never be wrong.
 	deadline := d.now().Add(keyConfirmWindow)
 	for {
-		if _, afterCaptures, err := d.enumerate(ctx); err == nil {
+		if _, afterCaptures, err := d.enumerateScreens(ctx); err == nil {
 			if after, reread := afterCaptures[live.paneID]; reread && screenDigest(after.text) != before {
 				return fleet.DeliveryReceipt{
 					Outcome: fleet.OutcomeSubmitted,
