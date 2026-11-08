@@ -33,6 +33,11 @@ func TestSandboxSpecValidate(t *testing.T) {
 		{"unknown cache mode", SandboxSpec{PackageCache: &SandboxPackageCache{Path: "/srv/c", Mode: "mirror"}}, "packageCache.mode"},
 		{"cache path is checked too", SandboxSpec{PackageCache: &SandboxPackageCache{Path: "c"}}, "absolute"},
 		{"a good cache", SandboxSpec{PackageCache: &SandboxPackageCache{Path: "/srv/c", Mode: PackageCacheShared}}, ""},
+		{"a cache serving every manager", SandboxSpec{PackageCache: &SandboxPackageCache{Path: "/srv/c",
+			Managers: []PackageManager{PackageManagerCargo, PackageManagerGo, PackageManagerNpm}}}, ""},
+		{"an unknown manager", SandboxSpec{PackageCache: &SandboxPackageCache{Path: "/srv/c", Managers: []PackageManager{"pip"}}}, "packageCache.managers"},
+		{"a manager named twice", SandboxSpec{PackageCache: &SandboxPackageCache{Path: "/srv/c",
+			Managers: []PackageManager{PackageManagerGo, PackageManagerGo}}}, "twice"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -72,5 +77,40 @@ func TestSandboxWireNames(t *testing.T) {
 	caps, _ := json.Marshal(DriverCapabilities{DeadlineMs: 1, Source: CapabilitiesObserved})
 	if strings.Contains(string(caps), "sandbox") {
 		t.Errorf("a driver without support must omit the capability, not report a false: %s", caps)
+	}
+}
+
+// muster #432: the variable each manager reads is part of the contract — a client
+// reading `docs/api.md` sets nothing itself, so a wrong name here is a cache the
+// manager never looks in.
+func TestPackageManagerEnvVars(t *testing.T) {
+	want := map[PackageManager]string{
+		PackageManagerCargo: "CARGO_HOME", PackageManagerGo: "GOMODCACHE", PackageManagerNpm: "npm_config_cache",
+	}
+	if got := PackageManagers(); len(got) != len(want) {
+		t.Fatalf("PackageManagers() = %v, want %d managers", got, len(want))
+	}
+	for m, v := range want {
+		if !m.Known() || m.EnvVar() != v {
+			t.Errorf("%s: known=%v EnvVar=%q, want %q", m, m.Known(), m.EnvVar(), v)
+		}
+	}
+	if PackageManager("pip").Known() || PackageManager("pip").EnvVar() != "" {
+		t.Error("an unknown manager must name no variable")
+	}
+}
+
+func TestPackageCacheManagersWireNames(t *testing.T) {
+	b, err := json.Marshal(SandboxPackageCache{Path: "/c", Managers: []PackageManager{PackageManagerCargo, PackageManagerNpm}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"path":"/c","managers":["cargo","npm"]}`; string(b) != want {
+		t.Errorf("wire form = %s, want %s", b, want)
+	}
+	// A cache announcing itself only (the shape before #432) carries no managers key.
+	b, _ = json.Marshal(SandboxPackageCache{Path: "/c", Mode: PackageCachePrivate})
+	if strings.Contains(string(b), "managers") {
+		t.Errorf("a cache with no managers must not mention them: %s", b)
 	}
 }

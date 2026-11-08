@@ -295,6 +295,22 @@ func (d *Driver) startServerIn(ctx context.Context, spec fleet.SessionSpec, exis
 	if extra == nil {
 		extra = map[string]string{}
 	}
+	// muster #432: a variable this session's package cache sets for a manager is
+	// this driver's for the session, so one the caller (or this machine's
+	// sessionEnv) already names is refused here, before a directory or a copy
+	// exists. Unlike HOME it is owned only while a cache serves that manager: a
+	// create with no cache may set CARGO_HOME as it always could.
+	if spec.Sandbox != nil && spec.Sandbox.PackageCache != nil {
+		for _, m := range spec.Sandbox.PackageCache.Managers {
+			if _, set := extra[envKey(m.EnvVar())]; set {
+				return nil, &fleet.Error{
+					Kind: fleet.ErrorInvalid, Machine: d.machine,
+					Message: fmt.Sprintf("create: env: %s is set by this driver for this session because its package cache serves %s, so it may not be supplied",
+						m.EnvVar(), string(m)),
+				}
+			}
+		}
+	}
 	// muster #396: the operator's agents are read here, before a directory or a
 	// process exists, on every create and every relaunch — an unusable file
 	// refuses the start, it is never skipped.
@@ -339,6 +355,10 @@ func (d *Driver) startServerIn(ctx context.Context, spec fleet.SessionSpec, exis
 		}
 		if plan.cache != nil {
 			extra[packageCacheEnv] = string(plan.cache.Path)
+			// muster #432: each manager reads its own directory of the copy.
+			for k, v := range managerEnv(string(plan.cache.Path), plan.cache.Managers) {
+				extra[envKey(k)] = v
+			}
 		}
 	}
 	var args []string

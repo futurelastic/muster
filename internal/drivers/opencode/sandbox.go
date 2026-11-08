@@ -53,6 +53,8 @@ func sandboxSupport(shared bool) (*fleet.SandboxSupport, string) {
 		return nil, why
 	}
 	sup.PackageCache = []fleet.PackageCacheMode{fleet.PackageCacheShared, fleet.PackageCachePrivate}
+	// muster #432: a session is handed the variable each of these reads.
+	sup.PackageManagers = fleet.PackageManagers()
 	return sup, ""
 }
 
@@ -162,6 +164,17 @@ func (d *Driver) planSandboxFor(spec fleet.SessionSpec, sessionDir, priorCopy st
 			mode = fleet.PackageCachePrivate
 		}
 		st := &fleet.SandboxPackageCacheState{Mode: mode}
+		// muster #432: a manager the cache is said to serve must have its directory
+		// there. Checked on the seed before it is copied, so a refusal costs no copy
+		// — and, for a session being relaunched, on the copy it already has.
+		managersAt := src
+		if priorCopy != "" && mode == fleet.PackageCachePrivate {
+			managersAt = filepath.Join(resolvePath(sessionDir), "pkgcache")
+		}
+		if err := checkManagerDirs(managersAt, pc.Managers); err != nil {
+			return nil, invalid("sandbox.packageCache: %v", err)
+		}
+		st.Managers = append([]fleet.PackageManager(nil), pc.Managers...)
 		switch mode {
 		case fleet.PackageCacheShared:
 			st.Path = fleet.AbsolutePath(src)
@@ -187,6 +200,30 @@ func (d *Driver) planSandboxFor(spec fleet.SessionSpec, sessionDir, priorCopy st
 	plan.read = dedupe(append(read, write...))
 	plan.write = dedupe(write)
 	return plan, nil
+}
+
+// checkManagerDirs refuses a cache that lacks the directory of a manager it is
+// said to serve (muster #432). The directory must be a real one: a link there
+// would be copied as a link, and what it pointed at would not be the cache the
+// session was promised.
+func checkManagerDirs(cache string, managers []fleet.PackageManager) error {
+	for _, m := range managers {
+		info, err := os.Lstat(filepath.Join(cache, string(m)))
+		if err != nil || !info.IsDir() {
+			return fmt.Errorf("it is said to serve %s but has no %s/ directory (a real directory, not a link)", string(m), string(m))
+		}
+	}
+	return nil
+}
+
+// managerEnv is the environment a cache serving managers adds to a session whose
+// copy of it is at cache: each manager's variable, pointing at its own directory.
+func managerEnv(cache string, managers []fleet.PackageManager) map[string]string {
+	out := make(map[string]string, len(managers))
+	for _, m := range managers {
+		out[m.EnvVar()] = filepath.Join(cache, string(m))
+	}
+	return out
 }
 
 // copyTree makes dst a copy of src, copy-on-write where the filesystem offers

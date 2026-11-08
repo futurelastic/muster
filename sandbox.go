@@ -68,6 +68,73 @@ const (
 	PackageCachePrivate PackageCacheMode = "private"
 )
 
+// PackageManager names a package manager a package cache can serve (muster #432).
+//
+// A cache that serves a manager holds that manager's cache in a directory named
+// after it — `<cache>/cargo`, `<cache>/go`, `<cache>/npm` — and the session is
+// handed the variable that manager reads, pointing at that directory in the
+// session's own copy (EnvVar). Without it a manager looks in the session's own
+// home, finds nothing, and downloads everything again.
+type PackageManager string
+
+const (
+	// PackageManagerCargo is served from `<cache>/cargo` through CARGO_HOME.
+	PackageManagerCargo PackageManager = "cargo"
+	// PackageManagerGo is served from `<cache>/go` through GOMODCACHE: the
+	// directory is the module cache itself. The build cache is not served — see
+	// the trade-off in docs/api.md.
+	PackageManagerGo PackageManager = "go"
+	// PackageManagerNpm is served from `<cache>/npm` through npm_config_cache.
+	PackageManagerNpm PackageManager = "npm"
+)
+
+// PackageManagers lists every manager a cache can serve, in the order they are
+// reported.
+func PackageManagers() []PackageManager {
+	return []PackageManager{PackageManagerCargo, PackageManagerGo, PackageManagerNpm}
+}
+
+// Known reports whether m is a manager a cache can serve.
+func (m PackageManager) Known() bool {
+	for _, k := range PackageManagers() {
+		if m == k {
+			return true
+		}
+	}
+	return false
+}
+
+// EnvVar is the variable the manager reads to find its cache.
+func (m PackageManager) EnvVar() string {
+	switch m {
+	case PackageManagerCargo:
+		return "CARGO_HOME"
+	case PackageManagerGo:
+		return "GOMODCACHE"
+	case PackageManagerNpm:
+		return "npm_config_cache"
+	}
+	return ""
+}
+
+// checkPackageManagers is the shape rule for a list of managers: at least the
+// ones it names are known, and none is named twice. field names the request
+// field in the error.
+func checkPackageManagers(field string, managers []PackageManager) error {
+	seen := map[PackageManager]bool{}
+	for _, m := range managers {
+		if !m.Known() {
+			return fmt.Errorf("%s: %q is not one of %q, %q, %q", field, string(m),
+				PackageManagerCargo, PackageManagerGo, PackageManagerNpm)
+		}
+		if seen[m] {
+			return fmt.Errorf("%s: %q is named twice", field, string(m))
+		}
+		seen[m] = true
+	}
+	return nil
+}
+
 // SandboxPackageCache names a package cache a sandboxed session may use, so a
 // dependency install is practical without opening the home directory.
 type SandboxPackageCache struct {
@@ -75,6 +142,12 @@ type SandboxPackageCache struct {
 	Path AbsolutePath `json:"path"`
 	// Mode defaults to private.
 	Mode PackageCacheMode `json:"mode,omitempty"`
+	// Managers names the package managers the cache serves (muster #432): each
+	// must have its directory in the cache (`cargo/`, `go/`, `npm/`), and the
+	// session is handed the variable that manager reads, pointing at that
+	// directory in the copy the session uses. Empty means the cache is only
+	// announced through MUSTER_PACKAGE_CACHE and no manager is pointed at it.
+	Managers []PackageManager `json:"managers,omitempty"`
 }
 
 // SandboxSpec is the optional `sandbox` field of a create (muster #281).
@@ -144,6 +217,10 @@ type SandboxSupport struct {
 	Network []SandboxNetwork `json:"network"`
 	// PackageCache lists the package-cache modes the driver supports.
 	PackageCache []PackageCacheMode `json:"packageCache"`
+	// PackageManagers lists the package managers the driver can point at a
+	// package cache (SandboxPackageCache.Managers, muster #432). Empty where it
+	// offers no package cache, or only the announced one.
+	PackageManagers []PackageManager `json:"packageManagers"`
 }
 
 // SandboxState is what a running session reports about its own sandbox
@@ -174,6 +251,9 @@ type SandboxPackageCacheState struct {
 	// Copy is how a private cache was made: "clone" (copy-on-write) or "copy".
 	// Empty for shared.
 	Copy string `json:"copy,omitempty"`
+	// Managers are the package managers pointed at the cache, each at
+	// `<Path>/<manager>` (muster #432). Empty when none was asked for.
+	Managers []PackageManager `json:"managers,omitempty"`
 }
 
 // Validate checks the shape of a sandbox request. It does not decide whether any
@@ -208,6 +288,9 @@ func (s SandboxSpec) Validate() error {
 		default:
 			return fmt.Errorf("sandbox.packageCache.mode %q is not one of %q, %q",
 				string(pc.Mode), PackageCacheShared, PackageCachePrivate)
+		}
+		if err := checkPackageManagers("sandbox.packageCache.managers", pc.Managers); err != nil {
+			return err
 		}
 	}
 	return nil
