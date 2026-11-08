@@ -1211,7 +1211,10 @@ unchanged: `respond` answers the current tab, with the nonce the same read gave.
   leading word have different nonces.
 - **A permission dialog's auto-deny countdown is a field, not text** (#353). Recent
   runtime versions add an unattended-session row to a tool-permission dialog
-  ("will automatically deny this request in 1:13"). It is left out of `question`
+  ("will automatically deny this request in 1:13", and in later versions
+  "will automatically block this request in 1:08" — it is recognised by its
+  shape, `automatically <word> this request in <clock>`, so a reworded verb is
+  still read, and `autoDenyAt` keeps its name). It is left out of `question`
   and out of `nonce` — it changes every second while the dialog does not, so a
   nonce that carried it could never be answered — and reported as
   `prompt.autoDenyAt` (RFC 3339, the deadline computed when the screen was read).

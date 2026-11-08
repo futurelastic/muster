@@ -2123,12 +2123,19 @@ func classifyPromptKind(p *fleet.SessionPrompt) fleet.PromptKind {
 var promptNow = time.Now
 
 // autoDenyRow matches the unattended-session countdown a tool-permission dialog
-// carries in recent runtime versions: "⚠ Claude Code will automatically deny
-// this request in 1:13, to avoid blocking progress on an unattended session".
-// Anchored on the one phrase that must survive a rewording, and nothing around
-// it: the runtime may change the rest, and a miss here only means the old
-// behaviour (a nonce that moves), never a wrong answer.
-var autoDenyRow = regexp.MustCompile(`(?i)automatically deny this request in\s+(?:(\d+):)?(\d+):(\d{2})`)
+// carries in recent runtime versions. The row has been worded two ways, and
+// installs run mixed runtime versions, so both are read:
+//
+//	⚠ Claude Code will automatically deny this request in 1:13, to avoid blocking progress on an unattended session
+//	⚠ Claude Code will automatically block this request in 1:08, to avoid holding up an unattended session
+//
+// Anchored on the structure, not on a verb: "automatically <one word> this
+// request in <clock>". The verb was the first thing to change (muster#429), so
+// it is the one part that is not matched literally; the rest of the row is not
+// matched at all. A miss here only means the old behaviour (a nonce that moves
+// every second), never a wrong answer, but a row with no clock is not a
+// countdown and is left in the question.
+var autoDenyRow = regexp.MustCompile(`(?i)automatically\s+[a-z]+\s+this request in\s+(?:(\d+):)?(\d+):(\d{2})`)
 
 // autoDenyCountdown reports the seconds left on a countdown row, and whether
 // the row is one.
