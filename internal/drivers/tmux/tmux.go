@@ -1263,7 +1263,28 @@ type paneRow struct {
 // enumerate performs the whole fleet read in one subprocess: one metadata
 // listing followed by one screen capture per session, delimited by a
 // per-call nonce.
+//
+// This entry point is for callers whose answer is the ROWS and who discard the
+// captures (`rows, _, err := d.enumerate(ctx)`). A chunk whose invocation was
+// killed at its slice gets the one same-size retry and nothing more: spending
+// the call's deadline on smaller chunks nobody will read would be waste
+// (muster#428). Callers that classify from the captures use enumerateScreens.
 func (d *Driver) enumerate(ctx context.Context) ([]paneRow, map[string]paneCapture, error) {
+	return d.enumerateWith(ctx, false)
+}
+
+// enumerateScreens is enumerate for a caller that classifies from the
+// captures. A chunk whose invocation was killed at its slice and left panes
+// unread has those panes re-read in smaller chunks, down to one pane, under a
+// bounded share of the call's budget (recoverUnreadPanes, muster#428), instead
+// of reading every unread pane as a driver malfunction from that one answer.
+func (d *Driver) enumerateScreens(ctx context.Context) ([]paneRow, map[string]paneCapture, error) {
+	return d.enumerateWith(ctx, true)
+}
+
+// enumerateWith is the body of both. rereadUnread selects what happens to a chunk
+// whose invocation expired its own slice with panes unread.
+func (d *Driver) enumerateWith(ctx context.Context, rereadUnread bool) ([]paneRow, map[string]paneCapture, error) {
 	nonce := d.nonce()
 	sep := nonce + "F"
 	mark := nonce + "P"
@@ -1373,6 +1394,15 @@ func (d *Driver) enumerate(ctx context.Context) ([]paneRow, map[string]paneCaptu
 	// more than half of it, and one empty chunk per enumeration whose slice
 	// expired is retried with a fresh slice. Everything still derives from the
 	// caller's context: no call runs longer than it did before.
+	//
+	// muster#428 refines "retried": for a caller that classifies from the
+	// captures (enumerateScreens), the retry reads the UNREAD panes of that
+	// chunk in smaller chunks, halving down to one pane, under half of the call's
+	// remaining budget (recoverUnreadPanes). It also fires for a chunk that came
+	// back SHORT, not only empty, because a killed invocation hands back what it
+	// printed before the kill. A caller that discards the captures
+	// (`rows, _, err := d.enumerate`) keeps the single same-size retry and
+	// nothing more.
 	byIndex := make(map[string]paneCapture, len(rows))
 	chunks := chunkPaneRows(rows)
 	retryUnused := true
@@ -1427,6 +1457,24 @@ func (d *Driver) enumerate(ctx context.Context) ([]paneRow, map[string]paneCaptu
 		// could not answer. The #141 prefix is kept word for word so an
 		// existing search of the log still finds these lines.
 		chunkCaptures, att := d.captureChunk(ctx, chunkRows, mark, pending)
+		// muster#428: an invocation killed at its OWN slice leaves panes unread,
+		// either all of the chunk or only part of it (a killed invocation hands
+		// back what it printed first). For a caller that classifies from the
+		// captures, read the unread ones again in smaller chunks. Same trigger
+		// and same one-per-enumeration limit as the same-size retry it replaces:
+		// a stall across the whole server must not spend the deadline chunk by
+		// chunk.
+		if rereadUnread && retryUnused && att.cause == captureSliceExpired {
+			if unread := unreadRows(chunkRows, chunkCaptures); len(unread) > 0 {
+				retryUnused = false
+				d.recoverUnreadPanes(ctx, chunkCaptures, chunkRows, unread, att, mark,
+					chunkIdx, len(chunks), listWall)
+				for k, v := range chunkCaptures {
+					byIndex[k] = v
+				}
+				continue
+			}
+		}
 		if len(chunkCaptures) == 0 && len(chunkRows) > 0 {
 			d.counters.incr(counterCaptureChunkFailed)
 			detail := fmt.Sprintf("wall %v of %v slice (call budget left %v, listing took %v); "+
@@ -1480,6 +1528,181 @@ func (d *Driver) enumerate(ctx context.Context) ([]paneRow, map[string]paneCaptu
 		}
 	}
 	return rows, captures, nil
+}
+
+// captureRecoveryMaxInvocations caps the invocations one recovery pass may
+// start. Isolating a single stuck pane among 64 costs about 12 (two per level,
+// six levels), so 16 finishes that and still stops a pass whose every piece
+// stalls, which the pass's time share would also end, a little later
+// (muster#428). Each invocation is one process against a multiplexer that is
+// already slow, so this is the number to lower if the spawn count matters more
+// than the panes it saves.
+const captureRecoveryMaxInvocations = 16
+
+// unreadRows returns the rows of chunk that have no capture, in chunk order.
+func unreadRows(chunk []indexedPaneRow, got map[string]paneCapture) []indexedPaneRow {
+	var out []indexedPaneRow
+	for _, r := range chunk {
+		if _, ok := got[strconv.Itoa(r.index)]; !ok {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// halveRows splits rows into two halves, or returns it whole when there is
+// nothing left to split. A lone pane is asked for again as it is: that is the
+// same-size retry the single-pane machines of muster#156 depend on.
+func halveRows(rows []indexedPaneRow) [][]indexedPaneRow {
+	if len(rows) <= 1 {
+		return [][]indexedPaneRow{rows}
+	}
+	mid := len(rows) / 2
+	return [][]indexedPaneRow{rows[:mid], rows[mid:]}
+}
+
+// recoveryPass is what recoverUnreadPanes reports about itself.
+type recoveryPass struct {
+	recovered   int           // panes read by the pass
+	invocations int           // multiplexer invocations the pass started
+	wall        time.Duration // the pass's wall time, measured on the real clock
+	last        captureAttempt
+	// stopped says why the pass ended with panes still unread: empty when the
+	// pieces left over simply failed for a reason asking again does not change.
+	stopped string
+}
+
+// recoverUnreadPanes re-reads the unread panes of one chunk in smaller chunks,
+// halving down to one pane, and adds what it reads to into (muster#428).
+// first is the attempt that left them unread.
+//
+// The budget is the part that needs care, because the invocation that failed
+// is already a slice gone and the verb still has its own work to do:
+//
+//   - The whole pass runs under ONE child context holding at most half of what
+//     the call has left when the pass starts. The other half stays with the
+//     verb and with the chunks still to come.
+//   - Each piece gets captureSlice of what is left in the pass, as every
+//     invocation does, so it never holds more than half of that either. A
+//     smaller piece therefore gets a smaller slice, which is fair: a healthy
+//     capture takes tens of milliseconds.
+//   - A piece is queued first-in first-out, so the halves that read cleanly are
+//     read before a stuck one is split further.
+//   - A piece ends the splitting of its own panes unless it expired its slice:
+//     a multiplexer exit (a pane that vanished) is an answer, and asking again
+//     returns the same one.
+//   - captureRecoveryMaxInvocations is the backstop on spawns.
+//
+// Nothing here can outlast the call's deadline: every context derives from ctx.
+func (d *Driver) recoverUnreadPanes(ctx context.Context, into map[string]paneCapture,
+	chunk, unread []indexedPaneRow, first captureAttempt, mark string,
+	chunkIdx, chunkCount int, listWall time.Duration) {
+
+	pass := d.runRecovery(ctx, into, unread, mark)
+
+	whole := len(unread) == len(chunk)
+	if whole {
+		d.counters.incr(counterCaptureChunkFailed)
+	} else {
+		d.counters.incr(counterCaptureChunkPartial)
+	}
+	if pass.recovered > 0 {
+		d.counters.incr(counterCaptureRetryRecovered)
+	} else {
+		d.counters.incr(counterCaptureRetryFailed)
+	}
+
+	detail := fmt.Sprintf("wall %v of %v slice (call budget left %v, listing took %v); "+
+		"cause: %s; exit error: %v",
+		roundMs(first.wall), roundMs(first.slice), roundMs(first.remaining), roundMs(listWall),
+		first.cause, first.err)
+	stillUnread := len(unread) - pass.recovered
+	switch {
+	case stillUnread == 0:
+		what := fmt.Sprintf("empty for %d pane(s)", len(chunk))
+		if !whole {
+			what = fmt.Sprintf("short, %d of %d pane(s) unread", len(unread), len(chunk))
+		}
+		log.Printf("tmux: batched capture came back %s "+
+			"(chunk %d/%d of this enumeration), %s; retry recovered %d/%d pane(s) in %v "+
+			"over %d invocation(s)",
+			what, chunkIdx+1, chunkCount, detail,
+			pass.recovered, len(unread), roundMs(pass.wall), pass.invocations)
+	case whole && pass.recovered == 0:
+		log.Printf("tmux: batched capture returned nothing parseable for %d pane(s) "+
+			"(chunk %d/%d of this enumeration) — every session in this chunk will "+
+			"classify as a driver malfunction, not as an observation; %s; retry: %s",
+			len(chunk), chunkIdx+1, chunkCount, detail, pass.failureNote())
+	default:
+		log.Printf("tmux: batched capture left %d of %d pane(s) unread "+
+			"(chunk %d/%d of this enumeration) — those sessions will classify as a driver "+
+			"malfunction, not as an observation; %s; retry recovered %d/%d pane(s): %s",
+			stillUnread, len(chunk), chunkIdx+1, chunkCount, detail,
+			pass.recovered, len(unread), pass.failureNote())
+	}
+}
+
+// failureNote says how a recovery pass ended without reading everything.
+func (p recoveryPass) failureNote() string {
+	note := fmt.Sprintf("failed after %v (split into %d invocation(s); last cause: %s; exit error: %v)",
+		roundMs(p.wall), p.invocations, p.last.cause, p.last.err)
+	if p.stopped != "" {
+		note += "; stopped: " + p.stopped
+	}
+	return note
+}
+
+// runRecovery is the queue behind recoverUnreadPanes.
+func (d *Driver) runRecovery(ctx context.Context, into map[string]paneCapture,
+	unread []indexedPaneRow, mark string) recoveryPass {
+
+	var pass recoveryPass
+	start := time.Now()
+	defer func() { pass.wall = time.Since(start) }()
+
+	remaining := d.deadline
+	if dl, ok := ctx.Deadline(); ok {
+		remaining = dl.Sub(d.now())
+	}
+	passCtx := ctx
+	if remaining > 0 {
+		c, cancel := context.WithDeadline(ctx, d.now().Add(remaining/2))
+		defer cancel()
+		passCtx = c
+	}
+
+	queue := halveRows(unread)
+	for len(queue) > 0 {
+		switch {
+		case ctx.Err() != nil:
+			pass.stopped = "the call's budget is used up or its caller is gone"
+			return pass
+		case passCtx.Err() != nil:
+			pass.stopped = "the recovery pass's half of the budget is used up"
+			return pass
+		case pass.invocations >= captureRecoveryMaxInvocations:
+			pass.stopped = fmt.Sprintf("the %d-invocation cap", captureRecoveryMaxInvocations)
+			return pass
+		}
+		piece := queue[0]
+		queue = queue[1:]
+		got, att := d.captureChunk(passCtx, piece, mark, len(queue)+1)
+		pass.invocations++
+		pass.last = att
+		d.counters.incr(counterCaptureSplitInvocation)
+		for k, v := range got {
+			into[k] = v
+			pass.recovered++
+		}
+		// Split again only what this piece left unread, and only when it was
+		// its own slice that ran out.
+		if att.cause == captureSliceExpired && len(piece) > 1 {
+			if left := unreadRows(piece, got); len(left) > 0 {
+				queue = append(queue, halveRows(left)...)
+			}
+		}
+	}
+	return pass
 }
 
 // Why a capture invocation came back with nothing, as far as this driver can
@@ -1775,7 +1998,7 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 	ctx, cancel := d.bounded(ctx)
 	defer cancel()
 
-	rows, captures, err := d.enumerate(ctx)
+	rows, captures, err := d.enumerateScreens(ctx)
 	if err != nil {
 		// §5.7: a failed read is never an empty result. Report the source
 		// as unreachable and let the envelope carry the failure.
@@ -2397,7 +2620,7 @@ func (d *Driver) State(ctx context.Context, req fleet.Request, ref fleet.Session
 	ctx, cancel := d.bounded(ctx)
 	defer cancel()
 
-	rows, captures, err := d.enumerate(ctx)
+	rows, captures, err := d.enumerateScreens(ctx)
 	if err != nil {
 		return fleet.SessionState{}, err
 	}
@@ -2783,7 +3006,7 @@ func (d *Driver) deliverViaPane(ctx context.Context, ref fleet.SessionRef, text 
 	ctx, cancel := d.bounded(ctx)
 	defer cancel()
 
-	rows, captures, err := d.enumerate(ctx)
+	rows, captures, err := d.enumerateScreens(ctx)
 	if err != nil {
 		return fleet.DeliveryReceipt{}, err
 	}
@@ -3811,7 +4034,7 @@ func (d *Driver) Discard(ctx context.Context, req fleet.Request, ref fleet.Sessi
 	ctx, cancel := d.bounded(ctx)
 	defer cancel()
 
-	rows, captures, err := d.enumerate(ctx)
+	rows, captures, err := d.enumerateScreens(ctx)
 	if err != nil {
 		return fleet.Ack{}, err
 	}
@@ -3994,7 +4217,7 @@ func (d *Driver) Composer(ctx context.Context, req fleet.Request, ref fleet.Sess
 	ctx, cancel := d.bounded(ctx)
 	defer cancel()
 
-	rows, captures, err := d.enumerate(ctx)
+	rows, captures, err := d.enumerateScreens(ctx)
 	if err != nil {
 		return fleet.ComposerRead{}, err
 	}
@@ -5622,7 +5845,7 @@ func (d *Driver) Respond(ctx context.Context, req fleet.Request, ref fleet.Sessi
 	ctx, cancel := d.bounded(ctx)
 	defer cancel()
 
-	rows, captures, err := d.enumerate(ctx)
+	rows, captures, err := d.enumerateScreens(ctx)
 	if err != nil {
 		return fleet.DeliveryReceipt{}, err
 	}
@@ -6386,7 +6609,7 @@ type readinessCheck struct {
 func (d *Driver) promptReadiness(ctx context.Context, id string) readinessCheck {
 	callCtx, cancel := d.bounded(ctx)
 	defer cancel()
-	rows, captures, err := d.enumerate(callCtx)
+	rows, captures, err := d.enumerateScreens(callCtx)
 	if err != nil {
 		return readinessCheck{}
 	}

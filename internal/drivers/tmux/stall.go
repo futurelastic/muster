@@ -126,7 +126,7 @@ func (d *Driver) stalledOnSend(ctx context.Context, ref fleet.SessionRef) (fleet
 
 	bounded, cancel := d.bounded(ctx)
 	defer cancel()
-	rows, captures, err := d.enumerate(bounded)
+	rows, captures, err := d.enumerateScreens(bounded)
 	if err != nil {
 		return fleet.DeliveryReceipt{}, false
 	}

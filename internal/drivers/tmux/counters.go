@@ -137,9 +137,19 @@ const (
 	// that SUCCEEDED but took longer than slowInvocationLine. It gives a wall
 	// time distribution before the next failure, which the failure line
 	// alone cannot.
+	//
+	// muster#428: a killed invocation can leave only SOME of its panes unread.
+	// chunk_partial counts those (chunk_failed stays "wholly empty").
+	// split_invocation counts every invocation a recovery pass started, so the
+	// spawns it spends are on record next to what they recovered: a high
+	// split_invocation against a low retry_recovered says the stall covers the
+	// server and smaller chunks do not help. retry_recovered / retry_failed now
+	// describe the recovery pass: it read at least one pane, or none.
 	counterCaptureChunkFailed      = "capture.chunk_failed"
+	counterCaptureChunkPartial     = "capture.chunk_partial"
 	counterCaptureRetryRecovered   = "capture.retry_recovered"
 	counterCaptureRetryFailed      = "capture.retry_failed"
+	counterCaptureSplitInvocation  = "capture.split_invocation"
 	counterEnumerateSlowInvocation = "enumerate.slow_invocation"
 
 	// muster#150: the inbox send path's exits. sendViaInbox reports
