@@ -337,6 +337,10 @@ type Driver struct {
 	// scratchLimits bound the measurement of a session's scratch directory
 	// (scratch.go). The zero value means the production bounds.
 	scratchLimits scratchLimits
+	// scratchGate holds one token per walk running; its capacity is how many may
+	// run at once across the driver (muster #431). Made by walkGate, once.
+	scratchGate     chan struct{}
+	scratchGateOnce sync.Once
 
 	// statusTTL is how long a read of a server's status is kept (muster #419;
 	// statuscache.go). Set to the production windows in New; a test sets it.
