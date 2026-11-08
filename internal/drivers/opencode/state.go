@@ -58,6 +58,21 @@ func classify(present bool, st wireStatus) fleet.SessionState {
 	}
 }
 
+// turnRead is one read of the runtime's newest message: how the turn it belongs
+// to ended, and whether that message settles the question.
+type turnRead struct {
+	// turn is the failure the message records, nil when it records none or there
+	// was nothing to read.
+	turn *fleet.TurnEnd
+	// settled is true when the newest message is the runtime's own reply, so the
+	// read says how the newest turn ended. A user message at the tail, or none at
+	// all, says nothing yet: the turn it starts has not been recorded, or is still
+	// running (muster #426).
+	settled bool
+	// err is a read that failed. It says nothing about the turn, and is never kept.
+	err error
+}
+
 // lastTurnFailure asks the runtime's own message record whether the most
 // recent turn ended in a provider-side error that GET /session/status never
 // carries (muster #77). Measured live: a turn the provider refused
@@ -66,38 +81,42 @@ func classify(present bool, st wireStatus) fleet.SessionState {
 // `confidence: observed`, forever after, indistinguishable from one that
 // finished normally.
 //
-// Returns nil, nil whenever there is nothing to report: no message history
+// Returns nil whenever there is nothing to report: no message history
 // yet, the newest message is not an assistant reply (a user message with
 // no reply is #55's own "busy" territory, not this function's job), or
-// that reply carries no error. A read failure here also returns nil, nil
+// that reply carries no error. A read failure here also returns nil
 // rather than propagating — the same best-effort-enrichment shape the tmux
 // driver's own upgradeLastTurnFromRecord already takes: the status read
 // that got this driver to "absent, therefore idle" already succeeded, and
 // this is enrichment on top of a real answer, not the source of it. A
-// caller wanting the message endpoint's own errors surfaced must read them
-// off the returned error value, which this function discards on purpose.
+// caller that must tell a failed read from an empty one uses turnVerdict.
 //
 // Bounded to the single newest message (?limit=1, confirmed live against a
 // real server to return the TAIL of the conversation, not the head) —
 // constant cost regardless of how long the session's history is — and
 // never decodes "parts", the field carrying actual conversation content
-// (see wireMessageInfo). This is why State calls it, and List only when it
-// was asked about ONE session (ListFilter.ID, muster #363): an unfiltered
-// List already visits every known session once per call, and one extra
-// request per session there is a real, unbounded cost the single-session
-// callers do not have.
+// (see wireMessageInfo). State calls it for every idle read, and List for a
+// read about ONE session (ListFilter.ID, muster #363); an unfiltered List asks
+// at most once per finished turn, through the record (lastturn.go).
 func (d *Driver) lastTurnFailure(ctx context.Context, srv *server, id string) *fleet.TurnEnd {
+	return d.turnVerdict(ctx, srv, id).turn
+}
+
+// turnVerdict is lastTurnFailure with what it leaves out: whether the read
+// failed, and whether the message it read settles how the newest turn ended.
+func (d *Driver) turnVerdict(ctx context.Context, srv *server, id string) turnRead {
 	var msgs []wireMessage
 	if err := d.do(ctx, srv, "GET", "/session/"+url.PathEscape(id)+"/message?limit=1", nil, &msgs); err != nil {
-		return nil
+		return turnRead{err: err}
 	}
 	if len(msgs) == 0 {
-		return nil
+		return turnRead{}
 	}
 	info := msgs[0].Info
 	if info.Role != "assistant" {
-		return nil
+		return turnRead{}
 	}
+	r := turnRead{settled: true}
 	// muster #293: a turn that ran on a provider outside the operator's set
 	// is not an unremarkable idle, whatever its own outcome was. The runtime's
 	// words about an error on that turn, if it has one, ride along.
@@ -107,10 +126,11 @@ func (d *Driver) lastTurnFailure(ctx context.Context, srv *server, id string) *f
 				reason += "; the runtime also reported: " + te.Reason
 			}
 		}
-		return &fleet.TurnEnd{Outcome: "failed", Reason: reason}
+		r.turn = &fleet.TurnEnd{Outcome: "failed", Reason: reason}
+		return r
 	}
 	if info.Error == nil {
-		return nil
+		return r
 	}
 
 	// The name is the runtime's own, and where the API gave only its generic
@@ -119,7 +139,8 @@ func (d *Driver) lastTurnFailure(ctx context.Context, srv *server, id string) *f
 	if info.Time.Created > 0 {
 		at = time.UnixMilli(info.Time.Created)
 	}
-	return d.turnFailure(ctx, srv, info.Error, at, false)
+	r.turn = d.turnFailure(ctx, srv, info.Error, at, false)
+	return r
 }
 
 // offPolicyTurn reports whether a turn ran on a provider or model the policy

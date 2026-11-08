@@ -264,6 +264,7 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 			d.idemStore(key, ref)
 			return fleet.Session{}, fmt.Errorf("create: session %s was started but its opening prompt failed: %w", sess.ID, err)
 		}
+		d.turnStarted(sess.ID) // muster #426
 	}
 	d.idemStore(key, ref)
 	// No turn has run yet, so there is nothing to resolve the agent pin from.
@@ -542,8 +543,9 @@ func (d *Driver) Send(ctx context.Context, req fleet.Request, ref fleet.SessionR
 		}
 		return fleet.DeliveryReceipt{}, err
 	}
-	// A new turn supersedes the one a restart interrupted (muster #282).
-	d.clearInterrupted(ref.ID)
+	// A new turn supersedes the one a restart interrupted (muster #282), and is
+	// one a listing will have to read the end of (muster #426).
+	d.turnStarted(ref.ID)
 	// HTTP 204 from prompt_async means the runtime accepted the message
 	// and will process it; it is not synchronous confirmation that the
 	// agent has started reading it (that only shows up on the status
@@ -625,7 +627,11 @@ func (d *Driver) readState(ctx context.Context, ref fleet.SessionRef) (fleet.Ses
 	if ws, present := statuses[ref.ID]; present {
 		// muster #283: busy is the runtime's word for "its turn has not ended",
 		// which a turn stopped on a permission ask also satisfies.
-		return d.withPermission(ctx, srv, ref.ID, classify(true, ws)), nil
+		st := d.withPermission(ctx, srv, ref.ID, classify(true, ws))
+		if st.Status == fleet.StatusWorking || st.Status == fleet.StatusWaitingInput {
+			d.sawWorking(ref.ID) // muster #426: a turn is running, so the last one is no longer the newest
+		}
+		return st, nil
 	}
 
 	// Absent from a map we just read successfully. Confirm the session
@@ -652,7 +658,11 @@ func (d *Driver) readState(ctx context.Context, ref fleet.SessionRef) (fleet.Ses
 			// no way to see that on its own — it only ever sees the status map
 			// — so it is checked here, once, on the one path that reaches a
 			// confirmed-idle verdict.
-			lastTurn = d.lastTurnFailure(ctx, srv, ref.ID)
+			res := d.turnVerdict(ctx, srv, ref.ID)
+			lastTurn = res.turn
+			// muster #426: what this read learned is kept for listings too, which
+			// also puts the record right after a restart.
+			d.noteTurn(ref.ID, known.turn.gen, res, false)
 			d.keepIdle(srv, ref.ID, gen, idleMemo{sess: sess, lastTurn: copyTurnEnd(lastTurn)})
 		case isNotFound(err):
 			d.forgetIdle(srv, ref.ID)
@@ -908,16 +918,23 @@ func (d *Driver) Rename(ctx context.Context, req fleet.Request, ref fleet.Sessio
 // it as dead. This is the same class of staleness SupportsResume: false
 // already declares, not a new one, and is stated here rather than hidden.
 //
-// # One id: the same honesty State has (muster #363)
+// # How the last turn ended (muster #363, #426)
 //
-// A listing does not ask the runtime how a session's newest turn ended: it
-// would be one extra request per idle session on every call, and the answer
-// a supervisor polls for one session would read idle with no lastTurn after a
-// turn the event stream had reported as failed. With filter.ID set the call
-// is about ONE session, so two things change, and only for that call:
-// the status read is made for that session's server alone, and a session
-// confirmed idle gets the single ?limit=1 message read State makes
-// (lastTurnFailure). An unfiltered listing keeps its constant cost.
+// idle alone is not how a session's last turn ended, and the runtime's status map
+// does not say: a turn the provider refused leaves the map and the session reads
+// idle. The runtime's message record does say, at the price of one request per
+// session. With filter.ID set the call is about ONE session, so that request is made
+// (lastTurnFailure): the answer a supervisor polls for one session is State's. An
+// unfiltered listing does not ask per session per call. It reports what this driver
+// has learned (lastturn.go): the failure a turn's end reported on the event bus, a
+// State read found, or a read this listing made itself (readFinishedTurns), which is
+// one for a session that was seen working or was sent input since the last, and none
+// for an idle session nothing has happened to. A listing therefore shows a failed
+// turn whether or not anything is subscribed, and keeps its constant cost.
+//
+// What it cannot show is a failure the driver has not learned of: after a service
+// restart the record is empty, so a row omits it until a turn runs or a read by id
+// finds it. The read by id stays the authority.
 func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.ListFilter) (fleet.Collection[fleet.Session], error) {
 	ctx, cancel := d.bounded(ctx)
 	defer cancel()
@@ -941,15 +958,20 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 	type statusRead struct {
 		statuses statusMap
 		err      error
+		// ids are the sessions of the server this listing is about (muster #426).
+		ids []string
 	}
 	reads := make(map[*server]*statusRead)
-	for _, info := range known {
+	for id, info := range known {
 		if info.srv == nil {
 			continue // listed, not running (muster #282): nothing to read
 		}
-		if _, ok := reads[info.srv]; !ok {
-			reads[info.srv] = &statusRead{}
+		r, ok := reads[info.srv]
+		if !ok {
+			r = &statusRead{}
+			reads[info.srv] = r
 		}
+		r.ids = append(r.ids, id)
 	}
 	var wg sync.WaitGroup
 	for srv, r := range reads {
@@ -960,6 +982,9 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 		go func(srv *server, r *statusRead) {
 			defer wg.Done()
 			r.statuses, r.err = d.statusOf(ctx, srv)
+			if r.err == nil && filter.ID == "" {
+				d.readFinishedTurns(ctx, srv, r.ids, r.statuses)
+			}
 		}(srv, r)
 	}
 	wg.Wait()
@@ -993,17 +1018,27 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 				// One extra read per BUSY session, never per idle one: a
 				// parked ask must not show as working in a listing either (#283).
 				st = d.withPermission(ctx, info.srv, id, st)
+				if (st.Status == fleet.StatusWorking || st.Status == fleet.StatusWaitingInput) && !info.turn.seenWorking {
+					d.sawWorking(id) // muster #426: the last turn is no longer the newest
+				}
 			}
 			if !present {
 				// muster #363: absent from the status map is idle, and idle
 				// alone is not how the last turn ended. State reads the
 				// runtime's newest message to say so; a read about ONE session
-				// can afford the same single request, a whole listing cannot.
+				// can afford the same single request.
 				if filter.ID != "" {
-					st.LastTurn = d.lastTurnFailure(ctx, info.srv, id)
-				}
-				if st.LastTurn == nil {
-					st.LastTurn = info.interrupted // muster #282
+					res := d.turnVerdict(ctx, info.srv, id)
+					d.noteTurn(id, info.turn.gen, res, false) // muster #426
+					st.LastTurn = res.turn
+					if st.LastTurn == nil {
+						st.LastTurn = info.interrupted // muster #282
+					}
+				} else {
+					// muster #426: a whole listing cannot, so it shows what this
+					// driver learned of the turn's end; readFinishedTurns made the
+					// one read a turn that just ended needs.
+					st.LastTurn = d.recordedTurn(id)
 				}
 			}
 		}

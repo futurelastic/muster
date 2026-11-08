@@ -327,17 +327,6 @@ func (d *Driver) requireLive(k knownSession) error {
 	}
 }
 
-// clearInterrupted forgets that a restart cut a session's turn short, once a new
-// turn has been sent.
-func (d *Driver) clearInterrupted(id string) {
-	d.mu.Lock()
-	if k, ok := d.seen[id]; ok && k.interrupted != nil {
-		k.interrupted = nil
-		d.seen[id] = k
-	}
-	d.mu.Unlock()
-}
-
 // closeUnlaunched closes a session that was found on disk but is not running:
 // this service started no process for it and there is no runtime to ask, so
 // closing it is removing what it left — the record and the directory — and

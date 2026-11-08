@@ -339,7 +339,10 @@ Two rules that will save you an incident:
   session whose turn died on a transient error looks exactly like one that
   finished — same empty composer, same settled status line. If `lastTurn.outcome`
   is `failed` and `retryable` is true, sending anything resumes it; no human is
-  needed. Ignore this and abandoned work sits looking available.
+  needed. Ignore this and abandoned work sits looking available. A listing carries
+  it too (since #426), so a provider outage shows as the same failed `reason` on every
+  session it hit; a listing taken just after a service restart can still omit it, so
+  read the one session before deciding it succeeded.
 - **`unknown` is not `dead`.** It means the service could not determine the
   state. Never clean up, kill or restart on `unknown`.
 - **`since` is your stall detector for `waiting_input`, and it needs no probe.**

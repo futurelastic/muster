@@ -1673,6 +1673,20 @@ directory, or not measured yet), never zero. Nothing is removed while the sessio
 lives; closing it removes the directory. Not a material change: it moves with every
 file written, so it does not fire `session.state`.
 
+**`lastTurn` in a listing** (#426) — on an `opencode` runtime a session whose newest
+turn ended on a provider error reads `idle` with `state.lastTurn: {"outcome": "failed",
+"reason": …}`, in `GET /v1/sessions` and the machine listing as in a read of the one
+session. The service has learned of the failure when a turn ends on the event stream, when
+a read of the session finds it, or when a listing finds the session idle after it was seen
+working or sent input; it does not read each idle session on every listing, so a listing
+costs no more than before. It is gone from the row once the session is working again, and a
+turn that then ends well leaves none. **After a service restart a listing may omit it**
+until the session next runs a turn or is read by id: the read by id
+(`GET …/sessions/{id}`) is the authority, and a listing that shows no `lastTurn` for an
+`idle` session has not shown that the last turn succeeded. A supervisor that polls a
+listing can therefore see one provider outage as the same failed `lastTurn.reason` on
+every row it hit.
+
 **A parked session** (#421) — on an `opencode` runtime whose service sets
 `FLEET_OPENCODE_IDLE_STOP`, a session that has had nothing to do for that long has its
 runtime process stopped to free memory. It reads `status: idle`, `confidence:

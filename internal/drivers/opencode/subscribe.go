@@ -83,6 +83,15 @@ import (
 // A state is emitted only when it CHANGES. The runtime reports a turn's end
 // twice (session.status idle, then session.idle); the second is not news.
 //
+// # What a turn's end also feeds (muster #426)
+//
+// A listing shows how a session's last turn ended without asking per session, from
+// the record lastturn.go keeps. A busy or retry status opens that record (the turn
+// that was last is no longer the newest) and the idle state a turn ends in, or a
+// failure reported outside a turn, closes it with what the stream learned. A
+// subscription is only one of the places the record is fed from: a listing nobody
+// streams to reads the end of a turn itself.
+//
 // # A dropped bus is a gap, never silence (§5.7)
 //
 // When a bus connection ends while its server is still alive, the stream ends
@@ -495,6 +504,7 @@ func (s *subscription) handle(srv *server, ev busEvent) {
 				key = fmt.Sprintf("retry:%d", p.Status.Attempt)
 			}
 			st := classify(true, *p.Status)
+			s.d.sawWorking(id) // muster #426
 			s.state(ref, srv, key, st)
 		case "idle":
 			s.idle(ref, srv)
@@ -560,8 +570,10 @@ func (s *subscription) permissionChanged(ref fleet.SessionRef, srv *server) {
 		uctx, ucancel := context.WithTimeout(s.ctx, busReadTimeout)
 		st.Usage = s.d.usageOf(uctx, srv, ref.ID, false)
 		ucancel()
+		s.d.sawWorking(ref.ID) // muster #426
 		s.state(ref, srv, key, st)
 	case fleet.StatusWorking:
+		s.d.sawWorking(ref.ID) // muster #426
 		s.state(ref, srv, "busy", st)
 	case fleet.StatusIdle:
 		// Only the end of something this stream already reported. A permission
@@ -619,13 +631,17 @@ func (s *subscription) idle(ref fleet.SessionRef, srv *server) {
 	s.mu.Unlock()
 
 	st := classify(false, wireStatus{})
-	if turn != nil {
-		st.LastTurn = turn
-	} else {
+	// muster #426: what this turn's end turned out to be is kept for listings, under
+	// the generation read before the reads below so a turn that starts meanwhile wins.
+	gen := s.d.turnGen(ref.ID)
+	res := turnRead{turn: turn, settled: true}
+	if turn == nil {
 		ctx, cancel := context.WithTimeout(s.ctx, busReadTimeout)
-		st.LastTurn = s.d.lastTurnFailure(ctx, srv, ref.ID)
+		res = s.d.turnVerdict(ctx, srv, ref.ID)
 		cancel()
 	}
+	st.LastTurn = res.turn
+	s.d.noteTurn(ref.ID, gen, res, true)
 	// muster #285: the turn that just ended, with what it spent — this is the
 	// turn-end event, and its figures are the same ones State reads.
 	ctx, cancel := context.WithTimeout(s.ctx, busReadTimeout)
@@ -661,6 +677,7 @@ func (s *subscription) failure(ref fleet.SessionRef, srv *server, e *wireAssista
 
 	st := classify(false, wireStatus{})
 	st.LastTurn = turn
+	s.d.noteTurn(ref.ID, s.d.turnGen(ref.ID), turnRead{turn: turn, settled: true}, true) // muster #426
 	s.state(ref, srv, "idle", st)
 }
 
