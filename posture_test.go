@@ -1,6 +1,7 @@
 package fleet
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -265,5 +266,141 @@ func TestPostureValidate_ConfigurationMustBeKnown(t *testing.T) {
 		if err := (Posture{Configuration: c}).Validate(); err != nil {
 			t.Errorf("configuration %q refused: %v", c, err)
 		}
+	}
+}
+
+// ---- the package-cache seed (muster #432) ------------------------------------
+
+// cachingCaps is a runtime that confines AND starts sessions from a cache seed.
+func cachingCaps() DriverCapabilities {
+	c := confinedCaps()
+	c.Sandbox.PackageCache = []PackageCacheMode{PackageCacheShared, PackageCachePrivate}
+	c.Sandbox.PackageManagers = PackageManagers()
+	return c
+}
+
+func seedPosture() Posture {
+	return Posture{PackageCache: &PosturePackageCache{
+		Seed: "/srv/seed", Managers: []PackageManager{PackageManagerCargo, PackageManagerGo, PackageManagerNpm},
+	}}
+}
+
+func TestPostureLower_APackageCacheLowersToACloneOfTheSeedAndImpliesConfinement(t *testing.T) {
+	p := seedPosture()
+	if !p.Confines() {
+		t.Fatal("a posture naming a seed must confine: nothing but the sandbox keeps a session from writing to it")
+	}
+	m, err := p.Lower(cachingCaps())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pc := m.Sandbox.PackageCache
+	if pc == nil || pc.Path != "/srv/seed" || pc.Mode != PackageCachePrivate || len(pc.Managers) != 3 {
+		t.Fatalf("lowered cache = %+v, want a private cache of the seed serving all three managers", pc)
+	}
+	if err := m.Sandbox.Validate(); err != nil {
+		t.Errorf("the lowered sandbox is not a valid sandbox: %v", err)
+	}
+	// The mapping owns its list: editing it must not edit the caller's posture.
+	pc.Managers[0] = PackageManagerNpm
+	if p.PackageCache.Managers[0] != PackageManagerCargo {
+		t.Error("the mapping shares its managers slice with the posture")
+	}
+}
+
+func TestPostureLower_ASharedPackageCacheIsLoweredAsAskedNotUpgraded(t *testing.T) {
+	p := seedPosture()
+	p.PackageCache.Mode = PackageCacheShared
+	m, err := p.Lower(cachingCaps())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := m.Sandbox.PackageCache.Mode; got != PackageCacheShared {
+		t.Errorf("mode = %q, want shared (offered, not recommended — never silently swapped)", got)
+	}
+}
+
+func TestPostureLower_APackageCacheIsRefusedWhereTheRuntimeCannotServeIt(t *testing.T) {
+	noMode := cachingCaps()
+	noMode.Sandbox.PackageCache = []PackageCacheMode{PackageCacheShared}
+	noManager := cachingCaps()
+	noManager.Sandbox.PackageManagers = []PackageManager{PackageManagerCargo, PackageManagerGo}
+	none := confinedCaps() // confines, but offers no cache at all (the multiplexer driver)
+	none.Sandbox.PackageCache, none.Sandbox.PackageManagers = []PackageCacheMode{}, []PackageManager{}
+
+	for name, c := range map[string]struct {
+		caps DriverCapabilities
+		want string
+	}{
+		"a runtime that cannot confine":    {plainCaps(), "cannot confine"},
+		"a runtime that offers no cache":   {none, "private package cache"},
+		"a mode the runtime does not have": {noMode, "private package cache"},
+		"a manager it cannot point":        {noManager, "npm_config_cache"},
+	} {
+		_, err := seedPosture().Lower(c.caps)
+		var fe *Error
+		if !errors.As(err, &fe) || fe.Kind != ErrorUnsupported || fe.Reason != ReasonPostureUnenforceable {
+			t.Errorf("%s: want a posture-unenforceable refusal, got %v", name, err)
+			continue
+		}
+		if !strings.Contains(fe.Message, c.want) {
+			t.Errorf("%s: refusal %q does not name %q", name, fe.Message, c.want)
+		}
+	}
+}
+
+func TestPostureLower_APackageCacheOnAssumedCapabilitiesIsLoweredNotRefused(t *testing.T) {
+	c := plainCaps()
+	c.Source = CapabilitiesAssumed
+	m, err := seedPosture().Lower(c)
+	if err != nil || m.Sandbox == nil || m.Sandbox.PackageCache == nil {
+		t.Fatalf("assumed capabilities say unknown, never incapable: %+v, %v", m, err)
+	}
+}
+
+func TestPostureValidate_PackageCache(t *testing.T) {
+	bad := map[string]*PosturePackageCache{
+		"no seed":            {Managers: []PackageManager{PackageManagerGo}},
+		"a relative seed":    {Seed: "seed", Managers: []PackageManager{PackageManagerGo}},
+		"an unclean seed":    {Seed: "/srv/../seed", Managers: []PackageManager{PackageManagerGo}},
+		"an unknown mode":    {Seed: "/srv/seed", Mode: "mirror", Managers: []PackageManager{PackageManagerGo}},
+		"no managers":        {Seed: "/srv/seed"},
+		"an unknown manager": {Seed: "/srv/seed", Managers: []PackageManager{"pip"}},
+		"a repeated manager": {Seed: "/srv/seed", Managers: []PackageManager{PackageManagerGo, PackageManagerGo}},
+	}
+	for name, pc := range bad {
+		if err := (Posture{PackageCache: pc}).Validate(); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	for _, mode := range []PackageCacheMode{"", PackageCachePrivate, PackageCacheShared} {
+		p := seedPosture()
+		p.PackageCache.Mode = mode
+		if err := p.Validate(); err != nil {
+			t.Errorf("mode %q: a valid posture was refused: %v", mode, err)
+		}
+	}
+}
+
+func TestPostureSupportFrom_PackageCache(t *testing.T) {
+	got := PostureSupportFrom(cachingCaps())
+	if len(got.PackageCache) != 2 || len(got.PackageManagers) != 3 {
+		t.Errorf("caching = %+v", got)
+	}
+	// Absent on a runtime that cannot offer one is an empty list, not a missing key.
+	got = PostureSupportFrom(plainCaps())
+	if got.PackageCache == nil || len(got.PackageCache) != 0 || got.PackageManagers == nil || len(got.PackageManagers) != 0 {
+		t.Errorf("plain = %+v (the cache lists must be empty, not absent)", got)
+	}
+}
+
+func TestPosturePackageCacheWireNames(t *testing.T) {
+	b, err := json.Marshal(seedPosture())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"packageCache":{"seed":"/srv/seed","managers":["cargo","go","npm"]}}`
+	if string(b) != want {
+		t.Errorf("wire form = %s, want %s", b, want)
 	}
 }

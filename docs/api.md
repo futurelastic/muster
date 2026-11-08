@@ -820,7 +820,8 @@ session's own private directory, unix-socket connects denied (a path rule does n
 connect, and the multiplexer and ssh-agent sockets are both reachable that way), and system
 services such as the clipboard and `open` denied. Add `readPaths`, `writePaths`, a
 `network` of `open` (default) or `closed` (loopback only), or a `packageCache`
-(`private` copy per session, or `shared`; the session finds it in `MUSTER_PACKAGE_CACHE`).
+(`private` copy per session, or `shared`; the session finds it in `MUSTER_PACKAGE_CACHE`, and
+for each package manager you list in `managers` in the variable that manager reads — below).
 A runtime that cannot enforce all of it has no `sandbox` entry in `GET /v1/runtimes` and answers
 `unsupported`; it never starts the session with less. `state.sandbox` reports the profile
 actually in force. Needs only `create`. Two things are yours: seed the repository's trunk
@@ -831,9 +832,9 @@ git on it only inside the same profile. See session-abstraction.md §2.1.
 the work needs, not how a runtime spells it — `attendance` (`attended` default, or `unattended`:
 no permission prompts), `files` (present: confine file access to the working directory and the
 session's private directory, plus `writePaths` / `readPaths` you name — a linked worktree's git
-common directory goes in `writePaths`), `network` (`open` or `closed`), `isolatedEnvironment` and
+common directory goes in `writePaths`), `network` (`open` or `closed`), `isolatedEnvironment`,
 `configuration` (`inherit` default, or `given`: the session loads only the configuration the create
-names, `isolateConfiguration` above) — and the service maps it onto each runtime's own permission mode,
+names, `isolateConfiguration` above) and `packageCache` (a seed the session starts from, below) — and the service maps it onto each runtime's own permission mode,
 pre-approval, sandbox and configuration switch. A runtime
 that cannot enforce all of it answers `unsupported` with `reason: "posture-unenforceable"` before
 anything starts; `GET /v1/runtimes` reports each runtime's `posture` (what it can enforce), and
@@ -853,6 +854,50 @@ cannot be combined with `sandbox`, `permissionMode`, `isolateEnvironment` or `is
 the first three keep working for one release and are **deprecated** in its favour, and
 `isolateConfiguration` is the spelling a relay forwards.
 `unattended` needs `send` as well as `create`; the rest needs only `create`.
+
+**A package-cache seed** (#432) is how many sessions share one warm cache without sharing a writable
+one. Every isolated session has its own `HOME`, so each downloads and unpacks its own language caches;
+on one machine 45 sessions held 23.35 GiB in their `home/` and `xdg/` directories, mostly Go modules,
+Go build cache, Cargo registry, npm cache and toolchains, and single sessions held up to 3.2 GiB.
+Name a seed in the posture and the session starts from a copy of it:
+
+```json
+"posture": { "attendance": "unattended",
+             "packageCache": { "seed": "/abs/seed", "managers": ["cargo", "go", "npm"] } }
+```
+
+`seed` is a directory on the machine the session runs on. It holds one directory per package manager:
+`cargo/` (read through `CARGO_HOME`), `go/` (the module cache itself, read through `GOMODCACHE`) and
+`npm/` (read through `npm_config_cache`). `managers` is required and names the managers the session
+uses, which is what decides the variables it is given: each points at that manager's directory **in the
+session's own copy** (`state.sandbox.packageCache` reports the copy's path, how it was made, and the
+managers). A manager whose directory the seed lacks, or has as a link, refuses the create, and so does a
+`env` entry (or a machine's `sessionEnv` entry) naming a variable the cache sets: those three names are
+yours to set only when no cache serves that manager. `mode` is `private` (the default) or `shared`.
+Naming a seed implies a confined session, as `unattended` does, because the protection of the seed is
+the sandbox's: a runtime that cannot confine, or does not offer the mode or a manager, answers
+`unsupported` with `reason: "posture-unenforceable"` before anything starts (`GET /v1/runtimes` lists
+`posture.packageCache` and `posture.packageManagers`). The same request spelled for the sandbox is
+`sandbox.packageCache` with `managers`; without `managers` the cache is announced in
+`MUSTER_PACKAGE_CACHE` only, as before.
+
+| Option | Disk | What it does to isolation |
+|---|---|---|
+| Per-session caches (no seed) | Worst: every session downloads its own | One session's writes never reach another |
+| **Seed cloned per session** (`private`, the default) | The seed once, plus what each session changes | One session's writes still never reach another or the seed. New trust: every session starts from the seed, so whatever refreshes it must not be a session, and the sandbox keeps sessions from writing to it |
+| `shared` writable cache | Best | Removes the wall between sessions: a session can plant content that a later session compiles or runs, and unpacked sources are not re-verified on each use. Offered, not recommended for an unattended session |
+
+Four things to plan for. **The seed is the operator's:** refreshing it is not something a session or this
+service does, and a session started from it afterwards sees the new content while a running one keeps the
+copy it started with. **Build output is not served:** a shared build directory holds artifacts that later
+sessions execute, so `GOCACHE` and a Cargo `target/` stay in each session's own space. **The copy adds
+to every create, and its cost is per file, not per byte.** On a seed of 6.6 GiB in about 140,000 files
+(a Go module cache, a Cargo registry and an npm cache) on APFS, `cp -cR` — one clone per file, which is
+what this service runs — took 88 to 105 s, a plain copy 180 s, and one `clonefile(2)` of the whole
+directory about 9 s. Keep a seed small, and read `state.sandbox.packageCache.copy`: `clone` means
+copy-on-write, `copy` means the filesystem could not clone (the seed and the session directory are on
+different volumes) and the session holds the seed's full size. **A clone counts at full size in
+`state.scratch`,** so that figure stops being a measure of the disk the session really uses.
 
 **Providers, and models, an opencode session may use** (#293, #401) are the operator's decision,
 not a field: `FLEET_OPENCODE_PROVIDERS` (comma-separated entries) is the whole allowed set, and
