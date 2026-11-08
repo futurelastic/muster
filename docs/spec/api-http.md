@@ -2207,12 +2207,18 @@ sends no key, and a relay passes the block through untouched. A change in any
 figure fires `session.state` (§4); it never changes `status`.
 
 `state.scratch` — when present — is how much the session's scratch directory
-holds (muster #419): `{"bytes":3100000000,"asOf":"…","partial":true}`. `bytes` is
-the sum of the sizes of the regular files under it, a link not followed; `asOf` is
-when a driver last walked the directory (at most every few minutes, off the request
-path), not when the state was read; `partial` is present and true when the walk
-stopped at its bound and `bytes` is a lower bound. **Absent means no figure, never
-zero.** A peer built before the field sends no key, and a relay passes the block
+holds (muster #419, #431): `{"bytes":49200000000,"areas":{"tmp":11300000000,"home":21400000000,"xdg":16500000000},"asOf":"…","partial":true}`.
+`bytes` is the sum of the sizes of the regular files under the session's **whole**
+directory, a link not followed, and equals the sum of `areas`; `areas` says where
+they sit (the `opencode` driver names `tmp`, `home` and `xdg`, and `other` only when
+the directory holds something outside them). It counts apparent size, so it can
+overstate the space in use: copy-on-write clones count at full size. `asOf` is when a
+driver last walked the directory (at most every few minutes, off the request path),
+not when the state was read; `partial` is present and true when the walk stopped at
+its bound or could not read part of the tree, and `bytes` and the areas are then lower
+bounds. A session that is `dead` still has a figure while its directory exists.
+**Absent means no figure, never zero.** A peer built before the field sends no key
+(and one built before `areas` sends none of those), and a relay passes the block
 through untouched. It is **not** a material change (§4): it moves with every file
 written, so a feed that fired on it would storm.
 

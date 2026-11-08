@@ -1628,7 +1628,7 @@ not in the response.
       "lastTurn": { "at": "…", "input": 311, "output": 42, "cacheRead": 3013, "cacheWrite": 60 },
       "context": { "tokens": 142000, "window": null, "model": "…", "at": "…" }
     },
-    "scratch": { "bytes": 3100000000, "asOf": "…" }
+    "scratch": { "bytes": 3100000000, "areas": { "tmp": 2900000000, "home": 150000000, "xdg": 50000000 }, "asOf": "…" }
   }
 }
 ```
@@ -1707,16 +1707,26 @@ arrive. Whether the context is "full" is the client's policy; nothing here judge
 it. Only counts, a model name and a timestamp leave the runtime's record — no
 content. A change fires `session.state`.
 
-**`scratch`** (#419) — how much the session's scratch directory holds, so a
+**`scratch`** (#419, #431) — how much the session's scratch directory holds, so a
 session waiting for review on gigabytes of test fixtures can be seen before the
-disk is full. `bytes` is the sum of the sizes of the regular files under it (not
-the space they occupy; a link is not followed). It is measured in the background,
-bounded, at most every few minutes — never on the request path — so `asOf` says
-when, and `partial: true` means the walk stopped at its bound or could not read part
-of the tree and `bytes` is a lower bound. **Absent means no figure** (no such
-directory, or not measured yet), never zero. Nothing is removed while the session
-lives; closing it removes the directory. Not a material change: it moves with every
-file written, so it does not fire `session.state`.
+disk is full. `bytes` is the sum of the sizes of the regular files under the
+session's **whole** directory (not the space they occupy; a link is not followed) —
+the same directory closing the session removes — and `areas` splits it: `tmp` is what
+the session's tools wrote as temporary files, `home` and `xdg` are the runtime's
+configuration and data and the caches and toolchains its tools downloaded, and `other`
+appears only if the directory holds something outside those three. `bytes` is always
+the sum of `areas`, so a client can tell disposable build output from caches without
+knowing the layout. **The figure can overstate the space in use**: it counts apparent
+size, so copy-on-write clones count at full size each time they appear. It is
+measured in the background, bounded, at most every few minutes — never on the request
+path — so `asOf` says when, and `partial: true` means the walk stopped at its bound
+or could not read part of the tree and `bytes` and the areas are lower bounds. The
+bound is well above what a session's directory has held, so a large tree is measured
+in full. **A dead session still has a figure** while its directory exists: the
+directory stays until the session is closed. **Absent means no figure** (no such
+directory, the directory is gone, or not measured yet), never zero. Nothing is removed
+while the session lives; closing it removes the directory. Not a material change: it
+moves with every file written, so it does not fire `session.state`.
 
 **`lastTurn` in a listing** (#426) — on an `opencode` runtime a session whose newest
 turn ended on a provider error reads `idle` with `state.lastTurn: {"outcome": "failed",

@@ -333,13 +333,14 @@ SessionState {
   sandbox?       : SandboxState    // the profile the session runs under (#281): mechanism, denied classes, network, granted paths (defaults included), package cache; absent = not sandboxed
   warnings?      : Warning[]       // footer notices the driver read below the composer (#230); absent = none found, not merely unobserved
   usage?         : Usage           // what the session has spent, as its RUNTIME reports it (#285): summed over every request; absent = not yet known, never zero
-  scratch?       : ScratchUsage    // how much the session's scratch directory holds (#419); absent = no such directory, or not measured yet — never zero
+  scratch?       : ScratchUsage    // how much the session's scratch directory holds (#419, #431); absent = no such directory, or not measured yet — never zero
 }
 
 ScratchUsage {
-  bytes    : integer       // the sum of the sizes of the regular files under the directory, as the file system reports them (not the space they occupy); a link is not followed
+  bytes    : integer       // the sum of the sizes of the regular files under the session's WHOLE directory, as the file system reports them (not the space they occupy: copy-on-write clones count at full size); a link is not followed (#431)
+  areas?   : map<string,integer> // `bytes` split by where the files sit, keyed by a name the driver chooses; the figures add up to `bytes` (#431). absent = the driver does not split the directory
   asOf     : Timestamp     // when the directory was measured, not when this state was read — a driver measures at most every few minutes, off the request path
-  partial? : boolean       // true when the walk stopped at its bound (a very large tree); `bytes` is then a lower bound
+  partial? : boolean       // true when the walk stopped at its bound (a very large tree) or could not read part of it; `bytes` and every area are then lower bounds
 }
 
 Usage {
@@ -613,22 +614,44 @@ Stall {
 > figure fires `session.state` (§4 of api-http.md): once per completed request,
 > never per repaint. It never changes `status`.
 
-> **`scratch` is how much the session's scratch directory holds (muster issue
-> #419).** A session that waits for a person for a day can sit on gigabytes of
-> test fixtures and build output in its temporary directory, and nothing said so
-> until the disk was full. `bytes` is the sum of the sizes of the regular files
-> under the directory, as the file system reports them — not the space they occupy,
-> and a link is not followed. It is **measured, not live**: a driver walks the
-> directory in the background, bounded, at most every few minutes, and never on the
-> request path, so `asOf` says when and a reader seeing a size that stopped moving
-> can tell a quiet directory from a reader that stopped reading. `partial` is true
-> when the walk stopped at its bound or could not read part of the tree, so `bytes`
-> is then a lower bound. **Absent means no figure** — the driver keeps no such
-> directory for the session, or has not measured it yet — **never zero** (§5.7).
-> Nothing is removed while the session lives, because a tool may be using the
-> files; closing the session removes the directory (the opencode driver). It is not
-> a material change: it moves with every file written, so a feed that fired on it
-> would storm. A poller reads it off the state.
+> **`scratch` is how much the session's scratch directory holds (muster issues
+> #419, #431).** A session that waits for a person for a day can sit on gigabytes of
+> test fixtures, build output and tool caches in its own directory, and nothing said
+> so until the disk was full. `bytes` is the sum of the sizes of the regular files
+> under the session's **whole** directory, as the file system reports them — not the
+> space they occupy, and a link is not followed. It is the whole directory because
+> closing the session removes all of it: a figure for the temporary files alone read
+> 8.5 GiB for 45 sessions whose directories held 49.2 GiB, the rest being the caches
+> and toolchains their tools had fetched and the temporary files of sessions that had
+> died. **It can overstate the space in use**, because it counts apparent size:
+> copy-on-write clones, and files hard-linked in several places, count at full size
+> each time they appear.
+>
+> `areas` says where the bytes sit, so a client can tell disposable build output from
+> caches and the runtime's own state. The keys are the driver's own; the `opencode`
+> driver reports `tmp` (what the session's tools write as temporary files), `home`
+> and `xdg` (the runtime's configuration and data, and the caches and toolchains its
+> tools downloaded), and `other` — present only when the directory holds something
+> outside those three. `bytes` is always the sum of the areas.
+>
+> **A dead session has a figure for as long as its directory exists.** The directory
+> outlives the process until the session is closed, so a session that is `dead`
+> still reports what it holds; the figure goes when the directory does.
+>
+> It is **measured, not live**: a driver walks the directory in the background,
+> bounded, at most every few minutes, and never on the request path, so `asOf` says
+> when and a reader seeing a size that stopped moving can tell a quiet directory from
+> a reader that stopped reading. A walk is bounded so that it cannot cost the machine
+> more than it is worth — by the number of entries, by time, and by how many walks run
+> at once — and the bounds are well above what a session's directory has held, so a
+> large tree is measured in full. `partial` is true when the walk stopped at its
+> bound or could not read part of the tree, so `bytes` and every area are then lower
+> bounds. **Absent means no figure** — the driver keeps no such directory for the
+> session, the directory is gone, or it has not measured it yet — **never zero**
+> (§5.7). Nothing is removed while the session lives, because a tool may be using the
+> files; closing the session removes the directory (the opencode driver). It is not a
+> material change: it moves with every file written, so a feed that fired on it would
+> storm. A poller reads it off the state.
 
 > **`warnings` lists footer notices the driver read below the composer's closing
 > rule (muster issue #230), the same region `controlChannel` and

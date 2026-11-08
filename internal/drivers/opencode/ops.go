@@ -604,8 +604,12 @@ func (d *Driver) State(ctx context.Context, req fleet.Request, ref fleet.Session
 			} else {
 				st.Usage = d.usageForState(ctx, known.srv, ref.ID, st.Status == fleet.StatusIdle)
 			}
-			st.Scratch = d.scratchOf(known.srv) // muster #419: the last walk's figure, never a wait
 		}
+		// muster #419, #431: the directory is measured, not the server asked, so a
+		// session that is dead, or whose server could not be read, still has the
+		// figure while its directory exists — it stays until the session is closed.
+		// The last walk's figure, never a wait.
+		st.Scratch = d.scratchOf(known.srv)
 	}
 	return st, nil
 }
@@ -1069,9 +1073,9 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 			// muster #285: what a State read or a turn's end last learned, with no
 			// request made here; AsOf says how old it is.
 			st.Usage = d.usageSnapshot(id, st.Status == fleet.StatusIdle)
-			if st.Status != fleet.StatusDead {
-				st.Scratch = d.scratchOf(info.srv) // muster #419
-			}
+			// muster #419, #431: a dead session's directory outlives its process, so
+			// the figure does too.
+			st.Scratch = d.scratchOf(info.srv)
 		}
 		startedAt := info.startedAt
 		sess := fleet.Session{
