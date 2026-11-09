@@ -2310,6 +2310,18 @@ and size, never a path). A directory that fails only the last check is **never r
 automatically**; `muster doctor` counts it, in the `runtime.opencode.dirs` row, apart from the
 leftovers the service removes by itself, and removing it is a person's decision.
 
+A directory that *does* have a record can still be held for good (#445). A session whose create
+carried caller-supplied environment cannot be relaunched by a restart, because the values were never
+kept; it is adopted and listed `unknown` (§7.5), with its record and its directory, until the caller that
+created it closes it — or `dead`, if its server exited since — and a caller that never comes back leaves
+the whole runtime store and package cache behind. `muster doctor` lists such sessions that run no server in
+the `runtime.opencode.sessions` row, oldest first,
+each with its id, its age and the size of its directory, and only as a warning: it removes nothing, and
+reaping stays with the caller, because a session listed `unknown` is still one somebody created. A
+session whose directory a running server holds is not listed (the service is up and has not restarted
+since the create), and neither is one whose relaunch failed for a reason that may pass — it is tried
+again at every start, and from a record it cannot be told from a service that is stopped.
+
 **What isolation does not do, stated plainly.** (1) The model-provider key a session needs is *in
 its environment*, and the runtime exposes that environment to its tool shell (`env` lists it).
 Isolation scopes every *other* credential; it cannot protect the model key itself, so give each lane
