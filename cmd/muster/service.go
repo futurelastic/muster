@@ -16,6 +16,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -82,6 +83,10 @@ func usageService() string {
 		"  status     unit present, loaded, healthy, and which binary it runs; exits 1 unless all hold",
 		"  uninstall  unload and remove the unit; configuration, tokens, state and the binary stay",
 		"  --purge    with uninstall: also delete them (the tokens go too)",
+		"",
+		"install keeps every other FLEET_* variable and every LANG / LC_* variable the unit already",
+		"has, so a runtime switched on by the environment survives an update; status lists their",
+		"names. FLEET_STATE_DIR and FLEET_CONFIG are the layout's: a different value is reset, said aloud.",
 		"",
 		"Peers, inbox delivery and Windows are not covered: docs/install.md continues there.",
 	}, "\n")
@@ -248,23 +253,54 @@ func svcLayout(goos, home string) (svcPaths, error) {
 	return p, nil
 }
 
-// svcSettings are the three values an operator may choose; the rest of the
-// unit's environment follows from the layout.
+// svcSettings are the three values an operator may choose with a flag; the
+// state directory and the table path follow from the layout. Carried is
+// everything else an operator put in the unit by hand (muster #447): the
+// variables that switch a runtime on, the locale. Install does not know them and
+// must not drop them, so it reads them back and writes them out again.
 type svcSettings struct {
 	Machine string
 	Addr    string
 	Tmux    string
+	Carried [][2]string // name, value; sorted by name; never one of install's own
 }
 
-// svcVars is the unit's whole environment, in a fixed order.
+// svcVars is the unit's whole environment, in a fixed order: the variables
+// install owns, then the carried ones by name.
 func svcVars(p svcPaths, s svcSettings) [][2]string {
-	return [][2]string{
+	vars := [][2]string{
 		{"FLEET_MACHINE", s.Machine},
 		{"FLEET_ADDR", s.Addr},
 		{"FLEET_STATE_DIR", p.StateDir},
 		{"FLEET_CONFIG", p.Config},
 		{"FLEET_TMUX_BIN", s.Tmux},
 	}
+	return append(vars, s.Carried...)
+}
+
+// carriedName reports whether a variable in an existing unit is one install
+// keeps: any FLEET_ variable (the service reads no other prefix) and the locale,
+// LANG and LC_*. Anything else in a hand-edited unit is not carried, and the
+// installed unit is the whole of what the service gets.
+var reCarriedName = regexp.MustCompile(`^(?:FLEET_[A-Z0-9_]+|LANG|LC_[A-Z_]+)$`)
+
+// carriedVars picks, from the variables a unit sets, the ones install keeps:
+// a carried name that install does not itself write. Install writes its own
+// from a flag, the unit's earlier value or the layout, so a copy here would be a
+// second, conflicting definition.
+func carriedVars(vars map[string]string) [][2]string {
+	own := map[string]bool{}
+	for _, kv := range svcVars(svcPaths{}, svcSettings{}) {
+		own[kv[0]] = true
+	}
+	var out [][2]string
+	for k, v := range vars {
+		if reCarriedName.MatchString(k) && !own[k] {
+			out = append(out, [2]string{k, v})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i][0] < out[j][0] })
+	return out
 }
 
 func svcEnviron(p svcPaths, s svcSettings) []string {
@@ -334,7 +370,7 @@ func (e svcEnv) findTmux() (string, error) {
 
 func renderSystemdUnit(p svcPaths, s svcSettings) string {
 	var b strings.Builder
-	b.WriteString("# Written by `muster service install`; the next run rewrites it.\n")
+	b.WriteString("# Written by `muster service install`; the next run rewrites it and keeps any other FLEET_*, LANG or LC_* variable set here.\n")
 	b.WriteString("[Unit]\nDescription=muster: the session service\nAfter=network.target\n\n")
 	b.WriteString("[Service]\nType=simple\n")
 	b.WriteString("ExecStart=" + systemdQuote(p.Bin) + " serve\n")
@@ -361,7 +397,7 @@ func renderLaunchdPlist(p svcPaths, s svcSettings) string {
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
 	b.WriteString(`<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">` + "\n")
-	b.WriteString("<!-- Written by `muster service install`; the next run rewrites it. -->\n")
+	b.WriteString("<!-- Written by `muster service install`; the next run rewrites it and keeps any other FLEET_*, LANG or LC_* variable set here. -->\n")
 	b.WriteString("<plist version=\"1.0\">\n<dict>\n")
 	b.WriteString("\t<key>Label</key>\n\t<string>" + svcLabel + "</string>\n")
 	b.WriteString("\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>" + x(p.Bin) + "</string>\n\t\t<string>serve</string>\n\t</array>\n")
@@ -388,9 +424,9 @@ func xmlEscape(s string) string {
 }
 
 var (
-	reSystemdEnv = regexp.MustCompile(`(?m)^Environment="((?:[^"\\]|\\.)*)"$`)
+	reSystemdEnv = regexp.MustCompile(`(?m)^Environment=(.*?)\r?$`)
 	reSystemdExe = regexp.MustCompile(`(?m)^ExecStart="((?:[^"\\]|\\.)*)"`)
-	rePlistVar   = regexp.MustCompile(`<key>(FLEET_[A-Z_]+)</key>\s*<string>([^<]*)</string>`)
+	rePlistVar   = regexp.MustCompile(`<key>(FLEET_[A-Z0-9_]+|LANG|LC_[A-Z_]+)</key>\s*<string>([^<]*)</string>`)
 	rePlistExe   = regexp.MustCompile(`(?s)<key>ProgramArguments</key>\s*<array>\s*<string>([^<]*)</string>`)
 )
 
@@ -407,10 +443,54 @@ func systemdUnescape(s string) string {
 	return b.String()
 }
 
-// parseUnit reads back the settings and the binary path from a unit this
-// command wrote, so a rerun without flags keeps what an earlier run chose.
-func parseUnit(goos, text string) (s svcSettings, bin string) {
-	vars := map[string]string{}
+// systemdWords splits the value of an Environment= line the way systemd does:
+// words separated by white space, a word optionally quoted with " or ', a
+// backslash escaping the next character and %% standing for one %. A unit this
+// command wrote has one quoted assignment per line, and an operator adding a
+// variable by hand writes it quoted or not, several to a line or one.
+func systemdWords(s string) []string {
+	var words []string
+	var cur []byte
+	started := false
+	var quote byte
+	flush := func() {
+		if started {
+			words = append(words, string(cur))
+		}
+		cur, started = nil, false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '\\' && i+1 < len(s):
+			i++
+			cur, started = append(cur, s[i]), true
+		case c == '%' && i+1 < len(s) && s[i+1] == '%':
+			i++
+			cur, started = append(cur, '%'), true
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			} else {
+				cur = append(cur, c)
+			}
+		case c == '"' || c == '\'':
+			quote, started = c, true
+		case c == ' ' || c == '\t':
+			flush()
+		default:
+			cur, started = append(cur, c), true
+		}
+	}
+	flush()
+	return words
+}
+
+// parseUnitVars reads back the carried-name variables and the binary path from
+// a unit. Only the names install writes or keeps are read (reCarriedName), so
+// the answer is never a stand-in for the unit's whole environment.
+func parseUnitVars(goos, text string) (vars map[string]string, bin string) {
+	vars = map[string]string{}
 	switch goos {
 	case "darwin":
 		for _, m := range rePlistVar.FindAllStringSubmatch(text, -1) {
@@ -421,15 +501,36 @@ func parseUnit(goos, text string) (s svcSettings, bin string) {
 		}
 	default:
 		for _, m := range reSystemdEnv.FindAllStringSubmatch(text, -1) {
-			if k, v, ok := strings.Cut(systemdUnescape(m[1]), "="); ok {
-				vars[k] = v
+			words := systemdWords(m[1])
+			if len(words) == 0 {
+				// An empty Environment= clears what the lines above it set.
+				vars = map[string]string{}
+				continue
+			}
+			for _, w := range words {
+				if k, v, ok := strings.Cut(w, "="); ok && reCarriedName.MatchString(k) {
+					vars[k] = v
+				}
 			}
 		}
 		if m := reSystemdExe.FindStringSubmatch(text); m != nil {
 			bin = systemdUnescape(m[1])
 		}
 	}
-	return svcSettings{Machine: vars["FLEET_MACHINE"], Addr: vars["FLEET_ADDR"], Tmux: vars["FLEET_TMUX_BIN"]}, bin
+	return vars, bin
+}
+
+// settingsFrom is what the variables a unit sets say about the three values a
+// flag can choose, and which others are to be kept (muster #447).
+func settingsFrom(vars map[string]string) svcSettings {
+	return svcSettings{Machine: vars["FLEET_MACHINE"], Addr: vars["FLEET_ADDR"], Tmux: vars["FLEET_TMUX_BIN"], Carried: carriedVars(vars)}
+}
+
+// parseUnit reads back the settings and the binary path from a unit this
+// command wrote, so a rerun without flags keeps what an earlier run chose.
+func parseUnit(goos, text string) (s svcSettings, bin string) {
+	vars, bin := parseUnitVars(goos, text)
+	return settingsFrom(vars), bin
 }
 
 // ---- service-manager calls ---------------------------------------------
@@ -627,11 +728,24 @@ func svcInstall(ctx context.Context, e svcEnv, o svcInstallOpts) error {
 		return err
 	}
 	// Settings: a flag wins, then what the unit already says, then a default.
+	// What the unit says beyond those three is kept as it is (muster #447): an
+	// update runs this command, and a variable that switches a runtime on must
+	// not be gone when the service comes back.
 	var cur svcSettings
+	var notes []string
 	if raw, err := os.ReadFile(p.Unit); err == nil {
-		cur, _ = parseUnit(e.GOOS, string(raw))
+		vars, _ := parseUnitVars(e.GOOS, string(raw))
+		cur = settingsFrom(vars)
+		// The state directory and the table are the layout's, not the unit's:
+		// install makes the key and the table where the layout says, and doctor
+		// reads them there. A different value in the unit is reset, said aloud.
+		for _, kv := range [][2]string{{"FLEET_CONFIG", p.Config}, {"FLEET_STATE_DIR", p.StateDir}} {
+			if got, ok := vars[kv[0]]; ok && got != kv[1] {
+				notes = append(notes, fmt.Sprintf("the unit sets %s=%s; install owns it and writes %s", kv[0], got, kv[1]))
+			}
+		}
 	}
-	s := svcSettings{Machine: firstNonEmpty(o.Machine, cur.Machine), Addr: firstNonEmpty(o.Addr, cur.Addr, svcDefaultAddr), Tmux: firstNonEmpty(o.Tmux, cur.Tmux)}
+	s := svcSettings{Machine: firstNonEmpty(o.Machine, cur.Machine), Addr: firstNonEmpty(o.Addr, cur.Addr, svcDefaultAddr), Tmux: firstNonEmpty(o.Tmux, cur.Tmux), Carried: cur.Carried}
 	if s.Machine == "" {
 		s.Machine = shortHost(e.Hostname)
 	}
@@ -648,6 +762,9 @@ func svcInstall(ctx context.Context, e svcEnv, o svcInstallOpts) error {
 
 	rep := &svcReport{w: e.Out}
 	fmt.Fprintf(e.Out, "muster service install (%s, machine %q, %s)\n", e.GOOS, s.Machine, s.Addr)
+	for _, n := range notes {
+		fmt.Fprintf(e.Out, "  note      %s\n", n)
+	}
 
 	binChanged, err := installBinary(e.Exe, p.Bin)
 	if err != nil {
@@ -707,6 +824,9 @@ func svcInstall(ctx context.Context, e svcEnv, o svcInstallOpts) error {
 		return fmt.Errorf("writing the unit: %w", err)
 	}
 	rep.line("unit", unitChanged, p.Unit)
+	if len(s.Carried) > 0 {
+		fmt.Fprintf(e.Out, "  carried   %d variable(s) kept from the unit: %s\n", len(s.Carried), carriedNames(s.Carried))
+	}
 
 	// doctor, as the unit will run: its environment and nothing else.
 	args := []string{"doctor", "--offline"}
@@ -766,6 +886,16 @@ func svcInstall(ctx context.Context, e svcEnv, o svcInstallOpts) error {
 	}
 	e.printNext(p, s)
 	return nil
+}
+
+// carriedNames lists the names, never the values: a unit can hold a token the
+// service reads, and the report goes to a terminal and a log.
+func carriedNames(c [][2]string) string {
+	names := make([]string, len(c))
+	for i, kv := range c {
+		names[i] = kv[0]
+	}
+	return strings.Join(names, ", ")
 }
 
 func (e svcEnv) printNext(p svcPaths, s svcSettings) {
@@ -912,6 +1042,11 @@ func svcStatus(ctx context.Context, e svcEnv) error {
 		fmt.Fprintf(e.Out, "%-9s %-8s %s\n", what, state, detail)
 	}
 	row("unit", true, p.Unit)
+	if len(s.Carried) > 0 {
+		row("env", true, "kept from the unit across installs: "+carriedNames(s.Carried))
+	} else {
+		row("env", true, "nothing beyond what install writes")
+	}
 	ver := "cannot run it"
 	if out, err := e.Run(ctx, nil, bin, "--version"); err == nil {
 		ver = strings.TrimSpace(string(out))

@@ -50,6 +50,16 @@ and restarts the service when it exits.
   an npm upgrade it replaces the installed binary and restarts the service. A rerun
   without flags keeps the machine id, address and tmux path the unit already has;
   `--machine`, `--addr` and `--tmux` change them.
+- **A variable you added to the unit stays.** Some runtimes are switched on only
+  by the environment (`FLEET_RUNTIME_OPENCODE=1` with `FLEET_OPENCODE_BIN` and the
+  rest of the opencode settings, `FLEET_INBOX_INDEX`), and the locale (`LANG`,
+  `LC_*`) decides what a session's tools can print. Add them to the unit by hand
+  and every later run, an update included, writes them back; without this an update
+  would turn the runtime off. Every `FLEET_*` name and `LANG` / `LC_*` is kept, and
+  nothing else is: a variable of any other name is not carried. `FLEET_STATE_DIR`
+  and `FLEET_CONFIG` are the layout's: a different value in the unit is reset, and
+  the run says so. The run prints the names it kept (never the values), and
+  `muster service status` lists the same names in an `env` row.
 - **Loopback only.** `--addr` takes a loopback `HOST:PORT` with a fixed port; any
   other address is refused. Putting the service on a network interface is step 3
   of the manual procedure.
