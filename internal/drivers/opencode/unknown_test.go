@@ -183,8 +183,10 @@ func TestUnknownSessions_MeasuringIsBounded(t *testing.T) {
 		f.recordWith(sessionRecord{ID: fmt.Sprintf("ses_%d", i), StartedAtMs: int64(i), EnvNames: []string{"K"},
 			Dir: f.dir(fmt.Sprintf("muster-opencode-%d", i), time.Hour, remnantTmp)})
 	}
-	// No time to measure: every session is still reported, none with a figure.
-	rep, err := unknownSessionReport(f.storeDir, f.root, noServers, time.Nanosecond)
+	// No time to measure: every session is still reported, none with a figure. The budget
+	// is zero, not "very small": a clock that has not ticked between two reads (Windows's
+	// is coarse) leaves a one-nanosecond budget a nanosecond to spend, and the walk runs.
+	rep, err := unknownSessionReport(f.storeDir, f.root, noServers, 0)
 	if err != nil || len(rep.Sessions) != 3 {
 		t.Fatalf("report = %+v, %v", rep, err)
 	}

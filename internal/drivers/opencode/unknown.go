@@ -117,7 +117,8 @@ func UnknownSessions(stateDir string) (UnknownReport, error) {
 
 // unknownSessionReport is UnknownSessions with the process listing and the time to
 // measure given, so a test on any platform can say which servers are running and how
-// long the walks may take.
+// long the walks may take. A budget of zero measures nothing: every session is still
+// reported, without a figure.
 func unknownSessionReport(storeDir, root string, scan func(string) ([]serverProc, int, error), budget time.Duration) (UnknownReport, error) {
 	servers, uninspected, err := scan(root)
 	if err != nil {
