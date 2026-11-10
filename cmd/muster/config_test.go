@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/futurelastic/muster/internal/service"
 	"github.com/futurelastic/muster/internal/sessionenv"
 )
 
@@ -585,5 +586,47 @@ func TestLoadConfigRejectsAMisspelledPrincipalScope(t *testing.T) {
 	_, err := loadConfig(path)
 	if err == nil || !strings.Contains(err.Error(), `scope "locla"`) || !strings.Contains(err.Error(), `"ui"`) {
 		t.Errorf("loadConfig error = %v, want one naming the principal and the bad scope", err)
+	}
+}
+
+// muster #450: profilingEndpoint is off unless the file says true, and an absent
+// key must not read as on.
+func TestLoadConfigReadsProfilingEndpoint(t *testing.T) {
+	for body, want := range map[string]bool{
+		`{"principals": [{"name": "op", "token": "tok"}], "profilingEndpoint": true}`:  true,
+		`{"principals": [{"name": "op", "token": "tok"}], "profilingEndpoint": false}`: false,
+		`{"principals": [{"name": "op", "token": "tok"}]}`:                             false,
+	} {
+		path := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := loadConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.ProfilingEndpoint != want {
+			t.Errorf("%s: ProfilingEndpoint = %v, want %v", body, cfg.ProfilingEndpoint, want)
+		}
+	}
+}
+
+// And the debug grant is one a config can name, like any other.
+func TestConfigCanGrantDebug(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	body := `{"principals": [{"name": "op", "token": "tok", "grants": ["debug"]}]}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps, err := cfg.principals()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ps) != 1 || !ps[0].Allows(service.GrantDebug) {
+		t.Errorf("principals = %+v, want op holding debug", ps)
 	}
 }

@@ -1,10 +1,15 @@
 package service
 
 import (
+	"context"
+	"fmt"
 	"log"
 	"net/http"
+	"strconv"
+	"time"
 
 	fleet "github.com/futurelastic/muster"
+	"github.com/futurelastic/muster/internal/driver"
 )
 
 // §6 requirement 4: "Log every remote-originated mutation — actor, verb,
@@ -127,12 +132,60 @@ func logActingDrop(p Principal, r *http.Request) {
 		callerFor(p, r).Principal, routeOf(r), a.Claimed, a.Dropped)
 }
 
+// requestTiming is what a request that wants its duration audited carries
+// (muster #450): when it started, and the phases anything under it noted.
+type requestTiming struct {
+	start  time.Time
+	phases *driver.Phases
+}
+
+type timingKey struct{}
+
+// withTiming starts the clock on r and lets drivers note phases under it
+// (driver.NotePhase). Called where an audited mutation begins — mutating() and
+// the gates that stand in for it — so the line logMutation writes afterwards can
+// say how long it took without every handler passing a stopwatch around.
+func withTiming(r *http.Request) *http.Request {
+	t := &requestTiming{start: time.Now(), phases: &driver.Phases{}}
+	ctx := context.WithValue(r.Context(), timingKey{}, t)
+	return r.WithContext(driver.WithPhases(ctx, t.phases))
+}
+
+func timingOf(r *http.Request) (*requestTiming, bool) {
+	t, ok := r.Context().Value(timingKey{}).(*requestTiming)
+	return t, ok
+}
+
+// logMutation writes the audit line of a mutation that ran.
+//
+// # took= and phase.* (muster #450)
+//
+// A create that took 33 s used to log exactly what a create that took 40 ms
+// logged, so where the time went could only be estimated from the caller's side.
+// The line now ends with `took=<ms>` — whole milliseconds from the moment
+// the verb was admitted to the moment the handler returned — and, when a
+// handler or a driver noted any, one `phase.<name>=<ms>` token each, in the order
+// they finished. Both are APPENDED, so anything that read the line up to
+// status= still reads it.
+//
+// Every mutating verb carries took=, not only create: it is one field, the
+// question "was this slow" is the same for all of them, and a line that carried it
+// for one verb would read as though the others had been measured and found
+// instant. phase.* is only what was actually measured; a verb with no phases
+// prints none rather than a zero.
 func logMutation(p Principal, g Grant, target fleet.MachineId, r *http.Request, status int) {
 	if g == GrantRead {
 		return // reads are not mutations; logging them would drown the signal
 	}
-	log.Printf("audit: actor=%q verb=%s route=%s target=%s/%s outcome=%s status=%d",
+	line := fmt.Sprintf("audit: actor=%q verb=%s route=%s target=%s/%s outcome=%s status=%d",
 		actorOf(p, r), g, routeOf(r), target, r.PathValue("id"), outcomeOf(status), status)
+	if t, ok := timingOf(r); ok {
+		line += " took=" + strconv.FormatInt(driver.Millis(time.Since(t.start)), 10)
+		if f := t.phases.Fields(); f != "" {
+			line += " " + f
+		}
+	}
+	log.Print(line)
 }
 
 func logDenied(p Principal, g Grant, target fleet.MachineId, r *http.Request) {

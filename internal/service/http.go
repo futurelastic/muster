@@ -74,6 +74,13 @@ type Config struct {
 	// sessions to mutation. That is backwards, and it was found by
 	// deploying rather than by reasoning.
 	AllowPeerRelay bool
+
+	// Profiling switches the profiling endpoint on (GET /v1/debug/pprof/…, muster
+	// #450). Off by default, and independent of the debug grant: both must
+	// hold. The operator sets it in the config file (`profilingEndpoint`), per
+	// machine and at start, so a machine nobody is investigating offers nothing
+	// to profile.
+	Profiling bool
 }
 
 // NewMux builds the routing skeleton of api-http.md §3 over svc, using
@@ -126,6 +133,12 @@ func NewMux(svc *Service, cfg Config) *http.ServeMux {
 	// body is read, which is why this route authenticates by its headers.
 	mux.HandleFunc("GET /v1/machine-list", withAuth(svc, cfg, reading(handleGetMachineList(cfg))))
 	mux.HandleFunc("PUT /v1/machine-list", withAuthDeferringBody(svc, cfg, pushListGate(svc, handlePutMachineList(cfg))))
+	// The process's own profiles, for an operator who must see where time goes
+	// (#450). Always registered, so every refusal is an error envelope rather than
+	// the mux's plain 404; debugGate decides who gets in and whether the machine
+	// offers it at all.
+	mux.HandleFunc("GET /v1/debug/pprof/{$}", withAuth(svc, cfg, debugGate(svc, cfg, handleDebugIndex())))
+	mux.HandleFunc("GET /v1/debug/pprof/{name}", withAuth(svc, cfg, debugGate(svc, cfg, handleDebugProfile(svc))))
 
 	return mux
 }
@@ -229,6 +242,10 @@ func principalOf(r *http.Request) (Principal, bool) {
 func mutating(svc *Service, cfg Config, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		target := fleet.MachineId(r.PathValue("machine"))
+
+		// The clock starts when the verb is admitted, so the audit line can say
+		// how long it ran and which phases a handler or driver noted (#450).
+		r = withTiming(r)
 
 		// The acting-person claim is decided once, here, before anything builds a
 		// Caller or writes an audit line from the request (muster #349).
@@ -1264,7 +1281,9 @@ func handleCreateSession(svc *Service) http.HandlerFunc {
 		// create has no id yet to resolve existence-first against — that is
 		// exactly the "genuine miss" shape resolveSessionDriver falls to the
 		// configured default for when body.Runtime names none (§60).
+		resolveStart := time.Now()
 		d, resolvedRuntime, via, resErr := svc.resolveSessionDriver(r.Context(), requestFrom(r), machine, "", body.Runtime, parseDeadline(r))
+		driver.NotePhase(r.Context(), "resolve", resolveStart)
 		if resErr != nil {
 			writeError(w, resErr)
 			return
@@ -1366,7 +1385,13 @@ func handleCreateSession(svc *Service) http.HandlerFunc {
 		ctx, cancel := context.WithTimeout(r.Context(), deadline)
 		defer cancel()
 
+		// muster #450: the phases a slow create can be explained by. `create` is
+		// the driver's whole Create — starting the runtime, or the round trip to
+		// the peer that does — and a driver notes the steps inside it under the
+		// same context (tmux: `terminal`, which is NESTED inside `create`).
+		createStart := time.Now()
 		sess, err := d.Create(ctx, requestFrom(r), key, spec)
+		driver.NotePhase(r.Context(), "create", createStart)
 		if err != nil {
 			writeDriverError(w, machine, deadline, err)
 			return
@@ -1403,7 +1428,9 @@ func handleCreateSession(svc *Service) http.HandlerFunc {
 		// resolve its own State inside Create (a relayed create adopting the
 		// peer's) is left alone.
 		if sess.State.Status == "" {
+			stateStart := time.Now()
 			sess.State, _ = d.State(ctx, requestFrom(r), sess.SessionRef)
+			driver.NotePhase(r.Context(), "state", stateStart)
 		}
 		// Labels (muster #153). A local session's are this service's to
 		// store; a relayed create's are the peer's, and arrive on its answer.

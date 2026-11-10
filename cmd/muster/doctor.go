@@ -786,7 +786,11 @@ func supervisorGrants() []service.Grant {
 		// `muster service install` enrols the local service principal with THIS
 		// set, so counting it would grant it by default on every new install.
 		// It is given per peer, by an operator, and nowhere else.
-		if g != service.GrantRelay && g != service.GrantLabel && g != service.GrantRemoteControl && g != service.GrantHumanRelay && g != service.GrantActingPerson && g != service.GrantPushList {
+		//
+		// debug (muster #450) is excluded for the same stronger reason: it reads the
+		// service's own process internals and drives no session, and the service
+		// principal `service install` enrols must not hold it by default.
+		if g != service.GrantRelay && g != service.GrantLabel && g != service.GrantRemoteControl && g != service.GrantHumanRelay && g != service.GrantActingPerson && g != service.GrantPushList && g != service.GrantDebug {
 			out = append(out, g)
 		}
 	}

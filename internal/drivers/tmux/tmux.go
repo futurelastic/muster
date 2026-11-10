@@ -5562,7 +5562,14 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 	args := append([]string{
 		"new-session", "-d", "-s", name, "-c", string(spec.Cwd), "--",
 	}, argv...)
-	if _, err := d.run(ctx, d.bin, args...); err != nil {
+	// muster #450: the one step of a create that has been seen to take most of
+	// its time. Noted whether or not it succeeds — a create that failed after 27 s
+	// in the terminal is exactly the line someone will read. A no-op unless the
+	// request asked for its phases (driver.NotePhase).
+	terminalStart := time.Now()
+	_, newSessionErr := d.run(ctx, d.bin, args...)
+	driver.NotePhase(ctx, "terminal", terminalStart)
+	if newSessionErr != nil {
 		// The create demonstrably failed, so the reservation describes
 		// nothing. Releasing it keeps a retry from being answered with a
 		// session that was never started.
@@ -5573,7 +5580,7 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 		if envPath != "" {
 			_ = os.Remove(envPath)
 		}
-		return fleet.Session{}, fmt.Errorf("create: %w", err)
+		return fleet.Session{}, fmt.Errorf("create: %w", newSessionErr)
 	}
 	sandboxOK = true
 	// The server may be new; do not let a health read keep reporting "no

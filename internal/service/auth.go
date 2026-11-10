@@ -191,6 +191,26 @@ const (
 	// reveals nothing a stronger grant would protect. Absent means denied, like
 	// every other grant, so no existing principal gains it by upgrading.
 	GrantPushList Grant = "push-list"
+	// GrantDebug lets a principal read this service's own process internals
+	// (GET /v1/debug/pprof/…, muster #450): a CPU profile, a trace, heap and
+	// goroutine shape.
+	//
+	// ⚠️ It reveals how the process is built and what it is busy with — function
+	// names, goroutine counts, where memory goes — and a CPU profile or trace
+	// occupies the process's profiler for up to two minutes per request. It
+	// changes nothing and returns no session content. That is why it is its own
+	// grant, and not a rider on read: a supervisor that may watch sessions has
+	// not thereby been trusted to look inside the service that serves them.
+	//
+	// Not implied by anything: not by read, send or relay, not by the legacy
+	// single-token flags (a machine with no principal table refuses every
+	// request, nobody can hold it), not by `muster service install`'s set (see
+	// supervisorGrants), and not by a signed machine list — whether this machine
+	// can be profiled, and by whom, is a local decision. And a grant alone is not
+	// enough: the machine's config must also switch the endpoint on
+	// (Config.Profiling), and it is off by default. Absent means denied, like every
+	// other grant, so no existing principal gains it by upgrading.
+	GrantDebug Grant = "debug"
 )
 
 // Grants is every grant this service defines, in the order an operator would
@@ -207,7 +227,7 @@ func Grants() []Grant {
 	return []Grant{
 		GrantRead, GrantCreate, GrantSend, GrantInterrupt,
 		GrantClose, GrantRename, GrantDiscard, GrantKeys, GrantLabel, GrantRemoteControl,
-		GrantRelay, GrantHumanRelay, GrantActingPerson, GrantPushList,
+		GrantRelay, GrantHumanRelay, GrantActingPerson, GrantPushList, GrantDebug,
 	}
 }
 
@@ -335,6 +355,12 @@ func grantForVerb(r *http.Request) Grant {
 		// grant itself. Listed here so every route a principal needs a grant for
 		// answers the same question in one place.
 		return GrantPushList
+	case r.Method == http.MethodGet && strings.HasPrefix(path, "/v1/debug/"):
+		// Not routed through reading() or mutating(): debugGate (debug.go) checks
+		// this grant itself, and a debug holder need not hold read. Listed here so
+		// every route a principal needs a grant for answers the same question in
+		// one place (muster #450).
+		return GrantDebug
 	case r.Method == http.MethodDelete:
 		return GrantClose
 	}

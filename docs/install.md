@@ -481,7 +481,7 @@ to it.
   `opencode` (which file holds [the machine's opencode agents](#agents-every-opencode-session-on-this-machine-receives)),
   `models` ([the model lists a client may offer](#models-a-client-may-offer-for-a-create)),
   `maxInputBytes`, `gateRemoteControlInput`, `closedRetentionDays`,
-  `inputAuditRetentionDays` and `machineList` are read at start, so an edit that
+  `inputAuditRetentionDays`, `profilingEndpoint` and `machineList` are read at start, so an edit that
   changes one of them is **refused whole**, naming it, and none of that edit —
   principals and peers included — is applied until the service restarts. The
   refusal also says whether the restart it points to would work: it runs the same
@@ -611,6 +611,36 @@ id:
   as a `config.load` failure in `muster doctor`.
 - It is read at start. A reload that changes it is refused whole, like the other
   start-only settings above.
+
+### Sampling a slow service: the profiling endpoint
+
+Off by default. To take a CPU profile of a running release build, without
+rebuilding it and without any symbol file:
+
+1. Give one principal the **`debug`** grant (`muster principal grant <name> debug`).
+   It is not in the set `muster service install` enrols, and no other grant
+   implies it.
+2. Add `"profilingEndpoint": true` to the config file and **restart** the
+   service. It is read at start; an edit made while the service runs is refused
+   whole, naming it, like the other start-time settings above. The start logs a
+   line saying the endpoint is on.
+3. Fetch a profile with the principal's token (a bare `go tool pprof <url>`
+   cannot send the header), then read it:
+
+   ```sh
+   curl -H "Authorization: Bearer $(cat TOKEN_FILE)" -o cpu.pb.gz \
+     "http://127.0.0.1:PORT/v1/debug/pprof/profile?seconds=30"
+   go tool pprof -top cpu.pb.gz
+   ```
+
+4. When done, remove `profilingEndpoint` (or set it `false`) and restart. The
+   grant may stay: with the switch off it is refused with a `501` that names
+   the switch.
+
+Every request is in the service log as `audit: … verb=debug …`, with `took=`.
+The same log's `create` lines now end with `took=<ms>` and `phase.*` fields, so a
+slow create can be read from the log before any profile is needed. Contract:
+[`spec/api-http.md`](spec/api-http.md) §3.1.2 and §5.
 
 ## Windows
 

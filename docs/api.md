@@ -22,7 +22,7 @@ open.
 **Grants.** With a principal table configured, each caller is a named identity
 with its own credential and its own list of grants: `read`, `create`, `send`,
 `interrupt`, `close`, `rename`, `discard`, `keys`, `label`, `remote-control`, `relay`,
-`push-list`.
+`push-list`, `debug`.
 Every grant defaults to denied. ⚠️ `keys` is the one that can **escalate** a session (it delivers
 `BTab`, which cycles the permission mode — see `POST …/keys` below), so grant it
 as that, not as "arrow keys". Without a principal table the service runs in
@@ -150,6 +150,7 @@ every configured peer, exactly one hop — peers never recurse.
 | `DELETE` | `/v1/machines/{machine}/sessions/{id}` | Destroy the session | `close` | yes |
 | `GET` | `/v1/machine-list` | The owner-signed machine list this machine has in force, byte for byte | `read` | this machine only |
 | `PUT` | `/v1/machine-list` | Hand this machine a newer signed machine list; it is written and put in force live | `push-list` | this machine only |
+| `GET` | `/v1/debug/pprof/` · `…/{name}` | Profile this service's own process (CPU, trace, heap, goroutines); off unless the machine's config switches it on | `debug` | this machine only |
 
 ⚠️ = the specification requires `read`; the implementation does not check it yet.
 
@@ -266,6 +267,33 @@ machines}` and means written **and** in force; every refusal changes nothing and
 carries a `reason` (the list is in `machine-list.md`). Neither route is relayed:
 there is no `{machine}` segment, they always mean the machine addressed. `muster
 machine-list push` and `fetch` are the clients.
+
+
+### `GET /v1/debug/pprof/` and `…/{name}` (#450)
+
+Profile this service's own process — CPU (`profile`), execution `trace`, `heap`,
+`allocs`, `goroutine`, `threadcreate` — without rebuilding it. The release build
+needs no symbol file: a profile the service writes already names its functions.
+Needs the **`debug`** grant, a grant of its own that nothing implies (not `read`,
+not the legacy all-verbs flags — a machine with no principal table refuses every
+request — and not a signed machine list), **and** the machine's config must set
+`profilingEndpoint: true`; it is off by default and read at start. The grant is
+checked first, so a caller without it learns nothing about the machine's
+configuration; a holder on a machine that has not switched it on gets `501`
+naming the switch.
+
+```sh
+curl -H "Authorization: Bearer $TOKEN" -o cpu.pb.gz "$BASE/v1/debug/pprof/profile?seconds=30"
+go tool pprof -top cpu.pb.gz
+```
+
+`go tool pprof <url>` cannot send an `Authorization` header, so fetch the file
+first. `seconds` is 1 to 120 (default 30 for `profile`, 1 for `trace`); a second
+`profile` or `trace` while one runs is `409` (retryable). `GET /v1/debug/pprof/`
+lists the names. Every request is audited as `verb=debug`, and a served one ends
+with `took=` — for a timed profile, the length of the sample. The route has no
+`{machine}` segment and is never relayed. Full contract:
+[`spec/api-http.md`](spec/api-http.md) §3.1.2.
 
 ### `GET /v1/whoami`
 
