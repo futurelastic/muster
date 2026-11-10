@@ -468,9 +468,13 @@ func TestRead_AFailedReadOfTheRecordIsNotReportedAsNoTurn(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 	f.setLastMessage(sess.ID, wireMessage{Info: wireMessageInfo{Role: "assistant", ProviderID: "anthropic", ModelID: "claude"}})
+	f.mu.Lock()
 	f.messagesDown = true
+	f.mu.Unlock()
 	got := readOne(t, d, sess.ID)
+	f.mu.Lock()
 	f.messagesDown = false
+	f.mu.Unlock()
 	if got.Pins == nil || got.Pins.Model == nil {
 		t.Fatalf("Pins = %+v, want the Model pin as requested", got.Pins)
 	}
