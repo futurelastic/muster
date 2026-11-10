@@ -191,6 +191,14 @@ func (d *Driver) planSandboxFor(ctx context.Context, spec fleet.SessionSpec, ses
 			dst := filepath.Join(resolvePath(sessionDir), "pkgcache")
 			how := priorCopy
 			if how == "" {
+				// muster #448: a seed that cannot be cloned is known before the copy
+				// starts, so the refusal costs nothing. A relaunch (priorCopy) already
+				// has its copy and is not asked again.
+				if !pc.AllowFullCopy {
+					if err := checkSeedVolume(src, dst); err != nil {
+						return nil, invalid("sandbox.packageCache: %v", err)
+					}
+				}
 				var err error
 				how, err = copyTree(ctx, src, dst)
 				if err != nil {
@@ -241,12 +249,56 @@ func managerEnv(cache string, managers []fleet.PackageManager) map[string]string
 // clone a directory as one operation.
 var errCloneUnsupported = errors.New("this platform has no call that clones a directory as one operation")
 
-// The two seams copyTree's tests use: the one-call clone, and the program that
-// makes the per-file copies.
+// The seams copyTree's and checkSeedVolume's tests use: the one-call clone, the
+// program that makes the per-file copies, whether this host clones at all, and
+// which volume a path is on.
 var (
 	cloneDir   = cloneDirectory
 	copyBinary = "/bin/cp"
+	hostClone  = hostClones
+	volumeOf   = volumeOfPath
 )
+
+// volume is a filesystem a path is on: id tells two apart, mount names it for a
+// reader.
+type volume struct {
+	id    uint64
+	mount string
+}
+
+// checkSeedVolume refuses a private copy that could only be a plain one because
+// the seed and the session's directory are on different volumes (muster #448).
+// A clone cannot cross a volume, so the session would hold the seed's whole size
+// and the create would wait for all of it to be copied (6.6 GiB took 180 s).
+//
+// It answers only where the host can clone at all: on a host with no clone call
+// every create is a full copy, a different volume or not, and refusing one case
+// of two would describe a difference that is not there. A volume it cannot read
+// is not a refusal either; the create goes on as it did before this check. A
+// same-volume filesystem that cannot clone still copies in full and reports
+// `copy` — the device is what is known before the copy, not the filesystem's
+// capability.
+//
+// dst need not exist: its volume is its nearest existing parent's.
+func checkSeedVolume(src, dst string) error {
+	if !hostClone() {
+		return nil
+	}
+	from, err := volumeOf(src)
+	if err != nil {
+		return nil
+	}
+	to, err := volumeOf(dst)
+	if err != nil {
+		return nil
+	}
+	if from.id == to.id {
+		return nil
+	}
+	return fmt.Errorf("the seed %q is on volume %q and the session's directory is on volume %q; a clone cannot cross volumes, "+
+		"so each session would hold the seed's full size and the create would copy all of it first. "+
+		"Keep the seed on the session directory's volume, or set allowFullCopy to accept the full copy", src, from.mount, to.mount)
+}
 
 // copyTree makes dst a copy of src, copy-on-write where the filesystem offers
 // it, and reports which it was: "clone" or "copy".
@@ -257,7 +309,8 @@ var (
 // copying when the filesystem cannot clone, so the last way is a separate, plain
 // copy — and the report says so, since "instant" and "slow" are not the same
 // promise. A seed on another volume than dst can clone nowhere, so it reaches the
-// plain copy and holds its full size.
+// plain copy and holds its full size — which planSandboxFor refuses before it gets
+// here unless the request says allowFullCopy (muster #448).
 //
 // ctx stops it. The copies are child processes and are killed; the clone is one
 // call that cannot be interrupted, so a cancel during it takes effect when it

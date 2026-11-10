@@ -114,3 +114,25 @@ func TestPackageCacheManagersWireNames(t *testing.T) {
 		t.Errorf("a cache with no managers must not mention them: %s", b)
 	}
 }
+
+// muster #448: the opt-in to a full copy is named allowFullCopy on both spellings
+// of the request, and an absent one is not on the wire at all.
+func TestAllowFullCopyWireName(t *testing.T) {
+	b, err := json.Marshal(SandboxPackageCache{Path: "/c", AllowFullCopy: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"path":"/c","allowFullCopy":true}`; string(b) != want {
+		t.Errorf("sandbox wire form = %s, want %s", b, want)
+	}
+	b, _ = json.Marshal(PosturePackageCache{Seed: "/s", Managers: []PackageManager{PackageManagerGo}, AllowFullCopy: true})
+	if want := `{"seed":"/s","managers":["go"],"allowFullCopy":true}`; string(b) != want {
+		t.Errorf("posture wire form = %s, want %s", b, want)
+	}
+	for _, v := range []any{SandboxPackageCache{Path: "/c"}, PosturePackageCache{Seed: "/s"}} {
+		b, _ = json.Marshal(v)
+		if strings.Contains(string(b), "allowFullCopy") {
+			t.Errorf("a request that did not opt in must not mention it: %s", b)
+		}
+	}
+}

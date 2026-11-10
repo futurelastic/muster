@@ -115,6 +115,12 @@ type PosturePackageCache struct {
 	// session's copy. At least one; a manager whose directory the seed lacks
 	// refuses the create.
 	Managers []PackageManager `json:"managers"`
+	// AllowFullCopy accepts a full-size plain copy when the seed is on a
+	// different volume than the session's directory (muster #448): that seed
+	// cannot be cloned, so without this the create is refused, before anything is
+	// copied, naming the two volumes. Default false. It changes nothing for a seed
+	// that can be cloned, nor for "shared", which copies nothing.
+	AllowFullCopy bool `json:"allowFullCopy,omitempty"`
 }
 
 // Posture is the optional `posture` field of a create (muster #344). Every field
@@ -301,6 +307,7 @@ func (p Posture) Lower(caps DriverCapabilities) (PostureMapping, error) {
 		}
 		m.Sandbox.PackageCache = &SandboxPackageCache{
 			Path: pc.Seed, Mode: mode, Managers: append([]PackageManager(nil), pc.Managers...),
+			AllowFullCopy: pc.AllowFullCopy,
 		}
 	}
 	m.IsolateEnvironment = p.IsolatedEnvironment

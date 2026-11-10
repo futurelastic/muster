@@ -73,3 +73,6 @@ func cloneDirectory(src, dst string) error {
 	}
 	return nil
 }
+
+// hostClones: this host has a call that clones a directory (clonefileat, above).
+func hostClones() bool { return true }
