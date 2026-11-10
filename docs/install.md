@@ -50,6 +50,16 @@ and restarts the service when it exits.
   an npm upgrade it replaces the installed binary and restarts the service. A rerun
   without flags keeps the machine id, address and tmux path the unit already has;
   `--machine`, `--addr` and `--tmux` change them.
+- **A variable you added to the unit stays.** Some runtimes are switched on only
+  by the environment (`FLEET_RUNTIME_OPENCODE=1` with `FLEET_OPENCODE_BIN` and the
+  rest of the opencode settings, `FLEET_INBOX_INDEX`), and the locale (`LANG`,
+  `LC_*`) decides what a session's tools can print. Add them to the unit by hand
+  and every later run, an update included, writes them back; without this an update
+  would turn the runtime off. Every `FLEET_*` name and `LANG` / `LC_*` is kept, and
+  nothing else is: a variable of any other name is not carried. `FLEET_STATE_DIR`
+  and `FLEET_CONFIG` are the layout's: a different value in the unit is reset, and
+  the run says so. The run prints the names it kept (never the values), and
+  `muster service status` lists the same names in an `env` row.
 - **Loopback only.** `--addr` takes a loopback `HOST:PORT` with a fixed port; any
   other address is refused. Putting the service on a network interface is step 3
   of the manual procedure.
@@ -388,7 +398,11 @@ order of this page and the order of its output are the same.
      restart of the service clears; row `runtime.opencode.dirs` counts session
      directories no record names, a `warn` whose leftovers the service removes by
      itself (at its next start, and hourly while it runs) and whose directories that
-     may hold a conversation it never does; row
+     may hold a conversation it never does; row `runtime.opencode.sessions` lists the
+     sessions that run no server and that a restart cannot relaunch (created with caller-supplied environment), each
+     with its age and the size of the directory it holds, a `warn` that removes nothing:
+     closing the session is what removes its record and directory, and that stays with
+     the caller that created it; row
      `runtime.opencode.providers` shows which providers, and which models of them,
      `FLEET_OPENCODE_PROVIDERS` lets a session use, and fails on an entry the service
      will refuse to start on). A runtime that is enabled but

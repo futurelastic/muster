@@ -936,6 +936,187 @@ func TestDoctorOpencodeDirsRow(t *testing.T) {
 	}
 }
 
+// muster #445: the runtime.opencode.sessions row names the sessions a restart cannot
+// relaunch, with each one's age and size, and deletes nothing.
+func TestDoctorOpencodeSessionsRow(t *testing.T) {
+	now := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+	ago := func(d time.Duration) time.Time { return now.Add(-d) }
+	const (
+		day = 24 * time.Hour
+		mib = int64(1 << 20)
+		gib = int64(1 << 30)
+	)
+	scanning := func(r opencode.UnknownReport, err error) func(string) (opencode.UnknownReport, error) {
+		return func(string) (opencode.UnknownReport, error) { return r, err }
+	}
+	notCalled := func(string) (opencode.UnknownReport, error) {
+		t.Fatal("the scan ran for a row that is skipped")
+		return opencode.UnknownReport{}, nil
+	}
+	sess := func(id string, age time.Duration, bytes int64) opencode.UnknownSession {
+		return opencode.UnknownSession{ID: id, StartedAt: ago(age), Bytes: bytes, Measured: true}
+	}
+	many := opencode.UnknownReport{}
+	for i := 0; i < 13; i++ {
+		many.Sessions = append(many.Sessions, sess("ses_"+string(rune('a'+i)), time.Duration(20-i)*day, mib))
+	}
+	cases := []struct {
+		name     string
+		enabled  bool
+		stateDir string
+		scan     func(string) (opencode.UnknownReport, error)
+		want     rowStatus
+		summary  []string
+		detail   []string
+		absent   []string
+	}{
+		{"runtime not enabled", false, "/state", notCalled, statusSkip, []string{"not 1"}, nil, nil},
+		{"no state directory", true, "", notCalled, statusSkip, []string{"FLEET_STATE_DIR"}, nil, nil},
+		{"platform cannot list processes", true, "/state", scanning(opencode.UnknownReport{}, opencode.ErrScanUnsupported), statusSkip, []string{"cannot list"}, nil, nil},
+		{"the listing failed", true, "/state", scanning(opencode.UnknownReport{}, errors.New("ps: read /state/opencode/dirs: denied")), statusUnknown,
+			[]string{"could not be listed"}, []string{"FLEET_STATE_DIR/opencode/dirs"}, []string{"/state/"}},
+		{"none", true, "/state", scanning(opencode.UnknownReport{}, nil), statusPass, []string{"no opencode session without a server is waiting"}, nil, nil},
+		{"processes that cannot be inspected hide nothing when nothing is counted", true, "/state", scanning(opencode.UnknownReport{Uninspected: 4}, nil), statusPass,
+			[]string{"no opencode session without a server is waiting"}, nil, nil},
+		{"two sessions, with age and size", true, "/state", scanning(opencode.UnknownReport{Sessions: []opencode.UnknownSession{
+			sess("ses_old", 5*day+3*time.Hour, 1*gib), sess("ses_new", 2*time.Hour+10*time.Minute, 512*mib)}}, nil), statusWarn,
+			[]string{"2 opencode session(s) run no server and cannot be relaunched by a restart", "hold 1.5 GiB", "(the oldest 5d old)"},
+			[]string{"ses_old (5d old, 1.0 GiB); ses_new (2h old, 512.0 MiB)", "oldest first", "needs re-creation", "listed dead", "Nothing here removes them", "tried again at every start"}, nil},
+		{"an age below an hour is minutes, one below two days is hours", true, "/state", scanning(opencode.UnknownReport{Sessions: []opencode.UnknownSession{
+			sess("ses_a", 47*time.Hour, mib), sess("ses_b", 59*time.Minute, mib)}}, nil), statusWarn,
+			[]string{"(the oldest 47h old)"}, []string{"ses_a (47h old, 1.0 MiB); ses_b (59m old, 1.0 MiB)"}, nil},
+		{"a size that is a lower bound, and one that is missing", true, "/state", scanning(opencode.UnknownReport{Sessions: []opencode.UnknownSession{
+			{ID: "ses_cut", StartedAt: ago(3 * day), Bytes: 2 * gib, Measured: true, Partial: true},
+			{ID: "ses_foreign", StartedAt: ago(2 * day)}}}, nil), statusWarn,
+			[]string{"hold at least 2.0 GiB"}, []string{"ses_cut (3d old, at least 2.0 GiB)", "ses_foreign (2d old, size not measured)"}, nil},
+		{"nothing measured at all", true, "/state", scanning(opencode.UnknownReport{Sessions: []opencode.UnknownSession{{ID: "ses_a", StartedAt: ago(day)}}}, nil), statusWarn,
+			[]string{"hold an unmeasured amount"}, []string{"ses_a (24h old, size not measured)"}, nil},
+		{"a record with no start time", true, "/state", scanning(opencode.UnknownReport{Sessions: []opencode.UnknownSession{
+			{ID: "ses_blank", Bytes: mib, Measured: true}, sess("ses_dated", 4*day, mib)}}, nil), statusWarn,
+			[]string{"(the oldest 4d old)"}, []string{"ses_blank (age unknown, 1.0 MiB); ses_dated (4d old, 1.0 MiB)"}, nil},
+		{"more sessions than the detail names", true, "/state", scanning(many, nil), statusWarn,
+			[]string{"13 opencode session(s)", "(the oldest 20d old)"}, []string{"ses_a (20d old", "ses_j (11d old", "and 3 more"}, []string{"ses_k"}},
+		{"records and processes that could not be read", true, "/state", scanning(opencode.UnknownReport{Unreadable: 2, Uninspected: 3,
+			Sessions: []opencode.UnknownSession{sess("ses_a", day, mib)}}, nil), statusWarn,
+			[]string{"1 opencode session(s)"}, []string{"2 session record(s) could not be read", "3 process(es) look like opencode servers"}, nil},
+		{"only a record that cannot be read", true, "/state", scanning(opencode.UnknownReport{Unreadable: 1}, nil), statusWarn,
+			[]string{"1 opencode session record(s) could not be read"}, []string{"closing the session removes it"}, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			row := checkOpencodeSessions(tc.enabled, tc.stateDir, now, tc.scan)
+			if row.ID != "runtime.opencode.sessions" || row.Status != tc.want {
+				t.Fatalf("got %+v, want status %s", row, tc.want)
+			}
+			for _, want := range tc.summary {
+				if !strings.Contains(row.Summary, want) {
+					t.Errorf("summary %q does not say %q", row.Summary, want)
+				}
+			}
+			for _, want := range tc.detail {
+				if !strings.Contains(row.Detail, want) {
+					t.Errorf("detail %q does not say %q", row.Detail, want)
+				}
+			}
+			for _, bad := range tc.absent {
+				if strings.Contains(row.Summary+row.Detail, bad) {
+					t.Errorf("row says %q: %+v", bad, row)
+				}
+			}
+			if tc.stateDir != "" && strings.Contains(row.Summary+row.Detail, tc.stateDir+"/") {
+				t.Errorf("row carries a filesystem path: %+v", row)
+			}
+		})
+	}
+
+	// Through the whole check run: the seam and the clock are used, the row sits beside
+	// the dirs row, and a warning never fails the run.
+	env := testDoctorEnv(map[string]string{"FLEET_RUNTIME_OPENCODE": "1", "FLEET_STATE_DIR": t.TempDir()})
+	env.OpencodeUnknown = scanning(opencode.UnknownReport{Sessions: []opencode.UnknownSession{sess("ses_x", 3*day, 7*mib)}}, nil)
+	env.Now = func() time.Time { return now }
+	rows := runChecks(context.Background(), env)
+	if row := rowByID(t, rows, "runtime.opencode.sessions"); row.Status != statusWarn || !strings.Contains(row.Detail, "ses_x (3d old, 7.0 MiB)") {
+		t.Errorf("through runChecks: %+v", row)
+	}
+
+	// --skip names the row and the walk behind it does not run at all.
+	env = testDoctorEnv(map[string]string{"FLEET_RUNTIME_OPENCODE": "1", "FLEET_STATE_DIR": t.TempDir()})
+	env.Skip["runtime.opencode.sessions"] = true
+	env.OpencodeUnknown = notCalled
+	rows = runChecks(context.Background(), env)
+	if row := rowByID(t, rows, "runtime.opencode.sessions"); row.Status != statusSkip {
+		t.Errorf("a skipped row: %+v", row)
+	}
+}
+
+// muster #445, end to end through the real accessor: a state directory a restart
+// left behind, read by the doctor, with nothing removed.
+func TestDoctorOpencodeSessionsRowReadsARealStateDirectory(t *testing.T) {
+	state := t.TempDir()
+	storeDir := filepath.Join(state, "opencode", "sessions")
+	root := filepath.Join(state, "opencode", "dirs")
+	started := time.Now().Add(-26 * time.Hour).UnixMilli()
+	write := func(name, body string) {
+		t.Helper()
+		path := filepath.Join(storeDir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mkdir := func(name string, size int) string {
+		t.Helper()
+		dir := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Join(dir, "xdg", "data"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "xdg", "data", "opencode.db"), make([]byte, size), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+	rec := func(id, dir string, env bool) string {
+		m := map[string]any{"version": 1, "id": id, "startedAtMs": started, "dir": dir}
+		if env {
+			m["envNames"] = []string{"MODEL_KEY"}
+		}
+		raw, err := json.Marshal(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
+	left := mkdir("muster-opencode-1", 3000)
+	relaunched := mkdir("muster-opencode-2", 5000)
+	write("ses_left.json", rec("ses_left", left, true))
+	write("ses_plain.json", rec("ses_plain", relaunched, false))
+
+	env := testDoctorEnv(map[string]string{"FLEET_RUNTIME_OPENCODE": "1", "FLEET_STATE_DIR": state})
+	rows := runChecks(context.Background(), env)
+	row := rowByID(t, rows, "runtime.opencode.sessions")
+	if row.Status == statusSkip && strings.Contains(row.Summary, "cannot list") {
+		t.Skip("this platform cannot list processes with their environment")
+	}
+	if row.Status != statusWarn || !strings.Contains(row.Summary, "1 opencode session(s)") {
+		t.Fatalf("got %+v; want one session counted (the plain one is relaunched by a restart)", row)
+	}
+	if !strings.Contains(row.Detail, "ses_left (26h old, 3 KiB)") || strings.Contains(row.Detail, "ses_plain") {
+		t.Errorf("detail = %q; want ses_left with its age and size, and not ses_plain", row.Detail)
+	}
+	if strings.Contains(row.Summary+row.Detail, state) {
+		t.Errorf("row carries a filesystem path: %+v", row)
+	}
+	// Nothing was removed or rewritten.
+	for _, p := range []string{filepath.Join(storeDir, "ses_left.json"), filepath.Join(storeDir, "ses_plain.json"),
+		filepath.Join(left, "xdg", "data", "opencode.db"), filepath.Join(relaunched, "xdg", "data", "opencode.db")} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("the doctor removed %s: %v", filepath.Base(p), err)
+		}
+	}
+}
+
 func TestHumanSize(t *testing.T) {
 	for n, want := range map[int64]string{0: "0 B", 1023: "1023 B", 1024: "1 KiB", 1025: "2 KiB", 5 << 20: "5.0 MiB", 3 << 30: "3.0 GiB"} {
 		if got := humanSize(n); got != want {

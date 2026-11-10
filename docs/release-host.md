@@ -19,7 +19,8 @@ in at publish time. It downloads the build for the machine, checks it against th
 binary names the release it was asked for, and then runs the **new binary's** `muster service install`. That command
 is the install: it copies itself to `~/.local/bin/muster`, creates what is missing, restarts the user service when
 the binary or the unit changed, runs `muster doctor` under the unit's environment and waits for `/v1/health`. A
-machine that has muster keeps its address, machine id, tokens and state; it gets a new binary under the same unit.
+machine that has muster keeps its address, machine id, tokens and state, and every `FLEET_*` and `LANG` / `LC_*`
+variable an operator added to the unit; it gets a new binary under the same unit.
 
 If the new version does not come up healthy, the copy of the previous binary the installer kept runs its own
 `service install`, which puts it back; the installer exits 1 either way so a caller never mistakes the failed

@@ -141,6 +141,13 @@ type doctorEnv struct {
 	// (muster #399). Nil means the real scan of this machine, stubbed in a test
 	// for the same reason as OpencodeOrphans.
 	OpencodeDirs func(stateDir string) (opencode.OrphanDirReport, error)
+	// OpencodeUnknown lists the opencode sessions a restart cannot relaunch, with
+	// their sizes (muster #445). Nil means the real scan of this machine, stubbed in
+	// a test for the same reason as the two above — and so that a test never walks a
+	// directory.
+	OpencodeUnknown func(stateDir string) (opencode.UnknownReport, error)
+	// Now is the clock the age of a session is read against. Zero means time.Now.
+	Now func() time.Time
 }
 
 func usageDoctor() string {
@@ -355,6 +362,21 @@ func runChecks(ctx context.Context, env doctorEnv) []doctorRow {
 		orphanDirs = opencode.OrphanDirs
 	}
 	c.add(checkOpencodeDirs(getenv("FLEET_RUNTIME_OPENCODE") == "1", getenv("FLEET_STATE_DIR"), orphanDirs))
+	// The sessions row is the one that measures directories, which can take a while
+	// on a machine that has many, so a row named in --skip is not computed at all.
+	if c.skipped("runtime.opencode.sessions") {
+		c.add(doctorRow{ID: "runtime.opencode.sessions"})
+	} else {
+		unknownSessions := env.OpencodeUnknown
+		if unknownSessions == nil {
+			unknownSessions = opencode.UnknownSessions
+		}
+		now := env.Now
+		if now == nil {
+			now = time.Now
+		}
+		c.add(checkOpencodeSessions(getenv("FLEET_RUNTIME_OPENCODE") == "1", getenv("FLEET_STATE_DIR"), now(), unknownSessions))
+	}
 
 	// --- the service manager's own record (Windows only) -----------------------
 	// muster installs no service manager; where the supported one is a scheduled
@@ -1395,6 +1417,147 @@ func checkOpencodeDirs(enabled bool, stateDir string, scan func(string) (opencod
 	}
 	row.Detail = strings.Join(detail, ". ")
 	return row
+}
+
+// unknownSessionsListed is how many sessions the row's detail names before it
+// says how many more there are. The list is oldest first, so the ones a person
+// most likely means to close are the ones shown.
+const unknownSessionsListed = 10
+
+// checkOpencodeSessions is the runtime.opencode.sessions row (muster #445): the
+// opencode sessions a restart cannot relaunch and that run no server — listed
+// `unknown` after a restart, or `dead` if their server exited since — each with its
+// age and the size of the directory it holds.
+//
+// A restart adopts such a session and lists it `unknown` (spec §7.5): its record and
+// its directory — a whole runtime store and package cache — stay until the caller
+// that created it closes it. Nothing else reported them: `runtime.opencode.dirs` only
+// counts directories no record names, and every one of these has a record. So a
+// caller that never comes back leaves hundreds of megabytes each, silently.
+//
+// It is a warning and nothing more, and it deletes nothing. Reaping stays with the
+// caller, because a session listed `unknown` is still a session somebody created and
+// may want to read; the row names each id so the caller can close it, and Close is
+// what removes the record and the directory. Like every row here it names no path
+// and no session title, only ids.
+//
+// Which sessions a restart cannot relaunch is the one class a record decides on its
+// own (the create carried caller-supplied environment, which this driver never
+// kept). A session whose relaunch failed for a reason that may pass is retried at
+// every start and, from a record, cannot be told from a stopped service, so it is not
+// counted — the detail says so.
+func checkOpencodeSessions(enabled bool, stateDir string, now time.Time, scan func(string) (opencode.UnknownReport, error)) doctorRow {
+	row := doctorRow{ID: "runtime.opencode.sessions", Refs: []int{445}}
+	switch {
+	case !enabled:
+		row.Status = statusSkip
+		row.Summary = "FLEET_RUNTIME_OPENCODE is not 1 — there are no opencode sessions to count"
+		return row
+	case stateDir == "":
+		row.Status = statusSkip
+		row.Summary = "FLEET_STATE_DIR is not set — opencode sessions are not remembered, so none is left unknown by a restart"
+		return row
+	}
+	rep, err := scan(stateDir)
+	switch {
+	case errors.Is(err, opencode.ErrScanUnsupported):
+		row.Status = statusSkip
+		row.Summary = "this platform cannot list running processes with their environment — sessions left unknown by a restart are not counted"
+		return row
+	case err != nil:
+		row.Status = statusUnknown
+		row.Summary = "the opencode sessions could not be listed"
+		row.Detail = redact(err.Error(), stateDir, "FLEET_STATE_DIR")
+		return row
+	case len(rep.Sessions) == 0 && rep.Unreadable == 0:
+		row.Status = statusPass
+		row.Summary = "no opencode session without a server is waiting for its caller to re-create or close it"
+		return row
+	}
+	row.Status = statusWarn
+	var detail []string
+	if len(rep.Sessions) == 0 {
+		row.Summary = fmt.Sprintf("%d opencode session record(s) could not be read, so each is listed unknown", rep.Unreadable)
+	} else {
+		total, exact := rep.Bytes()
+		size := humanSize(total)
+		switch {
+		case total == 0 && !exact:
+			size = "an unmeasured amount"
+		case !exact:
+			size = "at least " + size
+		}
+		row.Summary = fmt.Sprintf("%d opencode session(s) run no server and cannot be relaunched by a restart; they hold %s", len(rep.Sessions), size)
+		// The list is oldest first, but a record with no start time sorts before every
+		// other; the oldest age worth saying is the first one that is known.
+		for _, s := range rep.Sessions {
+			if !s.StartedAt.IsZero() {
+				row.Summary += fmt.Sprintf(" (the oldest %s)", sessionAge(now, s))
+				break
+			}
+		}
+		shown := rep.Sessions
+		if len(shown) > unknownSessionsListed {
+			shown = shown[:unknownSessionsListed]
+		}
+		items := make([]string, len(shown))
+		for i, s := range shown {
+			items[i] = fmt.Sprintf("%s (%s, %s)", s.ID, sessionAge(now, s), sessionSize(s))
+		}
+		list := strings.Join(items, "; ")
+		if more := len(rep.Sessions) - len(shown); more > 0 {
+			list += fmt.Sprintf("; and %d more", more)
+		}
+		detail = append(detail, "oldest first: "+list,
+			"each was created with caller-supplied environment, which is never kept, so a restart lists it unknown and it needs re-creation "+
+				"(one whose server exited since is listed dead); either way its record and directory stay until its caller closes it. "+
+				"Nothing here removes them — a session left unknown is still one somebody created")
+	}
+	if rep.Unreadable > 0 && len(rep.Sessions) > 0 {
+		detail = append(detail, fmt.Sprintf("%d session record(s) could not be read; the service lists each unknown too, but there is nothing to measure", rep.Unreadable))
+	}
+	if rep.Unreadable > 0 && len(rep.Sessions) == 0 {
+		detail = append(detail, "each is listed unknown and has no readable record to measure; closing the session removes it")
+	}
+	if rep.Uninspected > 0 && len(rep.Sessions) > 0 {
+		detail = append(detail, fmt.Sprintf("%d process(es) look like opencode servers but could not be inspected, so a counted session may be running "+
+			"(run the doctor as the service user)", rep.Uninspected))
+	}
+	detail = append(detail, "a session whose relaunch failed for a reason that may pass is tried again at every start and is not counted here")
+	row.Detail = strings.Join(detail, ". ")
+	return row
+}
+
+// sessionSize is one session's size as the row writes it.
+func sessionSize(s opencode.UnknownSession) string {
+	switch {
+	case !s.Measured:
+		return "size not measured"
+	case s.Partial:
+		return "at least " + humanSize(s.Bytes)
+	}
+	return humanSize(s.Bytes)
+}
+
+// sessionAge is one session's age as the row writes it: days from two days, hours
+// from one, minutes below. A record with no start time has no age, which is said, not
+// guessed. A start time ahead of this clock (the clocks differ) reads as no time at all.
+func sessionAge(now time.Time, s opencode.UnknownSession) string {
+	if s.StartedAt.IsZero() {
+		return "age unknown"
+	}
+	d := now.Sub(s.StartedAt)
+	switch {
+	case d < time.Hour:
+		if d < 0 {
+			d = 0
+		}
+		return fmt.Sprintf("%dm old", int(d/time.Minute))
+	case d < 48*time.Hour:
+		return fmt.Sprintf("%dh old", int(d/time.Hour))
+	default:
+		return fmt.Sprintf("%dd old", int(d/(24*time.Hour)))
+	}
 }
 
 // humanSize writes a byte count the way a person reads a disk: one unit, no
