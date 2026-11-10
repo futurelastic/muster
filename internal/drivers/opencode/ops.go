@@ -223,7 +223,7 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 		cwd = spec.Cwd
 	}
 	created := knownSession{
-		srv: srv, cwd: cwd, name: sess.Title, agent: sess.Agent, specAgent: string(spec.Agent), startedAt: startedAt,
+		srv: srv, cwd: cwd, name: sess.Title, agent: sess.Agent, specAgent: string(spec.Agent), specModel: spec.Model, startedAt: startedAt,
 		contextRef: spec.ContextRef, context: contextText,
 		// muster #378: the runtime named this session's id in its create response.
 		conversation: capturedAtCreate(sess.ID),
@@ -233,7 +233,7 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 		// can see but a restart cannot find would make SupportsResume a lie.
 		rec := &sessionRecord{
 			ID: sess.ID, Cwd: string(cwd), Name: sess.Title, Agent: sess.Agent,
-			SpecAgent: string(spec.Agent), SpecMarker: spec.Marker,
+			SpecAgent: string(spec.Agent), SpecMarker: spec.Marker, SpecModel: spec.Model,
 			StartedAtMs: sess.Time.Created, Dir: srv.dir, EnvNames: callerEnvNames,
 			Sandbox: spec.Sandbox, PermissionMode: spec.PermissionMode,
 			// The path, never the text: a restart reads the file again (muster #371).
@@ -460,21 +460,36 @@ func (d *Driver) idemEnd(key string) {
 // way round. Effort refuses at Create rather than reaching here at all (§2.1), so
 // it never appears.
 func pinOutcomeForAgent(spec fleet.SessionSpec, ev turnEvidence) *fleet.PinOutcome {
+	return pinOutcomeFrom(string(spec.Agent), spec.Model, ev, "")
+}
+
+// pinOutcomeFrom is pinOutcomeForAgent for the requested agent and model as plain
+// strings, which is all a session read has (muster #437: the spec itself is not
+// kept). unread, when set, is why no turn record was consulted by this report: it
+// replaces the standing "no turn has run yet" reason of an unresolved pin, which
+// would be false for a read that simply did not look.
+func pinOutcomeFrom(agent, model string, ev turnEvidence, unread string) *fleet.PinOutcome {
 	out := &fleet.PinOutcome{}
-	if spec.Agent != "" {
+	why := func(standing string) string {
+		if unread != "" {
+			return unread
+		}
+		return standing
+	}
+	if agent != "" {
 		if ev.ran {
-			out.Agent = fleet.PinResolved(string(spec.Agent), ev.agent, string(spec.Agent) == ev.agent, fleet.PinObserved,
+			out.Agent = fleet.PinResolved(agent, ev.agent, agent == ev.agent, fleet.PinObserved,
 				"the runtime's own record of the session's newest assistant message names the agent that turn ran as")
 		} else {
-			out.Agent = fleet.PinUnresolved(string(spec.Agent), pinAgentUnresolvedEvidence)
+			out.Agent = fleet.PinUnresolved(agent, why(pinAgentUnresolvedEvidence))
 		}
 	}
-	if spec.Model != "" {
+	if model != "" {
 		if ev.modelRan {
-			out.Model = fleet.PinResolved(spec.Model, ev.modelUsed, spec.Model == ev.modelUsed, fleet.PinObserved,
+			out.Model = fleet.PinResolved(model, ev.modelUsed, model == ev.modelUsed, fleet.PinObserved,
 				"the runtime's own record of the session's newest assistant message names the provider and model that turn ran on")
 		} else {
-			out.Model = fleet.PinUnresolved(spec.Model, pinModelUnresolvedEvidence)
+			out.Model = fleet.PinUnresolved(model, why(pinModelUnresolvedEvidence))
 		}
 	}
 	if out.Agent == nil && out.Model == nil {
@@ -959,6 +974,16 @@ func (d *Driver) Rename(ctx context.Context, req fleet.Request, ref fleet.Sessio
 // What it cannot show is a failure the driver has not learned of: after a service
 // restart the record is empty, so a row omits it until a turn runs or a read by id
 // finds it. The read by id stays the authority.
+//
+// # Pins and the model (muster #437)
+//
+// A session that pinned an agent or a model reports its pins, and the model its
+// newest turn ran on. Resolving them needs the runtime's own record of that turn
+// (agents.go), so it is the read by id that makes the one extra request, and only
+// for a session that pinned something: a listing never asks per session, which is
+// what #339 and #426 keep constant. A listing, a session whose runtime is not
+// there to ask, and a read that failed report each pin as requested and unresolved,
+// with the reason it was not read (pinsOfRead).
 func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.ListFilter) (fleet.Collection[fleet.Session], error) {
 	ctx, cancel := d.bounded(ctx)
 	defer cancel()
@@ -1018,6 +1043,9 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 	for id, info := range known {
 		r := reads[info.srv]
 		var st fleet.SessionState
+		// live: the session's runtime is up and its status read succeeded, so a
+		// by-id read can ask it for the pins' evidence (muster #437).
+		live := false
 		switch {
 		case info.srv == nil:
 			st = fleet.UnknownState(fleet.ConfidenceObserved, info.unknown)
@@ -1036,6 +1064,7 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 			st = fleet.UnknownState(fleet.ConfidenceObserved,
 				fmt.Sprintf("session identity is known but its status could not be read: %v", r.err))
 		default:
+			live = true
 			ws, present := r.statuses[id]
 			st = classify(present, ws)
 			if present {
@@ -1078,12 +1107,17 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 			st.Scratch = d.scratchOf(info.srv)
 		}
 		startedAt := info.startedAt
+		// muster #437: the pins and the observed model, which only a create and a
+		// repeat of it used to report. One request, for one session read by id.
+		pins, model := d.pinsOfRead(ctx, info, id, filter.ID != "", live)
 		sess := fleet.Session{
 			SessionRef: fleet.SessionRef{Machine: d.machine, ID: id, Name: info.name},
 			StartedAt:  &startedAt,
 			Runtime:    d.runtime,
 			Cwd:        info.cwd,
 			Agent:      fleet.AgentId(info.agent),
+			Model:      model,
+			Pins:       pins,
 			State:      st,
 			// muster #378: the session's own id, captured at create.
 			Conversation: info.conversationRef(),

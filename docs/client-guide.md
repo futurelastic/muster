@@ -897,10 +897,11 @@ prompt and each `input`), and refuses an `agent` the runtime does not list
 the catalog. The list is read for the session's own working directory, so a
 project agent defined under it counts. `pins.agent.honoured` is `null` on the
 create response, with the reason. It becomes `true` or `false`
-(`source: "observed"`, `applied` naming the agent the turn ran as) only on a
-repeat of the same create (same `Idempotency-Key`) after a turn has run, read
-from the runtime's own record of its newest assistant message: `false` is a turn
-that ran as another agent — the default one — and is never reported as honoured.
+(`source: "observed"`, `applied` naming the agent the turn ran as) once a turn has
+run, on a read of the session by id (muster #437, below) and on a repeat of the
+same create (same `Idempotency-Key`), read from the runtime's own record of its
+newest assistant message: `false` is a turn that ran as another agent — the
+default one — and is never reported as honoured.
 
 **Where an `opencode` agent comes from** (muster #396). Besides the runtime's
 built-in agents and the project agents under the session's working directory, an
@@ -924,6 +925,24 @@ runtime's default is never reported as honoured), `applied` names it as
 `provider/model` — the spelling a create asks for — and `source` is `"observed"`.
 A record that names only one half of a model, or no model at all, leaves the pin
 `null`. The `agent` and `model` pins resolve independently of each other.
+
+**Both pins resolve on `GET /v1/machines/{machine}/sessions/{id}` too** (muster
+#437), which is where most callers read a session; before this the read carried
+neither, so `model` and `pins` stayed empty however many turns had run. A read of
+one session by id makes one bounded request for the runtime's newest messages,
+and only for a session that pinned an `agent` or a `model`: the pins come back as
+above, and the top-level `model` names the `provider/model` that turn ran on
+(`agent` is unchanged). A session that pinned neither reports no `pins` and no
+`model`, and costs the runtime nothing extra. Three reads do not look, and say so
+in `pins.<field>.evidence`, with `honoured: null` and the request still in
+`requested`: a **listing** of sessions (it asks the runtime about no session's
+history, so its cost stays constant — read the session by id to resolve), a
+session whose runtime is **stopped while idle** or not answering (a read never
+starts a process to find out), and a read of the history that **failed**. After a
+service restart a session keeps its request, so it resolves again on the next
+read by id; one created before this was recorded has no model request to report
+and shows no `model` pin. The `session.created` event carries the same pins as the
+create response — requested, not yet resolved.
 
 **The `Idempotency-Key` header is required**, and a create without one is
 rejected with `invalid` before any driver is consulted. A federated create that

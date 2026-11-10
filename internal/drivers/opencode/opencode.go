@@ -378,6 +378,11 @@ type knownSession struct {
 	// delivers is sent as (muster #362), kept across a restart in the session's
 	// record. Empty is a session that asked for none.
 	specAgent string
+	// specModel is the model the create asked for, "provider/model": what a read
+	// reports as the pin's request (muster #437). The runtime never echoes it, so
+	// without it kept here — and in the session's record, across a restart — a read
+	// could not say what was asked for. Empty is a session that asked for none.
+	specModel string
 	startedAt time.Time
 
 	// dir is the session's scoped directory, kept for a session with no server
