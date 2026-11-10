@@ -874,6 +874,7 @@ session's own copy** (`state.sandbox.packageCache` reports the copy's path, how 
 managers). A manager whose directory the seed lacks, or has as a link, refuses the create, and so does a
 `env` entry (or a machine's `sessionEnv` entry) naming a variable the cache sets: those three names are
 yours to set only when no cache serves that manager. `mode` is `private` (the default) or `shared`.
+`allowFullCopy` (default `false`) is what a seed on another volume needs, below.
 Naming a seed implies a confined session, as `unattended` does, because the protection of the seed is
 the sandbox's: a runtime that cannot confine, or does not offer the mode or a manager, answers
 `unsupported` with `reason: "posture-unenforceable"` before anything starts (`GET /v1/runtimes` lists
@@ -897,11 +898,21 @@ back to `cp -cR` (one clone per file), then to a plain copy. On a seed of 6.6 Gi
 files (a Go module cache, a Cargo registry and an npm cache), `cp -cR` took 88 to 105 s, a plain copy
 180 s, and one clone of the directory about 9 s; the service now takes the last. Keep a seed small, and
 read `state.sandbox.packageCache.copy`: `clone` means copy-on-write (either of the two clone paths),
-`copy` means the filesystem could not clone (the seed and the session directory are on different
-volumes) and the session holds the seed's full size — the create is then slow and is not refused. The
-copy stops with the create's context: the per-file copies are killed at once, and one directory clone,
-which cannot be interrupted, is waited for (one clone's time, not the whole copy's); either way the
-session's directory is removed and nothing is left to adopt. **A clone counts at full size in
+`copy` means the filesystem could not clone and the session holds the seed's full size.
+**A seed on another volume than the session directory is refused unless the request opts in** (#448).
+A clone cannot cross volumes, so such a create would wait for the whole copy and every session would
+then hold the seed's full size, times the sessions running. On a host that can clone, the service
+compares the two volumes before anything is copied and answers `invalid`, naming the seed and both
+volumes, so a refusal costs nothing. `allowFullCopy: true` (`posture.packageCache.allowFullCopy`, or
+`sandbox.packageCache.allowFullCopy`; default `false`) accepts the full copy, and the report then
+reads `copy`. It changes nothing for a seed on the session directory's volume, and nothing for
+`shared`, which copies nothing. Two limits: a host with no clone call at all copies every seed in full
+whatever volume it is on, so the check does not apply there; and a seed on the same volume as the
+session directory whose filesystem cannot clone is still copied in full and reported `copy`, because
+the volume, not the filesystem's capability, is what is known before the copy. A session being
+relaunched keeps the copy it has and is not asked again. The copy stops with the create's context: the
+per-file copies are killed at once, and one directory clone, which cannot be interrupted, is waited
+for (one clone's time, not the whole copy's); either way the session's directory is removed and nothing is left to adopt. **A clone counts at full size in
 `state.scratch`,** so that figure stops being a measure of the disk the session really uses.
 
 **Providers, and models, an opencode session may use** (#293, #401) are the operator's decision,

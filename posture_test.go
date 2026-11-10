@@ -308,6 +308,30 @@ func TestPostureLower_APackageCacheLowersToACloneOfTheSeedAndImpliesConfinement(
 	}
 }
 
+// muster #448: the opt-in to a full copy crosses the lowering unchanged, and its
+// absence stays absence — the default refuses a seed on another volume.
+func TestPostureLower_AllowFullCopyIsCarriedAndDefaultsToRefusing(t *testing.T) {
+	p := seedPosture()
+	m, err := p.Lower(cachingCaps())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Sandbox.PackageCache.AllowFullCopy {
+		t.Fatal("a posture that did not opt in lowered to one that did")
+	}
+	p.PackageCache.AllowFullCopy = true
+	m, err = p.Lower(cachingCaps())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !m.Sandbox.PackageCache.AllowFullCopy {
+		t.Fatal("the opt-in was dropped on the way to the sandbox")
+	}
+	if err := (Posture{PackageCache: p.PackageCache}).Validate(); err != nil {
+		t.Errorf("the opt-in made the posture invalid: %v", err)
+	}
+}
+
 func TestPostureLower_ASharedPackageCacheIsLoweredAsAskedNotUpgraded(t *testing.T) {
 	p := seedPosture()
 	p.PackageCache.Mode = PackageCacheShared

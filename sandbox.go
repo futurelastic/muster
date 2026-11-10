@@ -64,7 +64,9 @@ const (
 	// made when the session starts (a copy-on-write clone where the filesystem
 	// has one, a plain copy otherwise), and grants only the copy. No write path
 	// is shared between sessions, and what the session installs never reaches
-	// the original. The state report says which kind of copy was made.
+	// the original. The state report says which kind of copy was made. A seed on
+	// another volume than the session's directory is refused unless the request
+	// says AllowFullCopy (muster #448).
 	PackageCachePrivate PackageCacheMode = "private"
 )
 
@@ -148,6 +150,15 @@ type SandboxPackageCache struct {
 	// directory in the copy the session uses. Empty means the cache is only
 	// announced through MUSTER_PACKAGE_CACHE and no manager is pointed at it.
 	Managers []PackageManager `json:"managers,omitempty"`
+	// AllowFullCopy accepts a full-size plain copy of a private cache (muster
+	// #448). A seed that is on a different volume than the session's directory
+	// cannot be cloned, so every session would take the seed's whole size on disk
+	// and the create would wait for the whole copy; by default such a create is
+	// refused, before anything is copied, with the two volumes named. True lets it
+	// through and `state.sandbox.packageCache.copy` reads "copy". It changes
+	// nothing for a seed that can be cloned, and nothing for `shared`, which
+	// copies nothing.
+	AllowFullCopy bool `json:"allowFullCopy,omitempty"`
 }
 
 // SandboxSpec is the optional `sandbox` field of a create (muster #281).

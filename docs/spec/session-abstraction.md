@@ -173,7 +173,8 @@ SandboxSpec {
   readPaths?    : AbsolutePath[]   // readable in addition to the defaults
   writePaths?   : AbsolutePath[]   // readable and writable in addition to the defaults; never a shared temporary directory
   network?      : "open" | "closed"  // default open; closed = loopback only
-  packageCache? : { path: AbsolutePath, mode?: "shared" | "private" }   // default private
+  packageCache? : { path: AbsolutePath, mode?: "shared" | "private",   // default private
+                    allowFullCopy?: boolean }                         // default false
 }
 ```
 
@@ -222,7 +223,11 @@ over loopback. The capability lists the postures a driver can enforce and implie
 without one and the home directory is closed. `private` (default) gives the session its own copy of
 the named directory, made when the session starts — copy-on-write where the filesystem has it, a
 plain copy otherwise — so no write path is shared between concurrent sessions and what the session
-installs never reaches the original. `shared` grants the named directory itself, writable.
+installs never reaches the original. A copy-on-write copy cannot cross volumes, so where the host can
+clone at all, a `private` cache on another volume than the session's directory is refused `invalid`
+before anything is copied, naming the two volumes, unless the request sets `allowFullCopy`: the full
+copy is then made and reported as `copy` (muster #448). `shared` grants the named directory itself,
+writable.
 Either way the session finds the directory it should use in `MUSTER_PACKAGE_CACHE`, and
 `state.sandbox.packageCache` says which mode and which kind of copy was used.
 

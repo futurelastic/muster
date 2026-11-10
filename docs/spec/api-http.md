@@ -950,7 +950,9 @@ directory plus the `writePaths` and `readPaths` named), `network` (`open` or `cl
 `isolatedEnvironment`, `configuration` (`inherit`, the default, or `given`: the session loads
 only the configuration the create names) and `packageCache` (muster #432: a `seed` directory, a `mode`
 of `private` — the default, a per-session copy — or `shared`, and the `managers` of `cargo`, `go`,
-`npm` the session uses, each handed the variable it reads, pointing into the session's copy; naming a
+`npm` the session uses, each handed the variable it reads, pointing into the session's copy; and
+`allowFullCopy` (muster #448, default `false`), without which a seed on another volume than the
+session's directory is refused `invalid` before it is copied; naming a
 seed implies a confined session, like `unattended`; see api.md). Every field present is a requirement. The service lowers
 it onto the per-runtime fields using only what the resolved runtime declares in `/v1/runtimes`
 (`posture` on each row says which parts it can enforce), and **refuses with `unsupported`,
