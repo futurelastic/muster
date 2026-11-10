@@ -568,6 +568,64 @@ path.
 directory and the sequence of the list in force. Equal is refused, not accepted
 as a no-op: a list is replaced only by a newer one.
 
+### 3.1.2 The profiling endpoint
+
+A service that is slow cannot be sampled from outside: the process-table CPU
+figure is a decaying average on some platforms and has pointed an investigation
+at the wrong process. These routes let an operator take a sample from inside a
+running service, release build included, without rebuilding it. They read the
+service's own process; they change nothing and return no session content. Like
+the machine-list routes they are never relayed: they always mean the machine
+that was addressed, so there is no `{machine}` segment.
+
+```
+GET /v1/debug/pprof/
+→ 200 { "profiles": [ { "name": string, "description": string } ] }
+
+GET /v1/debug/pprof/{name}
+→ 200 <the profile, application/octet-stream unless noted below>
+→ 400 invalid      — `seconds` outside 1..120 or not a whole number; `debug` not 0, 1 or 2
+→ 401 unauthorized — no credential, no principal table, or the principal lacks `debug`
+→ 404 not_found    — `name` is not one of the profiles below
+→ 409 conflict     — a profile or trace is already being taken; retryable
+→ 501 unsupported  — this machine has not switched the endpoint on
+```
+
+| `name` | What it is | Query |
+|---|---|---|
+| `profile` | CPU profile, gzip'd pprof protobuf | `seconds` 1..120, default 30 |
+| `trace` | execution trace | `seconds` 1..120, default 1 |
+| `heap` | live heap allocations, pprof | `gc=1` collects first; `debug=1` for text |
+| `allocs` | every allocation since start, pprof | `debug=1` for text |
+| `goroutine` | goroutine stacks, pprof | `debug=1` or `2` for text |
+| `threadcreate` | what led to a new OS thread, pprof | `debug=1` for text |
+
+Nothing else is served: not the process's command line (configuration an
+operator did not agree to publish) and not a symbol lookup (a profile this
+service writes already carries its function names, resolved inside the process
+from the runtime's own tables, so a stripped release binary needs no symbol file
+shipped beside it).
+
+**Two independent locks, both closed by default.** The caller needs the
+`debug` grant (§5), **and** the machine's operator must have switched the
+endpoint on (`profilingEndpoint` in the config file, read at start; off when
+absent). The grant is checked first, so a caller without it learns nothing about
+how the machine is configured; a holder on a machine that has not switched it on
+is told, in the `501`, which switch is missing. A machine with no principal
+table refuses every request: nobody can hold the grant.
+
+**The cost is bounded and visible.** `profile` and `trace` occupy the process's
+single profiler or tracer for up to the `seconds` asked, at most 120, and a
+second request while one runs is a `409`, not a queue. A caller that disconnects
+ends the sampling at once. Every request, served or refused, is in the audit
+trail (§5) as `verb=debug`, and a served one carries `took=` — for a timed profile,
+the length of the sample.
+
+The credential travels as an `Authorization` header like every other request,
+which a bare `go tool pprof <url>` cannot send. Fetch the file with the header,
+then open it: `curl -H "Authorization: Bearer …" -o cpu.pb.gz
+"$BASE/v1/debug/pprof/profile?seconds=30"`, then `go tool pprof cpu.pb.gz`.
+
 ### 3.2 Sessions
 
 ```
@@ -2854,7 +2912,7 @@ ordering is wrong rather than handing you a cursor that would skip.
   development.
 - Permissions are **per verb, per machine**. `list` and `state` may be granted
   broadly; `create`, `input`, `interrupt`, `close`, `rename`, `discard`, `keys`,
-  `label`, `remote-control`, `push-list` and `acting-person` are granted per peer and default to denied. That default is deliberate
+  `label`, `remote-control`, `push-list`, `debug` and `acting-person` are granted per peer and default to denied. That default is deliberate
   and applies to a fresh deployment as much as an established one — no grant is
   implied by anything else, including a runtime advertising the capability the
   grant gates (§3, `keys`; muster #68).
@@ -2887,6 +2945,17 @@ ordering is wrong rather than handing you a cursor that would skip.
   principal table refuses every push (nobody can hold it). A signed list cannot
   give it either: a list that names it is refused whole, because who may hand a
   machine its next list is a local decision, like the pinned signer.
+- **`debug` reads this service's own process** (muster #450,
+  `GET /v1/debug/pprof/…`, §3.1.2). It shows how the process is built and what it
+  is busy with, and a timed profile occupies the profiler for up to two minutes
+  per request; it changes nothing and returns no session content. Its own grant,
+  not a rider on `read`: a supervisor that may watch sessions has not thereby been
+  trusted to look inside the service that serves them. Denied by default like
+  every grant, not implied by the legacy all-verbs flags (a machine with no
+  principal table refuses every request), and a signed machine list cannot give
+  it: a list that names it is refused whole, because whether this machine can be
+  profiled, and by whom, is a local decision. A grant alone is not enough: the
+  machine's operator must also switch the endpoint on, and it is off by default.
 - **`acting-person` is attribution, not a verb** (muster #349). A mutating
   request may carry `Fleet-Acting-Person` (an opaque id) and
   `Fleet-Acting-Issuer` (the id of whatever minted it), both required together,
@@ -2990,6 +3059,17 @@ ordering is wrong rather than handing you a cursor that would skip.
 - Every remote-originated mutation is logged: actor, verb, target, outcome. Every
   `input` is additionally recorded durably, with a hash of its text, and can be
   read back by a `read` principal (§3.2, *Input audit*; muster #330).
+- **A logged mutation says how long it took** (muster #450). The line ends with
+  `took=<ms>`: whole milliseconds from the moment the verb was admitted to the
+  moment its handler returned. Where a step inside it was measured, one
+  `phase.<name>=<ms>` follows per step, in the order they finished; a verb that
+  measured none prints none, never a zero. A `create` names `resolve` (choosing
+  the driver), `create` (the driver's whole create — for a relayed one, the round
+  trip to the peer), `state` (the first state read) and, where the driver reports
+  it, `terminal` (starting the session in the terminal multiplexer, which is
+  **inside** `create`, so the two overlap and are not meant to be added). The fields
+  are appended after `status=`, so a reader that stops there still reads the line;
+  a refusal that ran nothing (`outcome=DENIED`) carries neither.
 
 ## 6. What this API deliberately lacks
 

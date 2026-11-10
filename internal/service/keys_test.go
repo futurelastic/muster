@@ -297,6 +297,9 @@ func TestGrants_AreDefinedInExactlyOnePlace(t *testing.T) {
 		t.Error("an unknown grant was accepted")
 	}
 	if !ValidGrant(GrantPushList) {
+		t.Error("push-list is missing from the one list")
+	}
+	if !ValidGrant(GrantDebug) {
 		t.Error("the newest grant is the one most likely to be missing from a second list")
 	}
 }

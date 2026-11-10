@@ -866,3 +866,27 @@ func liveMustRead(t *testing.T, path string) []byte {
 	}
 	return raw
 }
+
+// #450: the profiling switch is wired in at start, so flipping it in the file is a
+// restart-only change and says so; leaving it alone, or writing false where it was
+// absent, is not.
+func TestRestartOnlyNamesTheProfilingSwitch(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		running, next *fileConfig
+		restart       bool
+	}{
+		{"off to on", &fileConfig{}, &fileConfig{ProfilingEndpoint: true}, true},
+		{"on to off", &fileConfig{ProfilingEndpoint: true}, &fileConfig{}, true},
+		{"on to on", &fileConfig{ProfilingEndpoint: true}, &fileConfig{ProfilingEndpoint: true}, false},
+		{"absent to false", &fileConfig{}, &fileConfig{ProfilingEndpoint: false}, false},
+	} {
+		names := restartOnly(tc.running, tc.next)
+		if got := len(names) > 0; got != tc.restart {
+			t.Errorf("%s: restartOnly = %v, want restart=%v", tc.name, names, tc.restart)
+		}
+		if tc.restart && names[0] != "profilingEndpoint" {
+			t.Errorf("%s: named %v, want profilingEndpoint", tc.name, names)
+		}
+	}
+}

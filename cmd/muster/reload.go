@@ -330,6 +330,10 @@ func restartOnly(running, next *fileConfig) []string {
 	check("gateRemoteControlInput", running.gatesRemoteControlInput(), next.gatesRemoteControlInput())
 	check("closedRetentionDays", running.ClosedRetentionDays, next.ClosedRetentionDays)
 	check("inputAuditRetentionDays", running.InputAuditRetentionDays, next.InputAuditRetentionDays)
+	// The profiling endpoint (#450) is wired into the mux at start, so an edit that
+	// flipped it would otherwise read as applied while changing nothing. Compared
+	// by meaning: the key written false and the key absent are the same switch.
+	check("profilingEndpoint", running.ProfilingEndpoint, next.ProfilingEndpoint)
 	check("machineList", running.MachineList, next.MachineList)
 	return out
 }

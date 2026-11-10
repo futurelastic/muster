@@ -196,15 +196,17 @@ func TestWhoAmIUnderLegacyTokenMode(t *testing.T) {
 			// blanket flag.
 			// GrantPushList (#352) likewise: handing this machine a new peer table
 			// is never something a blanket flag implies.
-			if g == GrantHumanRelay || g == GrantActingPerson || g == GrantPushList {
+			// GrantDebug (#450) likewise: reading the process's internals is never
+			// something a blanket flag implies.
+			if g == GrantHumanRelay || g == GrantActingPerson || g == GrantPushList || g == GrantDebug {
 				continue
 			}
 			if !hasGrant(report.Grants, g) {
 				t.Errorf("grants = %v, missing %s (both legacy flags are on)", report.Grants, g)
 			}
 		}
-		if hasGrant(report.Grants, GrantHumanRelay) || hasGrant(report.Grants, GrantActingPerson) || hasGrant(report.Grants, GrantPushList) {
-			t.Errorf("grants = %v, legacy mode must never imply human-relay, acting-person or push-list", report.Grants)
+		if hasGrant(report.Grants, GrantHumanRelay) || hasGrant(report.Grants, GrantActingPerson) || hasGrant(report.Grants, GrantPushList) || hasGrant(report.Grants, GrantDebug) {
+			t.Errorf("grants = %v, legacy mode must never imply human-relay, acting-person, push-list or debug", report.Grants)
 		}
 	})
 }
