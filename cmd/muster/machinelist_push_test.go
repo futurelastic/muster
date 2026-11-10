@@ -520,24 +520,29 @@ func TestPushListComesFromTheOperatorNotTheList(t *testing.T) {
 		return false
 	}
 
-	t.Run("a list that names push-list is refused whole", func(t *testing.T) {
-		f, cfg := newListFixture(t, "only", 4)
-		cfg.MachineList.Path = f.listPath
-		doc := machinelist.Document{Fleet: "fleet-1", Seq: 5, Signers: []string{listPub(f.owner)},
-			Machines: []machinelist.Machine{{ID: "machine-a", PublicKey: listPub(aKey), Addresses: []string{"http://a:1"}, Grants: []string{"read", "push-list"}}},
-			Issuers:  []machinelist.Issuer{}}
-		raw, err := machinelist.Sign(doc, f.owner)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(f.listPath, raw, 0o644); err != nil {
-			t.Fatal(err)
-		}
-		o := loadMachineList(cfg, f.stateDir, "self")
-		if o.err == nil || !strings.Contains(o.err.Error(), "push-list") || o.fatal() == nil {
-			t.Fatalf("a list naming push-list loaded: err=%v", o.err)
-		}
-	})
+	// Both are decisions about THIS machine that a signed list must never make for
+	// it: who may hand it a list (push-list, #352) and who may read its process's
+	// internals (debug, #450).
+	for _, local := range []string{"push-list", "debug"} {
+		t.Run("a list that names "+local+" is refused whole", func(t *testing.T) {
+			f, cfg := newListFixture(t, "only", 4)
+			cfg.MachineList.Path = f.listPath
+			doc := machinelist.Document{Fleet: "fleet-1", Seq: 5, Signers: []string{listPub(f.owner)},
+				Machines: []machinelist.Machine{{ID: "machine-a", PublicKey: listPub(aKey), Addresses: []string{"http://a:1"}, Grants: []string{"read", local}}},
+				Issuers:  []machinelist.Issuer{}}
+			raw, err := machinelist.Sign(doc, f.owner)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(f.listPath, raw, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			o := loadMachineList(cfg, f.stateDir, "self")
+			if o.err == nil || !strings.Contains(o.err.Error(), local) || o.fatal() == nil {
+				t.Fatalf("a list naming %s loaded: err=%v", local, o.err)
+			}
+		})
+	}
 
 	t.Run("prefer and only carry the operator's grant to the listed machine of the same key", func(t *testing.T) {
 		for _, mode := range []string{"prefer", "only"} {

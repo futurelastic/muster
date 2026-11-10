@@ -964,6 +964,12 @@ func main() {
 		// newer one (muster #352). Only a service with a config file has the
 		// reloader that puts a list into force.
 		svcCfg.MachineList = machineListAPI{rl}
+		// The profiling endpoint (muster #450): off unless the operator switched it
+		// on, and then still only for a principal that holds `debug`.
+		svcCfg.Profiling = cfgFile.ProfilingEndpoint
+		if svcCfg.Profiling {
+			log.Printf("muster: profiling endpoint ON (profilingEndpoint) — GET /v1/debug/pprof/ for principals holding the debug grant; restart to turn it off")
+		}
 		for _, p := range principals {
 			log.Printf("muster: principal %q grants=%v", p.Name, p.Grants)
 		}

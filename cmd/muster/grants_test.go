@@ -265,3 +265,17 @@ func TestSupervisorGrantsNeverIncludePushList(t *testing.T) {
 		t.Fatal("push-list is not a grant this build can configure")
 	}
 }
+
+// muster #450: the same reasoning for debug. It reads the service's own process
+// internals and drives no session, so the principal `muster service install`
+// enrols must not hold it by default.
+func TestSupervisorGrantsNeverIncludeDebug(t *testing.T) {
+	for _, g := range supervisorGrants() {
+		if g == service.GrantDebug {
+			t.Fatalf("supervisorGrants includes %s: every new `service install` would grant it by default", g)
+		}
+	}
+	if !service.ValidGrant(service.GrantDebug) {
+		t.Fatal("debug is not a grant this build can configure")
+	}
+}

@@ -205,6 +205,17 @@ type fileConfig struct {
 	// negative value is refused at startup.
 	InputAuditRetentionDays int `json:"inputAuditRetentionDays,omitempty"`
 
+	// ProfilingEndpoint switches on the profiling endpoint, GET /v1/debug/pprof/…
+	// (muster #450). Absent or false means off, which is the default: a machine
+	// nobody is investigating offers nothing to profile. It is the second of two
+	// locks — a principal must also hold the `debug` grant — and neither implies
+	// the other, so an operator may grant `debug` ahead of time and flip this only
+	// for the afternoon a sample is needed. Config-file-only and per machine, like
+	// the settings above: it is read at start, so changing it needs a restart.
+	// Nothing is rebuilt for it and no symbol file is needed: a profile the service
+	// writes carries its own function names, release build included.
+	ProfilingEndpoint bool `json:"profilingEndpoint,omitempty"`
+
 	// MachineList points at an owner-signed list of the fleet's machines that
 	// the service reads in place of (or over) hand-written peers (muster #351).
 	// Absent means off. See machinelist.go for the modes.
