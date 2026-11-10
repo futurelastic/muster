@@ -85,7 +85,7 @@ func (d *Driver) resumeOne(ctx context.Context, it loaded) {
 		d.say("opencode: stopped a server left running by an earlier service (session %s, pid %d, port %d)", rec.ID, rec.Pid, rec.Port)
 	}
 	base := knownSession{
-		cwd: fleet.AbsolutePath(rec.Cwd), name: rec.Name, agent: rec.Agent, specAgent: rec.SpecAgent,
+		cwd: fleet.AbsolutePath(rec.Cwd), name: rec.Name, agent: rec.Agent, specAgent: rec.SpecAgent, specModel: rec.SpecModel,
 		startedAt: time.UnixMilli(rec.StartedAtMs),
 	}
 	if d.ownsDir(rec.Dir) {

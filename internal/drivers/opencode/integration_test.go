@@ -121,6 +121,68 @@ func TestIntegration_CreateAndCloseARealSession(t *testing.T) {
 	}
 }
 
+// muster #437 against a real server, spending nothing: a session created with a
+// pinned model, read by id before any turn. The read must reach the runtime's real
+// message endpoint and come back as "requested, nothing run yet" — not as a failed
+// read, and not as a resolved pin. The resolved half needs a turn, which is the
+// fake server's tests (pins_test.go); this proves the request the read makes is
+// one a real runtime accepts, and that the request survives into the record.
+func TestIntegration_AReadByIDReportsAPinnedModelOfARealSession(t *testing.T) {
+	requireOpencodeIntegration(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+	req := fleet.RequestFrom(fleet.Caller{Principal: "integration-test"})
+
+	d, err := New(ctx, "test-machine", WithProviders([]string{builtinProvider}))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer d.Shutdown()
+
+	// The first create reads the model catalog, which is what names a model a
+	// create may pin.
+	first, err := d.Create(ctx, req, "integration-key-437a", fleet.SessionSpec{Cwd: fleet.AbsolutePath(t.TempDir()), Name: "muster #437 catalog"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	defer d.Close(ctx, req, fleet.SessionRef{ID: first.ID})
+	ids := d.Models().IDs
+	if len(ids) == 0 {
+		t.Skip("the runtime lists no usable model to pin")
+	}
+	model := ids[0]
+
+	pinned, err := d.Create(ctx, req, "integration-key-437b", fleet.SessionSpec{Cwd: fleet.AbsolutePath(t.TempDir()), Name: "muster #437 pinned", Model: model})
+	if err != nil {
+		t.Fatalf("Create with model %q: %v", model, err)
+	}
+	defer d.Close(ctx, req, fleet.SessionRef{ID: pinned.ID})
+
+	col, err := d.List(ctx, req, driver.ListFilter{ID: pinned.ID})
+	if err != nil {
+		t.Fatalf("List(id): %v", err)
+	}
+	items := col.Items()
+	if len(items) != 1 {
+		t.Fatalf("List(id) returned %d sessions, want 1", len(items))
+	}
+	got := items[0]
+	if got.Pins == nil || got.Pins.Model == nil {
+		t.Fatalf("Pins = %+v, want the Model pin on a read by id", got.Pins)
+	}
+	m := got.Pins.Model
+	if m.Requested != model || m.Honoured != nil {
+		t.Errorf("model pin = %+v, want requested %q and unresolved: no turn has run", m, model)
+	}
+	if m.Evidence != pinModelUnresolvedEvidence {
+		t.Errorf("evidence = %q, want the standing no-turn reason: the real runtime answered the read, so it was not a failed or skipped one", m.Evidence)
+	}
+	if got.Model != "" {
+		t.Errorf("Model = %q, want empty before any turn", got.Model)
+	}
+}
+
 // The live measurement #55 itself made: create, prompt, and watch the
 // status endpoint report busy and then idle again. This is the one test
 // in the package that spends real provider money — reserved, tagged, and

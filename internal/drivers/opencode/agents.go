@@ -211,10 +211,19 @@ const turnEvidenceTail = 8
 // evidence" (the zero value), never a claim in either direction. A model counts
 // only when the record names both halves of it; one half alone is not a model.
 func (d *Driver) observedTurn(ctx context.Context, srv *server, id string) turnEvidence {
+	ev, _ := d.readTurnEvidence(ctx, srv, id)
+	return ev
+}
+
+// readTurnEvidence is observedTurn that also says whether the read failed, for a
+// caller that must not report a failed read as "no turn has run" (muster #437: a
+// session read states why a pin is unresolved). On an error the evidence is the
+// zero value, as observedTurn returns it.
+func (d *Driver) readTurnEvidence(ctx context.Context, srv *server, id string) (turnEvidence, error) {
 	var msgs []wireMessage
 	path := fmt.Sprintf("/session/%s/message?limit=%d", url.PathEscape(id), turnEvidenceTail)
 	if err := d.do(ctx, srv, "GET", path, nil, &msgs); err != nil {
-		return turnEvidence{}
+		return turnEvidence{}, err
 	}
 	for i := len(msgs) - 1; i >= 0; i-- {
 		info := msgs[i].Info
@@ -228,9 +237,9 @@ func (d *Driver) observedTurn(ctx context.Context, srv *server, id string) turnE
 		if info.ProviderID != "" && info.ModelID != "" {
 			ev.modelRan, ev.modelUsed = true, info.ProviderID+"/"+info.ModelID
 		}
-		return ev
+		return ev, nil
 	}
-	return turnEvidence{}
+	return turnEvidence{}, nil
 }
 
 // turnEvidenceFor reads the evidence for a session that pinned an agent or a
@@ -243,6 +252,62 @@ func (d *Driver) turnEvidenceFor(ctx context.Context, known knownSession, id str
 	ctx, cancel := d.bounded(ctx)
 	defer cancel()
 	return d.observedTurn(ctx, known.srv, id)
+}
+
+// Why a session READ (List, which GET on a session is answered from; muster #437)
+// leaves a pin unresolved when it did not consult the runtime's message record. The
+// create-time sentences above say no turn has run yet, which would be false here.
+const (
+	// pinUnreadListing is the reason on a listing of sessions: it asks the runtime
+	// for no session's message record, so the constant cost #339 and #426 keep is
+	// not undone. A read of one session by id does read it.
+	pinUnreadListing = "this read is a listing of sessions, which asks the runtime for no session's message record; " +
+		"read the session by id for the evidence"
+	// pinUnreadStopped is the reason when the session's runtime is not there to ask:
+	// stopped while idle, exited, listed unknown after a restart, or not answering.
+	pinUnreadStopped = "the session's runtime is not answering (stopped, exited or unreachable), " +
+		"so its message record cannot be read now"
+	// pinUnreadFailed is the reason when the runtime was asked and the read failed.
+	pinUnreadFailed = "the runtime's message record of the session could not be read just now"
+)
+
+// pinsOfRead is what a session read reports of the pins and of the model the newest
+// turn ran on (muster #437).
+//
+// Only a read of ONE session by id consults the runtime's message record, with one
+// bounded request, and only for a session that pinned an agent or a model — a
+// session that pinned neither reports no pins and no model, as before. The
+// request is the same read a repeat of a create makes (turnEvidenceFor), so the
+// two resolve a pin identically. Any other read reports each pin as requested and
+// unresolved, with the reason it was not read.
+//
+// The returned model is the "provider/model" the newest assistant message names,
+// "" when it names none or nothing was read: Session.Model is an observed value,
+// never an echo of the request.
+//
+// live says the session's runtime is up and its status read succeeded.
+func (d *Driver) pinsOfRead(ctx context.Context, info knownSession, id string, byID, live bool) (*fleet.PinOutcome, string) {
+	if info.specAgent == "" && info.specModel == "" {
+		return nil, ""
+	}
+	unread := func(why string) (*fleet.PinOutcome, string) {
+		return pinOutcomeFrom(info.specAgent, info.specModel, turnEvidence{}, why), ""
+	}
+	switch {
+	case !byID:
+		return unread(pinUnreadListing)
+	case !live || info.srv == nil:
+		return unread(pinUnreadStopped)
+	}
+	ev, err := d.readTurnEvidence(ctx, info.srv, id)
+	if err != nil {
+		return unread(pinUnreadFailed)
+	}
+	model := ""
+	if ev.modelRan {
+		model = ev.modelUsed
+	}
+	return pinOutcomeFrom(info.specAgent, info.specModel, ev, ""), model
 }
 
 // pinAgentUnresolvedEvidence is the standing reason an agent pin is not resolved:

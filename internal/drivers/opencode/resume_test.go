@@ -307,3 +307,55 @@ func TestResume_ASessionThatCannotBeFoundIsStillListedWithTheReason(t *testing.T
 		t.Errorf("the record of a session that could not be relaunched was removed: %v", err)
 	}
 }
+
+// muster #437: what the create asked for is kept with the session's record, so a
+// session relaunched after a restart still reports its model pin — as requested,
+// and resolved from the runtime's own record once a read asks for it.
+func TestResume_ThePinnedModelSurvivesARestartAndResolvesOnARead(t *testing.T) {
+	state := t.TempDir()
+	d1 := newStateDriver(t, state)
+	sess := mustCreate(t, d1, "k1", fleet.SessionSpec{Name: "pinned", Model: "anthropic/claude"})
+	if rec := d1.store.load(sess.ID); rec == nil || rec.SpecModel != "anthropic/claude" {
+		t.Fatalf("the session's record = %+v, want SpecModel anthropic/claude", rec)
+	}
+	known, _ := d1.wasSeen(sess.ID)
+	raw, _ := json.Marshal([]wireMessage{{Info: wireMessageInfo{Role: "assistant", ProviderID: "anthropic", ModelID: "claude"}}})
+	if err := os.WriteFile(filepath.Join(known.srv.dir, "xdg", "data", "fake-messages.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := d1.Shutdown(); err != nil {
+		t.Fatal(err)
+	}
+
+	d2 := newStateDriver(t, state)
+	t.Cleanup(func() { _ = d2.Shutdown() })
+	got := readOne(t, d2, sess.ID)
+	if got.Pins == nil || got.Pins.Model == nil {
+		t.Fatalf("after the restart Pins = %+v, want the Model pin", got.Pins)
+	}
+	if m := got.Pins.Model; m.Requested != "anthropic/claude" || m.Honoured == nil || !*m.Honoured || m.Applied != "anthropic/claude" {
+		t.Errorf("model pin = %+v, want requested and applied anthropic/claude, honoured", m)
+	}
+	if got.Model != "anthropic/claude" {
+		t.Errorf("Model = %q, want anthropic/claude", got.Model)
+	}
+}
+
+// A record written before the model was kept has no request to report: such a
+// session reports no model pin after a restart, rather than one it cannot know.
+func TestResume_ARecordWithoutAModelReportsNoModelPin(t *testing.T) {
+	state := t.TempDir()
+	d1 := newStateDriver(t, state)
+	sess := mustCreate(t, d1, "k1", fleet.SessionSpec{Name: "old"})
+	if rec := d1.store.load(sess.ID); rec == nil || rec.SpecModel != "" {
+		t.Fatalf("the session's record = %+v, want no SpecModel", rec)
+	}
+	if err := d1.Shutdown(); err != nil {
+		t.Fatal(err)
+	}
+	d2 := newStateDriver(t, state)
+	t.Cleanup(func() { _ = d2.Shutdown() })
+	if got := readOne(t, d2, sess.ID); got.Pins != nil || got.Model != "" {
+		t.Errorf("Pins = %+v, Model = %q, want neither for a session that pinned nothing", got.Pins, got.Model)
+	}
+}

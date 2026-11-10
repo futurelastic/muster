@@ -608,3 +608,26 @@ func TestPark_AParkedSessionSurvivesAShutdown(t *testing.T) {
 		t.Errorf("Send after a restart: %v", err)
 	}
 }
+
+// muster #437: a parked session has no process to ask, and a read never starts
+// one, so its pin is reported as requested and unresolved, with the reason — not
+// as "no turn has run yet", and never by starting a server to find out.
+func TestPark_AReadOfAParkedSessionReportsThePinUnresolvedWithoutStartingAProcess(t *testing.T) {
+	d, clock, _, _ := newParkDriver(t)
+	sess := mustCreate(t, d, "k1", fleet.SessionSpec{Name: "idler", Model: "anthropic/claude"})
+	srv := parkSession(t, d, clock, sess.ID)
+
+	got := readOne(t, d, sess.ID)
+	if got.Pins == nil || got.Pins.Model == nil {
+		t.Fatalf("Pins = %+v, want the Model pin as requested", got.Pins)
+	}
+	if m := got.Pins.Model; m.Requested != "anthropic/claude" || m.Honoured != nil || m.Evidence != pinUnreadStopped {
+		t.Errorf("model pin = %+v, want requested, unresolved, evidence %q", m, pinUnreadStopped)
+	}
+	if known, _ := d.wasSeen(sess.ID); known.srv != srv || d.phaseOf(srv) != phaseParked {
+		t.Error("a read of the pin replaced or revived the parked server")
+	}
+	if n := liveCount(d); n != 0 {
+		t.Errorf("%d servers tracked after a read of a parked session", n)
+	}
+}
