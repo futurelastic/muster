@@ -264,6 +264,13 @@ type Driver struct {
 	providerIDs []string
 	providers   providerPolicy
 
+	// grants is the machine's provider sign-in (WithGrant, muster #451): each
+	// session whose policy permits the provider is given its current access token,
+	// and every live session is updated when it changes. grantCancel ends the
+	// subscription; nil when there is none.
+	grants      GrantSource
+	grantCancel func()
+
 	// agentsFile is the operator's agent definition file (WithOperatorAgents,
 	// muster #396): its path is fixed here, its content is read again on every
 	// create and relaunch. Empty means the machine defines none.
@@ -703,6 +710,11 @@ func New(ctx context.Context, machine fleet.MachineId, opts ...Option) (*Driver,
 			"started again; no session will be stopped")
 		d.idleStop = 0
 	}
+	// muster #451: last, so a start that failed above leaves no subscription behind.
+	// Every live session's sign-in is rewritten whenever the access token changes.
+	if d.grants != nil {
+		d.grantCancel = d.grants.Subscribe(d.pushAccess)
+	}
 	return d, nil
 }
 
@@ -724,6 +736,9 @@ func (d *Driver) Shutdown() error {
 	d.stopDirSweep()
 	d.stopIdleSweep() // muster #421: a park in progress finishes first
 	d.endSubscriptions()
+	if d.grantCancel != nil {
+		d.grantCancel() // muster #451: no token renewal reaches a driver that is stopping
+	}
 
 	var wg sync.WaitGroup
 	for _, s := range servers {

@@ -197,6 +197,15 @@ func DescribeProviderPolicy(entries []string) (string, error) {
 	return p.describe(), nil
 }
 
+// ProviderPermitted reports whether the entries allow a session to use provider
+// id at all (muster #451): the doctor asks it to say whether a stored sign-in can
+// reach any session. A malformed list reports false: the error is
+// DescribeProviderPolicy's to give.
+func ProviderPermitted(entries []string, id string) bool {
+	p, err := newProviderPolicy(entries)
+	return err == nil && p.permits(id)
+}
+
 // NarrowsModels reports whether the entries name single models (an allow of
 // provider/<model> or provider/<glob>, or a deny), as opposed to whole providers
 // only. A malformed list reports false: the error is DescribeProviderPolicy's to

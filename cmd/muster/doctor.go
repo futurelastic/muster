@@ -20,8 +20,10 @@ import (
 	fleet "github.com/futurelastic/muster"
 	"github.com/futurelastic/muster/internal/drivers/opencode"
 	tmuxdriver "github.com/futurelastic/muster/internal/drivers/tmux"
+	"github.com/futurelastic/muster/internal/grant"
 	"github.com/futurelastic/muster/internal/inboxclient"
 	"github.com/futurelastic/muster/internal/peerkey"
+	"github.com/futurelastic/muster/internal/privfs"
 	"github.com/futurelastic/muster/internal/service"
 	"github.com/futurelastic/muster/internal/sessionenv"
 )
@@ -352,6 +354,7 @@ func runChecks(ctx context.Context, env doctorEnv) []doctorRow {
 	c.add(checkAgentProgram(ctx, runtime, env.Timeout))
 	c.add(checkOpencodeRuntime(getenv("FLEET_RUNTIME_OPENCODE") == "1", getenv("FLEET_OPENCODE_BIN")))
 	c.add(checkOpencodeProviders(getenv("FLEET_RUNTIME_OPENCODE") == "1", getenv("FLEET_OPENCODE_PROVIDERS")))
+	c.add(checkOpencodeGrant(getenv("FLEET_RUNTIME_OPENCODE") == "1", getenv("FLEET_STATE_DIR"), getenv("FLEET_OPENCODE_PROVIDERS"), time.Now()))
 	orphans := env.OpencodeOrphans
 	if orphans == nil {
 		orphans = opencode.OrphanServers
@@ -1298,6 +1301,71 @@ func checkOpencodeProviders(enabled bool, raw string) doctorRow {
 			"a session's own configuration enables whole providers only. " +
 			"Name exact models to allow: a name pattern is not a free-tier or data-retention filter"
 	}
+	return row
+}
+
+// checkOpencodeGrant is the runtime.opencode.grant row (muster #451): the state of
+// the machine's ChatGPT sign-in, read from its store, so it needs no running
+// service. A store that anyone but its owner can read is a failure — it holds a
+// refresh token. A revoked sign-in is a warning that says what to run: sessions
+// on the provider fail until someone signs in again, and this is the row that says
+// why, instead of a run of failed turns. A machine that never signed in is a skip,
+// not a finding. Like every row here it names no path.
+func checkOpencodeGrant(enabled bool, stateDir, providers string, now time.Time) doctorRow {
+	row := doctorRow{ID: "runtime.opencode.grant", Refs: []int{451}}
+	switch {
+	case !enabled:
+		row.Status = statusSkip
+		row.Summary = "FLEET_RUNTIME_OPENCODE is not 1 — the opencode runtime is not enabled"
+		return row
+	case stateDir == "":
+		row.Status = statusSkip
+		row.Summary = "FLEET_STATE_DIR is unset — a ChatGPT sign-in is kept there, so none can be used"
+		return row
+	}
+	store := grant.NewStore(stateDir)
+	g, err := store.Load()
+	switch {
+	case errors.Is(err, grant.ErrNoGrant):
+		row.Status = statusSkip
+		row.Summary = "no ChatGPT sign-in is stored (optional: `muster grant login` signs this machine in once)"
+		return row
+	case err != nil:
+		row.Status = statusFail
+		row.Summary = "the stored ChatGPT sign-in cannot be read"
+		row.Detail = err.Error()
+		return row
+	}
+	if rep, ok := store.Check(); ok && rep.Verdict == privfs.Loose {
+		row.Status = statusFail
+		row.Summary = "the stored ChatGPT sign-in is readable by more than its owner"
+		row.Detail = rep.Detail + "; it holds a refresh token — fix the access, or sign in again after `muster grant logout`"
+		return row
+	}
+	if g.Revoked != nil {
+		row.Status = statusWarn
+		row.Summary = "the ChatGPT sign-in is revoked — sign in again (`muster grant login`)"
+		row.Detail = (&grant.RevokedError{Status: g.Revoked.Status, Code: g.Revoked.Code}).Error() +
+			"; sessions on the openai provider fail until then, and nothing renews it"
+		return row
+	}
+	exp := g.ExpiresAt()
+	if !opencode.ProviderPermitted(splitList(providers), grant.ProviderOpenAI) {
+		row.Status = statusWarn
+		row.Summary = "a ChatGPT sign-in is stored but FLEET_OPENCODE_PROVIDERS does not allow openai — no session will use it"
+		row.Detail = "a sign-in makes openai usable, it does not allow it: name openai in FLEET_OPENCODE_PROVIDERS to use it"
+		return row
+	}
+	if !exp.After(now) {
+		row.Status = statusWarn
+		row.Summary = "the ChatGPT access token has lapsed"
+		row.Detail = "the service renews it before it lapses; if the service is running and this persists, " +
+			"check that it can reach the provider (`muster grant status`)"
+		return row
+	}
+	row.Status = statusPass
+	row.Summary = "ChatGPT sign-in present; access token valid until " + exp.UTC().Format(time.RFC3339) +
+		" (" + until(exp, now) + "); the service renews it"
 	return row
 }
 

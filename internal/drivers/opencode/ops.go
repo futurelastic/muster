@@ -374,6 +374,14 @@ func (d *Driver) startServerIn(ctx context.Context, spec fleet.SessionSpec, exis
 		cleanup()
 		return nil, &fleet.Error{Kind: fleet.ErrorInvalid, Message: "create: " + err.Error(), Machine: d.machine}
 	}
+	// muster #451: the machine's provider sign-in, as an access token only, before
+	// the server starts — the runtime decides at its start whether the provider is
+	// usable. Written on a relaunch too, so a parked session wakes with a token that
+	// is current rather than the one it was parked with.
+	if err := d.giveSessionGrant(ctx, dir); err != nil {
+		cleanup()
+		return nil, &fleet.Error{Kind: fleet.ErrorInvalid, Message: "create: " + err.Error(), Machine: d.machine}
+	}
 	// muster #420: the runtime's own log is owner-only before the runtime can write
 	// to it, on a relaunch as on a first start.
 	if err := privateRuntimeLog(dir); err != nil {
@@ -407,6 +415,9 @@ func (d *Driver) startServerIn(ctx context.Context, spec fleet.SessionSpec, exis
 		}
 		return nil, &fleet.Error{Kind: fleet.ErrorUnreachable, Message: "create: this driver has been shut down", Machine: d.machine}
 	}
+	// muster #451: a renewal between the write above and the tracking just done
+	// reached nobody; read the token again and write it if it moved.
+	d.catchUpGrant(ctx, dir)
 	srv.touch(d.now()) // muster #421: a server that has just started is not idle
 	return srv, nil
 }
