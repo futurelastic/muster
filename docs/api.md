@@ -891,12 +891,17 @@ Four things to plan for. **The seed is the operator's:** refreshing it is not so
 service does, and a session started from it afterwards sees the new content while a running one keeps the
 copy it started with. **Build output is not served:** a shared build directory holds artifacts that later
 sessions execute, so `GOCACHE` and a Cargo `target/` stay in each session's own space. **The copy adds
-to every create, and its cost is per file, not per byte.** On a seed of 6.6 GiB in about 140,000 files
-(a Go module cache, a Cargo registry and an npm cache) on APFS, `cp -cR` — one clone per file, which is
-what this service runs — took 88 to 105 s, a plain copy 180 s, and one `clonefile(2)` of the whole
-directory about 9 s. Keep a seed small, and read `state.sandbox.packageCache.copy`: `clone` means
-copy-on-write, `copy` means the filesystem could not clone (the seed and the session directory are on
-different volumes) and the session holds the seed's full size. **A clone counts at full size in
+to every create, and its cost is per file, not per byte** — unless it can be one operation. On APFS this
+service clones the whole seed directory with a single `clonefileat(2)`; if the host refuses, it falls
+back to `cp -cR` (one clone per file), then to a plain copy. On a seed of 6.6 GiB in about 140,000
+files (a Go module cache, a Cargo registry and an npm cache), `cp -cR` took 88 to 105 s, a plain copy
+180 s, and one clone of the directory about 9 s; the service now takes the last. Keep a seed small, and
+read `state.sandbox.packageCache.copy`: `clone` means copy-on-write (either of the two clone paths),
+`copy` means the filesystem could not clone (the seed and the session directory are on different
+volumes) and the session holds the seed's full size — the create is then slow and is not refused. The
+copy stops with the create's context: the per-file copies are killed at once, and one directory clone,
+which cannot be interrupted, is waited for (one clone's time, not the whole copy's); either way the
+session's directory is removed and nothing is left to adopt. **A clone counts at full size in
 `state.scratch`,** so that figure stops being a measure of the disk the session really uses.
 
 **Providers, and models, an opencode session may use** (#293, #401) are the operator's decision,

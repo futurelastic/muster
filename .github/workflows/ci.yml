@@ -200,3 +200,9 @@ jobs:
         run: go build -o "$RUNNER_TEMP/muster" ./cmd/muster
       - name: install --no-start, lint the plist, second install, uninstall
         run: ./scripts/e2e-service.sh lint "$RUNNER_TEMP/muster"
+      # The package-cache copy (#433) reaches clonefileat(2) by a literal system
+      # call number, which nothing promises and which the Linux job cannot run.
+      # macos-latest is arm64, the architecture a developer machine cannot prove;
+      # these tests fail, not skip, when the host answers EINVAL or ENOSYS to it.
+      - name: package-cache clone (clonefileat by number)
+        run: go test ./internal/drivers/opencode -run 'CloneDirectory|CopyTree' -count=1 -v

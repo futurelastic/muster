@@ -1,6 +1,8 @@
 package opencode
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -8,6 +10,7 @@ import (
 	"strings"
 
 	fleet "github.com/futurelastic/muster"
+	"github.com/futurelastic/muster/internal/privfs"
 	"github.com/futurelastic/muster/internal/sandbox"
 )
 
@@ -89,13 +92,18 @@ func dedupe(in []string) []string            { return sandbox.Dedupe(in) }
 // other than sessionDir exists, so a refusal has no side effect to undo beyond
 // sessionDir, which the caller removes.
 func (d *Driver) planSandbox(spec fleet.SessionSpec, sessionDir string) (*sandboxPlan, error) {
-	return d.planSandboxFor(spec, sessionDir, "")
+	return d.planSandboxFor(context.Background(), spec, sessionDir, "")
 }
 
 // planSandboxFor is planSandbox for a session that may already have a private
 // package cache in its directory (muster #282): priorCopy, when set, is how that
 // cache was made, and it is reused rather than copied over itself.
-func (d *Driver) planSandboxFor(spec fleet.SessionSpec, sessionDir, priorCopy string) (*sandboxPlan, error) {
+//
+// ctx bounds the copy (muster #433): a caller that gives up, or a service that
+// shuts down, stops it, and the error is then ctx's own rather than a failure of
+// the copy. A caller that cannot make a copy passes a context that is never
+// cancelled and is protected from needing one by priorCopy.
+func (d *Driver) planSandboxFor(ctx context.Context, spec fleet.SessionSpec, sessionDir, priorCopy string) (*sandboxPlan, error) {
 	sb := spec.Sandbox
 	invalid := func(msg string, args ...any) error {
 		return &fleet.Error{Kind: fleet.ErrorInvalid, Message: "create: " + fmt.Sprintf(msg, args...), Machine: d.machine}
@@ -184,8 +192,11 @@ func (d *Driver) planSandboxFor(spec fleet.SessionSpec, sessionDir, priorCopy st
 			how := priorCopy
 			if how == "" {
 				var err error
-				how, err = copyTree(src, dst)
+				how, err = copyTree(ctx, src, dst)
 				if err != nil {
+					if ctx.Err() != nil {
+						return nil, ctx.Err()
+					}
 					return nil, &fleet.Error{Kind: fleet.ErrorUnreachable, Message: fmt.Sprintf("create: copying the package cache for this session: %v", err), Machine: d.machine}
 				}
 			} else if info, err := os.Stat(dst); err != nil || !info.IsDir() {
@@ -226,18 +237,87 @@ func managerEnv(cache string, managers []fleet.PackageManager) map[string]string
 	return out
 }
 
+// errCloneUnsupported is what cloneDirectory answers where there is no call to
+// clone a directory as one operation.
+var errCloneUnsupported = errors.New("this platform has no call that clones a directory as one operation")
+
+// The two seams copyTree's tests use: the one-call clone, and the program that
+// makes the per-file copies.
+var (
+	cloneDir   = cloneDirectory
+	copyBinary = "/bin/cp"
+)
+
 // copyTree makes dst a copy of src, copy-on-write where the filesystem offers
-// it, and reports which it was. `cp -c` fails rather than copying when the
-// filesystem cannot clone, so the fallback is a separate, plain copy — and the
-// report says so, since "instant" and "slow" are not the same promise.
-func copyTree(src, dst string) (string, error) {
-	clone, cloneErr := exec.Command("/bin/cp", "-cR", src, dst).CombinedOutput()
+// it, and reports which it was: "clone" or "copy".
+//
+// Three ways, in order. One clone of the whole directory (muster #433: about ten
+// times faster than the next, because the cost of `cp -c` is a call and a walk
+// per file, not per byte). Failing that, `cp -cR`; `cp -c` fails rather than
+// copying when the filesystem cannot clone, so the last way is a separate, plain
+// copy — and the report says so, since "instant" and "slow" are not the same
+// promise. A seed on another volume than dst can clone nowhere, so it reaches the
+// plain copy and holds its full size.
+//
+// ctx stops it. The copies are child processes and are killed; the clone is one
+// call that cannot be interrupted, so a cancel during it takes effect when it
+// returns, which is one clone's time and not the whole copy's. Either way dst is
+// removed before copyTree returns and the error is ctx's, so a caller removing
+// the directory dst is in never races a copy still writing to it.
+//
+// dst is cleared first: `cp` given a dst that exists copies src INTO it rather
+// than making it, so what an earlier attempt left would turn a copy into a
+// nested one. That also leaves a relaunch with no recorded copy (resume.go) with
+// nothing of a cancelled start.
+func copyTree(ctx context.Context, src, dst string) (string, error) {
+	abandon := func(err error) (string, error) {
+		_ = privfs.RemoveAll(dst) // best effort: the caller removes what holds it
+		return "", err
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if err := privfs.RemoveAll(dst); err != nil {
+		return "", fmt.Errorf("clearing %s before the copy: %w", dst, err)
+	}
+
+	cloneErr := cloneDir(src, dst)
 	if cloneErr == nil {
+		if err := ctx.Err(); err != nil {
+			return abandon(err)
+		}
 		return "clone", nil
 	}
-	_ = os.RemoveAll(dst)
-	if plain, err := exec.Command("/bin/cp", "-R", src, dst).CombinedOutput(); err != nil {
-		return "", fmt.Errorf("%v: %s / %s", err, strings.TrimSpace(string(clone)), strings.TrimSpace(string(plain)))
+	if err := ctx.Err(); err != nil {
+		return abandon(err)
+	}
+	_ = privfs.RemoveAll(dst)
+
+	clone, cpCloneErr := exec.CommandContext(ctx, copyBinary, "-cR", src, dst).CombinedOutput()
+	if cpCloneErr == nil {
+		if err := ctx.Err(); err != nil {
+			return abandon(err)
+		}
+		return "clone", nil
+	}
+	if err := ctx.Err(); err != nil {
+		return abandon(err)
+	}
+	_ = privfs.RemoveAll(dst)
+
+	if plain, err := exec.CommandContext(ctx, copyBinary, "-R", src, dst).CombinedOutput(); err != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			return abandon(cerr)
+		}
+		_ = privfs.RemoveAll(dst)
+		why := fmt.Sprintf("%v: %s / %s", err, strings.TrimSpace(string(clone)), strings.TrimSpace(string(plain)))
+		if !errors.Is(cloneErr, errCloneUnsupported) {
+			why += " / " + cloneErr.Error()
+		}
+		return "", errors.New(why)
+	}
+	if err := ctx.Err(); err != nil {
+		return abandon(err)
 	}
 	return "copy", nil
 }

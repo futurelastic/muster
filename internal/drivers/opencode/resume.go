@@ -259,7 +259,8 @@ func (d *Driver) parkedServerFor(rec *sessionRecord) *server {
 			// once more by the start this falls back to: not a side effect to take twice.
 			return nil
 		}
-		plan, err := d.planSandboxFor(spec, rec.Dir, rec.CacheCopy)
+		// No context: the guard above returns before any copy could be made here.
+		plan, err := d.planSandboxFor(context.Background(), spec, rec.Dir, rec.CacheCopy)
 		if err != nil {
 			return nil
 		}
