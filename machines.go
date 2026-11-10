@@ -167,6 +167,43 @@ type RuntimeInfo struct {
 	// it, or from a peer that does, has none, and the service reads that as
 	// NoModels() — "nobody said", never "no model works".
 	Models *RuntimeModels `json:"models,omitempty"`
+	// Grants is the state of each provider sign-in this machine holds for the
+	// runtime (muster #451): present only on a runtime that keeps one and only on
+	// this machine's own rows. Absent says nobody reported, never "signed out" —
+	// a peer's row has none, and so does a runtime that holds no sign-in.
+	Grants []RuntimeGrant `json:"grants,omitempty"`
+}
+
+// GrantState is where a provider sign-in stands (muster #451). The set is open on
+// read: a client must treat a state it does not know as not usable.
+type GrantState string
+
+const (
+	// GrantOK: signed in and renewing; sessions created now get a working token.
+	GrantOK GrantState = "ok"
+	// GrantSignedOut: no sign-in is stored.
+	GrantSignedOut GrantState = "signed-out"
+	// GrantDegraded: the last renewal failed for a reason that is not the
+	// sign-in's fault (the provider unreachable or failing) and is being retried.
+	// The token in sessions may still be good; accessExpiresAt says until when.
+	GrantDegraded GrantState = "degraded"
+	// GrantRevoked: the provider refused the stored refresh token. Nothing renews
+	// it; a person signs in again. Sessions on the provider fail until then.
+	GrantRevoked GrantState = "revoked"
+)
+
+// RuntimeGrant is one entry of RuntimeInfo.Grants. It never carries a credential.
+type RuntimeGrant struct {
+	// Provider is the runtime's own id for the provider ("openai").
+	Provider string     `json:"provider"`
+	State    GrantState `json:"state"`
+	// AccessExpiresAt is when the stored access token stops working; absent when
+	// signed out.
+	AccessExpiresAt *Timestamp `json:"accessExpiresAt,omitempty"`
+	// RefreshedAt is when the sign-in was last renewed, else when it was made.
+	RefreshedAt *Timestamp `json:"refreshedAt,omitempty"`
+	// Reason is one sentence for a person, present unless State is ok.
+	Reason string `json:"reason,omitempty"`
 }
 
 // ModelsSource says where a RuntimeModels list came from, and so how far a

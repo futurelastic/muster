@@ -871,6 +871,15 @@ type ModelsReporter interface {
 	Models() fleet.RuntimeModels
 }
 
+// GrantReporter is another OPTIONAL capability, same shape: a driver that holds a
+// provider sign-in for its sessions says where it stands (muster #451), from
+// what it already holds. GET /v1/runtimes calls it for every local row, so an
+// implementation must be cheap and must never carry a credential. A driver
+// without it, or one that holds no sign-in, reports nothing.
+type GrantReporter interface {
+	Grants() []fleet.RuntimeGrant
+}
+
 // CapabilityRefresher is a driver that can re-probe its peer on demand —
 // what GET /v1/machines?verify=1 asks for, instead of the cached cycle.
 type CapabilityRefresher interface {

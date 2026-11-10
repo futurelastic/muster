@@ -189,7 +189,11 @@ GET /v1/runtimes
                      "models": { "source": "runtime",           ← "runtime" | "declared" | "none" (#400)
                                  "readAt": "...",                ← only when "runtime"
                                  "ids": ["deepseek/deepseek-flash"],
-                                 "default": null } },
+                                 "default": null },
+                     "grants": [ { "provider": "openai",        ← a provider sign-in this machine holds (#451);
+                                   "state": "ok",                 absent when none; this machine's own rows only
+                                   "accessExpiresAt": "...",
+                                   "refreshedAt": "..." } ] },
                    { "machine": "...", "runtime": "...",         ← enabled, no working driver
                      "status": "unavailable",
                      "cause": "probe-timeout",
@@ -278,6 +282,31 @@ RuntimeModels {
   unchanged.
 - `readAt` is omitted, not null, where nothing was read. `default` is always
   present and is null when it is not known with certainty.
+
+**`grants` is where a provider sign-in this machine holds for the runtime stands** (muster
+#451), so "every turn on this provider fails" has a reason a client can read.
+
+```
+RuntimeGrant {
+  provider         : string       // the runtime's own id for the provider ("openai")
+  state            : "ok" | "signed-out" | "degraded" | "revoked"
+  accessExpiresAt? : Timestamp    // when the stored access token stops working; absent when signed out
+  refreshedAt?     : Timestamp    // when the sign-in was last renewed, else when it was made
+  reason?          : string       // one sentence for a person; present unless state is "ok"
+}
+```
+
+- `ok` — signed in and renewing; a session created now gets a working token.
+  `degraded` — the last renewal failed for a reason that is not the sign-in's fault (the
+  provider unreachable or failing) and is being retried; the token in sessions may still
+  be good until `accessExpiresAt`. `revoked` — the provider refused the stored refresh
+  token; nothing renews it and a person signs in again. `signed-out` — none is stored.
+- The key is **absent**, not `[]`, on a runtime that holds no sign-in, on a machine whose
+  provider policy does not allow the provider, and on every peer's row (nobody reported).
+  Absent never reads "signed out". **The set of `state` values is open on read:** treat
+  one you do not know as not usable.
+- It never carries a credential, and it is answered from what the service holds: no
+  request is made to a provider to build it.
 
 **A runtime the operator enabled is listed even when it has no working
 driver** (muster #297). It used to be omitted — a runtime whose version check

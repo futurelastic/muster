@@ -131,6 +131,8 @@
 //	                       runtime keeps its session records and each session's
 //	                       database here too, so its sessions are found again
 //	                       after a restart (muster #282).
+//	                       A ChatGPT sign-in made with `muster grant login` is
+//	                       kept in its `grants` subdirectory, owner-only (#451).
 //	FLEET_CONFIG           path to a JSON file carrying the principal table,
 //	                       per-peer credentials (§6), this machine's
 //	                       defaultRuntime (§60: the bare-id tiebreak once a
@@ -360,6 +362,7 @@ import (
 	"github.com/futurelastic/muster/internal/drivers/opencode"
 	"github.com/futurelastic/muster/internal/drivers/stub"
 	"github.com/futurelastic/muster/internal/drivers/tmux"
+	"github.com/futurelastic/muster/internal/grant"
 	"github.com/futurelastic/muster/internal/service"
 	"github.com/futurelastic/muster/internal/sessionenv"
 	"github.com/futurelastic/muster/internal/state"
@@ -400,6 +403,11 @@ func main() {
 		os.Exit(code)
 	}
 	if handled, code := runMachineList(args, os.Getenv, os.Stdout, os.Stderr); handled {
+		os.Exit(code)
+	}
+	// grant (muster #451) signs this machine in to a ChatGPT subscription once and
+	// reads or forgets that sign-in. It touches the state directory only.
+	if handled, code := runGrant(args, os.Getenv, os.Stdout, os.Stderr); handled {
 		os.Exit(code)
 	}
 	if handled, err := runPrincipal(args); handled {
@@ -799,6 +807,26 @@ func main() {
 	// does, instead of staying out until the next restart.
 	var opencodeDriver atomic.Pointer[opencode.Driver]
 	stopOpencode := func() {}
+	// muster #451: the one refresher of this machine's ChatGPT sign-in. It idles —
+	// one small file read every half minute — until someone runs `muster grant
+	// login`, so a machine that never does behaves exactly as it did before. It is
+	// the only party that ever refreshes the sign-in; sessions get an access token.
+	stopGrant := func() {}
+	var grantRefresher *grant.Refresher
+	if stateDir := os.Getenv("FLEET_STATE_DIR"); stateDir != "" && getenv("FLEET_RUNTIME_OPENCODE", "") == "1" {
+		grantRefresher = grant.NewRefresher(grant.NewStore(stateDir), grant.NewClient(),
+			grant.WithLogf(func(format string, args ...any) { log.Printf("muster: "+format, args...) }))
+		grantCtx, grantCancel := context.WithCancel(context.Background())
+		grantDone := make(chan struct{})
+		go func() {
+			defer close(grantDone)
+			grantRefresher.Run(grantCtx)
+		}()
+		stopGrant = func() {
+			grantCancel()
+			<-grantDone
+		}
+	}
 	if getenv("FLEET_RUNTIME_OPENCODE", "") == "1" {
 		bin := os.Getenv("FLEET_OPENCODE_BIN")
 		idleStop, idleStopNote := parseIdleStop(os.Getenv("FLEET_OPENCODE_IDLE_STOP"))
@@ -840,6 +868,11 @@ func main() {
 				// start it again on the next input. Off unless set; needs FLEET_STATE_DIR.
 				if idleStop > 0 {
 					opts = append(opts, opencode.WithIdleStop(idleStop))
+				}
+				// muster #451: sessions whose provider policy permits openai get this
+				// machine's ChatGPT sign-in as an access token, and follow its renewals.
+				if grantRefresher != nil {
+					opts = append(opts, opencode.WithGrant(grantRefresher))
 				}
 				if attempt > 0 {
 					// The first try gates startup, so it is short. The retries
@@ -1120,6 +1153,7 @@ func main() {
 			log.Printf("muster: stopping opencode server: %v", err)
 		}
 	}
+	stopGrant() // after the driver: a renewal in flight finishes into a driver that has stopped listening
 }
 
 func getenv(key, fallback string) string {
@@ -1303,6 +1337,7 @@ func usageTop() string {
 		"       muster principal add|list|grant|revoke   enrol, list or re-grant clients (muster principal)",
 		"       muster key init|show|rotate     this machine's signing key for peers that authenticate by key (muster key -h)",
 		"       muster machine-list keygen|create|sign|verify|show|push|fetch   the owner-signed machine list (muster machine-list -h)",
+		"       muster grant login|import|status|logout   sign this machine in to a ChatGPT subscription once (muster grant -h)",
 		"       muster --version                print the build",
 		"       muster -h | --help              print this usage",
 		"",

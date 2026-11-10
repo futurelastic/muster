@@ -405,7 +405,8 @@ order of this page and the order of its output are the same.
      the caller that created it; row
      `runtime.opencode.providers` shows which providers, and which models of them,
      `FLEET_OPENCODE_PROVIDERS` lets a session use, and fails on an entry the service
-     will refuse to start on). A runtime that is enabled but
+     will refuse to start on; row `runtime.opencode.grant` reports a ChatGPT sign-in
+     made with `muster grant login`, below). A runtime that is enabled but
      not usable does not stop the service: it is listed on `GET /v1/runtimes`
      as `unavailable` with a `cause`, and a version check that merely timed out
      under load is retried until it answers;
@@ -587,6 +588,51 @@ own configuration carries under that name: one definition per agent.
   session the sandbox, not the agent file, is the boundary.
 - It has no effect on a shared-mode driver (a test seam that talks to a server it
   did not start), which has no configuration of its own to write them into.
+
+### A ChatGPT subscription for every opencode session
+
+An operator can sign this machine in to a ChatGPT subscription (Plus or Pro) **once**,
+and every `opencode` session the service starts can then use the `openai` provider
+under that sign-in, with no sign-in per session. It is optional and off until someone
+runs the command: a machine that never does behaves exactly as before.
+
+```sh
+muster grant login          # prints a web address and a code; open it on any device, approve
+muster grant import PATH    # or take the `openai` sign-in out of an opencode auth.json
+muster grant status         # ok · revoked · signed out; exits 1 unless ok
+muster grant logout         # delete the stored sign-in
+```
+
+What it does, and why it is shaped this way (`docs/adr/451-*`):
+
+- The sign-in is stored owner-only in the `grants` directory of `FLEET_STATE_DIR`, so
+  the service needs a state directory for it. The running service **alone** renews it,
+  before it lapses: the refresh token rotates on every use, so two holders of it cannot
+  both be right. It notices a `login`, `import` or `logout` within half a minute.
+- A session's own `auth.json` holds only the current **access token**, with a
+  placeholder where the refresh token goes, and it is rewritten in place whenever
+  the service renews. The runtime reads that file again before every provider request, so
+  a renewal reaches a running session on its next turn: nothing is relaunched.
+  The access token is in the session's reach, as a model-provider key always is; the
+  sandbox is what confines the filesystem. A session never holds the refresh token, so
+  it cannot keep the sign-in alive after it ends.
+- **A sign-in makes `openai` usable; it does not allow it.** A session gets the token
+  only where `FLEET_OPENCODE_PROVIDERS` allows `openai` (or names no provider at all,
+  the default that leaves every provider but the built-in hosted one open). A machine
+  that names only other providers hands the credential to nobody.
+- **After `import`, sign the source file out.** The service rotates the refresh token
+  from then on, so the source copy stops working the first time it renews.
+- A sign-in the provider has revoked, or that cannot be renewed, is visible rather than
+  a run of failed turns: `muster doctor` row `runtime.opencode.grant` (a `warn` that
+  says to sign in again; a `fail` if the stored file is readable by others), the
+  `grants` field of `GET /v1/runtimes`, and the reason on a create the missing
+  provider refuses. A renewal that fails for a reason that is not the sign-in's fault
+  (the provider unreachable) is `degraded` and retried with a backoff; it never revokes.
+- All sessions on a machine share one plan's usage windows. How a usage-limit hit
+  reads on a turn has not been measured here (it needs a live subscription).
+- **Terms.** Whether one subscription may be shared by automated sessions is a
+  question of the provider's terms, and for the operator to settle; muster does not
+  decide it. Nothing is signed in until someone chooses to.
 
 ### Models a client may offer for a create
 

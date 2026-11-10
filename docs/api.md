@@ -362,6 +362,14 @@ form can offer a picker instead of a free-text box. Every row has one:
   read, with the peer's own `readAt`. It is `none` while those are unreached or
   stale, and for a peer on an older build. No request is made to build any of it.
 
+**`grants` says where a provider sign-in this machine holds stands** (#451): a list of
+`{provider, state, accessExpiresAt?, refreshedAt?, reason?}`, `state` being `ok`,
+`signed-out`, `degraded` (a renewal is failing for a reason that is not the sign-in's
+fault, and is being retried) or `revoked` (the provider refused the stored refresh token;
+a person signs in again with `muster grant login`). The key is absent on a runtime with
+no sign-in and on every peer's row, and absent never means "signed out". It carries no
+credential. See `docs/install.md`, *A ChatGPT subscription for every opencode session*.
+
 A runtime the operator enabled is listed **even when it has no working driver**
 (#297). Its row has `status: "unavailable"`, a `cause` (`not-installed`,
 `not-executable`, `probe-timeout`, `probe-failed` or `start-failed` — an open

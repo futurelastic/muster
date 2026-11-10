@@ -10,6 +10,7 @@ import (
 
 	fleet "github.com/futurelastic/muster"
 	"github.com/futurelastic/muster/internal/driver"
+	"github.com/futurelastic/muster/internal/grant"
 )
 
 // wireProviders is the subset of the runtime's GET /config/providers this
@@ -340,6 +341,9 @@ func (d *Driver) checkProviders(ctx context.Context, srv *server, model string, 
 	if near := seen.closest(model, 3); len(near) > 0 {
 		msg += "; closest: " + strings.Join(quoteAll(near), ", ")
 	}
+	// muster #451: a model on the provider the machine's sign-in serves is missing
+	// because of the sign-in when it is not working, and nothing else says so.
+	msg += d.grantHint(model)
 	return &fleet.Error{Kind: fleet.ErrorInvalid, Message: msg, Machine: d.machine}
 }
 
@@ -547,6 +551,9 @@ func (d *Driver) noUsableProvider(listed modelCatalog) error {
 	}
 	msg += ". Give the session a credential for an allowed provider, or change the operator's provider setting; " +
 		"a session is never started on a provider nobody chose"
+	// muster #451: when the provider the machine's sign-in serves is the one with no
+	// credential, the sign-in is the reason and nothing else in this message says so.
+	msg += d.grantHint(grant.ProviderOpenAI + "/")
 	return &fleet.Error{Kind: fleet.ErrorUnsupported, Message: msg, Machine: d.machine}
 }
 
