@@ -55,6 +55,11 @@ type sessionRecord struct {
 	// same answers the create got.
 	SpecAgent  string `json:"specAgent,omitempty"`
 	SpecMarker string `json:"specMarker,omitempty"`
+	// SpecModel is the model the create asked for, "provider/model" (muster #437),
+	// kept so a read after a restart can still say what the pin requested. Optional,
+	// so a record from before it existed reads as "no model pin recorded" and the
+	// record's version is unchanged; a build that does not know the field ignores it.
+	SpecModel string `json:"specModel,omitempty"`
 	// StartedAtMs is the runtime's own creation time, which Close corroborates.
 	StartedAtMs int64 `json:"startedAtMs"`
 	// Dir is the session's scoped directory (HOME, TMPDIR, XDG_*).

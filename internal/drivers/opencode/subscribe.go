@@ -791,7 +791,10 @@ func (d *Driver) announceCreated(srv *server, info knownSession, ref fleet.Sessi
 		Runtime:    d.runtime,
 		Cwd:        info.cwd,
 		Agent:      fleet.AgentId(info.agent),
-		State:      classify(false, wireStatus{}),
+		// muster #437: what the create response carries, so the announcement and the
+		// response agree — requested, and unresolved until a turn's record shows it.
+		Pins:  pinOutcomeFrom(info.specAgent, info.specModel, turnEvidence{}, ""),
+		State: classify(false, wireStatus{}),
 		// muster #378.
 		Conversation: info.conversationRef(),
 	}
