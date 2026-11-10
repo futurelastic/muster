@@ -344,7 +344,11 @@ type Driver struct {
 	// stallAfter is how long a `working` session's screen must hold still
 	// before it reads as stalled; zero turns the judgement off (stall.go).
 	stallAfter time.Duration
-	build      CommandBuilder
+	// reuse, when non-nil, lets List serve an idle pane's screen from its last
+	// capture (WithCaptureReuse, capturereuse.go, muster #449). Nil reads every
+	// pane every pass.
+	reuse *captureReuse
+	build CommandBuilder
 	// agentProgram is the program the default command builder starts ("claude").
 	// Empty when a caller replaced the builder: this driver then cannot say what
 	// a session runs, and reports nothing about it (agentprogram.go).
@@ -952,6 +956,15 @@ func New(machine fleet.MachineId, opts ...Option) *Driver {
 	for _, o := range opts {
 		o(d)
 	}
+	if d.reuse != nil {
+		// muster #449: any input this driver sends to a pane drops that pane's
+		// reusable screen. One place, because input goes out from more than twenty.
+		inner := d.run
+		d.run = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+			d.reuse.noteInput(args)
+			return inner(ctx, name, args...)
+		}
+	}
 	// Constructed after options so a configured state store and retention
 	// are both in effect. An unreadable table is fatal rather than silently
 	// discarded: losing keys quietly is how §10's disaster arrives dressed
@@ -1258,6 +1271,11 @@ type paneRow struct {
 	// launchRC is what Create recorded about whether it put the remote-control
 	// flag on the command line: "1", "0", or "" when unknown (launchRemoteControlOption).
 	launchRC string
+	// activity and sig are the pane's last-output second and the fingerprint made
+	// of it (capturereuse.go, #449). Zero and empty unless the listing asked for
+	// them and the multiplexer answered: reuse never applies to a pane without.
+	activity int64
+	sig      string
 }
 
 // enumerate performs the whole fleet read in one subprocess: one metadata
@@ -1270,7 +1288,7 @@ type paneRow struct {
 // the call's deadline on smaller chunks nobody will read would be waste
 // (muster#428). Callers that classify from the captures use enumerateScreens.
 func (d *Driver) enumerate(ctx context.Context) ([]paneRow, map[string]paneCapture, error) {
-	return d.enumerateWith(ctx, false)
+	return d.enumerateWith(ctx, false, false)
 }
 
 // enumerateScreens is enumerate for a caller that classifies from the
@@ -1279,12 +1297,22 @@ func (d *Driver) enumerate(ctx context.Context) ([]paneRow, map[string]paneCaptu
 // bounded share of the call's budget (recoverUnreadPanes, muster#428), instead
 // of reading every unread pane as a driver malfunction from that one answer.
 func (d *Driver) enumerateScreens(ctx context.Context) ([]paneRow, map[string]paneCapture, error) {
-	return d.enumerateWith(ctx, true)
+	return d.enumerateWith(ctx, true, false)
 }
 
-// enumerateWith is the body of both. rereadUnread selects what happens to a chunk
-// whose invocation expired its own slice with panes unread.
-func (d *Driver) enumerateWith(ctx context.Context, rereadUnread bool) ([]paneRow, map[string]paneCapture, error) {
+// enumerateScreensReusing is enumerateScreens for the periodic read (List): a pane
+// whose activity fingerprint has not moved since its last capture is served from
+// that capture instead of being read again (capturereuse.go, muster #449). With
+// reuse off it is enumerateScreens. A verb that acts on a screen must not call
+// this one.
+func (d *Driver) enumerateScreensReusing(ctx context.Context) ([]paneRow, map[string]paneCapture, error) {
+	return d.enumerateWith(ctx, true, true)
+}
+
+// enumerateWith is the body of all three. rereadUnread selects what happens to a
+// chunk whose invocation expired its own slice with panes unread; reuseIdle lets a
+// pane that has produced no output keep its last capture.
+func (d *Driver) enumerateWith(ctx context.Context, rereadUnread, reuseIdle bool) ([]paneRow, map[string]paneCapture, error) {
 	nonce := d.nonce()
 	sep := nonce + "F"
 	mark := nonce + "P"
@@ -1292,7 +1320,7 @@ func (d *Driver) enumerateWith(ctx context.Context, rereadUnread bool) ([]paneRo
 	// Restrict to the active pane of the active window: one row per
 	// session. A session with several windows is still one session.
 	const activeOnly = "#{&&:#{pane_active},#{window_active}}"
-	format := strings.Join([]string{
+	fields := []string{
 		"#{session_name}", "#{pane_id}", "#{pane_current_path}",
 		"#{pane_pid}", "#{session_created}", "#{pane_dead}",
 		// muster #235: carried alongside pane_dead, in the SAME
@@ -1312,7 +1340,13 @@ func (d *Driver) enumerateWith(ctx context.Context, rereadUnread bool) ([]paneRo
 		// muster #269: whether the launch carried the remote-control flag
 		// (launchRemoteControlOption) — the weakest evidence behind `off`.
 		"#{" + launchRemoteControlOption + "}",
-	}, sep)
+	}
+	// muster #449: the activity fingerprint, asked for only by a driver that will
+	// use it, so every other listing is the one it always was.
+	if d.reuse != nil {
+		fields = append(fields, captureReuseFormat...)
+	}
+	format := strings.Join(fields, sep)
 
 	args := []string{"list-panes", "-a", "-f", activeOnly, "-F", format}
 
@@ -1328,6 +1362,9 @@ func (d *Driver) enumerateWith(ctx context.Context, rereadUnread bool) ([]paneRo
 	// how much of the call's budget the LISTING already spent cannot tell "the
 	// capture was slow" from "the capture inherited almost nothing".
 	listStart := time.Now()
+	// The driver's clock at the moment the listing was asked for: the time the
+	// activity fingerprint below is as of (capturereuse.go, #449).
+	listedAt := d.now()
 	out, err := d.run(ctx, d.bin, args...)
 	listWall := time.Since(listStart)
 	if err != nil {
@@ -1403,8 +1440,20 @@ func (d *Driver) enumerateWith(ctx context.Context, rereadUnread bool) ([]paneRo
 	// printed before the kill. A caller that discards the captures
 	// (`rows, _, err := d.enumerate`) keeps the single same-size retry and
 	// nothing more.
-	byIndex := make(map[string]paneCapture, len(rows))
-	chunks := chunkPaneRows(rows)
+	//
+	// muster #449: with reuse on, the rows whose activity fingerprint says nothing
+	// happened since their last capture are not read at all. capRows is what is
+	// read (all of rows when reuse is off), and every index below is an index into
+	// it; reused hands the rest back from the cache.
+	capRows := rows
+	var decision reuseDecision
+	reusing := reuseIdle && d.reuse.enabled()
+	if reusing {
+		decision = d.reuse.split(rows, listedAt)
+		capRows = decision.capture
+	}
+	byIndex := make(map[string]paneCapture, len(capRows))
+	chunks := chunkPaneRows(capRows)
 	retryUnused := true
 	for chunkIdx, chunkRows := range chunks {
 		// Invocations still to run, this one included: the chunks from here
@@ -1522,9 +1571,20 @@ func (d *Driver) enumerateWith(ctx context.Context, rereadUnread bool) ([]paneRo
 		}
 	}
 	captures := make(map[string]paneCapture, len(rows))
-	for i, r := range rows {
+	for i, r := range capRows {
 		if c, ok := byIndex[strconv.Itoa(i)]; ok {
 			captures[r.paneID] = c
+		}
+	}
+	if reusing {
+		// The reused screens are part of this answer whatever the self-check finds:
+		// a pane left out would classify as a driver malfunction.
+		for id, c := range decision.reused {
+			captures[id] = c
+		}
+		d.counters.add(counterCaptureReused, int64(len(decision.reused)))
+		if d.verifyReuse(decision.verify, captures) == 0 {
+			d.reuse.remember(rows, capRows, captures, listedAt)
 		}
 	}
 	return rows, captures, nil
@@ -1916,13 +1976,19 @@ func parseRows(out, sep string) ([]paneRow, error) {
 		}
 		f := strings.Split(line, sep)
 		// 9 fields before muster #269 added the launch option; accepted so a
-		// listing from a multiplexer wrapper that predates it still parses.
-		if len(f) != 9 && len(f) != 10 {
+		// listing from a multiplexer wrapper that predates it still parses. A
+		// driver that reuses captures (#449) asks for six more.
+		if len(f) != 9 && len(f) != 10 && len(f) != 10+captureReuseFields {
 			return nil, fmt.Errorf("parseRows: expected 10 fields, got %d in %q", len(f), line)
 		}
 		launchRC := ""
-		if len(f) == 10 {
+		if len(f) >= 10 {
 			launchRC = strings.TrimSpace(f[9])
+		}
+		var activity int64
+		var sig string
+		if len(f) == 10+captureReuseFields {
+			activity, sig = reuseFingerprint(f[10:])
 		}
 		pid, _ := strconv.Atoi(f[3])
 		createdUnix, _ := strconv.ParseInt(f[4], 10, 64)
@@ -1942,6 +2008,8 @@ func parseRows(out, sep string) ([]paneRow, error) {
 			// parses to false here.
 			managed:  f[8] == "1",
 			launchRC: launchRC,
+			activity: activity,
+			sig:      sig,
 		})
 	}
 	return rows, nil
@@ -1998,7 +2066,7 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 	ctx, cancel := d.bounded(ctx)
 	defer cancel()
 
-	rows, captures, err := d.enumerateScreens(ctx)
+	rows, captures, err := d.enumerateScreensReusing(ctx)
 	if err != nil {
 		// §5.7: a failed read is never an empty result. Report the source
 		// as unreachable and let the envelope carry the failure.

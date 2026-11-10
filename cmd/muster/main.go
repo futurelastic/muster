@@ -273,6 +273,19 @@
 //	                       `stalled`). A Go duration, e.g. 45m; `0` or `off`
 //	                       turns the judgement off. Absent means 30m; an
 //	                       unparsable value is logged and ignored. muster #391.
+//	FLEET_CAPTURE_IDLE_AFTER, FLEET_CAPTURE_IDLE_MAX
+//	                       a listing reads a pane's screen only when the
+//	                       multiplexer reports the pane moved (output, resize,
+//	                       cursor, scrollback), and otherwise serves the last
+//	                       capture. IDLE_AFTER is how long a pane must have been
+//	                       quiet before that starts (default 2m: a session being
+//	                       worked with is read every pass, as before); IDLE_MAX is
+//	                       the longest a captured screen is reused before it is
+//	                       read again regardless (default 30s). Go durations;
+//	                       `0` or `off` on either reads every pane every pass.
+//	                       A pane that changes where the multiplexer said nothing
+//	                       moved switches the saving off until restart (counter
+//	                       capture.reuse_missed). muster #449.
 //	FLEET_CAPTURE_LINES    how many lines of each pane this driver captures
 //	                       to classify it. Absent, or not a positive
 //	                       integer, means the built-in default is used and
@@ -691,6 +704,20 @@ func main() {
 		}
 		if stallSet {
 			opts = append(opts, tmux.WithStallAfter(stallAfter))
+		}
+		// muster #449: a listing reads a pane's screen only when the multiplexer
+		// reports the pane moved, or the screen is older than the ceiling. On by
+		// default; either bound set to 0/off puts every pane back to being read on
+		// every pass.
+		reuseAfter, reuseMax, reuseOn, reuseNotes := parseCaptureReuse(
+			os.Getenv("FLEET_CAPTURE_IDLE_AFTER"), os.Getenv("FLEET_CAPTURE_IDLE_MAX"))
+		for _, n := range reuseNotes {
+			log.Print("muster: " + n)
+		}
+		if reuseOn {
+			opts = append(opts, tmux.WithCaptureReuse(reuseAfter, reuseMax))
+			log.Printf("muster: a pane quiet for %s is not read again until it moves or its screen is %s old (#449)",
+				reuseAfter, reuseMax)
 		}
 		// #185: optional external delivery modules. Off unless
 		// FLEET_DELIVERY_MODULES names one; resolved here, started after

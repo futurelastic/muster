@@ -402,6 +402,14 @@ type fakeSession struct {
 	// launchRC models launchRemoteControlOption (muster #269): "1", "0" or ""
 	// (never recorded). Emitted as the listing's tenth field.
 	launchRC string
+	// activity is #{window_activity} (muster #449): the epoch second of the pane's
+	// last output. Zero models a multiplexer that does not report it, and leaves the
+	// fingerprint fields empty. cursorX, cursorY and history stand for the rest of
+	// the fingerprint; the pane's height is f.heights and its width is fixed.
+	activity int64
+	cursorX  int
+	cursorY  int
+	history  int
 }
 
 const testNonce = "0badc0de"
@@ -521,10 +529,25 @@ func (f *fakeMux) exec(ctx context.Context, name string, args ...string) ([]byte
 			if s.managed {
 				managed = "1"
 			}
-			b.WriteString(strings.Join([]string{
+			fields := []string{
 				s.name, s.paneID, s.cwd, itoa(s.pid), itoa64(s.created), dead,
 				itoa(s.deadStatus), s.title, managed, s.launchRC,
-			}, sep))
+			}
+			// The fingerprint comes only when the listing asked for it, as the
+			// real multiplexer answers a format it was given (#449).
+			if strings.Contains(strings.Join(args, " "), "#{window_activity}") {
+				if s.activity == 0 {
+					fields = append(fields, "", "", "", "", "", "")
+				} else {
+					h := f.heights[s.paneID]
+					if h == 0 {
+						h = 24
+					}
+					fields = append(fields, itoa64(s.activity), "80", itoa(h),
+						itoa(s.cursorX), itoa(s.cursorY), itoa(s.history))
+				}
+			}
+			b.WriteString(strings.Join(fields, sep))
 			b.WriteString("\n")
 		}
 		return []byte(b.String()), nil
