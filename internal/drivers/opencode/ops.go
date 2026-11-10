@@ -342,7 +342,7 @@ func (d *Driver) startServerIn(ctx context.Context, spec fleet.SessionSpec, exis
 	var plan *sandboxPlan
 	var profile string
 	if spec.Sandbox != nil {
-		plan, err = d.planSandboxFor(spec, dir, priorCopy)
+		plan, err = d.planSandboxFor(ctx, spec, dir, priorCopy)
 		if err == nil {
 			profile, err = plan.profile()
 			if err != nil {
