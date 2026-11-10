@@ -28,13 +28,19 @@ type counterSet struct {
 	n  map[string]int64
 }
 
-func (c *counterSet) incr(name string) {
+func (c *counterSet) incr(name string) { c.add(name, 1) }
+
+// add counts n at once: one lock for a pass that reuses many panes, not one each.
+func (c *counterSet) add(name string, n int64) {
+	if n == 0 {
+		return
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.n == nil {
 		c.n = map[string]int64{}
 	}
-	c.n[name]++
+	c.n[name] += n
 }
 
 // Snapshot returns a copy safe for a caller to read without racing further
@@ -151,6 +157,14 @@ const (
 	counterCaptureRetryFailed      = "capture.retry_failed"
 	counterCaptureSplitInvocation  = "capture.split_invocation"
 	counterEnumerateSlowInvocation = "enumerate.slow_invocation"
+
+	// muster #449: panes whose screen a listing served from the last capture
+	// instead of reading it (reused, counted per pane per listing), and panes that
+	// changed under an activity fingerprint that said nothing happened
+	// (reuse_missed). Any nonzero reuse_missed means the signal was wrong on this
+	// host and reuse switched itself off; capture.reused then stops growing.
+	counterCaptureReused      = "capture.reused"
+	counterCaptureReuseMissed = "capture.reuse_missed"
 
 	// muster#150: the inbox send path's exits. sendViaInbox reports
 	// every fallback as the same ok=false, and a fallback costs only

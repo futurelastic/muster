@@ -241,6 +241,7 @@ evidence, not on taste.
 | A session's permission mode is published in `state`, read off the runtime's own indicator row; absent means nothing read, `unknown` means read and unnamed, never a guess | [ADR 194](adr/194-permission-mode-in-state.md) |
 | The pre-commit guard being off is reported by a `doctor` row, from the clone; nothing installs it on the operator's behalf | [ADR 201](adr/201-precommit-guard-visibility.md) |
 | An optional external delivery module is a child process speaking JSON lines; off by default; a lane is chosen at create; a send is never delivered twice | [ADR 185](adr/185-optional-external-delivery-modules.md) |
+| A listing reads a pane's screen only when the multiplexer reports the pane moved, and serves an idle pane from its last capture; verbs that act still read fresh; a missed change switches it off | [ADR 449](adr/449-an-idle-pane-is-served-from-its-last-capture.md) |
 | CI runs the whole workflow on a session-branch push (supersedes #199 ruling 1, #299); a key-shaped fixture is fixed by changing its value, and an ignore entry only repairs history already published | [Secret scanning](#secret-scanning-and-fixtures-that-look-like-secrets) (#199, #299) |
 
 **Go, zero dependencies.** Chosen at zero lines of code, on the reasoning that
