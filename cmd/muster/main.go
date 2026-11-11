@@ -860,6 +860,9 @@ func main() {
 					// service user's home) adds directories to the PATH they get, ahead of
 					// the system ones.
 					opencode.WithSessionEnv(sessionEnvEntries),
+					// muster #458: which credential an openai session runs on when both a
+					// sign-in and an API key reach the machine. Unset keeps the default.
+					opencode.WithCredentialRules(cfgFile.credentialRules()),
 					// muster #282: with a state directory, opencode sessions survive a
 					// restart of this service; without one they are forgotten, as before.
 					opencode.WithStateDir(os.Getenv("FLEET_STATE_DIR")),

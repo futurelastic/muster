@@ -1,5 +1,18 @@
 package fleet
 
+// CredentialKind says which of a provider's two ways in a session runs on
+// (muster #458).
+type CredentialKind string
+
+const (
+	// CredentialSubscription is a sign-in to a plan (a ChatGPT subscription for
+	// the openai provider). Every session on it shares the plan's usage windows.
+	CredentialSubscription CredentialKind = "subscription"
+	// CredentialAPIKey is an API key passed in a session's environment, billed
+	// per token.
+	CredentialAPIKey CredentialKind = "api-key"
+)
+
 // UsageFigures is the arithmetic form of what a runtime reports it spent: the
 // four token counts every runtime this service drives has, and the two figures
 // only some report. It is what drivers add up; the wire forms (Usage and
@@ -141,6 +154,21 @@ type Usage struct {
 	Reasoning  *int64   `json:"reasoning,omitempty"`
 	Cost       *float64 `json:"cost,omitempty"`
 
+	// Credential is which account these figures were spent on (muster #458), for a
+	// session whose provider can be reached two ways: the subscription sign-in the
+	// service renews (a plan whose usage window every session on it shares), or an
+	// API key billed per token. The two are separate accounts with separate
+	// metering, so a consumer summing cost across sessions keeps them apart.
+	//
+	// It is the credential the SERVICE gave the session at its start, decided by
+	// the operator's rule or the documented default, not something read back out
+	// of the runtime. Absent means the session was given no credential this
+	// service chooses between (the provider has one way in, or the session runs on
+	// a provider this service does not hold a sign-in for) — never "unknown". The
+	// set is open on read: a client treats a kind it does not know as a third
+	// account.
+	Credential CredentialKind `json:"credential,omitempty"`
+
 	// Source says how the driver learned the figures: observed from a
 	// structured API, inferred from a record the runtime writes to disk. The
 	// same closed set as SessionState.Confidence, for the same reason.
@@ -251,7 +279,7 @@ func sameUsage(a, b *Usage) bool {
 	if !sameFigures(a.Figures(), b.Figures()) {
 		return false
 	}
-	if a.Source != b.Source {
+	if a.Source != b.Source || a.Credential != b.Credential {
 		return false
 	}
 	if (a.LastTurn == nil) != (b.LastTurn == nil) {

@@ -514,7 +514,8 @@ func (s *subscription) handle(srv *server, ev busEvent) {
 				key = fmt.Sprintf("retry:%d", p.Status.Attempt)
 			}
 			st := classify(true, *p.Status)
-			s.d.sawWorking(id) // muster #426
+			s.d.sawWorking(id)                          // muster #426
+			s.d.observeStatus(srv, id, true, *p.Status) // muster #458
 			s.state(ref, srv, key, st)
 		case "idle":
 			s.idle(ref, srv)
@@ -633,6 +634,7 @@ func (s *subscription) state(ref fleet.SessionRef, srv *server, key string, st f
 // runtime reported for that turn, if it did, else what the session's own message
 // record says — the same read State makes.
 func (s *subscription) idle(ref fleet.SessionRef, srv *server) {
+	s.d.observeStatus(srv, ref.ID, false, wireStatus{}) // muster #458
 	s.mu.Lock()
 	t := s.track[ref.ID]
 	if t != nil && t.last == "idle" {

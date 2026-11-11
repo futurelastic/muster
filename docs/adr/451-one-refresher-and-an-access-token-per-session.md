@@ -40,7 +40,11 @@ Two facts make the obvious shapes wrong:
 4. **What a usage-limit hit looks like on a turn was not measured**, for the same reason.
    The runtime has no branch of its own for it: a quota code from the backend becomes an API
    error, and other limit hits arrive as an HTTP 429 API error. Classifying it belongs with
-   the failed-last-turn work (#426) once a real one has been seen.
+   the failed-last-turn work (#426) once a real one has been seen. *(Measured later, on
+   #458, against a stand-in provider answering 429: the runtime keeps retrying it, so no
+   failed turn arrived in over three minutes; the session waits in its `retry` status. The grant-level
+   quota state in `docs/adr/458-*` is built on that, and a real exhausted window is still
+   unseen.)*
 
 ## Decision
 
@@ -82,6 +86,9 @@ muster holds the grant and is its **only refresher**.
 - Whether one personal subscription may serve many automated sessions is the provider's terms
   and the owner's decision. Nothing is signed in, and nothing is given to a session, until an
   operator chooses to.
+- A machine holding both this sign-in and an API key for the same provider does not leave the
+  choice to the runtime: the operator's `providerCredentials` rule decides which a session
+  runs on (`docs/adr/458-*`), and only a session on the subscription is given the token.
 
 ## Not done
 

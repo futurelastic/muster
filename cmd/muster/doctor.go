@@ -18,6 +18,7 @@ import (
 	"time"
 
 	fleet "github.com/futurelastic/muster"
+	"github.com/futurelastic/muster/internal/credrule"
 	"github.com/futurelastic/muster/internal/drivers/opencode"
 	tmuxdriver "github.com/futurelastic/muster/internal/drivers/tmux"
 	"github.com/futurelastic/muster/internal/grant"
@@ -363,6 +364,12 @@ func runChecks(ctx context.Context, env doctorEnv) []doctorRow {
 	c.add(checkOpencodeRuntime(getenv("FLEET_RUNTIME_OPENCODE") == "1", getenv("FLEET_OPENCODE_BIN")))
 	c.add(checkOpencodeProviders(getenv("FLEET_RUNTIME_OPENCODE") == "1", getenv("FLEET_OPENCODE_PROVIDERS")))
 	c.add(checkOpencodeGrant(getenv("FLEET_RUNTIME_OPENCODE") == "1", getenv("FLEET_STATE_DIR"), getenv("FLEET_OPENCODE_PROVIDERS"), time.Now()))
+	var credRules credrule.Rules
+	var credEnv []sessionenv.Entry
+	if cfg != nil {
+		credRules, credEnv = cfg.credentialRules(), cfg.sessionEnv()
+	}
+	c.add(checkOpencodeCredentials(getenv("FLEET_RUNTIME_OPENCODE") == "1", getenv("FLEET_STATE_DIR"), getenv("FLEET_OPENCODE_PROVIDERS"), credRules, credEnv))
 	orphans := env.OpencodeOrphans
 	if orphans == nil {
 		orphans = opencode.OrphanServers
@@ -682,6 +689,12 @@ func validateConfigExtras(cfg *fileConfig, getenv func(string) string) error {
 			}
 			return errors.New(msg)
 		}
+	}
+	// The operator's credential rule (muster #458): an entry that cannot be one, or can
+	// never apply, stops the start naming it, and shows in the doctor and a reload's
+	// refusal.
+	if err := credrule.Validate(cfg.credentialRules(), knownRuntimeIDs()); err != nil {
+		return err
 	}
 	// The operator's opencode agent file (muster #396): only the path is judged
 	// here. Whether the file exists and holds usable agents is judged on every
@@ -1385,9 +1398,103 @@ func checkOpencodeGrant(enabled bool, stateDir, providers string, now time.Time)
 			"check that it can reach the provider (`muster grant status`)"
 		return row
 	}
+	// muster #458: the provider keeps refusing requests made with the sign-in. The mark
+	// is the running service's observation, refreshed while it stays true, so one that
+	// has not been refreshed lately was left by a service that has since stopped and is
+	// said so rather than reported as current.
+	if g.Limit != nil {
+		seen := time.UnixMilli(g.Limit.UpdatedMs)
+		since := time.UnixMilli(g.Limit.SinceMs)
+		if now.Sub(seen) <= grantLimitFresh {
+			row.Status = statusWarn
+			row.Summary = "the provider is refusing requests on the ChatGPT sign-in (since " + since.UTC().Format(time.RFC3339) + ")"
+			row.Detail = "every session on the subscription shares one plan and is affected at once; they wait in the runtime's retry loop " +
+				"and recover on their own when the provider lets requests through (an exhausted usage window is the usual cause)"
+			if g.Limit.Message != "" {
+				row.Detail += "; the provider said: " + g.Limit.Message
+			}
+			return row
+		}
+		row.Detail = "a usage mark from " + since.UTC().Format(time.RFC3339) + " was last confirmed " + until(seen, now) +
+			" and is not current: the service that wrote it is probably stopped"
+	}
 	row.Status = statusPass
 	row.Summary = "ChatGPT sign-in present; access token valid until " + exp.UTC().Format(time.RFC3339) +
 		" (" + until(exp, now) + "); the service renews it"
+	return row
+}
+
+// grantLimitFresh is how recent a usage mark must have been confirmed for the doctor
+// to report it as happening now: the service writes it again every minute while true.
+const grantLimitFresh = 3 * time.Minute
+
+// checkOpencodeCredentials is the runtime.opencode.credentials row (muster #458):
+// what the operator's providerCredentials rule says, and whether the machine can
+// satisfy it. A rule that names a credential this machine does not hold is a warning,
+// because a session bound for openai is then refused, which is the point of the rule
+// and also not what the operator hoped to find out at the first create. Both
+// credentials reaching sessions with no rule to choose is the situation the rule
+// exists for, said once here. Read from disk like its neighbour: no service needed.
+func checkOpencodeCredentials(enabled bool, stateDir, providers string, rules credrule.Rules, env []sessionenv.Entry) doctorRow {
+	row := doctorRow{ID: "runtime.opencode.credentials", Refs: []int{458}}
+	if !enabled {
+		row.Status = statusSkip
+		row.Summary = "FLEET_RUNTIME_OPENCODE is not 1 — the opencode runtime is not enabled"
+		return row
+	}
+	if err := credrule.Validate(rules, knownRuntimeIDs()); err != nil {
+		row.Status = statusFail
+		row.Summary = "providerCredentials cannot be used"
+		row.Detail = err.Error()
+		return row
+	}
+	signedIn := false
+	if stateDir != "" {
+		if g, err := grant.NewStore(stateDir).Load(); err == nil && g.Revoked == nil {
+			signedIn = true
+		}
+	}
+	keyEntry := false
+	for _, e := range env {
+		if e.Name == "OPENAI_API_KEY" {
+			keyEntry = true
+		}
+	}
+	permitted := opencode.ProviderPermitted(splitList(providers), grant.ProviderOpenAI)
+	switch {
+	case len(rules) == 0 && signedIn && keyEntry && permitted:
+		row.Status = statusWarn
+		row.Summary = "a ChatGPT sign-in and an OPENAI_API_KEY both reach sessions and no providerCredentials rule chooses"
+		row.Detail = "with no rule the sign-in is used and the key is withheld, so the subscription pays; " +
+			"name the credential per machine, agent or marker in providerCredentials to decide it"
+		return row
+	case len(rules) == 0:
+		row.Status = statusSkip
+		row.Summary = "no providerCredentials rule — a usable sign-in is used, else the OPENAI_API_KEY a session carries"
+		return row
+	case !permitted:
+		row.Status = statusWarn
+		row.Summary = "providerCredentials names openai but FLEET_OPENCODE_PROVIDERS does not allow it — the rule applies to no session"
+		row.Detail = "a rule chooses between credentials, it does not allow a provider"
+		return row
+	}
+	desc := rules.Describe()
+	for _, r := range rules {
+		switch {
+		case r.Use == fleet.CredentialSubscription && !signedIn:
+			row.Status = statusWarn
+			row.Summary = "providerCredentials runs openai on the subscription but no usable ChatGPT sign-in is stored"
+			row.Detail = desc + "; a session bound for openai is refused until `muster grant login`, and the key is not used in its place"
+			return row
+		case r.Use == fleet.CredentialAPIKey && !keyEntry:
+			row.Status = statusWarn
+			row.Summary = "providerCredentials runs openai on an API key but no sessionEnv entry supplies OPENAI_API_KEY"
+			row.Detail = desc + "; a session bound for openai is refused unless its create carries the key, and the sign-in is not used in its place"
+			return row
+		}
+	}
+	row.Status = statusPass
+	row.Summary = "openai credential: " + desc
 	return row
 }
 

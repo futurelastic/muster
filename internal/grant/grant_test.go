@@ -611,3 +611,94 @@ func TestRefreshAtReadsTheTokensOwnLifetime(t *testing.T) {
 		t.Fatalf("renewal point ignored RefreshedAt: %v", got.Sub(base))
 	}
 }
+
+// ---- the usage mark (muster #458) ----------------------------------------------
+
+func TestNoteLimitKeepsWhenTheEpisodeBeganAndStampsEachSighting(t *testing.T) {
+	f := newRefresherFixture(t, time.Hour)
+	began := f.r.now()
+	if err := f.r.NoteLimit(began, "The usage limit has been reached"); err != nil {
+		t.Fatal(err)
+	}
+	f.advance(time.Minute)
+	// A later call carries a later "since" (the driver's own clock may restart an episode
+	// view) but the store keeps the first: it is when the account was first seen refused.
+	if err := f.r.NoteLimit(f.r.now(), "still: "+strings.Repeat("x", 500)); err != nil {
+		t.Fatal(err)
+	}
+	g, err := f.s.Load()
+	if err != nil || g.Limit == nil {
+		t.Fatalf("Load = %+v, %v", g, err)
+	}
+	if g.Limit.SinceMs != began.UnixMilli() {
+		t.Fatalf("since = %d, want the first sighting %d", g.Limit.SinceMs, began.UnixMilli())
+	}
+	if g.Limit.UpdatedMs != f.r.now().UnixMilli() {
+		t.Fatalf("updated = %d, want the latest sighting %d", g.Limit.UpdatedMs, f.r.now().UnixMilli())
+	}
+	if n := len([]rune(g.Limit.Message)); n > 200 {
+		t.Fatalf("message is %d runes, want it cut", n)
+	}
+	// Writing the mark is not a sign-in: the generation a refresh checks is unchanged.
+	if g.Generation != 1 {
+		t.Fatalf("generation = %d, want 1", g.Generation)
+	}
+}
+
+func TestClearLimitRemovesTheMarkAndNoneIsNotAnError(t *testing.T) {
+	f := newRefresherFixture(t, time.Hour)
+	if err := f.r.ClearLimit(); err != nil {
+		t.Fatalf("clearing nothing: %v", err)
+	}
+	if err := f.r.NoteLimit(f.r.now(), "m"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.r.ClearLimit(); err != nil {
+		t.Fatal(err)
+	}
+	if g, _ := f.s.Load(); g.Limit != nil {
+		t.Fatalf("limit = %+v after a clear", g.Limit)
+	}
+	// And with no sign-in stored there is no account to describe.
+	empty := NewRefresher(newTestStore(t), nil)
+	if err := empty.NoteLimit(time.Now(), "m"); err != nil {
+		t.Fatalf("NoteLimit on an empty store: %v", err)
+	}
+}
+
+func TestARefreshAndANewSignInTreatTheUsageMarkDifferently(t *testing.T) {
+	f := newRefresherFixture(t, time.Hour)
+	if err := f.r.NoteLimit(f.r.now(), "m"); err != nil {
+		t.Fatal(err)
+	}
+	// Renewing the tokens does not reset the plan's usage window.
+	f.advance(50 * time.Minute)
+	f.r.step(context.Background())
+	if g, _ := f.s.Load(); g.Access != "A2" || g.Limit == nil {
+		t.Fatalf("after a refresh: access %q, limit %+v; want the new tokens and the mark kept", g.Access, g.Limit)
+	}
+	// A new sign-in may be a different account.
+	if _, err := f.s.Replace(sampleGrant(f.r.now(), time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if g, _ := f.s.Load(); g.Limit != nil {
+		t.Fatalf("limit = %+v after a new sign-in, want none", g.Limit)
+	}
+}
+
+func TestAMarkWrittenWhileARefreshIsInFlightSurvivesIt(t *testing.T) {
+	f := newRefresherFixture(t, time.Hour)
+	f.advance(50 * time.Minute)
+	f.p.token = func(map[string]string, int) (int, string) {
+		// The service notes the limit between the refresh's read of the grant and its write.
+		if err := f.r.NoteLimit(f.r.now(), "mid-refresh"); err != nil {
+			t.Error(err)
+		}
+		return 200, `{"access_token":"A-new","refresh_token":"R-new","expires_in":3600}`
+	}
+	f.r.step(context.Background())
+	g, _ := f.s.Load()
+	if g.Access != "A-new" || g.Limit == nil || g.Limit.Message != "mid-refresh" {
+		t.Fatalf("store = %+v, the refresh's write erased the mark made while it ran", g)
+	}
+}

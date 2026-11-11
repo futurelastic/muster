@@ -63,6 +63,25 @@ type Grant struct {
 	// Revoked is set when the provider refused the refresh token. It stays until
 	// a new sign-in replaces the grant.
 	Revoked *Revoked `json:"revoked,omitempty"`
+	// Limit is set while the provider keeps refusing requests made with the
+	// sign-in (muster #458). It is the service's observation, written only through
+	// the refresher, kept in the store so the offline doctor can read it, and it
+	// describes the account, not the credential: a refresh does not clear it and a
+	// new sign-in does.
+	Limit *Limit `json:"limit,omitempty"`
+}
+
+// Limit records that sessions on the sign-in are being refused. It holds no
+// credential.
+type Limit struct {
+	// SinceMs is when the first session was seen refused in this episode and
+	// UpdatedMs when the service last saw it still so, both Unix milliseconds. A
+	// mark whose UpdatedMs is old was left by a service that has since stopped.
+	SinceMs   int64 `json:"since"`
+	UpdatedMs int64 `json:"updated"`
+	// Message is the provider's own message as the runtime reported it, cut short.
+	// It is not parsed.
+	Message string `json:"message,omitempty"`
 }
 
 // Revoked records the provider's refusal of a refresh token.

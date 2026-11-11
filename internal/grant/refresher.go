@@ -3,6 +3,7 @@ package grant
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -81,6 +82,48 @@ func NewRefresher(store *Store, client *Client, opts ...RefresherOption) *Refres
 		r.logf = func(string, ...any) {}
 	}
 	return r
+}
+
+// NoteLimit records that the provider is refusing requests made with the sign-in
+// (muster #458). since is when the episode began and is kept if one is already
+// recorded; every call stamps the time it was last seen true. message is cut and
+// stored unparsed. Nothing is recorded for a machine with no usable grant: there is
+// no account to describe.
+func (r *Refresher) NoteLimit(since time.Time, message string) error {
+	return r.updateLimit(func(g *Grant) {
+		now := r.now().UnixMilli()
+		if g.Limit == nil {
+			g.Limit = &Limit{SinceMs: since.UnixMilli()}
+		}
+		g.Limit.UpdatedMs = now
+		g.Limit.Message = cutMessage(message)
+	})
+}
+
+// ClearLimit removes the mark; none recorded is not an error.
+func (r *Refresher) ClearLimit() error {
+	return r.updateLimit(func(g *Grant) { g.Limit = nil })
+}
+
+func (r *Refresher) updateLimit(fn func(*Grant)) error {
+	g, err := r.store.Load()
+	if err != nil {
+		if errors.Is(err, ErrNoGrant) {
+			return nil
+		}
+		return err
+	}
+	_, _, err = r.store.Update(g.Generation, fn)
+	return err
+}
+
+// cutMessage keeps a provider's message to one short line.
+func cutMessage(m string) string {
+	m = strings.Join(strings.Fields(m), " ")
+	if rs := []rune(m); len(rs) > 200 {
+		m = string(rs[:199]) + "…"
+	}
+	return m
 }
 
 // Store is the store the refresher renews.
@@ -255,7 +298,7 @@ func (r *Refresher) step(ctx context.Context) time.Duration {
 func (r *Refresher) load() (*Grant, error) {
 	if r.unsaved != nil {
 		u := *r.unsaved
-		if _, ok, err := r.store.Update(u.Generation, func(g *Grant) { *g = u }); err == nil {
+		if _, ok, err := r.store.Update(u.Generation, func(g *Grant) { lim := g.Limit; *g = u; g.Limit = lim }); err == nil {
 			r.unsaved = nil
 			if ok {
 				return &u, nil
@@ -308,7 +351,9 @@ func (r *Refresher) refreshLocked(ctx context.Context, g Grant) (Grant, error) {
 	r.failures = 0
 	r.lastErr.Store(nil)
 	r.nextTry = now.Add(r.minGap)
-	saved, ok, serr := r.store.Update(g.Generation, func(x *Grant) { *x = ng })
+	// The usage mark is the service's observation of the account, written between
+	// this refresh's read and its write; the renewed tokens must not erase it.
+	saved, ok, serr := r.store.Update(g.Generation, func(x *Grant) { lim := x.Limit; *x = ng; x.Limit = lim })
 	switch {
 	case serr != nil:
 		// The provider has rotated the token. Holding it in memory and retrying the
