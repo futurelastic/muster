@@ -1,5 +1,5 @@
 name: Publish downloads
-run-name: ${{ inputs.dry_run && format('Publish {0} (dry run)', inputs.tag) || format('Publish {0}', inputs.tag) }}
+run-name: ${{ inputs.dry_run && format('Publish {0} (dry run)', inputs.tag) || format('Publish {0}', inputs.tag || github.ref_name) }}
 
 # Publishes a FINAL release to the company release host (#383), next to npm. npm stays: release-npm.yml is untouched.
 #
@@ -9,12 +9,24 @@ run-name: ${{ inputs.dry_run && format('Publish {0} (dry run)', inputs.tag) || f
 #             uploads through the host's CI publish API (GitHub OIDC; .github/downloads/publish.mjs publish).
 #
 # WHY THIS RUNS AT THE TAG. The host accepts a publish only from a run whose ref is `refs/tags/vX.Y.Z` and whose
-# workflow is `<repo>/<this file>@<that ref>`. release-auto.yml runs on main, so it cannot publish; it DISPATCHES this
-# workflow at the tag (scripts/release-downloads-guard.sh) from the same paths that publish a final to npm: the run
-# that tags a final, `publish-tag`, and the daily catch-up. By hand: Actions -> Publish downloads -> Run workflow, with
-# "Use workflow from" set to the final TAG (not a branch), or
-#     gh workflow run publish-downloads.yml --ref vX.Y.Z -f tag=vX.Y.Z
+# workflow is `<repo>/<this file>@<that ref>`. Three things start such a run (#422):
+#   - the push of a final tag by a person (`on.push.tags`, below): a final is a human act here, `colab release
+#     finalize` pushes the tag with the person's own credentials, and the run starts within seconds of it, at the tag;
+#   - release-auto.yml, which runs on main and so cannot publish itself, DISPATCHES this workflow at the tag
+#     (scripts/release-downloads-guard.sh) from the paths that publish a final to npm: the run that tags a final,
+#     `publish-tag`, and the daily catch-up. A tag pushed with GITHUB_TOKEN starts no workflow, so a final that run
+#     tags itself is never published twice by this trigger; the dispatch is its path, and the catch-up is the net
+#     under every path, because a repeat is answered "already published" by the host;
+#   - by hand: Actions -> Publish downloads -> Run workflow, with "Use workflow from" set to the final TAG (not a
+#     branch), or
+#         gh workflow run publish-downloads.yml --ref vX.Y.Z -f tag=vX.Y.Z
 # It follows that a final cut before this file merged cannot be published: the file is not in its tree.
+#
+# THE PUSH TRIGGER matches finals only: GitHub reads `v[0-9]+.[0-9]+.[0-9]+` against the whole tag name, so a
+# `-rc.N` candidate does not match, and the first step re-checks the name anyway. A push run has no `inputs`, so the
+# tag is `github.ref_name` wherever the dispatch reads `inputs.tag`. And a push run is off until PUBLISH_ORIGIN is set
+# (the `if` on the build job): a clone that never configured the host skips quietly instead of turning red on every
+# final, exactly as release-auto.yml dispatches nothing without it.
 #
 # A DRY RUN (`dry_run: true`) builds, stages, signs and checks the files, then stops before any network call to the
 # host. It may be started from any ref (build tooling comes from that ref, the source from `tag`), so it is how the
@@ -23,7 +35,7 @@ run-name: ${{ inputs.dry_run && format('Publish {0} (dry run)', inputs.tag) || f
 # CONFIGURATION lives in repository settings, never in this file: variables PUBLISH_ORIGIN (the host's exact address,
 # also the token's audience), PUBLISH_RUNNER (the publish runner's labels as a JSON array) and optionally PUBLISH_SLUG
 # (default `muster`); the secret PUBLISH_SIGNING_KEY in the `release` environment only. Unset PUBLISH_ORIGIN and
-# release-auto.yml does not dispatch this workflow at all. Setup, binding and key rotation: docs/install.md.
+# release-auto.yml does not dispatch this workflow at all, and a tag push skips it. Setup, binding and key rotation: docs/install.md.
 on:
   workflow_dispatch:
     inputs:
@@ -36,25 +48,33 @@ on:
         required: false
         type: boolean
         default: false
+  # A final only; a candidate (-rc.N) is not published to the host. Tags only, so a push to a branch never starts this.
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
 
 permissions: {}
 
 # One publish per tag at a time; never cancelled part-way (an upload resumes, but a cancel mid-complete is untidy).
 concurrency:
-  group: publish-downloads-${{ inputs.tag }}
+  group: publish-downloads-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
   build:
     name: Build and stage
+    # A tag push is the human final (#422). Without PUBLISH_ORIGIN the host is not configured here, so that run is
+    # skipped (and `publish` with it) rather than failed; a dispatch still reports a missing variable loudly.
+    if: github.event_name != 'push' || vars.PUBLISH_ORIGIN != ''
     runs-on: ubuntu-latest
     permissions:
       contents: read
     outputs:
       runner: ${{ steps.config.outputs.runner }}
     env:
-      # Through env, never interpolated into a script: an input is caller-controlled text.
-      TAG: ${{ inputs.tag }}
+      # Through env, never interpolated into a script: an input is caller-controlled text. A tag-push run has no
+      # inputs: its tag is the ref's own name (the trigger's pattern lets a final through, the first step re-checks).
+      TAG: ${{ inputs.tag || github.ref_name }}
       DRY_RUN: ${{ inputs.dry_run }}
       PUBLISH_ORIGIN: ${{ vars.PUBLISH_ORIGIN }}
       PUBLISH_RUNNER: ${{ vars.PUBLISH_RUNNER }}
@@ -87,7 +107,7 @@ jobs:
       # The source being released, with its history so `git describe` can see the tag it is checked out at.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
-          ref: refs/tags/${{ inputs.tag }}
+          ref: refs/tags/${{ env.TAG }}
           fetch-depth: 0
           path: src
           persist-credentials: false
@@ -113,7 +133,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: release-files-${{ inputs.tag }}
+          name: release-files-${{ env.TAG }}
           path: ${{ runner.temp }}/stage/*
           if-no-files-found: error
           retention-days: 3
@@ -130,7 +150,7 @@ jobs:
       contents: read
       id-token: write # the OIDC token the host verifies
     env:
-      TAG: ${{ inputs.tag }}
+      TAG: ${{ inputs.tag || github.ref_name }}
       DRY_RUN: ${{ inputs.dry_run }}
       PUBLISH_ORIGIN: ${{ vars.PUBLISH_ORIGIN }}
       PUBLISH_SLUG: ${{ vars.PUBLISH_SLUG }}
@@ -154,7 +174,7 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: release-files-${{ inputs.tag }}
+          name: release-files-${{ env.TAG }}
           path: ${{ runner.temp }}/stage
 
       - name: Sign and publish
