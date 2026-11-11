@@ -279,3 +279,17 @@ func TestSupervisorGrantsNeverIncludeDebug(t *testing.T) {
 		t.Fatal("debug is not a grant this build can configure")
 	}
 }
+
+// muster #441: the owner ruled that nobody holds the record grant by default. It
+// reads a session's whole record, so the principal `muster service install`
+// enrols must not hold it, and an operator must still be able to grant it.
+func TestSupervisorGrantsNeverIncludeRecord(t *testing.T) {
+	for _, g := range supervisorGrants() {
+		if g == service.GrantRecord {
+			t.Fatalf("supervisorGrants includes %s: every new `service install` would grant it by default", g)
+		}
+	}
+	if !service.ValidGrant(service.GrantRecord) {
+		t.Fatal("record is not a grant this build can configure")
+	}
+}

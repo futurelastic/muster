@@ -630,3 +630,45 @@ func TestConfigCanGrantDebug(t *testing.T) {
 		t.Errorf("principals = %+v, want op holding debug", ps)
 	}
 }
+
+// muster #441: refuseRecordReads is off unless the file says true, and an absent
+// key must not read as on.
+func TestLoadConfigReadsRefuseRecordReads(t *testing.T) {
+	for body, want := range map[string]bool{
+		`{"principals": [{"name": "op", "token": "tok"}], "refuseRecordReads": true}`:  true,
+		`{"principals": [{"name": "op", "token": "tok"}], "refuseRecordReads": false}`: false,
+		`{"principals": [{"name": "op", "token": "tok"}]}`:                             false,
+	} {
+		path := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := loadConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.RefuseRecordReads != want {
+			t.Errorf("%s: RefuseRecordReads = %v, want %v", body, cfg.RefuseRecordReads, want)
+		}
+	}
+}
+
+// And the record grant is one a config can name, like any other.
+func TestConfigCanGrantRecord(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	body := `{"principals": [{"name": "op", "token": "tok", "grants": ["record"]}]}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps, err := cfg.principals()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ps) != 1 || !ps[0].Allows(service.GrantRecord) || ps[0].Allows(service.GrantSend) {
+		t.Fatalf("principals = %+v, want one holding record and not send", ps)
+	}
+}

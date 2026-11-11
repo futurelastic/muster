@@ -30,10 +30,17 @@ func TestCapabilities_TurnsAndConversationFollowTheRecordRoot(t *testing.T) {
 		if c.ReportsConversation == nil || *c.ReportsConversation != tc.want {
 			t.Errorf("%s: ReportsConversation = %v, want declared %v", name, c.ReportsConversation, tc.want)
 		}
+		// muster #441: the record route reads the same store as turns.
+		if c.ReadsRecord == nil || *c.ReadsRecord != tc.want {
+			t.Errorf("%s: ReadsRecord = %v, want declared %v", name, c.ReadsRecord, tc.want)
+		}
 	}
 	// A declared "can read turns" must be a driver that implements the read.
 	if _, ok := any(with).(driver.TurnReader); !ok {
 		t.Error("declares ReadsTurns but does not implement driver.TurnReader")
+	}
+	if _, ok := any(with).(driver.RecordReader); !ok {
+		t.Error("declares ReadsRecord but does not implement driver.RecordReader")
 	}
 }
 

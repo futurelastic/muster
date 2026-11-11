@@ -22,8 +22,9 @@ open.
 **Grants.** With a principal table configured, each caller is a named identity
 with its own credential and its own list of grants: `read`, `create`, `send`,
 `interrupt`, `close`, `rename`, `discard`, `keys`, `label`, `remote-control`, `relay`,
-`push-list`, `debug`.
-Every grant defaults to denied. ⚠️ `keys` is the one that can **escalate** a session (it delivers
+`push-list`, `debug`, `record`.
+Every grant defaults to denied. ⚠️ `record` reads a session's **whole record**, and
+nothing implies it — see `GET …/record` below. ⚠️ `keys` is the one that can **escalate** a session (it delivers
 `BTab`, which cycles the permission mode — see `POST …/keys` below), so grant it
 as that, not as "arrow keys". Without a principal table the service runs in
 single-token mode and two booleans stand in: mutations against local sessions,
@@ -137,6 +138,7 @@ every configured peer, exactly one hop — peers never recurse.
 | `GET` | `/v1/machines/{machine}/sessions/{id}` | Read one session | — ⚠️ | yes |
 | `GET` | `…/{id}/environment` | What environment the process actually got | — ⚠️ | yes |
 | `GET` | `…/{id}/turns` | What the session's agent wrote — assistant turns only | `send` | yes |
+| `GET` | `…/{id}/record` | One session's record: what the person and the agent wrote (text, both directions; more kinds to come under the same format) | `record` ⚠️ | yes |
 | `GET` | `…/{id}/composer` | The unsent text in the composer, with the digest `discard` accepts | `read` ⚠️ | yes |
 | `POST` | `…/{id}/input` | Deliver text to the composer | `send` | yes |
 | `GET` | `/v1/machines/{machine}/input-audit` | Which principal sent which text (by hash) to which session, and when | `read` | this machine only |
@@ -438,11 +440,12 @@ an unreached peer reports it `assumed` and absent, which says nobody has
 answered, not that the peer cannot.
 
 **What a client that shows a session and lets a person type into it needs
-(#379).** Four capabilities, each per runtime, each **absent when not declared**:
+(#379, #441).** Five capabilities, each per runtime, each **absent when not declared**:
 
 | `capabilities.…` | declared yes | declared no |
 |---|---|---|
 | `readsTurns` | `true`: `GET …/turns` reads this runtime's turns (a given session can still be `404` retryable or `409`) | `false`: every call is `501` |
+| `readsRecord` | `true`: `GET …/record` reads this runtime's record (a given session can still be `404` retryable or `409`). It does not say this machine serves the route: an operator's switch answers `501` with the reason `record-off` whatever a runtime can do | `false`: every call is `501` |
 | `reportsConversation` | `true`: the driver looks, so `conversation` is an answer when it arrives | `false`: `conversation` will never be set |
 | `respond` | `{"kinds": ["tool-permission"], "unclassified": false}`: `…/respond` answers a prompt whose `kind` is listed, or one with no `kind` when `unclassified` is `true` | `{"kinds": [], "unclassified": false}` |
 | `permissionModeChange` | `{"live": true, "via": "keys"}`: a running session's mode changes through `POST …/keys` `BTab`, read back in `state.permissionMode` | `{"live": false}`: the mode is fixed at create; choose it from `createPermissionModes` |
@@ -605,8 +608,9 @@ recorded under the id the caller used; a query uses the same id.
 ### `GET /v1/machines/{machine}/sessions/{id}/turns`
 
 What the session's own agent wrote — **assistant turns only**, oldest first:
-`{"turns": [{"at", "text"}], "next": "<cursor>"}`. This is the one place the API
-returns content a session produced, and it is narrow on purpose: tool calls and
+`{"turns": [{"at", "text"}], "next": "<cursor>"}`. This is the narrow place the API
+returns content a session produced — the wider `…/record` route has its own grant —
+and it is narrow on purpose: tool calls and
 results, file contents, the messages a human or another session sent in, system
 and hook output and reasoning are never in it, and a turn that cannot be
 classified with certainty is left out. It carries no `status` or `result` — a turn
@@ -678,6 +682,83 @@ audited — who, which session, how many turns, whether a `pending` entry left
 whatever the agent chose to write**: an agent that echoes a secret into its own
 prose has put it where this route can return it. Reason it is allowed, and what
 it costs: `docs/adr/258-assistant-turns-read.md`.
+
+### `GET /v1/machines/{machine}/sessions/{id}/record`
+
+One session's **record**, oldest first: what was said in the conversation, by both
+sides, in the kinds the runtime's reader admits. `{"messages": [...], "next": "<cursor>", "format": 1}`
+(muster #441; `docs/adr/441-a-sessions-full-record-is-read-under-its-own-grant.md`).
+It sits beside `turns` and is a different thing from it: `turns` is the agent's own
+prose as bare `{at, text}`, on `send`; this is the whole conversation, on its own
+grant, **`record`**, which nothing implies and nobody holds by default.
+
+| Query | |
+|---|---|
+| `since` | A `next` from an earlier page of **this route**. Omit it for the most recent `limit` entries. A `turns` cursor is not accepted here (`400`), and this one is not accepted there. |
+| `limit` | 1–100, default 20. Over 100 is refused, not clamped. |
+| `startedAt` | The `startedAt` you saw. A recycled id is `409` instead of someone else's record. |
+
+One message is `{"at", "kind", "role", "text"?, "tool"?, "parent"?, "model"?, "media"?, "truncated"?}`:
+
+| Key | |
+|---|---|
+| `at` | The runtime's own time on the entry. |
+| `kind` | `text` · `reasoning` · `tool` · `image` · `summary` · `system`. **Skip a kind you do not know**: later work adds kinds under the same `format`. |
+| `role` | `user` or `assistant`. |
+| `text` | For `text`, `reasoning`, `summary` and `system`. |
+| `tool` | `{id, name, input, result, status}`: a call and its result, paired by the service. |
+| `parent` | The tool call an entry was made inside, when it belongs to a delegated sub-task. |
+| `model` | The model that wrote an assistant entry, when the record says. |
+| `media` | A reference for an `image`, read separately; image bytes are never inline. |
+| `truncated` | `true` when a text field was cut at 64 KiB. |
+
+`format` is `1`. It changes only when a key is renamed or removed; new kinds do
+not change it. `next` is returned even when `messages` is empty, so a poller
+always has a place to resume. A cursor from another conversation (a `/clear`, a
+relaunch) is `409`; so is one past the end of a record that shrank. A session
+whose record cannot be identified yet is `404` with `retryable`, which is not the
+same as a conversation with nothing admitted (`200`, `messages: []`).
+
+**What each runtime emits today.** The terminal runtime emits `text` entries in
+both directions: the assistant's prose (by the same predicate `turns` uses, with
+`model`), and what a person typed (a human-origin message whose content is text
+only, not the runtime's own markup — a slash command or its output, a bash-mode
+line, a reminder or hook output, an interruption note). Everything else its record
+holds — tool calls and results, reasoning, sub-agent entries, summaries, system and
+hook output, attachments, images, a message that mixes text with another block,
+and a message another session sent in — is left out, and an entry the reader
+cannot classify with certainty is left out too. They are absent, not empty. The
+`opencode` runtime does not read a record yet: it answers `501` and declares
+`capabilities.readsRecord: false`. Read that capability before offering the
+control.
+
+**Authority.** The `record` grant under a principal table — `read` and `send` do
+not stand in for it, and it is in no default set (`muster service install` does not
+enrol the local service principal with it; a signed machine list may name it for a
+peer). Without a principal table a valid token is the credential, exactly as for
+`turns`. For a peer target it does **not** also require `relay`; the machine that
+owns the session applies its own table to the asserted caller, so a read relayed
+through machine A needs `record` on A's principal **and** on the owner, for the
+principal A relays as.
+
+**The switch.** `"refuseRecordReads": true` in the config file refuses the route
+wholesale on that machine, read at start: every call — local, peer target or
+relayed in, whatever grants the caller holds — answers `501 unsupported` with
+`reason: "record-off"`, so a client can show why. The grant is checked first, so a
+caller without it learns nothing about how the machine is configured. On a machine
+with no principal table it is the only lever.
+
+**Audit.** Every read writes one line, `audit: content-read actor=… route=… target=<machine>/<id> entries=<n> outcome=… status=… took=<ms>[ reason=record-off]`
+— who, which session, how many entries, never the content, a cursor or a model.
+It is a different event from the state reads' lines and from `turns`' `read-turns`,
+so `grep 'audit: content-read'` selects exactly the record reads. A relayed read
+writes a line on each machine. A refused caller leaves a `DENIED` line. The response
+carries `Cache-Control: no-store`.
+
+⚠️ **What a record holds is whatever the session did and was told**: file bodies
+and command output once tool results are carried, credentials an agent printed,
+messages people sent in. Grant `record` the way you grant `keys`: to a principal
+meant to see everything a session did.
 
 ### `GET /v1/machines/{machine}/sessions/{id}/composer`
 
@@ -1914,13 +1995,14 @@ service, or this service has begun growing into a second supervisor.
 > It does not know what a worktree is.**
 
 Nor does any endpoint return a session's screen text, a raw transcript, or
-content a session produced — with **one** exception: `GET …/{id}/turns` returns
-what the session's own agent wrote and nothing else (muster #258, narrowing
-#82). There is still no "give me the result" route, and nothing stores a result
-on a session's behalf. A dispatched agent's answer can still travel the way its
-input did — the caller names a reply address at dispatch time and the worker
-delivers its answer there itself — and a coordinator can also read it back with
-`turns`. One pushes, one pulls.
+content a session produced — with **two** exceptions, each on its own grant:
+`GET …/{id}/turns` returns what the session's own agent wrote and nothing else
+(muster #258, narrowing #82), and `GET …/{id}/record` returns a session's record
+under the `record` grant (muster #441). There is still no "give me the result"
+route, and nothing stores a result on a session's behalf. A dispatched agent's
+answer can still travel the way its input did — the caller names a reply address
+at dispatch time and the worker delivers its answer there itself — and a
+coordinator can also read it back with `turns`. One pushes, one pulls.
 
 ---
 

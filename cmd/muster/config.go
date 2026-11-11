@@ -216,6 +216,17 @@ type fileConfig struct {
 	// writes carries its own function names, release build included.
 	ProfilingEndpoint bool `json:"profilingEndpoint,omitempty"`
 
+	// RefuseRecordReads refuses the record route, GET …/sessions/{id}/record
+	// (muster #441), on this machine: every call answers 501 with the reason
+	// "record-off", whatever grants the caller holds. Absent or false means the
+	// route is served, to a principal holding the `record` grant (which nobody
+	// holds by default) or, on a machine with no principal table, to a valid
+	// token. Config-file-only and per machine, like the settings above, and read
+	// at start, so changing it needs a restart. It is the operator's lever over
+	// the widest read this API has, and the only one on a machine that does not
+	// identify its callers.
+	RefuseRecordReads bool `json:"refuseRecordReads,omitempty"`
+
 	// MachineList points at an owner-signed list of the fleet's machines that
 	// the service reads in place of (or over) hand-written peers (muster #351).
 	// Absent means off. See machinelist.go for the modes.

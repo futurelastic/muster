@@ -648,6 +648,43 @@ type TurnReader interface {
 	Turns(ctx context.Context, req fleet.Request, ref fleet.SessionRef, q fleet.TurnsQuery) (fleet.TurnsPage, error)
 }
 
+// RecordReader is an OPTIONAL capability (muster #441): a driver that can read
+// back a session's record — what was said in it, by both sides, in the kinds
+// the driver's reader admits — from the runtime's own record of the conversation.
+//
+// It is the wider sibling of TurnReader and a separate interface on purpose: the
+// two answer to different grants (`record` and `send`), carry different cursors
+// and have different boundaries (docs/adr/441-a-sessions-full-record-is-read-under-its-own-grant.md
+// and docs/adr/258-assistant-turns-read.md). A driver may implement either, both
+// or neither, and a service type-asserts and reports the absence as
+// `unsupported`.
+//
+// # What an implementation owes the caller
+//
+//   - An allow-list over the runtime's own fields, enforced where the record is
+//     read and nowhere downstream. An entry the reader cannot classify with
+//     certainty is left out, never guessed at. Which kinds a driver emits today
+//     is listed per driver in the ADR; a kind it does not emit is absent from
+//     every page, not empty.
+//   - RecordPage.Format is fleet.RecordFormat, and Messages is never nil.
+//   - req.Expect.StartedAt, when set, is corroborated against the live session
+//     before anything is read, and a disagreement is fleet.ErrAmbiguousTarget. A
+//     session the machine does not hold is fleet.ErrNoSuchSession. A record that
+//     cannot be identified yet is fleet.ErrNoTurnRecord (404, retryable).
+//   - A cursor that no longer refers to this session's record is
+//     fleet.ErrAmbiguousTarget; a value that is not a record cursor at all is a
+//     plain error, which the service maps to `invalid`. A turns cursor is not a
+//     record cursor.
+//   - q.Limit of zero is fleet.DefaultRecordLimit; one outside 1..MaxRecordLimit
+//     is an error, never clamped.
+//
+// A relaying driver forwards the call to the machine that owns the session and
+// never reads, filters or rewrites a message; that machine's service applies its
+// own authorization (the `record` grant included) to the asserted caller (§13).
+type RecordReader interface {
+	Record(ctx context.Context, req fleet.Request, ref fleet.SessionRef, q fleet.RecordQuery) (fleet.RecordPage, error)
+}
+
 // ComposerReader is an OPTIONAL capability (muster #276): a driver that can say
 // what text is sitting unsent in a session's composer, not merely that some is.
 //
