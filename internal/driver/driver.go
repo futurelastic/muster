@@ -934,6 +934,29 @@ type ModelsReporter interface {
 	Models() fleet.RuntimeModels
 }
 
+// PeerRuntime is one runtime a peer reported for itself: its id, and what the
+// peer said about it, each as a Driver reports its own (muster #459).
+type PeerRuntime struct {
+	Runtime      fleet.RuntimeId
+	Capabilities fleet.DriverCapabilities
+	Models       fleet.RuntimeModels
+}
+
+// PeerRuntimesReporter is another OPTIONAL capability, same shape: a driver that
+// fronts a peer says which runtimes that peer runs, one entry each in runtime-id
+// order, from what it already holds and without a network call (muster #459).
+// GET /v1/runtimes calls it for every peer, so an implementation must be as cheap
+// as Capabilities().
+//
+// It lists every runtime the driver has learned, whatever the age of what it
+// learned: a stale entry is still an entry, carrying the degraded values that
+// Capabilities() and Models() give for it, so one peer's rows degrade together.
+// It is empty only while the peer has not answered. A driver without it reads as
+// one runtime, the one Capabilities(), Models() and a Runtime() method describe.
+type PeerRuntimesReporter interface {
+	PeerRuntimes() []PeerRuntime
+}
+
 // GrantReporter is another OPTIONAL capability, same shape: a driver that holds a
 // provider sign-in for its sessions says where it stands (muster #451), from
 // what it already holds. GET /v1/runtimes calls it for every local row, so an

@@ -331,7 +331,8 @@ absent key means an older build, never "not listed".
 
 `{items: [{machine, runtime, status, capabilities, models}], sources, complete}`. Consult
 this before relying on a capability — a driver that cannot do something says so
-here rather than failing at the call.
+here rather than failing at the call. A machine that runs several runtimes has one row
+per runtime, a peer's included, in runtime-id order (#459).
 
 **`models` lists the models a create on that runtime may name** (#400), so a
 form can offer a picker instead of a free-text box. Every row has one:
