@@ -3,8 +3,11 @@ package opencode
 import (
 	"context"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/futurelastic/muster/internal/sandbox"
 )
 
 // logCapture holds the tail of one runtime process's own log (muster #284).
@@ -116,6 +119,28 @@ func (l *logCapture) errorName(since time.Time) string {
 			if !genericErrorNames[name] {
 				return name
 			}
+		}
+	}
+	return ""
+}
+
+// launcherRefusal returns the reason the sandbox launcher gave for not starting
+// the runtime, or "" when it gave none (muster #456). It reads one thing only: a
+// line the launcher itself wrote, which begins with sandbox.LauncherMessagePrefix
+// and says what it declined and why in words this service owns. Nothing of the
+// runtime's own output is returned here, for the reason this type exists: the
+// runtime can print anything. The launcher writes its line before it runs the
+// program, so a line that begins that way and was followed by the child's exit
+// with the launcher's status is the launcher's.
+func (l *logCapture) launcherRefusal() string {
+	if l == nil {
+		return ""
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, ln := range l.lines {
+		if why, ok := strings.CutPrefix(ln.text, sandbox.LauncherMessagePrefix); ok {
+			return strings.TrimSpace(why)
 		}
 	}
 	return ""

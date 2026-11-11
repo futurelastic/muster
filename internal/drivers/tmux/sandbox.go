@@ -99,15 +99,16 @@ const agentProjectsDir = "projects"
 var agentProbeArgs = []string{"auth", "status"}
 
 const (
-	sandboxFoundTTL = 5 * time.Minute
-	// sandboxFailTTL is how long a failed measurement is trusted when somebody
-	// is waiting on it (a create). In the background it doubles with each
-	// consecutive failure, up to sandboxFailMaxTTL (muster #404): a host that
-	// cannot be confined (credentials in a store the profile denies) used to be
-	// re-measured every thirty seconds forever, each time starting a login shell
-	// twice and the agent CLI once.
-	sandboxFailTTL    = 30 * time.Second
-	sandboxFailMaxTTL = 5 * time.Minute
+	// The lifetimes are the shared package's (muster #456), so this driver and the
+	// one that measures its runtime's own start read one rule. A failed
+	// measurement is trusted for sandboxFailTTL when somebody is waiting on it (a
+	// create); in the background it doubles with each consecutive failure, up to
+	// sandboxFailMaxTTL (muster #404): a host that cannot be confined (credentials
+	// in a store the profile denies) used to be re-measured every thirty seconds
+	// forever, each time starting a login shell twice and the agent CLI once.
+	sandboxFoundTTL   = sandbox.MeasuredFoundTTL
+	sandboxFailTTL    = sandbox.MeasuredFailTTL
+	sandboxFailMaxTTL = sandbox.MeasuredFailMaxTTL
 
 	sandboxProbeBegin = "MUSTER_SANDBOX_PROBE_BEGIN"
 	agentPathMark     = "MUSTER_AGENT_PATH="
@@ -195,13 +196,7 @@ type sandboxMeasurement struct {
 // negative lifetime however many failures came before, so a user who has just
 // logged in is not made to wait out a backoff that exists for the background.
 func (m *sandboxMeasurement) ttl(strict bool) time.Duration {
-	if m.sup != nil {
-		return sandboxFoundTTL
-	}
-	if strict {
-		return sandboxFailTTL
-	}
-	return backoffTTL(sandboxFailTTL, sandboxFailMaxTTL, m.failures)
+	return sandbox.MeasuredTTL(m.sup != nil, strict, m.failures)
 }
 
 func copySandboxSupport(s *fleet.SandboxSupport) *fleet.SandboxSupport {

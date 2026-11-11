@@ -11,6 +11,6 @@ import (
 // mechanism's; on any other platform there is nothing to apply, and the program
 // is not run.
 func LauncherMain(args []string) int {
-	fmt.Fprintln(os.Stderr, "muster sandbox: the Linux sandbox launcher is not available on this platform")
-	return 125
+	fmt.Fprintln(os.Stderr, LauncherMessagePrefix+"the Linux sandbox launcher is not available on this platform")
+	return LauncherRefusedStatus
 }

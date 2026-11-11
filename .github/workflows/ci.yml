@@ -214,8 +214,8 @@ jobs:
           go test ./internal/sandbox -run TestHostFacts -count=1 -v
       - name: launcher, policy, filter, and a confined child doing each refused thing
         run: go test ./internal/sandbox -count=1 -v
-      - name: the opencode driver starts its server under the mechanism
-        run: go test ./internal/drivers/opencode -run 'LinuxSandbox|LinuxPrivate' -count=1 -v
+      - name: the opencode driver starts its server under the mechanism, and is measured under it
+        run: go test ./internal/drivers/opencode -run 'LinuxSandbox|LinuxPrivate|SandboxMeasured|StartServer' -count=1 -v
       - name: the multiplexer driver, on a real multiplexer
         run: |
           sudo apt-get install -y tmux

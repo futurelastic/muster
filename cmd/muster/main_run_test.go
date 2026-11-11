@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 	"testing"
+
+	"github.com/futurelastic/muster/internal/sandbox"
 )
 
 // asMainEnv makes this test binary behave as the muster binary, so a test can
@@ -12,6 +14,13 @@ import (
 const asMainEnv = "MUSTER_TEST_AS_MAIN"
 
 func TestMain(m *testing.M) {
+	// muster #456: the service, run as this binary, starts the opencode runtime
+	// through itself as the sandbox launcher to measure it, in an environment it
+	// BUILDS, which carries no asMainEnv: so the launcher is recognised by argv, as
+	// main does, or that child would be a second copy of this whole test run.
+	if len(os.Args) > 1 && os.Args[1] == sandbox.LauncherArg {
+		os.Exit(sandbox.LauncherMain(os.Args[2:]))
+	}
 	if os.Getenv(asMainEnv) == "1" {
 		main()
 		os.Exit(0)
