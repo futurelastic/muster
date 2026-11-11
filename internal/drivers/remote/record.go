@@ -40,6 +40,7 @@ func (d *Driver) Record(ctx context.Context, req fleet.Request, ref fleet.Sessio
 		path += "?" + v.Encode()
 	}
 	var out fleet.RecordPage
+	path = withRuntimeHint(req, path)
 	if err := d.do(ctx, req, http.MethodGet, path, nil, &out); err != nil {
 		if routeMissing(err) {
 			return fleet.RecordPage{}, &fleet.Error{

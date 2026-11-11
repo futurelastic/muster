@@ -44,6 +44,19 @@ type Request struct {
 	// Expect is what the caller believes about the target, for operations
 	// that must not act on a belief that has gone stale (§5.4).
 	Expect Expectation
+
+	// RuntimeHint is the runtime the caller named for a session-addressed
+	// call (?runtime=, api-http.md §3.3), empty when it named none.
+	//
+	// It is a statement the caller made about HOW to resolve the target, not a
+	// fact about the target, which is why it is here and not in a SessionRef
+	// (a ref is an address, and an id is only unique within a runtime). A
+	// local resolution consumes it where the route is handled; this field
+	// exists for the one resolution this machine does not perform: a peer
+	// resolves its own runtimes (§13.1), so the only way the caller's choice
+	// reaches that resolution is for the remote driver to carry it. Empty means
+	// the call goes out exactly as it would have before this field existed.
+	RuntimeHint RuntimeId
 }
 
 // Expectation is the caller's own observation of the target, supplied so a

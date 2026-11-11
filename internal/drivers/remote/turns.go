@@ -40,6 +40,7 @@ func (d *Driver) Turns(ctx context.Context, req fleet.Request, ref fleet.Session
 		path += "?" + v.Encode()
 	}
 	var out fleet.TurnsPage
+	path = withRuntimeHint(req, path)
 	if err := d.do(ctx, req, http.MethodGet, path, nil, &out); err != nil {
 		if routeMissing(err) {
 			return fleet.TurnsPage{}, &fleet.Error{

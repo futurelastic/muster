@@ -115,7 +115,9 @@ session that has been replaced since you looked.
 
 **Runtime disambiguation.** `?runtime=` on any session-addressed operation, and
 `"runtime"` in the create body, picks between several local drivers on one
-machine.
+machine. On an operation addressed to a peer the value is passed on to the peer,
+which picks among its own runtimes; one id held under two of them is reachable
+through this machine by naming the runtime.
 
 **Scope.** `?scope=fleet` (the default) or `?scope=local`. Fleet fans out to
 every configured peer, exactly one hop — peers never recurse.

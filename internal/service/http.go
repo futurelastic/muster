@@ -413,8 +413,18 @@ func callerFrom(r *http.Request) fleet.Caller {
 // guarantee — "destroy the session I looked at" — while a caller that omits it
 // gets the weaker one a driver can offer from its own sightings, and is told
 // which it got when the operation refuses.
+//
+// RuntimeHint is read from ?runtime= for the same reason startedAt is: it is
+// something the caller said, and the one resolution that cannot see the query
+// is a peer's (#461). A local resolution reads the query itself where the
+// route is handled; a session-addressed call to a peer reaches the remote
+// driver with only this Request, so it travels here. Routes that do not
+// address a session never read it.
 func requestFrom(r *http.Request) fleet.Request {
-	req := fleet.Request{Caller: callerFrom(r)}
+	req := fleet.Request{
+		Caller:      callerFrom(r),
+		RuntimeHint: fleet.RuntimeId(r.URL.Query().Get("runtime")),
+	}
 	if raw := r.URL.Query().Get("startedAt"); raw != "" {
 		if ts, err := time.Parse(time.RFC3339Nano, raw); err == nil {
 			req.Expect.StartedAt = &ts
@@ -1556,15 +1566,22 @@ func handleGetSession(svc *Service) http.HandlerFunc {
 		// Narrowed to the one id (#339): without it every poll of one session
 		// read the runtime record of every session on the machine. A driver
 		// that cannot narrow ignores the field, hence the id check below.
+		//
+		// A peer's listing spans all of the peer's runtimes, and an id is only
+		// unique within one (§2.2). When the caller named a runtime, the row
+		// is the one that runtime holds (#461); without that, the first row
+		// with the id answered for a caller who asked about the other.
 		if col, err := d.List(ctx, req, driver.ListFilter{ID: id}); err == nil {
-			for _, s := range col.Items() {
-				if s.ID == id {
-					if via != resolvedPeer {
-						s.Labels = svc.labels.get(resolvedRuntime, s.ID, s.StartedAt)
-					}
-					writeJSON(w, http.StatusOK, s)
-					return
+			peerHint := fleet.RuntimeId("")
+			if via == resolvedPeer {
+				peerHint = runtimeHint
+			}
+			if s, ok := listedSession(col.Items(), id, peerHint); ok {
+				if via != resolvedPeer {
+					s.Labels = svc.labels.get(resolvedRuntime, s.ID, s.StartedAt)
 				}
+				writeJSON(w, http.StatusOK, s)
+				return
 			}
 		}
 
@@ -1577,6 +1594,42 @@ func handleGetSession(svc *Service) http.HandlerFunc {
 		}
 		writeJSON(w, http.StatusOK, fleet.Session{SessionRef: ref, Runtime: resolvedRuntime, State: state})
 	}
+}
+
+// listedSession picks the row for id out of a listing. peerHint is the runtime
+// the caller named for a PEER's session, empty for a local one or when none was
+// named; with it empty the first row with the id is the answer, as it always
+// was.
+//
+// With a hint, a peer's listing can hold the id under two runtimes, so the row
+// must be the one the hint names. A row that does not state its runtime (an
+// older peer, a driver that does not report it) cannot be told apart, so it
+// stands only when it is the single row with that id: nothing else could have
+// been meant. When no row qualifies the caller falls through to the peer's own
+// answer for the hinted call, which says "not found" for a runtime that does
+// not hold the id (§13.1).
+func listedSession(items []fleet.Session, id string, peerHint fleet.RuntimeId) (fleet.Session, bool) {
+	var rows []fleet.Session
+	for _, s := range items {
+		if s.ID == id {
+			rows = append(rows, s)
+		}
+	}
+	if len(rows) == 0 {
+		return fleet.Session{}, false
+	}
+	if peerHint == "" {
+		return rows[0], true
+	}
+	for _, s := range rows {
+		if s.Runtime == peerHint {
+			return s, true
+		}
+	}
+	if len(rows) == 1 && rows[0].Runtime == "" {
+		return rows[0], true
+	}
+	return fleet.Session{}, false
 }
 
 func handleSendInput(svc *Service) http.HandlerFunc {

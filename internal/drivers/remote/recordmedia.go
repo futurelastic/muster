@@ -32,6 +32,7 @@ func (d *Driver) RecordMedia(ctx context.Context, req fleet.Request, ref fleet.S
 		path += "?" + url.Values{"startedAt": {want.UTC().Format(time.RFC3339Nano)}}.Encode()
 	}
 	var out imageBody
+	path = withRuntimeHint(req, path)
 	if err := d.do(ctx, req, http.MethodGet, path, nil, &out); err != nil {
 		if routeMissing(err) {
 			return fleet.RecordMedia{}, &fleet.Error{

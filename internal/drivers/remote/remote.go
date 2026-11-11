@@ -1229,6 +1229,31 @@ func (d *Driver) bounded(ctx context.Context) (context.Context, context.CancelFu
 	return context.WithDeadline(ctx, own)
 }
 
+// withRuntimeHint carries the caller's ?runtime= onto a session-addressed path
+// (#461). The peer resolves a session id among its OWN runtimes (§13.1), and an
+// id present under two of them is answered "pass ?runtime= to disambiguate" —
+// an answer a caller addressing the peer through this machine could not act
+// on, because the one thing that would have resolved it never left here.
+//
+// No hint returns the path untouched, so a call that never named a runtime is
+// byte-for-byte what it was. The value is forwarded as given: whether the peer
+// has that runtime, or has the session under it, is the peer's answer to give,
+// and a "unknown runtime" from it is the right thing for the caller to see.
+//
+// Every builder of a session-addressed path calls this once, last, after it
+// has finished its own query (startedAt, expect, since…); a path that
+// addresses no session (create, list, health) must not.
+func withRuntimeHint(req fleet.Request, path string) string {
+	if req.RuntimeHint == "" {
+		return path
+	}
+	sep := "?"
+	if strings.Contains(path, "?") {
+		sep = "&"
+	}
+	return path + sep + url.Values{"runtime": {string(req.RuntimeHint)}}.Encode()
+}
+
 // do performs one request. token, when non-empty, replaces this driver's own
 // credential — that is how a proxied call presents the original caller's
 // authority (§13).
@@ -1520,6 +1545,7 @@ func (d *Driver) State(ctx context.Context, req fleet.Request, ref fleet.Session
 	var out fleet.Session
 	path := fmt.Sprintf("/v1/machines/%s/sessions/%s",
 		url.PathEscape(string(d.machine)), url.PathEscape(ref.ID))
+	path = withRuntimeHint(req, path)
 	if err := d.do(ctx, req, http.MethodGet, path, nil, &out); err != nil {
 		return fleet.SessionState{}, err
 	}
@@ -1918,6 +1944,7 @@ func (d *Driver) Send(ctx context.Context, req fleet.Request, ref fleet.SessionR
 		}
 		headers["Fleet-Remote-Control"] = "1"
 	}
+	path = withRuntimeHint(req, path)
 	if err := d.doWithHeaders(ctx, req, http.MethodPost, path, headers, body, &out); err != nil {
 		return fleet.DeliveryReceipt{}, err
 	}
@@ -1931,6 +1958,7 @@ func (d *Driver) Interrupt(ctx context.Context, req fleet.Request, ref fleet.Ses
 
 	path := fmt.Sprintf("/v1/machines/%s/sessions/%s/interrupt",
 		url.PathEscape(string(d.machine)), url.PathEscape(ref.ID))
+	path = withRuntimeHint(req, path)
 	if err := d.do(ctx, req, http.MethodPost, path, struct{}{}, nil); err != nil {
 		return fleet.Ack{}, err
 	}
@@ -1963,6 +1991,7 @@ func (d *Driver) Close(ctx context.Context, req fleet.Request, ref fleet.Session
 	if want := req.Expect.StartedAt; want != nil {
 		path += "?startedAt=" + url.QueryEscape(want.UTC().Format(time.RFC3339Nano))
 	}
+	path = withRuntimeHint(req, path)
 	if err := d.do(ctx, req, http.MethodDelete, path, nil, nil); err != nil {
 		return fleet.Ack{}, err
 	}
@@ -1999,6 +2028,7 @@ func (d *Driver) Discard(ctx context.Context, req fleet.Request, ref fleet.Sessi
 		path += "?" + q.Encode()
 	}
 	var ack fleet.Ack
+	path = withRuntimeHint(req, path)
 	if err := d.do(ctx, req, http.MethodPost, path, nil, &ack); err != nil {
 		return fleet.Ack{}, err
 	}
@@ -2030,6 +2060,7 @@ func (d *Driver) Keys(ctx context.Context, req fleet.Request, ref fleet.SessionR
 		path += "?" + q.Encode()
 	}
 	var receipt fleet.DeliveryReceipt
+	path = withRuntimeHint(req, path)
 	if err := d.do(ctx, req, http.MethodPost, path, map[string]any{"key": key}, &receipt); err != nil {
 		return fleet.DeliveryReceipt{}, err
 	}
@@ -2057,6 +2088,7 @@ func (d *Driver) Rename(ctx context.Context, req fleet.Request, ref fleet.Sessio
 	// forwarded to OUR caller verbatim. This driver never implements
 	// driver.TitleSyncer itself; there is nothing left here to attempt.
 	var ack fleet.RenameAck
+	path = withRuntimeHint(req, path)
 	if err := d.do(ctx, req, http.MethodPost, path, body, &ack); err != nil {
 		return fleet.RenameAck{}, err
 	}
@@ -2082,6 +2114,7 @@ func (d *Driver) Labels(ctx context.Context, req fleet.Request, ref fleet.Sessio
 	}
 	body := map[string]map[string]*string{"labels": patch}
 	var out fleet.Session
+	path = withRuntimeHint(req, path)
 	if err := d.do(ctx, req, http.MethodPost, path, body, &out); err != nil {
 		if routeMissing(err) {
 			return fleet.Session{}, &fleet.Error{
@@ -2116,6 +2149,7 @@ func (d *Driver) SetRemoteControl(ctx context.Context, req fleet.Request, ref fl
 		path += "?startedAt=" + url.QueryEscape(want.UTC().Format(time.RFC3339Nano))
 	}
 	var out fleet.Ack
+	path = withRuntimeHint(req, path)
 	if err := d.do(ctx, req, http.MethodPost, path, map[string]bool{"enabled": enabled}, &out); err != nil {
 		if routeMissing(err) {
 			return fleet.Ack{}, &fleet.Error{
@@ -2148,6 +2182,7 @@ func (d *Driver) Composer(ctx context.Context, req fleet.Request, ref fleet.Sess
 		path += "?startedAt=" + url.QueryEscape(want.UTC().Format(time.RFC3339Nano))
 	}
 	var out fleet.ComposerRead
+	path = withRuntimeHint(req, path)
 	if err := d.do(ctx, req, http.MethodGet, path, nil, &out); err != nil {
 		if routeMissing(err) {
 			return fleet.ComposerRead{}, &fleet.Error{
@@ -2175,6 +2210,7 @@ func (d *Driver) Respond(ctx context.Context, req fleet.Request, ref fleet.Sessi
 	var out fleet.DeliveryReceipt
 	path := fmt.Sprintf("/v1/machines/%s/sessions/%s/respond",
 		url.PathEscape(string(d.machine)), url.PathEscape(ref.ID))
+	path = withRuntimeHint(req, path)
 	if err := d.do(ctx, req, http.MethodPost, path, resp, &out); err != nil {
 		return fleet.DeliveryReceipt{}, err
 	}
