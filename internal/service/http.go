@@ -130,6 +130,9 @@ func NewMux(svc *Service, cfg Config) *http.ServeMux {
 	// The record route (muster #441): the wider sibling of turns, under its own
 	// grant (recordGate) and refusable wholesale by the operator (cfg.RefuseRecord).
 	mux.HandleFunc("GET /v1/machines/{machine}/sessions/{id}/record", withAuth(svc, cfg, recordGate(handleRecord(svc, cfg.RefuseRecord))))
+	// One image of that record, by the reference an image entry carries (muster
+	// #442): the same grant, the same switch, the same audit line.
+	mux.HandleFunc("GET /v1/machines/{machine}/sessions/{id}/record/media/{ref}", withAuth(svc, cfg, recordGate(handleRecordMedia(svc, cfg.RefuseRecord))))
 	mux.HandleFunc("GET /v1/machines/{machine}/sessions/{id}/composer", withAuth(svc, cfg, reading(handleComposer(svc))))
 	mux.HandleFunc("POST /v1/machines/{machine}/sessions/{id}/input", withAuth(svc, cfg, mutating(svc, cfg, handleSendInput(svc))))
 	mux.HandleFunc("GET /v1/machines/{machine}/input-audit", withAuth(svc, cfg, reading(handleInputAudit(svc))))
@@ -516,6 +519,11 @@ func writeDriverError(w http.ResponseWriter, machine fleet.MachineId, deadline t
 		// The session exists; the source of its turns does not (yet). Retryable,
 		// because the usual cause is a record the runtime has not written.
 		writeError(w, &fleet.Error{Kind: fleet.ErrorNotFound, Message: err.Error(), Machine: machine, Retryable: true})
+	case errors.Is(err, fleet.ErrNoSuchMedia):
+		// A media reference that is unknown or has expired (muster #442). One
+		// answer for every way a reference can fail, and NOT retryable: asking
+		// again does not bring the image back.
+		writeError(w, &fleet.Error{Kind: fleet.ErrorNotFound, Message: err.Error(), Machine: machine})
 	case errors.Is(err, fleet.ErrAmbiguousTarget):
 		// §5.4: the caller's belief and the world disagree. Well-formed
 		// request, conflicting state — 409, not 400.

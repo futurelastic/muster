@@ -1875,7 +1875,8 @@ module cannot verify.
 ### 2.16 RecordPage
 
 One read of a session's record (muster #441, `GET …/{id}/record`, api-http.md §3.2;
-`docs/adr/441-a-sessions-full-record-is-read-under-its-own-grant.md`). It is the
+`docs/adr/441-a-sessions-full-record-is-read-under-its-own-grant.md`, and for what the
+terminal runtime emits `docs/adr/442-the-record-carries-tool-calls-sub-tasks-summaries-and-images-by-reference.md`). It is the
 wider sibling of the assistant-turns read (§5.8): a different route, a different
 wire type, a different cursor and a different grant (`record`), and `turns` is
 unchanged by it. Not a field of `Session` or `SessionState`: a record is read on
@@ -1893,32 +1894,45 @@ RecordMessage {
   kind       : "text" | "reasoning" | "tool" | "image" | "summary" | "system"   // a client skips a kind it does not know
   role       : "user" | "assistant"
   text?      : string          // for text, reasoning, summary, system; bounded at 64 KiB
-  tool?      : RecordTool      // for tool: a call and its result, paired by the service
+  tool?      : RecordTool      // for tool: a call and its result, paired by the reader (below)
   parent?    : string          // the tool call an entry was made inside, when it belongs to a delegated sub-task
   model?     : string          // the model that wrote an assistant entry, when the record says
-  media?     : string          // a reference for an image, read separately; never inline
-  truncated? : boolean         // a text field was cut at 64 KiB
+  media?     : string          // a reference for an image, read through the media route (§2.17); never inline; opaque
+  truncated? : boolean         // a field was cut at 64 KiB (for a tool: its input or its result)
 }
 
 RecordTool {
-  id      : string             // the runtime's id for the call
+  id      : string             // the runtime's id for the call; a message's `parent` names one
   name    : string
-  input?  : any                // as the runtime recorded it
-  result? : string             // absent while the call has not returned
-  status? : string             // the runtime's own word for how the call ended
+  input?  : any                // as the runtime recorded it; over 64 KiB a JSON string of its leading part, with `truncated`
+  result? : string             // absent while the call has not returned; at most 64 KiB
+  status? : "running" | "completed" | "error"   // running: the record holds no result for the call yet; error: the runtime marked the result an error
 }
 ```
+
+**A `tool` message is updated by id** (muster #442). A call is sent where it was
+recorded, with its own `at`. If the page also reads its result it goes out once,
+complete. If not, it goes out `running`, and a later page that reads the result
+carries the same message again, complete: the same `tool.id`, the call's own `at`,
+positioned where the result was read. **A message of kind `tool` whose `tool.id` the
+reader already holds replaces the held one.** A result is attached only to a call
+with exactly its id, in the same file, recorded before it, and only the first result
+for the call; a result that cannot be tied to its call is omitted, never attached to
+another. So within a page `at` is not monotonic, and a client that does not apply the
+rule shows the call twice and loses nothing. A message with `parent` was made inside
+a delegated sub-task; a client that does not nest them shows them as they come.
 
 **Which kinds a driver emits is the allow-list of its own reader**, held where the
 record is read and nowhere downstream. The terminal runtime emits `text` in both
 directions (the assistant's prose by the same predicate as turns, and what a person
-typed); a kind a driver does not emit is absent from every page, not empty, and
-`tool`, `parent` and `media` are declared so the format-1 key set is settled before
-the driver that fills them exists. The runtime's own record is the source and its
-entry shape can change in a release, so a reader fails closed: an entry it cannot
-classify with certainty is omitted, never guessed at. A driver declares whether it
-reads a record at all through `DriverCapabilities.readsRecord` (§4.3); one that does
-not answers `unsupported` (§5.6).
+typed, with or without images), `reasoning` when it is written out, `tool` for any
+tool's call with its result, `summary` for a compaction, and `image` by reference,
+with `parent` on everything a delegated sub-task wrote (muster #442). A kind a driver
+does not emit is absent from every page, not empty. The runtime's own record is the
+source and its entry shape can change in a release, so a reader fails closed: an entry
+it cannot classify with certainty is omitted, never guessed at. A driver declares
+whether it reads a record at all through `DriverCapabilities.readsRecord` (§4.3); one
+that does not answers `unsupported` (§5.6).
 
 **What does not change from turns:** the cursor is opaque and bound to the
 conversation it was issued against (`conflict` against another conversation or past
@@ -1926,6 +1940,43 @@ the end of a shrunken record); `limit` over 100 is refused, never clamped; `star
 is corroborated before anything is read; a record that cannot be identified yet is
 `not_found` with `retryable`, which is not a conversation with nothing admitted
 (`200`, `messages: []`, §5.7); a relay carries the owning machine's page unchanged.
+
+### 2.17 RecordMedia
+
+One image of a session's record (muster #442,
+`GET …/{id}/record/media/{ref}`, api-http.md §3.2), read by the `media` reference an
+`image` entry of a RecordPage carries. It is not part of a RecordPage and is not JSON:
+the answer is the image's bytes, with a `Content-Type` that is one of `image/png`,
+`image/jpeg`, `image/gif` or `image/webp`, at most 16 MiB.
+
+```
+RecordMedia {
+  contentType : "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+  data        : bytes          // checked to be that type; at most 16 MiB
+}
+```
+
+**A reference is a place, not a token.** It names where in the runtime's own record the
+image sits, bound to the conversation it was read from; it holds no content and no
+path, and the service keeps nothing about it. It is valid exactly as long as the record
+holds the entry: it stops working when the session's conversation is replaced (a
+`/clear`, a relaunch) or the record goes. There is no time limit of its own.
+
+**Every way a reference can fail is one answer: `not_found`, not `retryable`.** It is
+malformed, was never issued, was issued against another conversation, names something
+that is not an image the reader admits, or no longer does. A caller is not told which,
+because that would tell it which references exist. A reference handed to a different
+session than the one that issued it is one of these: it names a conversation that
+session does not hold. The read applies the same corroboration as a record read
+(`startedAt` before anything is read; `not_found` retryable for a record that cannot be
+identified yet) and reads the reference through the same allow-list that issued it. A
+driver whose record carries images implements it; one that does not answers
+`unsupported` (§5.6). There is no capability flag of its own: a runtime that reads a
+record (`readsRecord`) and carries no images emits no `image` entry.
+
+**What may be referenced** is an inline image of one of those four types, starting with
+that type's signature, within the size cap. A relay passes the owning machine's answer
+only after checking it is such an image.
 
 ---
 
@@ -2704,7 +2755,8 @@ failure to observe will report its ignorance as the world's.*
 > that a session's **full record** may be read through `GET …/{id}/record`
 > (api-http.md §3.2, §2.16 above) — both sides of the conversation and, as the
 > kinds are added, tool calls and results, reasoning, sub-task entries and images —
-> under a **`record` grant** that nothing implies and nobody holds by default. The
+> under a **`record` grant** that nothing implies and nobody holds by default (the
+> terminal runtime carries every kind since muster #442, with images by reference). The
 > boundary above still binds `turns` unchanged and stays on `send`; the record route
 > has its own boundary, drawn by each runtime's reader, its own `content-read` audit
 > event, and an operator switch that refuses it wholesale. Same reasoning as the note

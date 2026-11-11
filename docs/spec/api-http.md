@@ -1416,8 +1416,9 @@ never the text. Unrelated to `SessionState.turns`, the liveness count.
 
 ```
 GET /v1/machines/{machine}/sessions/{id}/record?since=&limit=&startedAt=&runtime=
-→ 200 { "messages": [ { "at": "...", "kind": "text", "role": "user" | "assistant",
-                        "text": "...", "model": "..."?, "truncated": true? } ],   ← oldest first
+→ 200 { "messages": [ { "at": "...", "kind": "text" | "reasoning" | "tool" | "image" | "summary",
+                        "role": "user" | "assistant", "text": "..."?, "tool": {...}?, "parent": "..."?,
+                        "model": "..."?, "media": "..."?, "truncated": true? } ],   ← oldest first
         "next": "<opaque cursor>", "format": 1 }
 → 200 { "messages": [], "next": "...", "format": 1 }   ← nothing (new): a normal answer to a poll
 → 400 invalid        limit outside 1..100 (refused, not clamped); startedAt not RFC 3339;
@@ -1440,21 +1441,67 @@ tool?, parent?, model?, media?, truncated?}`; `format` is `1` and changes only w
 a key is renamed or removed, so a client skips a `kind` it does not know.
 
 **What a runtime emits is the allow-list of its own reader**, held where the record
-is read and nowhere downstream. The terminal runtime emits `text` entries in both
-directions: the assistant's prose (the same predicate as `turns`, with `model`) and
-what a person typed — a top-level user entry of human origin whose content is text
-only and is not the runtime's own markup. Tool calls and results, reasoning,
-sub-agent entries, summaries, system and hook output, attachments, images and a
-message another session sent in are left out, and so is any entry the reader cannot
-classify with certainty. The `opencode` runtime and the test stub declare
+is read and nowhere downstream. The terminal runtime emits (muster #442, ADR 442):
+`text` in both directions (the assistant's prose by the same predicate as `turns`,
+with `model`; what a person typed, a top-level user entry of human origin that is not
+the runtime's own markup, with or without images); `reasoning` when the runtime wrote
+it out; `tool` for any tool's call, paired by exact id with its result; `summary` for
+a compaction; `image` carrying a `media` reference (the person's attachments and the
+images a tool returned); and `parent`, the id of the call that started a delegated
+sub-task, on every entry the sub-task wrote. Meta and hook output, attachments, queued
+placeholders, a message another session sent in, a user message that mixes text with a
+block that is neither text nor an image, and any entry the reader cannot classify with
+certainty are left out. The `opencode` runtime and the test stub declare
 `readsRecord: false` and answer `501` (a later change adds a reader for the first).
 
+**A `tool` message is updated by id.** A call goes out where it was recorded with
+`tool.status: "running"` and no result unless the same page reads the result too; a
+later page that reads the result carries the same message again, complete — the same
+`tool.id`, the call's own `at`, in the position of the result. **A `tool` message
+whose `tool.id` the client holds replaces it**; `at` is therefore not monotonic within
+a page. `status` is `running`, `completed` or `error`. A result is attached only to
+the call with exactly its id (the first result only); one that cannot be tied to its
+call is omitted. `input` is the raw JSON the runtime recorded; over 64 KiB it is a JSON
+string of its leading part and the message is `truncated`.
+
 The cursor is opaque, bound to the conversation it was issued against, and its own:
-it is `400` on `turns`, and a `turns` cursor is `400` here. Without `since` the most
-recent `limit` entries (default 20, at most 100) are returned; `next` is returned
-even when `messages` is empty. A text field over 64 KiB is cut on a rune boundary
-and carries `"truncated": true`. `startedAt` is corroborated against the live
-session before anything is read, exactly as for `turns`.
+it is `400` on `turns`, and a `turns` cursor is `400` here. It holds a position in
+the conversation's record and in each sub-task that still needs one, so it can be a
+few hundred bytes (it names at most 64 sub-tasks); a page may end inside a line, and
+`limit` bounds what a page carries. Without `since` the most recent `limit` entries
+(default 20, at most 100) are returned across the conversation and its sub-tasks,
+merged by time; `next` is returned even when `messages` is empty. A text field over
+64 KiB is cut on a rune boundary and carries `"truncated": true`. `startedAt` is
+corroborated against the live session before anything is read, exactly as for `turns`.
+
+```
+GET /v1/machines/{machine}/sessions/{id}/record/media/{ref}?startedAt=&runtime=
+→ 200 <the image's bytes>   Content-Type: image/png | image/jpeg | image/gif | image/webp
+                            Cache-Control: no-store, X-Content-Type-Options: nosniff
+→ 400 invalid        startedAt not RFC 3339
+→ 401 unauthorized   a principal table is configured and the caller lacks `record`
+→ 404 not_found      no such session; or its record cannot be identified yet (retryable: true);
+                     or the reference is unknown, malformed, issued for another conversation,
+                     expired, or names something that is not an image the reader admits
+                     (retryable: false — one answer for all of those)
+→ 409 conflict       startedAt disagrees with the live session
+→ 501 unsupported    the runtime, or the peer's build, carries no images
+→ 501 unsupported    reason "record-off" — this machine's operator refused the route
+```
+
+One image of a session's record (muster #442; session-abstraction.md §2.17), by the
+`media` reference an `image` entry of the record carries. It is the record route's
+sibling and shares everything with it: the **`record` grant** (nothing else stands in
+for it, and a principal that holds only `record` is served), **the switch** (`refuseRecordReads`),
+`startedAt` corroboration and the relay (the owning machine applies its own table to the
+asserted caller, and a relay passes the bytes only after checking they are an image of
+a type named above, at most 16 MiB). **Audit:** every read writes one `audit: content-read`
+line with `route=GET …/record/media/{ref}` — the route pattern, never the reference —
+and `entries=1` when an image left, `0` otherwise. A reference is a place in the
+runtime's record bound to the conversation it was read from, holds no content or path,
+and is valid as long as the record holds the entry; it stops working when the
+conversation is replaced. A reference handed to another session is `404`, as is every
+other way it can fail.
 
 **Authority.** With a principal table the `record` grant (§5) — not `read`, not
 `send`, not `relay` — and nothing is implied by anything else. Without one a valid

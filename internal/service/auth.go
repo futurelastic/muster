@@ -388,11 +388,11 @@ func grantForVerb(r *http.Request) Grant {
 		// every route a principal needs a grant for answers the same question in
 		// one place (muster #450).
 		return GrantDebug
-	case r.Method == http.MethodGet && isRecordPath(path):
+	case r.Method == http.MethodGet && (isRecordPath(path) || isRecordMediaPath(path)):
 		// Not routed through reading(): recordGate (record.go) checks this grant
 		// itself, and a record holder need not hold read. Listed here so every
 		// route a principal needs a grant for answers the same question in one
-		// place (muster #441).
+		// place (muster #441). The media route (muster #442) rides the same grant.
 		return GrantRecord
 	case r.Method == http.MethodDelete:
 		return GrantClose

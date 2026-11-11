@@ -1216,10 +1216,22 @@ func (d *Driver) doWithHeaders(ctx context.Context, req fleet.Request, method, p
 	if out == nil {
 		return nil
 	}
+	// A route whose answer is not JSON (a record image, muster #442) reads its own
+	// body; the request, the caller's authority and the error handling above are the
+	// same as for every other route.
+	if rb, ok := out.(bodyReader); ok {
+		return rb.readBody(resp, d.machine)
+	}
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
 		return fmt.Errorf("remote: decoding response from %s: %w", d.machine, err)
 	}
 	return nil
+}
+
+// bodyReader is an `out` that reads the response body itself instead of having it
+// decoded as JSON.
+type bodyReader interface {
+	readBody(resp *http.Response, machine fleet.MachineId) error
 }
 
 // noEnvelopeFormat is decodeError's message for a status with no envelope.

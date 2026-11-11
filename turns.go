@@ -142,3 +142,12 @@ const (
 // text is a TurnsPage with no Turns (§5.7) — and the service maps it to
 // not_found with Retryable set.
 var ErrNoTurnRecord = errors.New("fleet: no readable conversation record could be identified for this session")
+
+// ErrNoSuchMedia is returned by a media read (muster #442) when the reference
+// does not name an image this session's record holds now: it is malformed, it was
+// never issued, the conversation it was issued against has been replaced (a
+// /clear or a relaunch), or the entry is gone. The cases are one answer on
+// purpose — telling them apart would tell a caller which references exist — and
+// the service maps it to not_found, NOT retryable: asking again does not bring
+// the image back.
+var ErrNoSuchMedia = errors.New("fleet: no such image in this session's record (the reference is unknown, or has expired)")

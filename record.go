@@ -21,16 +21,19 @@ type RecordKind string
 const (
 	// RecordKindText is prose someone wrote: the Text field holds it.
 	RecordKindText RecordKind = "text"
-	// RecordKindReasoning is the agent's reasoning, Text. No driver produces it
-	// yet.
+	// RecordKindReasoning is the agent's reasoning, Text. The terminal runtime
+	// emits it (muster #442).
 	RecordKindReasoning RecordKind = "reasoning"
-	// RecordKindTool is a tool call paired with its result, Tool. No driver
-	// produces it yet.
+	// RecordKindTool is a tool call paired with its result, Tool. The terminal
+	// runtime emits it (muster #442). A tool message whose Tool.ID a reader
+	// already holds REPLACES the held one: the call is sent as soon as it is
+	// recorded, with Status "running", and again, complete, when its result is.
 	RecordKindTool RecordKind = "tool"
-	// RecordKindImage is an image, Media. No driver produces it yet.
+	// RecordKindImage is an image, Media. The terminal runtime emits it (muster
+	// #442); the bytes are read through the media route, never from this entry.
 	RecordKindImage RecordKind = "image"
 	// RecordKindSummary is a summary the runtime wrote of earlier entries, Text.
-	// No driver produces it yet.
+	// The terminal runtime emits it for a compaction (muster #442).
 	RecordKindSummary RecordKind = "summary"
 	// RecordKindSystem is the runtime speaking rather than a person or the
 	// agent, Text. No driver produces it yet.
@@ -56,9 +59,9 @@ const (
 // served on its own route under its own grant, and it has both because a record
 // is a conversation of more than one voice and more than one kind of entry.
 //
-// The keys are fixed by RecordFormat. Tool, Parent and Media are declared now so
-// that the format-1 key set is settled in one place; the driver that fills them
-// is a later change, and until then they are absent.
+// The keys are fixed by RecordFormat. Tool, Parent and Media were declared with
+// the route so that the format-1 key set was settled in one place; the terminal
+// runtime fills them since muster #442.
 //
 // What a driver puts INTO this type is the allow-list of that driver's reader
 // (docs/adr/441-…, "What each runtime emits today"). Nothing downstream of the
@@ -77,7 +80,7 @@ type RecordMessage struct {
 	// bounded by MaxRecordFieldBytes.
 	Text string `json:"text,omitempty"`
 
-	// Tool is a call and its result paired by the service, for the tool kind.
+	// Tool is a call and its result paired by the reader, for the tool kind.
 	Tool *RecordTool `json:"tool,omitempty"`
 
 	// Parent is the id of the tool call this entry was made inside, when it
@@ -88,11 +91,14 @@ type RecordMessage struct {
 	Model string `json:"model,omitempty"`
 
 	// Media is a reference to an image, for the image kind. It is read
-	// separately; image bytes are never inline here.
+	// separately (GET …/record/media/{ref}); image bytes are never inline here.
+	// Opaque: never parse it, and never carry it to another session.
 	Media string `json:"media,omitempty"`
 
 	// Truncated is true when a field of this entry was cut at
-	// MaxRecordFieldBytes. Absent otherwise.
+	// MaxRecordFieldBytes. Absent otherwise. For a tool message the cut field may
+	// be the input (which then reads as a JSON string holding the leading part of
+	// the input's JSON text) or the result.
 	Truncated bool `json:"truncated,omitempty"`
 }
 
@@ -110,9 +116,22 @@ type RecordTool struct {
 	// Result is what the call returned, absent while it has not.
 	Result string `json:"result,omitempty"`
 
-	// Status is the runtime's own word for how the call ended.
+	// Status is RecordToolRunning while the record holds no result for the call,
+	// and RecordToolCompleted or RecordToolError once it does, taken from the
+	// result. A client that does not know a value shows it as it is.
 	Status string `json:"status,omitempty"`
 }
+
+// The Status a tool message carries (muster #442).
+const (
+	// RecordToolRunning: the record holds the call and no result for it yet.
+	RecordToolRunning = "running"
+	// RecordToolCompleted: the result is in, and the runtime did not mark it an error.
+	RecordToolCompleted = "completed"
+	// RecordToolError: the result is in, and the runtime marked it an error
+	// (including a call that was interrupted).
+	RecordToolError = "error"
+)
 
 // RecordPage is one read of a session's record, oldest first.
 type RecordPage struct {
@@ -154,3 +173,24 @@ const (
 	// same 64 KiB as a Turn's, for the same reason.
 	MaxRecordFieldBytes = MaxTurnTextBytes
 )
+
+// RecordMedia is one image read through GET …/{id}/record/media/{ref} (muster
+// #442): the bytes and their type. It is never part of a RecordPage.
+type RecordMedia struct {
+	// ContentType is one of the image types in RecordMediaTypes, and the bytes
+	// have been checked to be that type.
+	ContentType string
+
+	// Data is the image, at most MaxRecordMediaBytes.
+	Data []byte
+}
+
+// MaxRecordMediaBytes bounds one image a record reference can name, decoded. An
+// image over it is not referenced at all, so a reference a page hands out is one
+// the media route can serve.
+const MaxRecordMediaBytes = 16 << 20
+
+// RecordMediaTypes are the image types a record reference can name. The media
+// route serves bytes under the caller's grant, so the set is the browser image
+// types and nothing a viewer could be made to run.
+var RecordMediaTypes = []string{"image/png", "image/jpeg", "image/gif", "image/webp"}
