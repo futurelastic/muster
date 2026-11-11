@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	fleet "github.com/futurelastic/muster"
 	"github.com/futurelastic/muster/internal/sandbox"
@@ -140,6 +141,44 @@ func TestLinuxSandboxedCreateRefusesAGrantThatDoesNotExistAndStartsNothing(t *te
 	}
 	if len(d.live) != 0 {
 		t.Fatal("a refused create started a server")
+	}
+}
+
+// muster #456: the launcher's two refusals as the real launcher gives them. A
+// runtime whose interpreter the policy does not open cannot be exec'd by it: the
+// launcher prints why and exits 127, and startServer, which used to retry that as a
+// lost port race, returns the reason once. The launcher's other refusal (125) is
+// checked without a kernel feature by TestStartServerReadsTheRealLauncherEntryPointsRefusal.
+func TestLinuxSandboxExecFailureOfTheRuntimeIsNotRetriedAndItsReasonReachesTheError(t *testing.T) {
+	bin := runtimeWithInterpreterOutsideTheGrants(t)
+	d := hostSandboxDriver(t, bin)
+	cwd := t.TempDir()
+	dir, err := sessionDirs(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := d.planSandbox(fleet.SessionSpec{Cwd: fleet.AbsolutePath(cwd), Sandbox: &fleet.SandboxSpec{Network: fleet.SandboxNetworkClosed}}, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	launch, err := plan.launcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	asked := 0
+	counted := func(port int) ([]string, error) { asked++; return launch(port) }
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err = startServer(ctx, bin, cwd, "muster", d.buildEnv(dir, nil), counted)
+	if !errors.Is(err, errLauncherRefused) || asked != 1 {
+		t.Fatalf("asked = %d, err = %v; want one start, refused by the launcher", asked, err)
+	}
+	if !strings.Contains(err.Error(), "starting "+bin) {
+		t.Fatalf("the launcher's own reason (what it was starting, and why not) did not reach the error: %v", err)
+	}
+	if strings.Contains(err.Error(), "did not become ready") {
+		t.Fatalf("the reason is hidden behind the generic start error: %v", err)
 	}
 }
 

@@ -105,8 +105,9 @@ The facts that decide the shape, measured on the target and in a VM:
   refused with the reason.
 - Other processes' `cmdline` and `status` stay readable, and `/etc` is readable,
   as on macOS: keep a token or key out of both.
-- A launcher refusal inside the opencode driver costs up to three start attempts,
-  because the exit looks like losing a port race. Recognising exit 125 is a
-  follow-up, as is a measurement probe for opencode like the one the terminal
-  runtime has (a runtime that cannot run under the policy fails every create
-  loudly instead of withholding the capability).
+- A launcher refusal inside the opencode driver cost up to three start attempts,
+  because the exit looked like losing a port race, and a runtime that cannot run
+  under the policy failed every create loudly instead of the capability being
+  withheld. Both were follow-ups and are done (muster #456): the launcher's
+  refusal is recognised and returned once with its reason, and the opencode
+  runtime is measured under the policy like the terminal runtime's agent.

@@ -113,13 +113,18 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 		refused["env"] = len(spec.Env) > 0
 		refused["isolateEnvironment"] = spec.IsolateEnvironment
 	}
-	if spec.Sandbox != nil && d.sandbox == nil {
+	if spec.Sandbox != nil {
 		// muster #281: refuse, never degrade. The reason is the capability's own,
 		// so a caller reading it learns what is missing rather than that "it failed".
-		return fleet.Session{}, &fleet.Error{
-			Kind:    fleet.ErrorUnsupported,
-			Message: "create: this driver cannot enforce a sandbox: " + d.sandboxWhy + " (refusing rather than start the session unconfined)",
-			Machine: d.machine,
+		// muster #456: the answer is the measured one, taken now if it is stale, so a
+		// runtime that cannot start under the policy is refused here, with the reason,
+		// and not by a start that fails.
+		if sup, why := d.sandboxCurrent(ctx, true); sup == nil {
+			return fleet.Session{}, &fleet.Error{
+				Kind:    fleet.ErrorUnsupported,
+				Message: "create: this driver cannot enforce a sandbox: " + why + " (refusing rather than start the session unconfined)",
+				Machine: d.machine,
+			}
 		}
 	}
 	// muster #283: bypass is honoured inside an enforced sandbox only. Checked
