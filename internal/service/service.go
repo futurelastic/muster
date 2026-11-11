@@ -309,6 +309,10 @@ func NewWithState(self fleet.MachineId, st *state.Store) (*Service, error) {
 		// What the file holds is a ceiling (see cursorReserveBlock), so this
 		// run starts at it and the first event past it raises it.
 		svc.events.reserved = seq.Cursor
+		// The sequence continues, so nothing tells a resumed subscriber that the
+		// drivers went unwatched while this service was stopped; the first
+		// subscription of each machine says so (#454, takeRestoreGap).
+		svc.events.restoredFeed = true
 		svc.events.reserve = func(c int64) error {
 			return st.Save("events", eventSequence{Epoch: seq.Epoch, Cursor: c})
 		}
@@ -325,11 +329,13 @@ func newService(self fleet.MachineId) *Service {
 	now := time.Now()
 	return &Service{
 		self: self,
-		// epoch identifies this service instance (§7.3): it changes on
-		// every restart, exactly what a subscriber's stale epoch needs to
-		// compare against. Derived from startedAt rather than a random id
-		// — no dependency needed for a UUID, and it is human-legible in
-		// GET /v1/health.
+		// epoch identifies this service's event sequence (§7.3). A service
+		// without durable state gets a new one on every start, which is what
+		// a subscriber's stale epoch needs to compare against; one with
+		// state keeps the epoch a previous run persisted (NewWithState), and
+		// then a restart is announced as a feed_gap instead (#454). Derived
+		// from startedAt rather than a random id — no dependency needed for a
+		// UUID, and it is human-legible in GET /v1/health.
 		epoch:      now.UTC().Format(time.RFC3339Nano),
 		startedAt:  now,
 		build:      fleet.SelfBuild(),

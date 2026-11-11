@@ -1469,10 +1469,14 @@ listen by type, while `kind` inside `data` lets every other client treat the
 stream as framed JSON.
 
 **Resuming.** Send back the last `cursor` and `epoch` you saw. If your cursor
-is too old, or the service restarted (different `epoch`), you receive
+is too old, or the `epoch` differs (a service that keeps state keeps its epoch
+across a restart; one that does not gets a new one), you receive
 `control.resync` — which means *your view is stale, refetch the list*. It never
 resumes you silently from an arbitrary point, because a subscriber that
-believes it has complete history and does not is unrecoverable.
+believes it has complete history and does not is unrecoverable. A restart that
+kept the epoch is announced too, as a `feed_gap` (see *When the feed itself
+goes deaf*): your cursor still resumes, and the one `control.resync` that
+follows is the service saying it was not watching while it was down.
 
 A browser gets this free: `id:` makes `EventSource` send `Last-Event-ID` on
 reconnect, and the server honours it.
@@ -1491,6 +1495,7 @@ This is the part to get right before you build a UI on it.
 | the agent prints output, the spinner ticks, the screen scrolls | **no** |
 | the `evidence` prose is reworded | **no** |
 | this service's own view of a machine goes deaf, and comes back | `source.status`, then `control.resync` with `feed_gap` |
+| this service is **restarted** and starts watching a machine again | `source.status: ok`, then `control.resync` with `feed_gap`, once per restart |
 | a machine becomes unreachable | `source.status` |
 | this machine's **account** starts or stops refusing work | `machine.quota` |
 | this machine's local **credential material** changes | `machine.account` |
@@ -1576,6 +1581,18 @@ it — the driver subscription failed or ended. It retries; when it succeeds you
 get `source.status: ok` and a `control.resync` with reason `feed_gap`, because
 whatever happened during the outage was never stamped into the sequence and
 cannot be replayed. Re-list on it.
+
+**A restart of the service is the same outage, and is announced the same way.**
+The epoch and the cursor continue across it, so a subscriber that was caught up
+is resumed rather than resynced — but while the service was down nothing watched
+the machines, and the first subscription after the start takes a baseline that
+absorbs whatever changed. A session that closed during the downtime is in no
+event, so a mirror that resumed silently would keep showing it. You therefore get
+`source.status: ok` and one `control.resync` with `feed_gap` for each machine
+the first time the restarted service watches it, even though your cursor is
+valid: re-list on it as on any other. It arrives once per restart, not on every
+reconnect afterwards. A service with no state to restore starts a new epoch
+instead, and you get `epoch_changed`.
 
 `feed_gap` is worth distinguishing in your logs from the other two resync
 reasons. `epoch_changed` and `cursor_expired` are about your view; `feed_gap`
