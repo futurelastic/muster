@@ -25,9 +25,10 @@ import (
 // # Retention exists so a gap can be announced
 //
 // A subscriber reconnects with the last cursor it saw. If that cursor is older
-// than what is retained, or the epoch differs because this service restarted,
-// the subscriber is told `resync_required` rather than quietly resumed from
-// the oldest event still held. §7.3 is explicit about why: silently resuming
+// than what is retained — which after a restart is everything stamped before
+// it, because the window is not persisted — or the epoch differs, the
+// subscriber is told `resync_required` rather than quietly resumed from the
+// oldest event still held. §7.3 is explicit about why: silently resuming
 // produces a subscriber that believes it has a complete history and does not.
 // Announced gaps are recoverable; silent ones are not.
 //
@@ -79,9 +80,15 @@ const defaultRetention = 512
 // never after the fact — an event past the ceiling is not handed to anyone
 // until the larger ceiling is durable. The price is that a restart continues
 // from the ceiling, not from the last event: up to one block of numbers is
-// skipped, which no subscriber can observe (a cursor from before a restart
-// already answers resync_required or an empty backlog — the window is not
-// persisted either), and an int64 does not run out.
+// skipped, and an int64 does not run out.
+//
+// A subscriber CAN observe that, in one case, and it is the right one: after a
+// crash the restored cursor is the ceiling, so a subscriber that was caught up
+// holds a cursor below it and is told cursor_expired, like every subscriber that
+// holds a cursor from before the restart — it cannot be told apart from one that
+// was behind (#418). A graceful stop closes that case: seal writes the exact
+// cursor, so the restored number is the last one handed out and a subscriber
+// that held it is resumed.
 //
 // 1024 is ~49 writes a day at the ~50 000 events a day measured on a busy
 // machine, against ~49 000 before.
@@ -316,6 +323,55 @@ func (h *hub) extendReservation() bool {
 	return true
 }
 
+// seal makes the durable ceiling exact: the file ends up holding the cursor
+// last handed out, not the block-ahead number a running service keeps (#418).
+//
+// # Why a stop writes the exact number
+//
+// A restart restores the file's number as the cursor with an empty window, and a
+// subscriber is resumed only if it holds exactly that cursor — anything below it
+// asks for events nobody retained and is told cursor_expired. That is only a
+// fair question if the number is the last event handed out. After a crash it is
+// the ceiling, up to one block above it, so every subscriber below the ceiling
+// resyncs, the caught-up ones included: announced, one refetch, and the only
+// answer that cannot hide a gap. After a graceful stop it can be exact, so a
+// subscriber that was caught up before the restart is not made to resync.
+// (Recording where the run started and resyncing only below that minus a block
+// would instead resume subscribers inside the block unannounced, whether or not
+// they had missed events.)
+//
+// # Why it is safe to LOWER the ceiling
+//
+// Lowering is the dangerous direction: a cursor handed out above the durable
+// number would be reused by the next run (§7.3). So reserved is set to the
+// cursor first, under mu, before anything is written. From that moment a
+// publisher sees cursor >= reserved and queues on extend, which seal holds — it
+// cannot stamp cursor+1 against a file that says cursor. When seal returns the
+// publishers that queued write a fresh ceiling and carry on; a publish after a
+// seal therefore only turns a graceful stop into one that reads as a crash.
+//
+// A failed write leaves reserved at the cursor, not at the old ceiling: the next
+// publish then rewrites cursor+block, which holds whatever the failed write left
+// on disk. The feed is never stopped for it, and the next start is simply
+// crash-shaped.
+func (h *hub) seal() error {
+	h.extend.Lock()
+	defer h.extend.Unlock()
+
+	h.mu.Lock()
+	reserve, cursor := h.reserve, h.cursor
+	if reserve == nil || h.reserved == cursor {
+		// Nothing durable to adjust, or the file is already exact (a quiet run
+		// restored from an exact file): do not pay a flush to write the same bytes.
+		h.mu.Unlock()
+		return nil
+	}
+	h.reserved = cursor
+	h.mu.Unlock()
+
+	return reserve(cursor)
+}
+
 // add registers a subscriber resuming from (cursor, epoch). It returns the
 // backlog to replay and whether the subscriber must resync first.
 func (h *hub) add(scope Scope, filter driver.SubscribeFilter, fromCursor int64, fromEpoch string) (*subscriber, []fleet.Event, bool) {
@@ -343,11 +399,23 @@ func (h *hub) add(scope Scope, filter driver.SubscribeFilter, fromCursor int64, 
 		return s, nil, true
 	}
 	var backlog []fleet.Event
-	oldest := int64(0)
+	// floor is the highest cursor the window does NOT hold: a subscriber at or
+	// above it has missed nothing the window cannot replay.
+	//
+	// With an empty ring it is the cursor itself. An empty ring means either a
+	// service that has stamped nothing (cursor 0, so nothing is below it) or one
+	// restored from its file, whose first event will be cursor+1 — and everything
+	// up to the restored cursor was stamped by a previous run and is gone. Reading
+	// the floor as 0 there is what let a restart answer a subscriber that was
+	// behind with an empty backlog instead of cursor_expired (#418); once the
+	// first event after the restart arrived, the non-empty branch below said the
+	// right thing, so the answer used to depend on whether anything had happened
+	// yet.
+	floor := h.cursor
 	if len(h.ring) > 0 {
-		oldest = h.ring[0].Cursor
+		floor = h.ring[0].Cursor - 1
 	}
-	if fromCursor < oldest-1 {
+	if fromCursor < floor {
 		return s, nil, true // fell off the retained window
 	}
 	for i, ev := range h.ring {

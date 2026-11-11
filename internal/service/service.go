@@ -49,6 +49,13 @@ import (
 // stamped exceeds it, and a restart continues from it (#415, cursorReserveBlock).
 // The field keeps its name so a file written by an older build reads as a
 // ceiling that happens to be exact.
+//
+// A restart restores the cursor with an EMPTY window, so the restored number is
+// also the oldest cursor a subscriber can resume from: one holding anything below
+// it gets cursor_expired, one holding exactly it is resumed (#418). Close writes
+// the exact cursor on a graceful stop, so a subscriber that was caught up then
+// keeps resuming; after a crash the number is the ceiling, above the last event
+// handed out, and every subscriber that held a cursor from before it resyncs.
 type eventSequence struct {
 	Epoch  string `json:"epoch"`
 	Cursor int64  `json:"cursor"`
@@ -332,6 +339,22 @@ func newService(self fleet.MachineId) *Service {
 		// field's own doc comment.
 		maxInputBytes: defaultMaxInputBytes,
 	}
+}
+
+// Close is the graceful end of a service: it makes the persisted cursor the
+// exact one, so the next start can resume a subscriber that was caught up
+// instead of announcing cursor_expired to it (#418, hub.seal). Call it once,
+// after the drivers have stopped publishing; nothing else needs it, and a
+// service that never reaches it is simply treated as one that crashed.
+//
+// An error means the file still holds the larger ceiling it had: the next start
+// is crash-shaped and every subscriber resyncs, which is announced and
+// recoverable. It is returned so the caller can say so, not so it can retry.
+func (s *Service) Close() error {
+	if s.state == nil {
+		return nil
+	}
+	return s.events.seal()
 }
 
 // Events opens a subscription on this service's event plane (§7.3, §13).
