@@ -392,7 +392,8 @@ order of this page and the order of its output are the same.
      login keychain, which the profile does not open). On Linux (muster #439) it
      needs kernel 6.12 or newer with `landlock` in `/sys/kernel/security/lsm`, and
      an agent whose install and interpreter the policy can read (see "What a Linux
-     machine reports about the sandbox", below). `FLEET_TMUX_SANDBOX=off`
+     machine reports about the sandbox", below; row `sandbox.host` says what the host
+     itself can offer, whether or not the runtime is enabled). `FLEET_TMUX_SANDBOX=off`
      stops the runtime offering it;
    - when `FLEET_RUNTIME_OPENCODE=1`, set `FLEET_OPENCODE_BIN` to the opencode
      binary's absolute path, for the same reason (row: `runtime.opencode`,
@@ -753,6 +754,28 @@ thing that is not:
   kept five minutes when it was good and thirty seconds when it was not (longer, in the
   background, while it keeps failing), so a runtime installed or fixed while the service runs is
   offered again without a restart.
+
+`muster doctor` shows the same facts without a running service (row `sandbox.host`, muster #457),
+so an operator does not have to read the capability's reason or `cat /sys/kernel/security/lsm`.
+It reads the host check the capability reads, so the two cannot disagree, and it answers offline:
+
+- `pass`: the host can enforce the mechanism. The detail lists what was seen: the architecture,
+  whether the service has named its launcher, the Landlock ABI against the floor (6, Linux 6.12),
+  the active security modules, and that the confined self-test passed. This is the host's half
+  only: the runtime measures its own agent on top of it, so `GET /v1/runtimes` can still say
+  `sandboxUnavailable` for a reason about the agent.
+- `warn`: the platform has a mechanism and this host refuses it. The summary is the reason the
+  capability carries, word for word; the detail is every fact, including the ones read after the
+  first refusal (a kernel below the floor also shows whether `landlock` is among the modules). The
+  self-test is shown as not run when an earlier check refused, because it needs a launcher and a
+  kernel with Landlock to run on. A session that asks for no sandbox is unaffected; this row never
+  fails the doctor.
+- `skip`, reading `n/a`: the platform has no mechanism (Windows, or any system that is neither
+  macOS nor Linux).
+
+On macOS the facts are whether `/usr/bin/sandbox-exec` is present and whether a profile was applied
+to a throwaway process, which is what finds a service that itself runs inside a sandbox. On Linux the
+self-test starts a child, so `--skip=sandbox.host` skips the row and does not run it.
 
 What a session on Linux gets that a macOS one does not, and the reverse: it cannot create a unix
 socket at all (a pre-connected pair still works), `closed` means no outbound connection even to
