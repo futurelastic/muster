@@ -341,12 +341,15 @@ func TestResume_AFailedRelaunchIsMarkedOnTheRecordAndClearedByASuccessfulOne(t *
 	if err := os.Remove(store); err != nil {
 		t.Fatal(err)
 	}
-	clock := time.Date(2026, 11, 11, 9, 0, 0, 0, time.UTC)
-	d2 := newStateDriver(t, state, withClock(func() time.Time { return clock }))
+	// One fixed time per driver: a driver's background work reads its clock after the test
+	// has moved on, so a clock that is a variable the test changes would be a data race.
+	at := func(when time.Time) Option { return withClock(func() time.Time { return when }) }
+	first := time.Date(2026, 11, 11, 9, 0, 0, 0, time.UTC)
+	d2 := newStateDriver(t, state, at(first))
 	if got := listed(t, d2)[broken.ID].State.Status; got != fleet.StatusUnknown {
 		t.Fatalf("the session whose store is gone is %q after the restart; want unknown", got)
 	}
-	if got, want := rec(broken.ID).RelaunchFailedAtMs, clock.UnixMilli(); got != want {
+	if got, want := rec(broken.ID).RelaunchFailedAtMs, first.UnixMilli(); got != want {
 		t.Errorf("RelaunchFailedAtMs = %d; want %d (the start that failed it)", got, want)
 	}
 	if rec(healthy.ID).RelaunchFailedAtMs != 0 {
@@ -355,9 +358,8 @@ func TestResume_AFailedRelaunchIsMarkedOnTheRecordAndClearedByASuccessfulOne(t *
 	_ = d2.Shutdown()
 
 	// A second start that fails the same way keeps the time of the first: it is written once.
-	clock = clock.Add(time.Hour)
-	d3 := newStateDriver(t, state, withClock(func() time.Time { return clock }))
-	if got, want := rec(broken.ID).RelaunchFailedAtMs, clock.Add(-time.Hour).UnixMilli(); got != want {
+	d3 := newStateDriver(t, state, at(first.Add(time.Hour)))
+	if got, want := rec(broken.ID).RelaunchFailedAtMs, first.UnixMilli(); got != want {
 		t.Errorf("RelaunchFailedAtMs = %d after a second failed start; want the first one's %d", got, want)
 	}
 	_ = d3.Shutdown()
