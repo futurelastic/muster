@@ -252,6 +252,21 @@ acceptable because the answer is a report and grants nothing.
 Clients **must** consult `/v1/runtimes` before relying on a capability, and
 degrade rather than assume. A driver never emulates (§5.6).
 
+**A peer is listed as one row per runtime it runs** (muster #459). A machine
+that runs more than one runtime shows up here as several items with the same
+`machine` and different `runtime`, in runtime-id order, each with its own
+`capabilities`, `posture` and `models`; one that runs a single runtime shows one
+row, as before. The rows of a peer come from the one read of that peer's own
+`/v1/runtimes` that this machine caches, so they are observed together and go
+stale together: past the cache's age every row of that peer reads
+`source: "assumed"` with no `posture` and `models` of `none`, and its one entry
+in `sources` is `degraded`. A runtime the peer lists as `unavailable` (#297) is
+not a row of that peer here, and a peer that has not answered has no row at
+all, only its `degraded` source — a client never sees a runtime nobody named.
+What is true of the machine rather than of a runtime — whether it answers, which
+build it runs, what this machine may do there — is reported once, in
+`/v1/machines`.
+
 **`models` is which models a create on that runtime may name** (muster #400), so a
 client can offer a picker instead of a free-text box.
 

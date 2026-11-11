@@ -1065,39 +1065,38 @@ func (s *Service) listRuntimes(ctx context.Context, withPeers bool) (fleet.Colle
 	// what makes reporting a cache honest rather than misleading, and it is
 	// why this endpoint can stay cheap.
 	for m, d := range peers {
-		caps := d.Capabilities()
-		var rt fleet.RuntimeId
-		if r, ok := d.(interface{ Runtime() fleet.RuntimeId }); ok {
-			rt = r.Runtime()
-		}
 		st := fleet.SourceOK
-		if caps.Source != fleet.CapabilitiesObserved {
-			// Nothing was reached to produce this row. §5.7: that is not
-			// the same as a peer that answered, and the envelope must not
-			// present it as one.
-			st = fleet.SourceDegraded
-		}
-		// muster #67: the fallback row for a peer nobody has heard
-		// from — `source: assumed` with no runtime learned yet — used to be
-		// reported anyway, empty runtime id and all, as a placeholder
-		// nobody removed. That is the one option that misleads a client
-		// keying its capability table by (machine, runtime): it reads as a
-		// runtime literally named "" on that machine, rather than as "no
-		// runtime known there yet". The degraded SourceStatus below already
-		// says "nothing is known" about this peer; omitting the item row
-		// instead of naming a runtime that was never learned is the option
-		// that does not invent a fact. A peer that HAS answered but
-		// happens to report an empty runtime id is a different, genuine
-		// case this endpoint has no basis to hide.
-		if rt != "" || st == fleet.SourceOK {
-			// muster #400: a peer's list comes from the cache its capabilities
-			// came from, so no network call is made here either.
-			row := fleet.RuntimeInfo{Machine: m, Runtime: rt, Capabilities: caps, Status: fleet.RuntimeAvailable, Models: modelsOf(d)}
-			if caps.Source != fleet.CapabilitiesAssumed {
-				ps := fleet.PostureSupportFrom(caps)
-				row.Posture = &ps
+		for _, pr := range peerRuntimesOf(d) {
+			caps, rt := pr.Capabilities, pr.Runtime
+			if caps.Source != fleet.CapabilitiesObserved {
+				// Nothing was reached to produce this row. §5.7: that is not
+				// the same as a peer that answered, and the envelope must not
+				// present it as one.
+				st = fleet.SourceDegraded
 			}
-			items = append(items, row)
+			// muster #67: the fallback row for a peer nobody has heard
+			// from — `source: assumed` with no runtime learned yet — used to be
+			// reported anyway, empty runtime id and all, as a placeholder
+			// nobody removed. That is the one option that misleads a client
+			// keying its capability table by (machine, runtime): it reads as a
+			// runtime literally named "" on that machine, rather than as "no
+			// runtime known there yet". The degraded SourceStatus below already
+			// says "nothing is known" about this peer; omitting the item row
+			// instead of naming a runtime that was never learned is the option
+			// that does not invent a fact. A peer that HAS answered but
+			// happens to report an empty runtime id is a different, genuine
+			// case this endpoint has no basis to hide.
+			if rt != "" || caps.Source == fleet.CapabilitiesObserved {
+				// muster #400: a peer's list comes from the cache its capabilities
+				// came from, so no network call is made here either.
+				models := pr.Models.Normalized()
+				row := fleet.RuntimeInfo{Machine: m, Runtime: rt, Capabilities: caps, Status: fleet.RuntimeAvailable, Models: &models}
+				if caps.Source != fleet.CapabilitiesAssumed {
+					ps := fleet.PostureSupportFrom(caps)
+					row.Posture = &ps
+				}
+				items = append(items, row)
+			}
 		}
 		sources = append(sources, fleet.SourceStatus{
 			Machine: m, Status: st, ObservedAt: now,
@@ -1105,6 +1104,25 @@ func (s *Service) listRuntimes(ctx context.Context, withPeers bool) (fleet.Colle
 		})
 	}
 	return fleet.NewCollection(items, sources)
+}
+
+// peerRuntimesOf is the runtimes a peer driver answers for, from what it already
+// holds and without a network call (muster #459): one entry per runtime the peer
+// reported for itself, in runtime-id order, from a driver that keeps a table of
+// them. A driver that does not, or one that has learned none yet, answers as one
+// runtime — Capabilities(), a Runtime() method if it has one, and its models —
+// which for a peer nobody has heard from is the assumed floor with no runtime id.
+func peerRuntimesOf(d driver.Driver) []driver.PeerRuntime {
+	if r, ok := d.(driver.PeerRuntimesReporter); ok {
+		if rows := r.PeerRuntimes(); len(rows) > 0 {
+			return rows
+		}
+	}
+	var rt fleet.RuntimeId
+	if r, ok := d.(interface{ Runtime() fleet.RuntimeId }); ok {
+		rt = r.Runtime()
+	}
+	return []driver.PeerRuntime{{Runtime: rt, Capabilities: d.Capabilities(), Models: *modelsOf(d)}}
 }
 
 // driverSummary is one row of GET /v1/health's `drivers`: an enabled runtime
