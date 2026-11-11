@@ -164,12 +164,20 @@ func Dedupe(in []string) []string {
 // Plan is a resolved sandbox request: every path real, every default applied,
 // ready to be rendered as a profile and reported back.
 type Plan struct {
+	// Mechanism names the facility the plan is for: MechanismLinux, or empty for
+	// the macOS facility (the only one before #439, so a plan that does not say
+	// keeps its meaning).
+	Mechanism string
 	// Network is the posture in force; empty means open.
 	Network fleet.SandboxNetwork
 	// Read is every readable directory (writable ones included).
 	Read []string
 	// Write is every writable directory.
 	Write []string
+	// BindTCP are the ports a session may bind while the network is closed (the
+	// port of the runtime server a driver connects into). Only the Linux
+	// mechanism reads it: the macOS profile allows loopback as a whole.
+	BindTCP []int
 }
 
 // State renders the plan as the report a session carries. A driver that has
@@ -187,7 +195,7 @@ func (p *Plan) State() *fleet.SandboxState {
 		network = fleet.SandboxNetworkOpen
 	}
 	return &fleet.SandboxState{
-		Mechanism:  Mechanism,
+		Mechanism:  p.mechanism(),
 		Denies:     Denies(),
 		Network:    network,
 		ReadPaths:  toPaths(p.Read),
