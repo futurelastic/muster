@@ -364,6 +364,12 @@ type sandboxLayout struct {
 	report  string // <dir>/sandbox.json, what the service reports
 }
 
+// policyFile is where this session's policy is written: the profile file on
+// macOS, the policy document on Linux (muster #439). On macOS it is layout.profile.
+func (l sandboxLayout) policyFile(plan *sandbox.Plan) string {
+	return filepath.Join(l.dir, plan.ProfileFileName())
+}
+
 func newSandboxLayout(root, session string) sandboxLayout {
 	sum := sha256.Sum256([]byte(session))
 	dir := filepath.Join(root, "s-"+hex.EncodeToString(sum[:])[:24])
@@ -395,17 +401,18 @@ func (d *Driver) refuseSandbox(why string) error {
 
 // sandboxGate decides, before any side effect, whether a create asking for a
 // sandbox can be honoured, and returns the agent program it will run (resolved
-// to a path). It is Create's first act on a sandboxed spec.
-func (d *Driver) sandboxGate(ctx context.Context, spec fleet.SessionSpec) (string, error) {
+// to a path) and the mechanism that was measured to work. It is Create's first
+// act on a sandboxed spec.
+func (d *Driver) sandboxGate(ctx context.Context, spec fleet.SessionSpec) (prog, mechanism string, err error) {
 	if d.sandboxCfg == nil {
-		return "", d.refuseSandbox("its sessions run in the user's own multiplexer, outside any profile this service could apply, " +
+		return "", "", d.refuseSandbox("its sessions run in the user's own multiplexer, outside any profile this service could apply, " +
 			"and this service was not configured to wrap the agent in one")
 	}
 	if err := spec.Sandbox.Validate(); err != nil {
-		return "", &fleet.Error{Kind: fleet.ErrorInvalid, Message: "create: " + err.Error(), Machine: d.machine}
+		return "", "", &fleet.Error{Kind: fleet.ErrorInvalid, Message: "create: " + err.Error(), Machine: d.machine}
 	}
 	if spec.Sandbox.PackageCache != nil {
-		return "", &fleet.Error{
+		return "", "", &fleet.Error{
 			Kind:    fleet.ErrorUnsupported,
 			Message: "create: this driver offers no package-cache mode (sandbox.packageCache); refusing rather than start the session without one",
 			Machine: d.machine,
@@ -413,14 +420,31 @@ func (d *Driver) sandboxGate(ctx context.Context, spec fleet.SessionSpec) (strin
 	}
 	sup, why, prog := d.sandboxCurrent(ctx, true)
 	if sup == nil {
-		return "", d.refuseSandbox(why)
+		return "", "", d.refuseSandbox(why)
 	}
-	return prog, nil
+	return prog, planMechanism(sup.Mechanism), nil
+}
+
+// planMechanism is the Plan.Mechanism a measured mechanism names: the Linux one
+// by name, and empty for macOS's, whose plans have never said (muster #439).
+func planMechanism(measured string) string {
+	if measured == sandbox.MechanismLinux {
+		return sandbox.MechanismLinux
+	}
+	return ""
 }
 
 // planSandbox resolves a request against this driver's defaults and the agent's
 // own needs. layout.work must already exist.
-func (d *Driver) planSandbox(spec fleet.SessionSpec, prog, configDir string, layout sandboxLayout) (*sandbox.Plan, error) {
+//
+// mechanism is the facility the plan is for (planMechanism). On Linux a grant is
+// made by opening a path, so what the plan names must exist: the directories the
+// agent writes its transcripts to are made when create is true (a create), and
+// left out when it is false (a measurement, which must not make a directory in
+// the user's transcript tree for every probe), and a driver-carried read that is
+// absent is dropped so the report names only what is granted. A path a caller
+// named that is absent is refused.
+func (d *Driver) planSandbox(spec fleet.SessionSpec, prog, configDir string, layout sandboxLayout, mechanism string, create bool) (*sandbox.Plan, error) {
 	sb := spec.Sandbox
 	invalid := func(msg string, args ...any) error {
 		return &fleet.Error{Kind: fleet.ErrorInvalid, Message: "create: " + fmt.Sprintf(msg, args...), Machine: d.machine}
@@ -428,6 +452,7 @@ func (d *Driver) planSandbox(spec fleet.SessionSpec, prog, configDir string, lay
 	if err := sb.Validate(); err != nil {
 		return nil, invalid("%s", err.Error())
 	}
+	linux := mechanism == sandbox.MechanismLinux
 	home := d.sandboxHome()
 	// A grant that would include the service user's home puts back exactly what
 	// the profile exists to remove.
@@ -435,6 +460,11 @@ func (d *Driver) planSandbox(spec fleet.SessionSpec, prog, configDir string, lay
 		r := sandbox.ResolvePath(string(p))
 		if home != "" && sandbox.CoversOrIs(r, home) {
 			return "", invalid("%s: %q is, or contains, the service user's home directory; grant the specific directory a session needs", field, string(p))
+		}
+		if linux {
+			if err := sandbox.RequireExist(field, []string{r}); err != nil {
+				return "", invalid("%s", err.Error())
+			}
 		}
 		return r, nil
 	}
@@ -447,12 +477,12 @@ func (d *Driver) planSandbox(spec fleet.SessionSpec, prog, configDir string, lay
 		return nil, invalid("cwd %q is, or contains, the service user's home directory, which a sandboxed session would then write to", string(spec.Cwd))
 	}
 
-	plan := &sandbox.Plan{Network: sb.Network}
+	plan := &sandbox.Plan{Mechanism: mechanism, Network: sb.Network}
 	if plan.Network == "" {
 		plan.Network = fleet.SandboxNetworkOpen
 	}
 
-	read := append([]string(nil), sandbox.SystemReadRoots...)
+	read := sandbox.SystemReadRootsFor(mechanism)
 	read = append(read, sandbox.InstallRoots(prog, home)...)
 	cfg := sandbox.ResolvePath(configDir)
 	for _, n := range agentConfigReads {
@@ -470,9 +500,20 @@ func (d *Driver) planSandbox(spec fleet.SessionSpec, prog, configDir string, lay
 	write := []string{cwd, sandbox.ResolvePath(layout.work)}
 	// The session's own transcripts, under both spellings of its directory (the
 	// agent records the real path; the service may know it by a link).
+	var transcripts []string
 	for _, wd := range []string{cwd, string(spec.Cwd)} {
-		write = append(write, filepath.Join(cfg, agentProjectsDir, recordDirFor(wd)))
+		transcripts = append(transcripts, filepath.Join(cfg, agentProjectsDir, recordDirFor(wd)))
 	}
+	if linux {
+		if create {
+			if err := sandbox.EnsureDirs(transcripts); err != nil {
+				return nil, &fleet.Error{Kind: fleet.ErrorUnreachable, Message: "create: making the session's transcript directory: " + err.Error(), Machine: d.machine}
+			}
+		} else {
+			transcripts = sandbox.PruneMissing(transcripts)
+		}
+	}
+	write = append(write, transcripts...)
 
 	for _, p := range sb.ReadPaths {
 		r, err := check("sandbox.readPaths", p)
@@ -489,6 +530,12 @@ func (d *Driver) planSandbox(spec fleet.SessionSpec, prog, configDir string, lay
 		write = append(write, r)
 	}
 
+	if linux {
+		// What the agent's configuration directory does not hold (an agent with no
+		// skills, no plugins) is not a grant the policy can make, so it is not
+		// reported as one.
+		read = sandbox.PruneMissing(read)
+	}
 	plan.Write = sandbox.Dedupe(write)
 	plan.Read = sandbox.Dedupe(append(read, write...))
 	return plan, nil
@@ -502,19 +549,25 @@ func (d *Driver) planSandbox(spec fleet.SessionSpec, prog, configDir string, lay
 // The temporary directory is set HERE, after the login shell's startup files
 // have run, so nothing they export can point the agent back at a directory
 // shared between users.
-func sandboxLaunchArgv(layout sandboxLayout, prog string, agentArgv []string) []string {
-	out := []string{
-		"/usr/bin/env", "TMPDIR=" + layout.tmp, "CLAUDE_CODE_TMPDIR=" + layout.tmp,
-		sandbox.ExecPath, "-f", layout.profile, prog,
-	}
+//
+// The facility's own command comes from the plan: `sandbox-exec -f <profile>` on
+// macOS, the service's binary as the launcher on Linux (muster #439). Where the
+// plan cannot be wrapped (no launcher is named) there is no argv, and the create
+// is refused rather than started unconfined.
+func sandboxLaunchArgv(layout sandboxLayout, plan *sandbox.Plan, prog string, agentArgv []string) ([]string, error) {
+	tail := []string{prog}
 	if len(agentArgv) > 1 {
-		out = append(out, agentArgv[1:]...)
+		tail = append(tail, agentArgv[1:]...)
 	}
-	return out
+	wrapped, err := plan.Wrap(layout.policyFile(plan), tail)
+	if err != nil {
+		return nil, err
+	}
+	return append([]string{"/usr/bin/env", "TMPDIR=" + layout.tmp, "CLAUDE_CODE_TMPDIR=" + layout.tmp}, wrapped...), nil
 }
 
-// writeSandboxFiles makes the private directory, writes the profile and the
-// report, and returns the plan's state.
+// writeSandboxFiles makes the private directory, writes the profile (or, on
+// Linux, the policy document) and the report, and returns the plan's state.
 func writeSandboxFiles(layout sandboxLayout, plan *sandbox.Plan, session string, now time.Time) (*fleet.SandboxState, error) {
 	if err := os.RemoveAll(layout.dir); err != nil {
 		return nil, err
@@ -522,11 +575,11 @@ func writeSandboxFiles(layout sandboxLayout, plan *sandbox.Plan, session string,
 	if err := os.MkdirAll(layout.tmp, 0o700); err != nil {
 		return nil, err
 	}
-	profile, err := plan.Profile()
+	policy, err := plan.Policy()
 	if err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(layout.profile, []byte(profile), 0o600); err != nil {
+	if err := os.WriteFile(layout.policyFile(plan), policy, 0o600); err != nil {
 		return nil, err
 	}
 	st := plan.State()
@@ -543,7 +596,7 @@ func writeSandboxFiles(layout sandboxLayout, plan *sandbox.Plan, session string,
 // prepareSandbox builds the private directory and profile for a session and
 // returns the agent argv wrapped to run under it, plus a function that undoes
 // it for a create that fails after this point.
-func (d *Driver) prepareSandbox(spec fleet.SessionSpec, name, prog string, argv []string) ([]string, func(), error) {
+func (d *Driver) prepareSandbox(spec fleet.SessionSpec, name, prog, mechanism string, argv []string) ([]string, func(), error) {
 	root, why := d.sandboxRoot()
 	if why != "" {
 		return nil, nil, d.refuseSandbox(why)
@@ -560,7 +613,7 @@ func (d *Driver) prepareSandbox(spec fleet.SessionSpec, name, prog string, argv 
 	if err := os.MkdirAll(layout.tmp, 0o700); err != nil {
 		return nil, nil, fmt.Errorf("create: making the session's private directory: %w", err)
 	}
-	plan, err := d.planSandbox(spec, prog, configDir, layout)
+	plan, err := d.planSandbox(spec, prog, configDir, layout, mechanism, true)
 	if err != nil {
 		_ = os.RemoveAll(layout.dir)
 		return nil, nil, err
@@ -576,7 +629,12 @@ func (d *Driver) prepareSandbox(spec fleet.SessionSpec, name, prog string, argv 
 	}
 	d.sandboxStates[name] = st
 	d.sandboxMu.Unlock()
-	return sandboxLaunchArgv(layout, prog, argv), func() { d.dropSandbox(name) }, nil
+	wrapped, err := sandboxLaunchArgv(layout, plan, prog, argv)
+	if err != nil {
+		d.dropSandbox(name)
+		return nil, nil, d.refuseSandbox(err.Error())
+	}
+	return wrapped, func() { d.dropSandbox(name) }, nil
 }
 
 // dropSandbox forgets a session's sandbox and removes its private directory.
@@ -746,19 +804,22 @@ func (d *Driver) measureSandbox(ctx context.Context) (*fleet.SandboxSupport, str
 	if err := os.MkdirAll(layout.tmp, 0o700); err != nil {
 		return nil, "making a probe directory: " + err.Error(), ""
 	}
-	plan, err := d.planSandbox(fleet.SessionSpec{Cwd: fleet.AbsolutePath(cwd), Sandbox: &fleet.SandboxSpec{}}, prog, configDir, layout)
+	plan, err := d.planSandbox(fleet.SessionSpec{Cwd: fleet.AbsolutePath(cwd), Sandbox: &fleet.SandboxSpec{}}, prog, configDir, layout, planMechanism(sup.Mechanism), false)
 	if err != nil {
 		return nil, "planning the probe: " + err.Error(), ""
 	}
-	profile, err := plan.Profile()
+	policy, err := plan.Policy()
 	if err != nil {
 		return nil, "rendering the probe profile: " + err.Error(), ""
 	}
-	if err := os.WriteFile(layout.profile, []byte(profile), 0o600); err != nil {
+	if err := os.WriteFile(layout.policyFile(plan), policy, 0o600); err != nil {
 		return nil, "writing the probe profile: " + err.Error(), ""
 	}
 
-	argv := sandboxLaunchArgv(layout, prog, append([]string{prog}, agentProbeArgs...))
+	argv, err := sandboxLaunchArgv(layout, plan, prog, append([]string{prog}, agentProbeArgs...))
+	if err != nil {
+		return nil, "building the probe's command: " + err.Error(), ""
+	}
 	pctx, cancel := context.WithTimeout(ctx, sandboxProbeTimeout)
 	defer cancel()
 	var out []byte

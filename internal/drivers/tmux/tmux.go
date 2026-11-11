@@ -5246,13 +5246,13 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 	// session away from. The server stays outside; what can be confined is the
 	// agent program inside the pane, and only on a host where that was measured
 	// to work (sandbox.go). Refused before any side effect whenever it cannot.
-	sandboxProg := ""
+	sandboxProg, sandboxMech := "", ""
 	if spec.Sandbox != nil {
-		prog, err := d.sandboxGate(ctx, spec)
+		prog, mech, err := d.sandboxGate(ctx, spec)
 		if err != nil {
 			return fleet.Session{}, err
 		}
-		sandboxProg = prog
+		sandboxProg, sandboxMech = prog, mech
 	}
 	// A completed key returns what it produced; a pending one means this
 	// driver was interrupted mid-create and must find out what happened
@@ -5507,7 +5507,7 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 	// stays outside and everything the agent starts is inside.
 	sandboxOK := false
 	if spec.Sandbox != nil {
-		wrapped, drop, err := d.prepareSandbox(spec, name, sandboxProg, argv)
+		wrapped, drop, err := d.prepareSandbox(spec, name, sandboxProg, sandboxMech, argv)
 		if err != nil {
 			_ = d.idem.release(key)
 			return fleet.Session{}, err

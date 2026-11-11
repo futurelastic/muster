@@ -178,9 +178,22 @@ func TestAnotherProcessesEnvironmentIsNotReadableEvenThoughProcIsGranted(t *test
 	requireABI(t, 3)
 	// The supervisor's credential is in its environment. /proc is granted read, so
 	// what must stop this is the kernel's scoping of process access.
-	t.Setenv("MUSTER_PROBE_SECRET", "hunter2")
+	holder := exec.Command("sleep", "30")
+	holder.Env = append(os.Environ(), "MUSTER_PROBE_SECRET=hunter2")
+	if err := holder.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Process.Kill(); _ = holder.Wait() }()
+	environ := fmt.Sprintf("/proc/%d/environ", holder.Process.Pid)
+
+	// The control: outside any policy the same read works, so a refusal below is
+	// the kernel's and not a path that was never readable.
+	control, err := exec.Command(self(t), "__probe", "read", environ).Output()
+	if err != nil || strings.TrimSpace(string(control)) != "ok" {
+		t.Fatalf("control: an unconfined read of %s = %q, %v; the test cannot tell a refusal from a failure", environ, control, err)
+	}
 	p := plan(t, fleet.SandboxNetworkOpen)
-	got := probe(t, p, "read", fmt.Sprintf("/proc/%d/environ", os.Getpid()))
+	got := probe(t, p, "read", environ)
 	if got != "EACCES" && got != "EPERM" {
 		t.Errorf("another process's environment: %q", got)
 	}
