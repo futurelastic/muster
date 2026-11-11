@@ -202,6 +202,28 @@ func BenchmarkListHTTP(b *testing.B) {
 			}
 		})
 
+		b.Run(fmt.Sprintf("n=%d/conditional", n), func(b *testing.B) {
+			// A poller that already holds the current body: validator sent, 304
+			// back, no body either way.
+			_, h, _ := newServiceFor(b)
+			etag := get(h).Header().Get("ETag")
+			if etag == "" {
+				b.Fatal("the service offered no validator")
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				req := httptest.NewRequest(http.MethodGet, "/v1/sessions?scope=local", nil)
+				req.Header.Set("Authorization", "Bearer "+testToken)
+				req.Header.Set("If-None-Match", etag)
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, req)
+				if rec.Code != http.StatusNotModified {
+					b.Fatalf("status %d, want 304", rec.Code)
+				}
+			}
+		})
+
 		b.Run(fmt.Sprintf("n=%d/warm", n), func(b *testing.B) {
 			_, h, _ := newServiceFor(b)
 			get(h) // the one build every later read is served from
