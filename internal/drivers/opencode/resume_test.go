@@ -341,26 +341,27 @@ func TestResume_AFailedRelaunchIsMarkedOnTheRecordAndClearedByASuccessfulOne(t *
 	if err := os.Remove(store); err != nil {
 		t.Fatal(err)
 	}
-	// One fixed time per driver: a driver's background work reads its clock after the test
-	// has moved on, so a clock that is a variable the test changes would be a data race.
-	at := func(when time.Time) Option { return withClock(func() time.Time { return when }) }
-	first := time.Date(2026, 11, 11, 9, 0, 0, 0, time.UTC)
-	d2 := newStateDriver(t, state, at(first))
+	// The real clock, not an injected one: the driver builds its relaunch deadline from
+	// d.now(), so a clock that stands still in the past would expire every relaunch at once.
+	before := time.Now()
+	d2 := newStateDriver(t, state)
 	if got := listed(t, d2)[broken.ID].State.Status; got != fleet.StatusUnknown {
 		t.Fatalf("the session whose store is gone is %q after the restart; want unknown", got)
 	}
-	if got, want := rec(broken.ID).RelaunchFailedAtMs, first.UnixMilli(); got != want {
-		t.Errorf("RelaunchFailedAtMs = %d; want %d (the start that failed it)", got, want)
+	firstFail := rec(broken.ID).RelaunchFailedAtMs
+	if firstFail < before.UnixMilli() || firstFail > time.Now().UnixMilli() {
+		t.Errorf("RelaunchFailedAtMs = %d; want the time of the start that failed it (between %d and now)", firstFail, before.UnixMilli())
 	}
-	if rec(healthy.ID).RelaunchFailedAtMs != 0 {
-		t.Error("a session that relaunched is marked as failed")
+	if h := listed(t, d2)[healthy.ID]; h.State.Status == fleet.StatusUnknown || rec(healthy.ID).RelaunchFailedAtMs != 0 {
+		t.Errorf("the session that relaunched is %q (%s), mark %d; want running and unmarked", h.State.Status, h.State.Evidence, rec(healthy.ID).RelaunchFailedAtMs)
 	}
 	_ = d2.Shutdown()
 
 	// A second start that fails the same way keeps the time of the first: it is written once.
-	d3 := newStateDriver(t, state, at(first.Add(time.Hour)))
-	if got, want := rec(broken.ID).RelaunchFailedAtMs, first.UnixMilli(); got != want {
-		t.Errorf("RelaunchFailedAtMs = %d after a second failed start; want the first one's %d", got, want)
+	time.Sleep(5 * time.Millisecond)
+	d3 := newStateDriver(t, state)
+	if got := rec(broken.ID).RelaunchFailedAtMs; got != firstFail {
+		t.Errorf("RelaunchFailedAtMs = %d after a second failed start; want the first one's %d", got, firstFail)
 	}
 	_ = d3.Shutdown()
 
