@@ -1927,8 +1927,12 @@ record is read and nowhere downstream. The terminal runtime emits `text` in both
 directions (the assistant's prose by the same predicate as turns, and what a person
 typed, with or without images), `reasoning` when it is written out, `tool` for any
 tool's call with its result, `summary` for a compaction, and `image` by reference,
-with `parent` on everything a delegated sub-task wrote (muster #442). A kind a driver
-does not emit is absent from every page, not empty. The runtime's own record is the
+with `parent` on everything a delegated sub-task wrote (muster #442). The opencode
+runtime emits the same kinds, one entry per part of a message and not per message, without
+`parent` (its sub-tasks are sessions of their own): while a message is being written it
+returns the settled parts, sends a running call once and again, complete, under the same
+`tool.id`, and closes a call that a cut-off turn left without an outcome as `error`
+(muster #443). A kind a driver does not emit is absent from every page, not empty. The runtime's own record is the
 source and its entry shape can change in a release, so a reader fails closed: an entry
 it cannot classify with certainty is omitted, never guessed at. A driver declares
 whether it reads a record at all through `DriverCapabilities.readsRecord` (§4.3); one

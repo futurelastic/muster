@@ -245,6 +245,16 @@ func TestPark_ReadsNeverStartAProcess(t *testing.T) {
 	if kindOfErr(err) != fleet.ErrorConflict {
 		t.Errorf("Turns on a parked session = %v, want a conflict that says it is parked", err)
 	}
+	// The record and its media answer as turns does (#443): a clear conflict, not an
+	// empty page, and nothing started.
+	_, err = d.Record(context.Background(), testReq, sess.SessionRef, fleet.RecordQuery{})
+	if kindOfErr(err) != fleet.ErrorConflict || !strings.Contains(err.Error(), "parked") {
+		t.Errorf("Record on a parked session = %v, want a conflict that says it is parked", err)
+	}
+	_, err = d.RecordMedia(context.Background(), testReq, sess.SessionRef, "x")
+	if kindOfErr(err) != fleet.ErrorConflict || !strings.Contains(err.Error(), "parked") {
+		t.Errorf("RecordMedia on a parked session = %v, want a conflict that says it is parked", err)
+	}
 
 	known, _ := d.wasSeen(sess.ID)
 	if known.srv != srv || d.phaseOf(srv) != phaseParked {

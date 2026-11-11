@@ -240,5 +240,6 @@ viewer of a live session would see the sub-task only when it was over.
   guessed at — so drift costs a missing entry, not a leaked category. The same holds
   for the sub-task layout: if the runtime moves it, sub-task entries disappear and
   nothing else does.
-- **`opencode` is unchanged** and still answers `501` for both routes; a reader for it
-  is #443, which fills the same kinds under the same rules.
+- **`opencode` was unchanged by this change** and answered `501` for both routes; its
+  reader is [`443-the-opencode-record-is-read-by-part-and-a-running-call-is-sent-once-and-updated-by-id.md`](443-the-opencode-record-is-read-by-part-and-a-running-call-is-sent-once-and-updated-by-id.md),
+  which fills the same kinds under the same rules.

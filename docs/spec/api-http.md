@@ -1451,8 +1451,11 @@ images a tool returned); and `parent`, the id of the call that started a delegat
 sub-task, on every entry the sub-task wrote. Meta and hook output, attachments, queued
 placeholders, a message another session sent in, a user message that mixes text with a
 block that is neither text nor an image, and any entry the reader cannot classify with
-certainty are left out. The `opencode` runtime and the test stub declare
-`readsRecord: false` and answer `501` (a later change adds a reader for the first).
+certainty are left out. The `opencode` runtime reads a record too (muster #443): the same
+kinds, one entry per part of a message rather than per message, no `parent` (its sub-tasks are
+sessions of their own), the settled parts of a message still being written, and a running call
+sent once and again, complete, under the same `tool.id`; it declares `readsRecord: true`. The
+test stub declares `readsRecord: false` and answers `501`.
 
 **A `tool` message is updated by id.** A call goes out where it was recorded with
 `tool.status: "running"` and no result unless the same page reads the result too; a

@@ -5,6 +5,7 @@
 **Supersedes, for this route only:** the content boundary of [`258-assistant-turns-read.md`](258-assistant-turns-read.md)
 **Further narrows:** [`82-session-result-belongs-above-this-layer.md`](82-session-result-belongs-above-this-layer.md)
 **Extended by:** [`442-the-record-carries-tool-calls-sub-tasks-summaries-and-images-by-reference.md`](442-the-record-carries-tool-calls-sub-tasks-summaries-and-images-by-reference.md) — what the terminal runtime emits (the paragraph "What each runtime emits today" below is the state at #441; ADR 442 supersedes it), the media route, and cursor version 2. The route, the grant, the audit event and the switch are unchanged.
+**Extended again by:** [`443-the-opencode-record-is-read-by-part-and-a-running-call-is-sent-once-and-updated-by-id.md`](443-the-opencode-record-is-read-by-part-and-a-running-call-is-sent-once-and-updated-by-id.md) — the `opencode` runtime reads a record too (the sentence below that says it answers `501` is the state at #441).
 
 ## Context
 

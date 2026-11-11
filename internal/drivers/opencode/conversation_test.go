@@ -196,13 +196,16 @@ func TestCapabilities_DeclaresWhatAPersonFacingClientNeeds(t *testing.T) {
 		if _, ok := driver.Driver(d).(driver.TurnReader); !ok {
 			t.Errorf("%s: declares ReadsTurns but does not implement driver.TurnReader", name)
 		}
-		// muster #441: no record reader for this runtime yet, so the route answers
-		// unsupported and the flag says so.
-		if caps.ReadsRecord == nil || *caps.ReadsRecord {
-			t.Errorf("%s: ReadsRecord = %v; this runtime has no record reader yet (#441)", name, caps.ReadsRecord)
+		// muster #443: the record reader, and the flag that says so. The media route
+		// is a separate interface, implemented alongside it (#442).
+		if caps.ReadsRecord == nil || !*caps.ReadsRecord {
+			t.Errorf("%s: ReadsRecord = %v; /record reads this runtime's message record (#443)", name, caps.ReadsRecord)
 		}
-		if _, ok := driver.Driver(d).(driver.RecordReader); ok {
-			t.Errorf("%s: declares ReadsRecord false but implements driver.RecordReader", name)
+		if _, ok := driver.Driver(d).(driver.RecordReader); !ok {
+			t.Errorf("%s: declares ReadsRecord but does not implement driver.RecordReader", name)
+		}
+		if _, ok := driver.Driver(d).(driver.RecordMediaReader); !ok {
+			t.Errorf("%s: reads a record but does not implement driver.RecordMediaReader", name)
 		}
 		if caps.ReportsConversation == nil || !*caps.ReportsConversation {
 			t.Errorf("%s: ReportsConversation = %v; every session carries the runtime's own id (#378)", name, caps.ReportsConversation)

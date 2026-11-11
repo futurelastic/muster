@@ -249,6 +249,8 @@ func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 		f.handleStatus(w, r)
 	case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/message"):
 		f.handleMessages(w, r)
+	case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/message/") && strings.HasPrefix(r.URL.Path, "/session/"):
+		f.handleMessage(w, r)
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/session/") && !strings.Contains(r.URL.Path[len("/session/"):], "/"):
 		f.handleGet(w, r)
 	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/session/"):
@@ -562,6 +564,29 @@ func (f *fakeServer) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(all)
+}
+
+// handleMessage serves GET /session/{id}/message/{messageID}: the one message the
+// runtime holds under that id, or 404, as the real server answers (session.message).
+func (f *fakeServer) handleMessage(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/session/")
+	id, mid, _ := strings.Cut(rest, "/message/")
+	f.mu.Lock()
+	all := append([]json.RawMessage(nil), f.messages[id]...)
+	f.mu.Unlock()
+	for _, raw := range all {
+		var m struct {
+			Info struct {
+				ID string `json:"id"`
+			} `json:"info"`
+		}
+		if json.Unmarshal(raw, &m) == nil && m.Info.ID == mid {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(raw)
+			return
+		}
+	}
+	http.NotFound(w, r)
 }
 
 // setLastMessage appends one message to id's scripted history — tests use
