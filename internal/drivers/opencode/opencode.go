@@ -284,6 +284,14 @@ type Driver struct {
 	sandbox     *fleet.SandboxSupport
 	sandboxWhy  string
 	sandboxRead []string
+	// sandboxMeasured is the last answer to whether the runtime itself starts under
+	// the policy, which the capability is declared on top of the host's answer
+	// (muster #456; sandboxmeasure.go). sandboxGo and sandboxProbe are the test
+	// seams: how a background refresh is run (nil: a goroutine), and a replacement
+	// for the probe that starts the runtime (nil: the real one).
+	sandboxMeasured sandboxMeasurement
+	sandboxGo       func(func())
+	sandboxProbe    func(context.Context) string
 
 	// stateDir is where sessions are remembered across a restart (muster #282);
 	// empty means they are not. store is derived from it in New.
@@ -458,10 +466,8 @@ func WithRuntimePath(dirs []string) Option { return func(d *Driver) { d.runtimeP
 
 // sandboxUnavailable is the reason Sandbox is absent, or empty when it is present.
 func (d *Driver) sandboxUnavailable() string {
-	if d.sandbox != nil {
-		return ""
-	}
-	return d.sandboxWhy
+	_, why := d.sandboxSupportNow()
+	return why
 }
 
 // WithSandboxReadPaths adds directories every sandboxed session may read, ahead
@@ -788,6 +794,9 @@ var _ driver.Driver = (*Driver)(nil)
 // runtime's own catalog (catalog.go) — though where a runtime offers no usable
 // catalog the create proceeds unchecked, as before.
 func (d *Driver) Capabilities() fleet.DriverCapabilities {
+	// Read once: the support and its reason are one answer, and a second read could
+	// land on either side of a refresh.
+	sandboxSup, sandboxWhy := d.sandboxSupportNow()
 	return fleet.DriverCapabilities{
 		ObservesState:    true,
 		DeliversRawKeys:  false,
@@ -809,9 +818,9 @@ func (d *Driver) Capabilities() fleet.DriverCapabilities {
 		// Sandbox: nil where this host cannot deny files, unix sockets and
 		// system services together (sandbox.go) — a capability absent, never a
 		// weaker profile under the same name.
-		Sandbox: d.sandbox,
+		Sandbox: sandboxSup,
 		// And the reason, so a posture refusal can say why (muster #345).
-		SandboxUnavailable: d.sandboxUnavailable(),
+		SandboxUnavailable: sandboxWhy,
 		// muster #283: in isolated mode this driver wrote the session's
 		// configuration itself and reports it back; shared mode has no posture
 		// of its own to report.

@@ -35,8 +35,8 @@ import (
 // on; the launcher has no path that runs a program unconfined.
 
 const (
-	exitRefused    = 125
-	exitExecFailed = 127
+	exitRefused    = LauncherRefusedStatus
+	exitExecFailed = LauncherExecFailedStatus
 
 	closeRangeCloexec = 1 << 2
 	sysCloseRange     = 436
@@ -54,7 +54,7 @@ var minABI = MinLandlockABI
 var applySeccomp = installSeccomp
 
 func refuse(err error) int {
-	fmt.Fprintf(os.Stderr, "muster sandbox: %v\n", err)
+	fmt.Fprintf(os.Stderr, LauncherMessagePrefix+"%v\n", err)
 	return exitRefused
 }
 
@@ -90,7 +90,7 @@ func LauncherMain(args []string) int {
 		return refuse(fmt.Errorf("closing inherited descriptors: %w", e))
 	}
 	err = syscall.Exec(a.argv[0], a.argv, os.Environ())
-	fmt.Fprintf(os.Stderr, "muster sandbox: starting %s: %v\n", a.argv[0], err)
+	fmt.Fprintf(os.Stderr, LauncherMessagePrefix+"starting %s: %v\n", a.argv[0], err)
 	return exitExecFailed
 }
 

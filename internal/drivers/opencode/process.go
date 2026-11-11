@@ -20,6 +20,7 @@ import (
 	fleet "github.com/futurelastic/muster"
 	"github.com/futurelastic/muster/internal/privfs"
 	"github.com/futurelastic/muster/internal/procgroup"
+	"github.com/futurelastic/muster/internal/sandbox"
 )
 
 // defaultProbeTimeout bounds `opencode --version`. It is the bound on a
@@ -419,6 +420,15 @@ func startServer(ctx context.Context, bin, workdir, username string, env []strin
 		}
 		p.stop()
 		if errors.Is(err, errExitedBeforeReady) {
+			// muster #456: the launcher declining to start the runtime is not a
+			// lost port race. Starting again on another port would meet the same
+			// refusal, three times over, and end by hiding its reason behind "did
+			// not become ready"; it is returned as it is, once.
+			if len(wrap) > 0 {
+				if why := launcherRefusal(p, logs); why != "" {
+					return nil, fmt.Errorf("opencode: %w: %s", errLauncherRefused, why)
+				}
+			}
 			lastErr = err
 			if name := logs.errorName(time.Time{}); name != "" {
 				// The runtime's own name for why it died (muster #284), not its log.
@@ -434,6 +444,30 @@ func startServer(ctx context.Context, bin, workdir, username string, env []strin
 // errExitedBeforeReady is waitReady's answer when the child died before it
 // ever answered.
 var errExitedBeforeReady = errors.New("the server process exited before it answered")
+
+// errLauncherRefused is what startServer returns when the sandbox launcher did not
+// start the runtime (muster #456), wrapped with the launcher's own reason. Never
+// retried: unlike a lost port race, the same start refuses the same way.
+var errLauncherRefused = errors.New("the sandbox launcher did not start the runtime")
+
+// launcherRefusal returns the launcher's reason when p is a launcher that has
+// exited without running the runtime, and "" otherwise. Two things must both be
+// true: the exit status is one the launcher gives (sandbox.LauncherRefusedStatus,
+// or LauncherExecFailedStatus when the exec of the runtime failed), and its
+// standard error carries the launcher's own line. Either alone is not enough: a
+// runtime may exit 125 or 127 for reasons of its own, and a line that looks like
+// the launcher's is only the launcher's if the process that wrote it is what
+// ended. p must have exited.
+func launcherRefusal(p *process, logs *logCapture) string {
+	if p == nil || p.cmd == nil || p.cmd.ProcessState == nil {
+		return ""
+	}
+	switch p.cmd.ProcessState.ExitCode() {
+	case sandbox.LauncherRefusedStatus, sandbox.LauncherExecFailedStatus:
+		return logs.launcherRefusal()
+	}
+	return ""
+}
 
 // waitReady polls the server's own session listing (authenticated) until it
 // answers 200, the child exits, or ctx / the readiness budget runs out.

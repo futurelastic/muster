@@ -37,6 +37,23 @@ const MechanismLinux = "linux-landlock-seccomp"
 // sandbox launcher. Hidden: it is not a command an operator types.
 const LauncherArg = "__sandbox-exec"
 
+// What the launcher says when it does not start the program (muster #456). Both
+// are the launcher's own, written where the program never ran, so a driver that
+// started it can tell "the launcher declined" from "the program started and then
+// died" — and from losing a port race, which is the one failure worth a retry.
+//
+// LauncherRefusedStatus is the exit status when it refuses before running
+// anything: a policy it cannot read, a granted path that is gone, a kernel below
+// the floor. LauncherExecFailedStatus is the status when the exec of the program
+// itself failed, after the confinement was already on. Each is accompanied by one
+// line on standard error that begins with LauncherMessagePrefix and carries the
+// reason in the launcher's own words.
+const (
+	LauncherRefusedStatus    = 125
+	LauncherExecFailedStatus = 127
+	LauncherMessagePrefix    = "muster sandbox: "
+)
+
 // PolicyVersion is the version of the policy document. A launcher refuses a
 // document of another version rather than guess what a field meant.
 const PolicyVersion = 1
