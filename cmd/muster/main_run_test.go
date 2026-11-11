@@ -34,5 +34,11 @@ func TestMain(m *testing.M) {
 	// And whether it has the agent CLI: runtime.agent-program is tested on its own
 	// with answers it is handed.
 	doctorAgentProgram = func(context.Context, string) (bool, bool) { return true, true }
+	// And what the host can offer as a sandbox: the real check starts a confined child
+	// on Linux and applies a profile on macOS. sandbox.host is tested on its own with
+	// reports it is handed.
+	doctorSandboxHost = func() *sandbox.HostReport {
+		return &sandbox.HostReport{Platform: "test", Reason: "no sandbox mechanism is implemented for a test host"}
+	}
 	os.Exit(m.Run())
 }

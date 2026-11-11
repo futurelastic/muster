@@ -24,6 +24,7 @@ import (
 	"github.com/futurelastic/muster/internal/inboxclient"
 	"github.com/futurelastic/muster/internal/peerkey"
 	"github.com/futurelastic/muster/internal/privfs"
+	"github.com/futurelastic/muster/internal/sandbox"
 	"github.com/futurelastic/muster/internal/service"
 	"github.com/futurelastic/muster/internal/sessionenv"
 )
@@ -45,6 +46,13 @@ var doctorTmuxVersion = runTmuxVersion
 // doctorTmuxVersion: the generic doctor tests must not depend on whether the
 // machine they run on has the agent CLI. main_run_test.go replaces it.
 var doctorAgentProgram = tmuxdriver.ProbeAgentProgram
+
+// doctorSandboxHost is the host check the sandbox.host row reads (muster #457). A
+// variable for the same reason as the three above: on Linux the real one starts a
+// confined child, and on macOS it applies a profile, and the generic doctor tests
+// must depend on neither. main_run_test.go replaces it; the tests that are about
+// the row pass their own report.
+var doctorSandboxHost = sandbox.CheckHost
 
 func runTmuxVersion(ctx context.Context, bin string) (string, error) {
 	out, err := exec.CommandContext(ctx, bin, "-V").Output()
@@ -379,6 +387,16 @@ func runChecks(ctx context.Context, env doctorEnv) []doctorRow {
 			now = time.Now
 		}
 		c.add(checkOpencodeSessions(getenv("FLEET_RUNTIME_OPENCODE") == "1", getenv("FLEET_STATE_DIR"), now(), unknownSessions))
+	}
+
+	// --- the sandbox this host can offer (#457) ------------------------------------
+	// Beside the runtime rows because it is the host's half of what the runtime
+	// capability declares. On Linux it starts a child to confine, so a row named in
+	// --skip is not computed at all.
+	if c.skipped("sandbox.host") {
+		c.add(doctorRow{ID: "sandbox.host"})
+	} else {
+		c.add(checkSandboxHost(doctorSandboxHost()))
 	}
 
 	// --- the service manager's own record (Windows only) -----------------------
@@ -1617,6 +1635,46 @@ func checkOpencodeSessions(enabled bool, stateDir string, now time.Time, scan fu
 	}
 	detail = append(detail, "a session of a stopped service that no start has failed to relaunch is not counted here: a restart relaunches it")
 	row.Detail = strings.Join(detail, ". ")
+	return row
+}
+
+// checkSandboxHost is the sandbox.host row (muster #457): what this host can offer
+// as a sandbox, from the same host check the runtime capability reads, so the row and
+// `GET /v1/runtimes` cannot disagree. Offline-capable: nothing here leaves the machine.
+//
+// It is `pass` when the host can enforce the mechanism and `warn` when the platform has
+// one and the host refuses it, with the reason the capability carries verbatim in the
+// summary and every observation behind it in the detail, so an operator sees the Landlock
+// ABI against its floor and the active security modules without reading a kernel file. It
+// is never `fail`: an unavailable sandbox only matters to a caller that asks for one, and
+// a create that asks is refused with that reason, so a host that offers none is not a
+// broken installation. It is `skip` — not applicable — on a platform with no mechanism.
+//
+// The row names no path: the launcher is reported as named or not.
+func checkSandboxHost(rep *sandbox.HostReport) doctorRow {
+	row := doctorRow{ID: "sandbox.host", Refs: []int{439, 457}}
+	facts := make([]string, 0, len(rep.Facts)+1)
+	if rep.Mechanism != "" {
+		facts = append(facts, "mechanism: "+rep.Mechanism)
+	}
+	for _, f := range rep.Facts {
+		facts = append(facts, f.Name+": "+f.Value)
+	}
+	switch {
+	case rep.Mechanism == "":
+		row.Status = statusSkip
+		row.Summary = "n/a — " + rep.Reason
+	case rep.Support != nil:
+		row.Status = statusPass
+		row.Summary = fmt.Sprintf("this host can enforce the sandbox (%s)", rep.Mechanism)
+		row.Detail = strings.Join(facts, "; ") + ". This is the host's half: the runtime measures its own agent on top of it " +
+			"(muster #345, #456), so `GET /v1/runtimes` can still say `sandboxUnavailable` for a reason about the agent"
+	default:
+		row.Status = statusWarn
+		row.Summary = "this host is not offered the sandbox — " + rep.Reason
+		row.Detail = strings.Join(facts, "; ") + ". `GET /v1/runtimes` shows this same reason as `sandboxUnavailable`, " +
+			"and a create that asks for a sandbox is refused until it is fixed; a session that asks for none is unaffected"
+	}
 	return row
 }
 

@@ -27,10 +27,31 @@ var selfTestTimeout = 10 * time.Second
 var (
 	hostABI    = landlockABI
 	hostGOARCH = func() string { return runtime.GOARCH }
+	hostLSM    = readActiveModules
 )
 
-// HostSupport reports what the host can enforce, or nil and the reason when it
-// cannot — a statement the capability carries, not an error.
+// activeModulesFile is where the kernel lists the security modules that are on. A
+// variable so a test can read a file of its own.
+var activeModulesFile = "/sys/kernel/security/lsm"
+
+// readActiveModules is the kernel's list of active security modules, in the order
+// it names them.
+func readActiveModules() ([]string, error) {
+	raw, err := os.ReadFile(activeModulesFile)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, m := range strings.Split(strings.TrimSpace(string(raw)), ",") {
+		if m = strings.TrimSpace(m); m != "" {
+			out = append(out, m)
+		}
+	}
+	return out, nil
+}
+
+// CheckHost looks at what the host can enforce and reports it (muster #457);
+// HostSupport is its answer and `muster doctor` shows its facts.
 //
 // The Linux mechanism is declared only when four things are true, checked in this
 // order so the reason names the first that is not: the architecture is one whose
@@ -42,40 +63,92 @@ var (
 // not: it is what finds a container profile that blocks the calls, a module that
 // is built but not enabled, or a launcher path that is not the muster binary.
 //
-// The returned support names no package-cache mode: that is a decision of the
-// driver, which fills it in (or leaves it empty).
-func HostSupport() (*fleet.SandboxSupport, string) {
-	refuse := func(format string, args ...any) (*fleet.SandboxSupport, string) {
-		return nil, reasonPrefix + fmt.Sprintf(format, args...)
+// The first three are read whatever the others say, because reading them costs
+// nothing and an operator fixing one wants to know about the next. The fourth
+// starts a process, and is run only when there is a launcher and a kernel to run
+// it on. The active security modules are a fifth fact that decides nothing: the
+// kernel's answer about Landlock is what is trusted, and the list is what an
+// operator checks it against.
+func CheckHost() *HostReport {
+	rep := newHostReport(MechanismLinux)
+	refuse := func(format string, args ...any) {
+		rep.refuse(reasonPrefix + fmt.Sprintf(format, args...))
 	}
-	if _, ok := TableFor(hostGOARCH()); !ok {
-		return refuse("the system call numbers of %s have not been measured (amd64 and arm64 only), so a filter for it would be a guess", hostGOARCH())
+
+	arch := hostGOARCH()
+	if _, ok := TableFor(arch); ok {
+		rep.add(FactArchitecture, "%s (its system call numbers were measured)", arch)
+	} else {
+		rep.add(FactArchitecture, "%s (its system call numbers have not been measured; amd64 and arm64 only)", arch)
+		refuse("the system call numbers of %s have not been measured (amd64 and arm64 only), so a filter for it would be a guess", arch)
 	}
+
 	launcher := Launcher()
 	if launcher == "" {
-		return refuse("this process has not named its own executable as the sandbox launcher, so it cannot start a session through one")
+		rep.add(FactLauncher, "not named (this process has not named its own executable as the launcher)")
+		refuse("this process has not named its own executable as the sandbox launcher, so it cannot start a session through one")
+	} else {
+		rep.add(FactLauncher, "named (this process can start a session through itself)")
 	}
+
 	abi, err := hostABI()
 	switch {
 	case err == syscall.ENOSYS:
-		return refuse("the kernel has no Landlock (built without it, or a container's seccomp profile blocks the system call)")
+		rep.add(FactLandlockABI, "none: the kernel has no Landlock (built without it, or a container's seccomp profile blocks the system call)")
+		refuse("the kernel has no Landlock (built without it, or a container's seccomp profile blocks the system call)")
 	case err == syscall.EOPNOTSUPP:
-		return refuse("Landlock is built into the kernel but not enabled (the boot parameter lsm= lacks landlock)")
+		rep.add(FactLandlockABI, "none: Landlock is built into the kernel but not enabled")
+		refuse("Landlock is built into the kernel but not enabled (the boot parameter lsm= lacks landlock)")
 	case err != nil:
-		return refuse("asking the kernel for its Landlock version: %v", err)
+		rep.add(FactLandlockABI, "unknown: asking the kernel for its Landlock version failed: %v", err)
+		refuse("asking the kernel for its Landlock version: %v", err)
 	case abi < MinLandlockABI:
-		return refuse("Landlock ABI %d is below the %d this mechanism needs (Linux 6.12: abstract unix sockets and signals are scoped)", abi, MinLandlockABI)
+		rep.add(FactLandlockABI, "%d, below the %d the mechanism needs (Linux 6.12)", abi, MinLandlockABI)
+		refuse("Landlock ABI %d is below the %d this mechanism needs (Linux 6.12: abstract unix sockets and signals are scoped)", abi, MinLandlockABI)
+	default:
+		rep.add(FactLandlockABI, "%d (the mechanism needs %d or newer, Linux 6.12)", abi, MinLandlockABI)
+	}
+
+	if modules, err := hostLSM(); err != nil {
+		rep.add(FactModules, "cannot be read: %v", err)
+	} else {
+		listed := strings.Join(modules, ", ")
+		if listed == "" {
+			listed = "none listed"
+		}
+		if !containsModule(modules, "landlock") {
+			listed += "; landlock is not among them"
+		}
+		rep.add(FactModules, "%s", listed)
+	}
+
+	if rep.refused() {
+		rep.add(FactSelfTest, "not run: an earlier check refused, and the test needs a launcher and a kernel with Landlock")
+		return rep
 	}
 	if why := selfTest(launcher); why != "" {
-		return refuse("%s", why)
+		rep.add(FactSelfTest, "%s", why)
+		rep.refuse(reasonPrefix + why)
+		return rep
 	}
-	return &fleet.SandboxSupport{
+	rep.add(FactSelfTest, "passed (a process confined the way a session will be could not do what the capability says it cannot)")
+	rep.Support = &fleet.SandboxSupport{
 		Mechanism:       MechanismLinux,
 		Denies:          Denies(),
 		Network:         []fleet.SandboxNetwork{fleet.SandboxNetworkOpen, fleet.SandboxNetworkClosed},
 		PackageCache:    []fleet.PackageCacheMode{},
 		PackageManagers: []fleet.PackageManager{},
-	}, ""
+	}
+	return rep
+}
+
+func containsModule(modules []string, name string) bool {
+	for _, m := range modules {
+		if m == name {
+			return true
+		}
+	}
+	return false
 }
 
 // selfTest runs the launcher's in-process checks in a throwaway child, under a
