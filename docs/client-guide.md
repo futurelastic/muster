@@ -269,6 +269,36 @@ process (a `/clear`): the next read names the new conversation, never the previo
 of subprocess spawns regardless of session count.** You are not being charged
 per session, so do not build a per-session read loop to "avoid a big response".
 
+### Polling the list: send `If-None-Match`
+
+Prefer a mirror (§8): it is the one way to learn *what changed*. If a client
+must poll the list anyway — a view that redraws on a timer, a script that checks
+a count — it should not pay for the whole listing each time nothing has changed.
+
+```
+GET /v1/sessions?scope=local                         → 200   ETag: "k3P…"
+GET /v1/sessions?scope=local   If-None-Match: "k3P…" → 304   (nothing changed; no body)
+                                                     → 200   (something did; new ETag)
+```
+
+- **Keep the last `ETag` with the body it came with, per question.** The scope
+  and the filters are part of the validator, so one you stored for
+  `status=working` is no use for the plain list. Send it back as
+  `If-None-Match`; on `304` the body you already hold is current, so use it; on
+  `200` replace both.
+- **A response with no `ETag` is an ordinary listing.** It means the service
+  cannot vouch that an answer is unchanged — nothing is watching it, you asked
+  for `scope=fleet` on a machine that has peers, or a driver did not answer —
+  not that anything is wrong. Ask again as you would have.
+- **`304` is "the service knows of no change", not "the fleet is identical".**
+  A few fields no event reports (a conversation, a model) can be up to five
+  seconds behind in a kept answer (api-http.md §3.2). The validator makes the
+  poll cheaper; it does not make it a feed — you still ask on a timer, and a
+  changed list is still the whole body. A client that reacts to changes should
+  build a mirror.
+- Nothing about `sources` and `complete` changes: a `304` stands for the body
+  you hold, with the `complete` it had.
+
 ### You MUST read `sources` and `complete`
 
 `items` is not the whole answer. A machine that did not respond contributes a
@@ -1574,6 +1604,12 @@ re-applies a few changes the snapshot already has. That is deliberate: applied
 twice, an event changes nothing; missed once, your mirror is wrong forever and
 cannot tell.
 
+A client that wants deltas should do this rather than poll the list, even with
+`If-None-Match` (§4): a conditional list saves the body when nothing changed, but
+it is still a request on a timer and a whole listing when something did, and the
+watch is the only delta transport there is — the list deliberately has no
+`since=`.
+
 ### When the feed itself goes deaf
 
 `source.status: degraded` on a machine means this service is no longer watching
@@ -1866,6 +1902,7 @@ boundaries.)
 - [ ] Sends `?startedAt=` on every delete
 - [ ] Sends `nonce` on every respond, and never blind-accepts a default
 - [ ] Subscribes rather than polls, and handles `control.resync`
+- [ ] If it does poll the list, sends the last `ETag` back as `If-None-Match` and treats `304` as "the body I hold is current"
 - [ ] Talks only to its own machine's service
 - [ ] Shows "unreachable", never an empty list, when the service is down
 - [ ] Keys on `id` from the server, never on the `name` it asked for
