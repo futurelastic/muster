@@ -87,16 +87,34 @@ func TestCoversOrIsAndDedupe(t *testing.T) {
 
 func TestHostSupportIsDeclaredOnlyWhereItCanBeEnforced(t *testing.T) {
 	sup, why := HostSupport()
-	if runtime.GOOS != "darwin" {
+	switch runtime.GOOS {
+	case "darwin":
+		if sup == nil {
+			t.Skipf("macOS host that cannot apply a profile (nested sandbox?): %s", why)
+		}
+		if len(sup.Denies) != 3 {
+			t.Fatalf("a host support that does not deny every class: %+v", sup)
+		}
+		if sup.Mechanism != Mechanism {
+			t.Fatalf("mechanism = %q, want %q", sup.Mechanism, Mechanism)
+		}
+	case "linux":
+		// Whether a Linux host offers the mechanism depends on its kernel and on the
+		// launcher being named, which this test binary does not do; the answer must be
+		// one or the other, never a declaration without all three denies, and never a
+		// refusal without a reason that names the mechanism.
+		if sup == nil {
+			if !strings.HasPrefix(why, MechanismLinux+": ") {
+				t.Fatalf("a Linux refusal that does not name its mechanism: %q", why)
+			}
+			return
+		}
+		if len(sup.Denies) != 3 || sup.Mechanism != MechanismLinux {
+			t.Fatalf("a host support that does not deny every class: %+v", sup)
+		}
+	default:
 		if sup != nil || why == "" {
 			t.Fatalf("declared a sandbox on %s, or gave no reason: %+v %q", runtime.GOOS, sup, why)
 		}
-		return
-	}
-	if sup == nil {
-		t.Skipf("macOS host that cannot apply a profile (nested sandbox?): %s", why)
-	}
-	if len(sup.Denies) != 3 {
-		t.Fatalf("a host support that does not deny every class: %+v", sup)
 	}
 }

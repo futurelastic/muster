@@ -17,6 +17,24 @@
 // (HostSupport applies a profile once to find out, rather than discovering it at
 // the first create).
 //
+// # The Linux mechanism
+//
+// Linux has no host facility that takes a profile, so the same contract is met by
+// two kernel pieces applied by the service's own binary to itself before it
+// becomes the agent (muster #439): Landlock for files — and, from Linux 6.12, for
+// abstract unix sockets and signals — and a seccomp filter for everything a file
+// rule cannot name (unix socket creation, the network under a closed posture,
+// shared memory and queues, io_uring). The policy is the document policy.go
+// renders, the launcher is launcher_linux.go, and the host is offered the
+// mechanism only after a process confined that way was seen unable to do each
+// thing (host_linux.go). Where the kernel cannot back all three classes the
+// capability is absent, with the reason, exactly as on any platform that lacks one.
+//
+// What differs from macOS is stated rather than hidden: a closed network is not
+// "loopback only" there but no outbound connection at all, because the kernel's
+// network rules cannot tell loopback from anywhere else; and a session cannot
+// create a unix socket, where on macOS it can create one it may not connect.
+//
 // # What the profile denies
 //
 // Three classes, together, because each is a way out of the other two:

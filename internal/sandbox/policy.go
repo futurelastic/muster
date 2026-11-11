@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	fleet "github.com/futurelastic/muster"
@@ -211,6 +212,27 @@ func SetLauncher(path string) {
 	launcherMu.Lock()
 	defer launcherMu.Unlock()
 	launcherPath = path
+}
+
+// SelfLauncher is the path of the running executable as a launcher can be
+// started by it, or empty when it cannot be named. A binary replaced by an
+// upgrade while the service runs reads as "<path> (deleted)"; the path itself now
+// holds the new build, which speaks the same policy version, so the suffix is
+// dropped and the path is checked for what it is.
+func SelfLauncher() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	exe = strings.TrimSuffix(exe, " (deleted)")
+	if r, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = r
+	}
+	info, err := os.Stat(exe)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return ""
+	}
+	return exe
 }
 
 // Launcher is the path SetLauncher named, or empty.
