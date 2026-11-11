@@ -172,7 +172,7 @@ no sandbox; its presence, even as `{}`, is the default profile.
 SandboxSpec {
   readPaths?    : AbsolutePath[]   // readable in addition to the defaults
   writePaths?   : AbsolutePath[]   // readable and writable in addition to the defaults; never a shared temporary directory
-  network?      : "open" | "closed"  // default open; closed = loopback only
+  network?      : "open" | "closed"  // default open; closed = loopback only (stricter on Linux, below)
   packageCache? : { path: AbsolutePath, mode?: "shared" | "private",   // default private
                     allowFullCopy?: boolean }                         // default false
 }
@@ -218,6 +218,16 @@ tell it to stand down. (The opencode driver's runtime has none.)
 hostname, and the model API a session talks to needs the network. `closed` leaves loopback only (the
 runtime's own server lives there), so a closed session works only against a model that is reachable
 over loopback. The capability lists the postures a driver can enforce and implies no host filtering.
+
+**On Linux a closed network is stricter than "loopback only", never weaker** (muster #439). The
+kernel's network rules cannot tell loopback from any other address, so the Linux mechanism
+(`linux-landlock-seccomp`) allows no outbound connection at all while the network is closed, loopback
+included, and no UDP, so no name resolution. What still works is being connected to: the runtime's own
+server, on the one port the service named, is reached by the service, which is not confined. The
+posture's name is unchanged; the capability's `mechanism` says which meaning a caller is getting, and a
+caller that needs a closed session to reach a model over loopback uses an open network there. The same
+mechanism also denies creating a unix socket at all, where the macOS profile denies connecting to one,
+and needs a kernel with Landlock ABI 6 (Linux 6.12); it is absent, with the reason, on any other.
 
 **A package cache is part of the profile's shape**, because a dependency install is impractical
 without one and the home directory is closed. `private` (default) gives the session its own copy of
@@ -2164,8 +2174,10 @@ Present means the driver enforces **every** class in `denies` — `files`, `unix
 `packageCache` modes it lists. Absent means it cannot, and a create carrying `sandbox` is refused
 `unsupported`, naming what is missing, before anything is started (§5.6). It is absent, not
 half-offered, where the platform cannot deny all three classes. For the opencode driver it is
-present on macOS only, enforced with the system's `sandbox-exec` and a profile the driver generates;
-on any other platform, in the test-only shared mode (one server cannot confine one of its sessions),
+present on macOS, enforced with the system's `sandbox-exec` and a profile the driver generates, and on
+Linux 6.12 or newer, enforced with Landlock and a seccomp filter applied by the service's own binary
+(`linux-landlock-seccomp`, muster #439, with the same three classes and the stricter closed network
+§2.1 describes); on any other platform or kernel, in the test-only shared mode (one server cannot confine one of its sessions),
 or when the service itself already runs inside a sandbox (a profile cannot be nested), it is absent
 and the reason is in the refusal. The tmux driver declares it **only where it was measured to work**
 (muster #345). Its sessions live in the user's own multiplexer, whose server socket is exactly what a

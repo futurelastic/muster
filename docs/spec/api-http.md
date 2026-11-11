@@ -162,7 +162,7 @@ GET /v1/runtimes
                                        "deliversToInbox": false,
                                        "isolatesEnvironment": false,
                                        "isolatesConfiguration": true,
-                                       "sandbox": { "mechanism": "macos-sandbox-exec",
+                                       "sandbox": { "mechanism": "macos-sandbox-exec",   ← or "linux-landlock-seccomp" (#439)
                                                     "denies": ["files", "unixSockets", "systemServices"],
                                                     "network": ["open", "closed"],
                                                     "packageCache": ["shared", "private"],
@@ -1027,7 +1027,10 @@ directory, an unknown posture) is `400` on any machine; a grant that is or conta
 user's home directory is `400` where the session runs. It needs only `create`: it narrows what the
 session reaches and grants nothing. A `201` then means the session runs under the profile that
 `state.sandbox` reports on every read; it does **not** make the working directory trustworthy
-afterwards (§2.1: run any git against it inside the same profile).
+afterwards (§2.1: run any git against it inside the same profile). The mechanism is named in
+`sandbox.mechanism`; where it is `linux-landlock-seccomp` (muster #439) a `closed` network is
+stricter than "loopback only" (§2.1), and a `readPaths`/`writePaths` entry that does not exist is
+`400`, because that mechanism grants a path by opening it.
 
 **`posture` is the engine-neutral spelling of `permissionMode`, `sandbox`, `isolateEnvironment`
 and `isolateConfiguration`** (muster #344, #392). It says what the work needs and never how a runtime
