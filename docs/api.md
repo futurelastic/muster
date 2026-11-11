@@ -2090,8 +2090,11 @@ Filters on both: `session` (repeatable — name the ones you care about),
 `session.renamed`, `session.labels`, `session.record`, `source.status`, `machine.quota`,
 `machine.account`, `control.resync`.
 
-**Cursor and epoch.** The epoch identifies a service *instance*; a restart gets
-a new one. The cursor is monotonic within an epoch. A relayed event keeps the
+**Cursor and epoch.** The epoch identifies a service's event *sequence*. A
+service that keeps state keeps its epoch across a restart and continues the
+cursor, so a subscriber that was caught up when it stopped is resumed instead of
+resynced; only a service with no state to restore starts a new one. The cursor is
+monotonic within an epoch. A relayed event keeps the
 originating machine's own cursor and epoch in `origin`, and takes the relaying
 service's cursor for local ordering — so resumption is never ambiguous about
 whose sequence you are holding.
@@ -2099,8 +2102,17 @@ whose sequence you are holding.
 **Resync** arrives in-band as a `control.resync` event, never as an error, with
 one of three reasons: `epoch_changed` (you hold another instance's cursors),
 `cursor_expired` (older than retained), `feed_gap` (the sequence is intact but
-*this* service's own subscription dropped and reconnected — a different party is
-at fault). All three prescribe the same recovery.
+*this* service's own subscription dropped and reconnected, **or the service was
+stopped and started again** — a different party is at fault). All three
+prescribe the same recovery.
+
+**A restart is announced.** A resumed cursor says nothing about the time the
+service was down, when nothing watched the drivers and a session may have closed
+or changed state without an event. So the first subscription to each machine
+after a start that kept the epoch is announced as `source.status: ok` with a
+`control.resync` reason `feed_gap` beside it, **once per restart**; a subscriber
+whose cursor survived the restart therefore refetches once. A reconnect after
+that is the in-run case above, unchanged.
 
 **Build a mirror in this order.** Getting it wrong is the most common client
 bug:

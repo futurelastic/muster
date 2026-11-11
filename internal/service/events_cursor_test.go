@@ -1,7 +1,9 @@
 package service
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -510,5 +512,191 @@ func TestSealWritesNothingWhenThereIsNothingToMakeExact(t *testing.T) {
 	}
 	if saves, ceiling := r.snapshot(); saves != 2 || ceiling != 41 {
 		t.Errorf("after one event and a seal: %d writes, file at %d, want 2 writes and 41", saves, ceiling)
+	}
+}
+
+// restoreGapEvents reads ch until the restart's feed_gap has arrived, and then
+// for quiet more, so a second announcement would be seen rather than missed.
+// It returns every event it saw.
+func restoreGapEvents(t *testing.T, ch <-chan fleet.Event, quiet time.Duration) []fleet.Event {
+	t.Helper()
+	var seen []fleet.Event
+	isGap := func(ev fleet.Event) bool {
+		p, ok := ev.Payload.(fleet.ControlResyncPayload)
+		return ok && p.Reason == fleet.ResyncFeedGap
+	}
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case ev := <-ch:
+			seen = append(seen, ev)
+			if isGap(ev) {
+				for {
+					select {
+					case ev := <-ch:
+						seen = append(seen, ev)
+					case <-time.After(quiet):
+						return seen
+					}
+				}
+			}
+		case <-deadline:
+			t.Fatalf("no feed_gap within 3s; events seen: %+v", seen)
+		}
+	}
+}
+
+func countFeedGaps(evs []fleet.Event) (gaps int) {
+	for _, ev := range evs {
+		if p, ok := ev.Payload.(fleet.ControlResyncPayload); ok && p.Reason == fleet.ResyncFeedGap {
+			gaps++
+		}
+	}
+	return gaps
+}
+
+// #454: a restart is the one stop in which the service stopped watching that no
+// subscriber was told about. The epoch and the cursor continue across a graceful
+// stop, so a caught-up subscriber is resumed — and the first driver subscription
+// after the restart takes a baseline that absorbs whatever changed while nothing
+// was watching. A session that closed during the downtime is in no event, ever;
+// feed_gap is the only way its subscriber can learn that its mirror is stale.
+func TestARestartAnnouncesFeedGapToAResumedSubscriber(t *testing.T) {
+	dir := t.TempDir()
+	first := openRestartable(t, dir)
+	last := publishN(t, first, 3)
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The service is stopped here; a session the subscriber mirrors closes.
+	// Nothing observes it, and the driver the next run subscribes to knows only
+	// the world as it is now: it will never emit that session's close.
+	second := openRestartable(t, dir)
+	d := newFeedDriver(0, nil)
+	if err := second.RegisterLocalDriver("fake", d); err != nil {
+		t.Fatal(err)
+	}
+
+	ch, backlog, resync, cancel := second.Events(context.Background(), ScopeFleet, driver.SubscribeFilter{}, last, first.epoch)
+	defer cancel()
+	if resync || len(backlog) != 0 {
+		t.Fatalf("a subscriber caught up at %d before a graceful stop: resync=%v backlog=%d — it must be resumed, the persisted epoch is for exactly that", last, resync, len(backlog))
+	}
+
+	seen := restoreGapEvents(t, ch, 150*time.Millisecond)
+	if got := countFeedGaps(seen); got != 1 {
+		t.Fatalf("resumed subscriber saw %d feed_gap announcements across the restart, want exactly 1: %+v", got, seen)
+	}
+	// The pair announceFeedRestored publishes: the machine is observed, and the
+	// mirror has a hole. Both are stamped in the continuing sequence.
+	var sawOK bool
+	for _, ev := range seen {
+		if ev.Cursor <= last || ev.Epoch != first.epoch {
+			t.Errorf("announcement %s is cursor %d epoch %q, want a cursor above %d under the kept epoch", ev.Kind, ev.Cursor, ev.Epoch, last)
+		}
+		if p, ok := ev.Payload.(fleet.SourceStatus); ok && p.Status == fleet.SourceOK && ev.Machine == "testbox" {
+			sawOK = true
+		}
+	}
+	if !sawOK {
+		t.Errorf("no source.status ok for the machine beside the feed_gap: %+v", seen)
+	}
+
+	// A subscriber that was caught up too and reconnects later replays the same
+	// announcement from the window, instead of resuming past it.
+	_, late, resync, cancelLate := second.Events(context.Background(), ScopeFleet, driver.SubscribeFilter{}, last, first.epoch)
+	defer cancelLate()
+	if resync || countFeedGaps(late) != 1 {
+		t.Errorf("a subscriber resuming at %d after the announcement got resync=%v and %d feed_gap in its backlog, want it replayed once", last, resync, countFeedGaps(late))
+	}
+}
+
+// The announcement is the restart's, once. A lane the hub tears down and starts
+// again takes a fresh baseline too, but that is a different gap, and announcing
+// the restart's again would make every subscriber refetch every time the last
+// one leaves and another arrives.
+func TestTheRestartFeedGapIsAnnouncedOncePerRunNotPerSubscription(t *testing.T) {
+	dir := t.TempDir()
+	first := openRestartable(t, dir)
+	last := publishN(t, first, 2)
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	second := openRestartable(t, dir)
+	second.events.linger = 0 // the stream is torn down the instant the last subscriber leaves
+	d := newFeedDriver(0, nil)
+	if err := second.RegisterLocalDriver("fake", d); err != nil {
+		t.Fatal(err)
+	}
+
+	ch, _, _, cancel := second.Events(context.Background(), ScopeFleet, driver.SubscribeFilter{}, last, first.epoch)
+	seen := restoreGapEvents(t, ch, 50*time.Millisecond)
+	cursor := seen[len(seen)-1].Cursor
+	cancel()
+	waitForStream(t, second, false)
+
+	ch2, backlog, resync, cancel2 := second.Events(context.Background(), ScopeFleet, driver.SubscribeFilter{}, cursor, first.epoch)
+	defer cancel2()
+	waitForAttempts(t, d, 2)
+	if resync || len(backlog) != 0 {
+		t.Fatalf("resuming at the announcement's cursor %d: resync=%v backlog=%d, want neither", cursor, resync, len(backlog))
+	}
+	select {
+	case ev := <-ch2:
+		t.Fatalf("the second subscription of the run announced %s %+v; the restart's feed_gap is made once", ev.Kind, ev.Payload)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+// A first subscription that has to be retried already announces the outage and
+// its end; the restart's announcement is that same pair, not a second one.
+func TestARestartWhoseFirstSubscriptionFailsStillAnnouncesFeedGapOnce(t *testing.T) {
+	dir := t.TempDir()
+	first := openRestartable(t, dir)
+	last := publishN(t, first, 2)
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	second := openRestartable(t, dir)
+	d := newFeedDriver(1, fmt.Errorf("nothing to attach to yet: %w", driver.ErrNotReady))
+	if err := second.RegisterLocalDriver("fake", d); err != nil {
+		t.Fatal(err)
+	}
+	ch, _, _, cancel := second.Events(context.Background(), ScopeFleet, driver.SubscribeFilter{}, last, first.epoch)
+	defer cancel()
+
+	seen := restoreGapEvents(t, ch, 200*time.Millisecond)
+	if got := countFeedGaps(seen); got != 1 {
+		t.Fatalf("%d feed_gap announcements for one restart with one retried subscription, want 1: %+v", got, seen)
+	}
+	if d.Attempts() < 2 {
+		t.Errorf("attempts = %d, the first refusal was meant to be retried", d.Attempts())
+	}
+}
+
+// What the announcement is NOT for: a service that started a new sequence has no
+// cursor anyone can resume, so every subscriber is already told (epoch_changed)
+// and a fresh one holds nothing stale. Nothing is said beyond what the first
+// subscription's own events say.
+func TestAServiceThatStartedANewSequenceAnnouncesNoRestartGap(t *testing.T) {
+	for name, svc := range map[string]*Service{
+		"no durable state":         New("testbox"),
+		"an empty state directory": openRestartable(t, t.TempDir()),
+	} {
+		d := newFeedDriver(0, nil)
+		if err := svc.RegisterLocalDriver("fake", d); err != nil {
+			t.Fatal(err)
+		}
+		ch, _, _, cancel := svc.Events(context.Background(), ScopeFleet, driver.SubscribeFilter{}, 0, "")
+		waitForAttempts(t, d, 1)
+		select {
+		case ev := <-ch:
+			t.Errorf("%s: a first start announced %s %+v, want silence", name, ev.Kind, ev.Payload)
+		case <-time.After(150 * time.Millisecond):
+		}
+		cancel()
 	}
 }

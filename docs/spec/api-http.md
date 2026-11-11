@@ -2943,7 +2943,7 @@ resumption needs no client code. The server honours that header when no
 | `source.status` | a machine's reachability changed |
 | `machine.quota` | `{ "machine", "blocked": bool, "quota"? }` — this machine's **account** started or stopped refusing work |
 | `machine.account` | `{ "machine", "generation" }` — this machine's local **credential material** changed |
-| `control.resync` | `{ "reason": "epoch_changed" \| "cursor_expired" }` |
+| `control.resync` | `{ "reason": "epoch_changed" \| "cursor_expired" \| "feed_gap" }` |
 
 **`session.record` says a record grew, with a cursor and never content** (muster #444;
 `docs/adr/444-a-record-that-grew-is-said-with-a-cursor-and-never-content.md`). A client
@@ -3058,7 +3058,25 @@ statements about whose view is stale:
 |---|---|
 | `epoch_changed` | you hold another instance's cursors |
 | `cursor_expired` | your cursor is older than what is retained — which after a restart is every cursor below the one the service restarted at, because the window is not kept — or newer than anything this service has stamped, which it equally cannot supply |
-| `feed_gap` | **the sequence is intact and this service stopped watching.** Its subscription to a driver dropped and was re-established, so changes in between were never stamped at all |
+| `feed_gap` | **the sequence is intact and this service stopped watching.** Its subscription to a driver dropped and was re-established, or the service itself was stopped and started again, so changes in between were never stamped at all |
+
+**A restart is a gap, and is announced** (muster #454). The epoch and the cursor
+continue across a restart of a service that keeps state (that is what lets a
+subscriber that was caught up be resumed, not resynced), but while the service
+is down nothing watches any driver. The first driver subscription after the start
+takes a fresh baseline that absorbs whatever changed in between: a session that
+closed or changed state during the downtime is in no event, then or later. A
+service that restored its sequence therefore announces, on its **first
+subscription to each machine** in that run, `source.status: ok` for the machine
+and a `control.resync` with reason `feed_gap`, stamped in the continuing
+sequence; a subscriber that resumes later replays them from the window. It is
+made **once per machine per run**, not on every subscription: a driver that drops
+and is re-established afterwards is the case above, and a stream the hub itself
+stops and starts again is not a restart. A service that started a new sequence
+announces nothing extra, because no cursor of the old one survives (`epoch_changed`)
+and a subscriber with no cursor holds nothing stale. The cost is one refetch
+per subscriber per restart, which is the price of the sequence never being
+resumed silently from a point the service was not watching (§7.3).
 
 `feed_gap` is not a politer `cursor_expired`. One says the caller fell behind;
 the other is this service admitting the hole is its own, and telling a caller
@@ -3070,6 +3088,9 @@ refetch and resubscribe — which is why a client that already handles
 **`source.status` also reports the feed itself.** A driver subscription that
 fails or ends is announced `degraded` and retried; when it comes back, `ok`
 arrives with a `feed_gap` resync beside it. Both edges, on the transition only.
+The first subscription after a restart that kept the sequence says `ok` and
+`feed_gap` the same way, without a `degraded` before it, because the outage was
+the service's own.
 The alternative was measured and is the worst shape available: the pump gave up
 after a single failure, and every subscriber then held a stream that was open,
 healthy-looking, and permanently empty. A machine that is momentarily empty

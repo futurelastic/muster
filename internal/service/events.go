@@ -147,6 +147,15 @@ type hub struct {
 	cwds     map[sessionKey]string
 	cwdTried map[sessionKey]time.Time
 
+	// restoredFeed is set when this run took its epoch and cursor from the file a
+	// previous run left (#454). It means the drivers were not watched while that
+	// run was stopped, whatever a subscriber's cursor says. restoreSaid holds the
+	// machines whose first driver subscription of this run has already said so,
+	// so the announcement is made once per machine per run (see takeRestoreGap).
+	// Both are guarded by mu.
+	restoredFeed bool
+	restoreSaid  map[fleet.MachineId]struct{}
+
 	// reserve makes a cursor ceiling durable, so a restart continues the
 	// sequence rather than reusing numbers (§7.3); nil when running without
 	// durable state, in which case nothing below gates. reserved is the ceiling
@@ -440,6 +449,35 @@ func (h *hub) currentCursor() int64 {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.cursor
+}
+
+// takeRestoreGap reports whether machine's first driver subscription of this run
+// still owes the "this service was not watching while it was stopped"
+// announcement, and settles it: true at most once per machine per run, and never
+// on a run that started a new sequence — a subscriber of another epoch is
+// already told to resync, and one with no cursor holds nothing stale (#454).
+//
+// Once per RUN, not once per subscription: a lane the hub tears down and starts
+// again (a filter change, the linger running out) takes a fresh baseline too,
+// and that is a different gap with its own history (see defaultLinger). This
+// answers only the one a restart makes, which nothing else can see — the epoch
+// and the cursor continue across it, so a resumed subscriber has no other way to
+// learn that the window between the last stop and the first baseline was never
+// stamped.
+func (h *hub) takeRestoreGap(machine fleet.MachineId) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.restoredFeed {
+		return false
+	}
+	if _, said := h.restoreSaid[machine]; said {
+		return false
+	}
+	if h.restoreSaid == nil {
+		h.restoreSaid = make(map[fleet.MachineId]struct{})
+	}
+	h.restoreSaid[machine] = struct{}{}
+	return true
 }
 
 func (h *hub) subscriberCount() int {
@@ -855,7 +893,11 @@ func (s *Service) pump(ctx context.Context, machine fleet.MachineId, d driver.Dr
 			continue
 		}
 
-		if gapAnnounced {
+		// The take is unconditional so a first subscription that needed retries
+		// settles the restart's announcement too: the pair it publishes for the
+		// outage is the one the restart owes, and saying it twice would make
+		// every subscriber refetch twice.
+		if restored := s.events.takeRestoreGap(machine); gapAnnounced || restored {
 			s.announceFeedRestored(machine)
 			gapAnnounced = false
 		}
@@ -942,6 +984,14 @@ func (s *Service) announceFeedGap(machine fleet.MachineId, cause error) {
 
 // announceFeedRestored says the stream is running again — and, separately,
 // that what happened while it was not is not recoverable from the sequence.
+//
+// It is also what a restart owes (#454). The first subscription after a service
+// starts on a restored epoch takes a fresh baseline that absorbs whatever changed
+// while nothing was watching, and the epoch and cursor continue across the stop —
+// so a resumed subscriber would otherwise hold a view that is stale for exactly
+// those sessions with no word to say so. The pump calls this for that first
+// subscription too (takeRestoreGap); a driver that reconnects after it is the
+// path above, unchanged.
 //
 // Two events rather than one, because they are two facts and a client acts on
 // them differently. The status says this machine is observed again; the resync
