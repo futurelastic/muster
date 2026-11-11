@@ -117,6 +117,11 @@ var specFieldTypes = map[string]any{
 
 	// #400: the models block of a GET /v1/runtimes row.
 	"RuntimeModels": RuntimeModels{},
+
+	// #441: the record route's page, its messages and its paired tool call.
+	"RecordPage":    RecordPage{},
+	"RecordMessage": RecordMessage{},
+	"RecordTool":    RecordTool{},
 }
 
 // specFieldExceptions records a Go field that a normative type block

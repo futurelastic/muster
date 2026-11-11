@@ -23,6 +23,10 @@
 # run). The same reason means a final tagged before this workflow merged can never be published: the file is not in
 # its tree.
 #
+# THE TAG PUSH IS THE FIRST PATH, THIS IS THE NET (#422). A final a person tags starts the workflow itself (its
+# `on.push.tags`), so this script only has to find what no run reached: the catch-up's "no successful run at this tag"
+# counts a run started by that push the same way as a dispatched one (`--branch <tag>` matches both).
+#
 # WHAT "ALREADY PUBLISHED" MEANS HERE. The catch-up looks at what the HOST answered, not at npm: a publish run only
 # ends green when the host reported the version published (or already published). A tag with no green run is
 # dispatched again, and the host's own idempotent "already published" answer closes any gap between the two.

@@ -82,6 +82,7 @@ Grants are per verb, so you can be given exactly what you need:
 | `send` | deliver input, and answer prompts |
 | `interrupt` | interrupt a running turn |
 | `close` | destroy sessions |
+| `record` | read a session's **whole record** (`GET …/record`, see [`api.md`](api.md)): what was said in it by both sides and, as more kinds are added, tool calls and their results. Not implied by `read`, `send` or anything else, and nobody holds it by default. ⚠️ Grant it as the widest read there is |
 | `relay` | have any of the above forwarded to a **peer** |
 
 `relay` is separate on purpose: "may mutate sessions here" and "may ask another

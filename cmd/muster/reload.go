@@ -334,6 +334,10 @@ func restartOnly(running, next *fileConfig) []string {
 	// flipped it would otherwise read as applied while changing nothing. Compared
 	// by meaning: the key written false and the key absent are the same switch.
 	check("profilingEndpoint", running.ProfilingEndpoint, next.ProfilingEndpoint)
+	// The record switch (#441) is read at start like the profiling one: it is
+	// copied into the service's config once, so a live edit would read as applied
+	// while changing nothing.
+	check("refuseRecordReads", running.RefuseRecordReads, next.RefuseRecordReads)
 	check("machineList", running.MachineList, next.MachineList)
 	return out
 }

@@ -68,6 +68,12 @@ func TestDriver_DeclaresItCannotDoWhatAPersonFacingClientNeeds(t *testing.T) {
 	if _, ok := any(&Driver{}).(driver.TurnReader); ok {
 		t.Error("declares it cannot read turns but implements driver.TurnReader")
 	}
+	if c.ReadsRecord == nil || *c.ReadsRecord {
+		t.Errorf("ReadsRecord = %v, want declared false", c.ReadsRecord)
+	}
+	if _, ok := any(&Driver{}).(driver.RecordReader); ok {
+		t.Error("declares it cannot read a record but implements driver.RecordReader")
+	}
 	if c.ReportsConversation == nil || *c.ReportsConversation {
 		t.Errorf("ReportsConversation = %v, want declared false", c.ReportsConversation)
 	}

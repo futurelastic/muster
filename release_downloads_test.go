@@ -1273,9 +1273,9 @@ func TestUpdateBusyIsAnInstallInProgressAndNeverTheRunningService(t *testing.T) 
 func TestPublishDownloadsWorkflowKeepsTheKeyAndTheRunnerWhereTheyBelong(t *testing.T) {
 	wf := string(mustRead(t, ".github/workflows/publish-downloads.yml"))
 
-	// Started by hand or by dispatch at a tag, and by nothing else.
-	if !strings.Contains(wf, "\non:\n  workflow_dispatch:\n") || strings.Contains(wf, "workflow_call") || strings.Contains(wf, "\n  push:") || strings.Contains(wf, "schedule:") {
-		t.Error("publish-downloads.yml must be workflow_dispatch only: a reusable call would run at the caller's ref, which the host refuses")
+	// Started by hand or by dispatch at a tag, or by the push of a final tag (#422), and by nothing else.
+	if !strings.Contains(wf, "\non:\n  workflow_dispatch:\n") || strings.Contains(wf, "workflow_call") || strings.Contains(wf, "schedule:") || strings.Contains(wf, "pull_request") {
+		t.Error("publish-downloads.yml must start from workflow_dispatch or a final-tag push only: a reusable call would run at the caller's ref, which the host refuses")
 	}
 	// The runner is a repository variable, never a label written here.
 	if strings.Contains(wf, "self-hosted") || !strings.Contains(wf, "runs-on: ${{ fromJSON(needs.build.outputs.runner) }}") {
@@ -1298,6 +1298,65 @@ func TestPublishDownloadsWorkflowKeepsTheKeyAndTheRunnerWhereTheyBelong(t *testi
 	// Caller-controlled text goes through env, never into a script.
 	if strings.Contains(wf, "run: node") && strings.Contains(wf, "${{ inputs.tag }}\"") {
 		t.Error("an input is interpolated into a script")
+	}
+}
+
+// The push of a final tag starts the publish by itself (#422). The pattern is read the way GitHub reads a tag filter
+// (the whole ref name must match; `+` repeats the class before it; the dots are literal), so a candidate, a branch
+// or a tag that merely contains a version does not start a publish.
+func TestPublishDownloadsStartsOnTheTagPushOfAFinalOnly(t *testing.T) {
+	wf := string(mustRead(t, ".github/workflows/publish-downloads.yml"))
+
+	// The trigger is exactly one tag filter under `push:`, and never a branch filter.
+	m := regexp.MustCompile(`(?m)^  push:\n    tags:\n      - '([^'\n]+)'\n(?:[^ ]|  [^ ])`).FindStringSubmatch(wf)
+	if m == nil {
+		t.Fatal("publish-downloads.yml must start on `push:` with one `tags:` filter (and nothing else under push)")
+	}
+	pattern := m[1]
+	if strings.Contains(wf, "branches:") {
+		t.Error("the push trigger must not carry a branch filter: only a tag push starts a publish")
+	}
+	// GitHub's tag filter, as a regexp: the only special characters in this pattern are `[...]` and `+`; a dot is a dot.
+	re := regexp.MustCompile("^" + strings.ReplaceAll(pattern, ".", `\.`) + "$")
+	for _, tag := range []string{"v0.14.2", "v1.0.0", "v10.20.30"} {
+		if !re.MatchString(tag) {
+			t.Errorf("the tag filter %q must start a publish for the final %s", pattern, tag)
+		}
+	}
+	for _, tag := range []string{"v0.14.2-rc.1", "v1.0.0-rc.12", "v1.2", "v1.2.3.4", "v1.2.3-beta", "release-v1.2.3", "v1.2.3x", "main"} {
+		if re.MatchString(tag) {
+			t.Errorf("the tag filter %q must not start a publish for %s", pattern, tag)
+		}
+	}
+
+	// A tag-push run has no inputs: wherever the dispatch reads its tag, the push run reads the ref's own name.
+	if n := strings.Count(wf, "${{ inputs.tag }}"); n != 0 {
+		t.Errorf("%d bare `inputs.tag` reads: on a tag push they are empty, so every one needs `|| github.ref_name`", n)
+	}
+	for _, want := range []string{
+		"group: publish-downloads-${{ inputs.tag || github.ref_name }}",
+		"format('Publish {0}', inputs.tag || github.ref_name)",
+	} {
+		if !strings.Contains(wf, want) {
+			t.Errorf("publish-downloads.yml must carry %q", want)
+		}
+	}
+	if n := strings.Count(wf, "TAG: ${{ inputs.tag || github.ref_name }}"); n != 2 {
+		t.Errorf("both jobs must take TAG from the input or, on a tag push, the ref name: found %d", n)
+	}
+	if strings.Contains(wf, "refs/tags/${{ inputs.tag") || strings.Contains(wf, "release-files-${{ inputs.tag") {
+		t.Error("the source checkout and the artifact name must follow the job's TAG, which has the ref-name fallback")
+	}
+
+	// A clone that never set PUBLISH_ORIGIN skips the push run instead of failing every final it tags.
+	build := strings.SplitN(strings.SplitN(wf, "\n  build:\n", 2)[1], "\n  publish:\n", 2)[0]
+	if !strings.Contains(build, "if: github.event_name != 'push' || vars.PUBLISH_ORIGIN != ''") {
+		t.Error("the build job must skip a tag-push run while PUBLISH_ORIGIN is unset (a dispatch still fails loudly on it)")
+	}
+	// The ref check that makes a real publish refuse anything but the tag itself is still the first step.
+	if !strings.Contains(wf, `[ "$DRY_RUN" != "true" ] && [ "$GITHUB_REF" != "refs/tags/$TAG" ]`) ||
+		!strings.Contains(wf, `[[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]`) {
+		t.Error("the first step must still require a final tag name and, outside a dry run, a run AT that tag")
 	}
 }
 

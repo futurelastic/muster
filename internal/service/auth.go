@@ -211,6 +211,33 @@ const (
 	// (Config.Profiling), and it is off by default. Absent means denied, like every
 	// other grant, so no existing principal gains it by upgrading.
 	GrantDebug Grant = "debug"
+	// GrantRecord lets a principal read a session's full record
+	// (GET …/sessions/{id}/record, muster #441): what was said in it by both
+	// sides, and — as later changes add the kinds — tool calls and their results,
+	// reasoning, sub-task entries and images. The owner ruled it its own grant
+	// (option B, 2026-11-11; docs/adr/441-a-sessions-full-record-is-read-under-its-own-grant.md).
+	//
+	// ⚠️ It is the widest read this API has. A record carries whatever the agent
+	// printed or read — file bodies, command output, credentials in a tool result
+	// — and the messages people and other sessions sent in. ADR 258 kept all of
+	// that out of `turns` for that reason, and `turns` stays on `send`. Holding
+	// `send` therefore does not reveal a record: a deployment that hands out
+	// `send` today has not agreed to that, and gains nothing by upgrading.
+	//
+	// Not implied by anything: not by read, send or relay, not by the legacy
+	// single-token flags' mutation set, and not by `muster service install`'s set
+	// (see supervisorGrants), so nobody holds it until an operator writes it down.
+	// A signed machine list may name it for a peer — an owner-signed, explicit act,
+	// and the way a fleet lets one machine read another's records.
+	//
+	// For a peer target it does NOT additionally require relay, the ruling #81
+	// made for reads (reaching is not changing). The machine that owns the session
+	// applies its own table to the asserted caller, so a read relayed through
+	// machine A needs `record` on A's principal and, on the owner, on the
+	// principal A relays as. Absent means denied, so no existing principal gains
+	// it by upgrading. The operator's second lock, whatever grants are held, is
+	// Config.RefuseRecord.
+	GrantRecord Grant = "record"
 )
 
 // Grants is every grant this service defines, in the order an operator would
@@ -227,7 +254,7 @@ func Grants() []Grant {
 	return []Grant{
 		GrantRead, GrantCreate, GrantSend, GrantInterrupt,
 		GrantClose, GrantRename, GrantDiscard, GrantKeys, GrantLabel, GrantRemoteControl,
-		GrantRelay, GrantHumanRelay, GrantActingPerson, GrantPushList, GrantDebug,
+		GrantRelay, GrantHumanRelay, GrantActingPerson, GrantPushList, GrantDebug, GrantRecord,
 	}
 }
 
@@ -361,6 +388,12 @@ func grantForVerb(r *http.Request) Grant {
 		// every route a principal needs a grant for answers the same question in
 		// one place (muster #450).
 		return GrantDebug
+	case r.Method == http.MethodGet && isRecordPath(path):
+		// Not routed through reading(): recordGate (record.go) checks this grant
+		// itself, and a record holder need not hold read. Listed here so every
+		// route a principal needs a grant for answers the same question in one
+		// place (muster #441).
+		return GrantRecord
 	case r.Method == http.MethodDelete:
 		return GrantClose
 	}

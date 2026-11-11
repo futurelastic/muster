@@ -30,21 +30,34 @@ stdin, never as an argument. `DL_URL` points the installer at another host.
 ## How a final gets there
 
 ```
-release-auto.yml (on main)                      publish-downloads.yml (AT the tag)
-  a final tagged this run ─┐
-  publish-tag = a final ───┼─► dispatch-downloads ──► build ─► artifact ─► publish ─► the host
-  daily catch-up ──────────┘   (gh workflow run --ref <tag>)  hosted        publish runner, environment `release`
+a person tags a final ──► the tag push ──────────────┐
+release-auto.yml (on main)                           │
+  a final tagged this run ─┐                         ├─► publish-downloads.yml, AT the tag:
+  publish-tag = a final ───┼─► dispatch-downloads ───┘     build ─► artifact ─► publish ─► the host
+  daily catch-up ──────────┘   (gh workflow run            hosted      publish runner,
+                                --ref <tag>)                           environment `release`
 ```
 
-- **Why a dispatch at the tag.** The host accepts a publish only from a run whose ref is `refs/tags/vX.Y.Z` and
+- **Why a run at the tag.** The host accepts a publish only from a run whose ref is `refs/tags/vX.Y.Z` and
   whose workflow is `<repo>/<workflow file>@<that ref>`. `release-auto.yml` runs on `main`, and a reusable workflow
-  it called would run with `main`'s ref, so it cannot publish itself. It starts `publish-downloads.yml` at the tag
-  instead (a `workflow_dispatch` started with `GITHUB_TOKEN` is the one event allowed to start another run).
-- **The same three paths as npm**, because a final is a human act (`final: human`): the run that tags it,
-  `publish-tag`, and the daily catch-up. The catch-up asks what the **host** answered, not npm: the newest final
-  that main reaches with no successful, non-dry-run publish run is dispatched, and the host answers "already
-  published" to a repeat. `scripts/release-downloads-guard.sh` holds those decisions and
-  `release_downloads_test.go` runs it against a real origin and a fake `gh`.
+  it called would run with `main`'s ref, so it cannot publish itself. Something has to start `publish-downloads.yml`
+  at the tag, and there are two such starts: the push of the tag itself, and a dispatch (a `workflow_dispatch`
+  started with `GITHUB_TOKEN` is the one event allowed to start another run).
+- **A final a person tags publishes by itself.** `release.final` is `human`: the colab CLI's finalize command pushes
+  the tag with the person's own credentials, and the push starts `publish-downloads.yml` at that tag within seconds
+  (its `on.push.tags`, a pattern that matches `vX.Y.Z` and no `-rc.N`). A tag-push run has no inputs, so it reads
+  its tag from the ref's name. It is off until `PUBLISH_ORIGIN` is set: with the variable unset the run is skipped,
+  not red. `latest.json` on the host shows the new version without anyone dispatching anything.
+- **Why no double run.** A tag pushed with `GITHUB_TOKEN` starts no workflow, so a final that `release-auto.yml`
+  itself tags is published by its dispatch alone. Whatever else repeats (a dispatch for a tag the push already
+  published) is answered "already published" by the host, and the `publish-downloads-<tag>` concurrency group runs
+  one at a time.
+- **The three `release-auto.yml` paths are the safety net**, the same three as npm: the run that tags it,
+  `publish-tag`, and the daily catch-up. A tag push can be missed (the workflow was off, the host was down, the run
+  failed), and the catch-up asks what the **host** answered, not npm: the newest final that main reaches with no
+  successful, non-dry-run publish run, of either kind, is dispatched, and the host answers "already published" to a
+  repeat. `scripts/release-downloads-guard.sh` holds those decisions and `release_downloads_test.go` runs it against
+  a real origin and a fake `gh`.
 - **A final cut before this workflow existed is never published.** The file has to be in the tag's tree. The first
   final after the change merged is the first one on the host.
 - **Two jobs, so the key is held by one.** `build` runs on a hosted runner with no secret: it builds the tag with

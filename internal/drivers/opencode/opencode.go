@@ -826,6 +826,9 @@ func (d *Driver) Capabilities() fleet.DriverCapabilities {
 		//
 		// turns: GET …/turns reads the runtime's own message record (#369).
 		ReadsTurns: fleet.Declared(true),
+		// muster #441: this runtime has no record reader yet (a later change
+		// adds one and flips this); until then the route answers unsupported.
+		ReadsRecord: fleet.Declared(false),
 		// conversation: every session carries the runtime's own id, captured at
 		// create (#378, conversation.go).
 		ReportsConversation: fleet.Declared(true),

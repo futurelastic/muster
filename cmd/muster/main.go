@@ -1042,6 +1042,12 @@ func main() {
 		if svcCfg.Profiling {
 			log.Printf("muster: profiling endpoint ON (profilingEndpoint) — GET /v1/debug/pprof/ for principals holding the debug grant; restart to turn it off")
 		}
+		// The record route (muster #441): served unless the operator refused it
+		// wholesale here. The grant that guards it is nobody's by default.
+		svcCfg.RefuseRecord = cfgFile.RefuseRecordReads
+		if svcCfg.RefuseRecord {
+			log.Printf("muster: record route REFUSED (refuseRecordReads) — GET …/record answers 501 \"record-off\" for every caller; restart to turn it back on")
+		}
 		for _, p := range principals {
 			log.Printf("muster: principal %q grants=%v", p.Name, p.Grants)
 		}
@@ -1166,6 +1172,15 @@ func main() {
 		}
 	}
 	stopGrant() // after the driver: a renewal in flight finishes into a driver that has stopped listening
+
+	// Last, once nothing is left to publish: make the persisted event cursor the
+	// exact one, so a subscriber that was caught up before this stop resumes after
+	// the restart instead of being told cursor_expired (#418). A failure is not
+	// fatal — the file keeps its ceiling, the next start reads as a crash, and
+	// every subscriber refetches.
+	if err := svc.Close(); err != nil {
+		log.Printf("muster: persisting the exact event cursor on stop: %v — the next start will ask subscribers to resync", err)
+	}
 }
 
 func getenv(key, fallback string) string {

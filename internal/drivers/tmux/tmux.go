@@ -1142,7 +1142,10 @@ func (d *Driver) Capabilities() fleet.DriverCapabilities {
 		// is wired only by WithRecordRoot: without it neither can resolve, so the
 		// honest answer is "cannot", not "not declared" — this driver is
 		// describing itself.
-		ReadsTurns:          fleet.Declared(d.conversations != nil),
+		ReadsTurns: fleet.Declared(d.conversations != nil),
+		// muster #441: the record route reads the same file as turns, so it is
+		// readable exactly when turns is. Declared, not derived.
+		ReadsRecord:         fleet.Declared(d.conversations != nil),
 		ReportsConversation: fleet.Declared(d.conversations != nil),
 		// respond answers every prompt this driver reports, with or without a
 		// kind: it works from the screen's own option list, and refuses by the

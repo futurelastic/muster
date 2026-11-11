@@ -41,6 +41,13 @@ name: Release (auto)
 # npm: a final with no successful publish run is started again, and the host answers "already published" to a repeat.
 # Off unless the repository variable PUBLISH_ORIGIN is set. npm is untouched by any of it.
 #
+# A FINAL A PERSON TAGS (#422). `release.final` is `human` here: the colab CLI's finalize command pushes the final tag
+# with the person's own credentials, and that push starts publish-downloads.yml by itself (its `on.push.tags`),
+# within seconds. None of this file's three paths sees such a tag until the next daily catch-up, so they are the
+# safety net under it, not the way it is published. A final THIS run tags is pushed with GITHUB_TOKEN and starts no
+# workflow, so the tag push never doubles the dispatch above, and a repeat of either is answered "already published"
+# by the host anyway.
+#
 # IT NEVER WRITES A COMMIT. The only refs pushed are the annotated tags
 # `colab release cut` / `finalize` create.
 

@@ -264,3 +264,29 @@ func TestTrustCwdNeedsSendOnTopOfCreate(t *testing.T) {
 		}
 	}
 }
+
+// muster #441: record is a grant like any other as far as configuration goes, is
+// defined once, and the one route that needs it asks for it by name.
+func TestGrantRecord_IsDefinedOnceAndNamedByItsRoute(t *testing.T) {
+	if !ValidGrant("record") || GrantRecord != "record" {
+		t.Fatal("record is not a grant this build can configure")
+	}
+	n := 0
+	for _, g := range Grants() {
+		if g == GrantRecord {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("Grants() holds record %d times, want once", n)
+	}
+	r := httptest.NewRequest(http.MethodGet, "/v1/machines/m/sessions/s1/record", nil)
+	if g := grantForVerb(r); g != GrantRecord {
+		t.Errorf("GET …/record needs %s, want record", g)
+	}
+	// A session that happens to be named "record" is a state read, not the route.
+	r = httptest.NewRequest(http.MethodGet, "/v1/machines/m/sessions/record", nil)
+	if g := grantForVerb(r); g != GrantRead {
+		t.Errorf("GET …/sessions/record needs %s, want read", g)
+	}
+}

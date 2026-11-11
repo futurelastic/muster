@@ -173,7 +173,25 @@ func TestWhoAmIUnderLegacyTokenMode(t *testing.T) {
 	t.Run("neither flag", func(t *testing.T) {
 		srv := build(false, false)
 		_, report := whoami(t, srv, testToken, "")
-		if len(report.Grants) != 1 || !hasGrant(report.Grants, GrantRead) {
+		// record (#441) is reported because a valid token reads the record route in
+		// legacy mode (recordGate has no table to consult), exactly as it reads
+		// turns: whoami says what the credential can actually do.
+		if len(report.Grants) != 2 || !hasGrant(report.Grants, GrantRead) || !hasGrant(report.Grants, GrantRecord) {
+			t.Errorf("grants = %v, want [read record] only", report.Grants)
+		}
+	})
+
+	// The operator's switch withdraws it: a machine that refuses the route
+	// wholesale must not tell a client its credential can read a record.
+	t.Run("record route refused by the operator", func(t *testing.T) {
+		svc := New("legacybox")
+		if err := svc.RegisterLocalDriver("stub", &stub.Driver{DeadlineMs: 1000}); err != nil {
+			t.Fatal(err)
+		}
+		srv := httptest.NewServer(NewMux(svc, Config{Token: testToken, RefuseRecord: true}))
+		t.Cleanup(srv.Close)
+		_, report := whoami(t, srv, testToken, "")
+		if len(report.Grants) != 1 || !hasGrant(report.Grants, GrantRead) || hasGrant(report.Grants, GrantRecord) {
 			t.Errorf("grants = %v, want [read] only", report.Grants)
 		}
 	})
