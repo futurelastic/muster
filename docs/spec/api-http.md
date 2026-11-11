@@ -1178,7 +1178,11 @@ agent program inside the pane is wrapped. On any other host it enforces only an 
 posture and refuses the rest, and the refusal carries the reason the measurement failed
 (`sandboxUnavailable` on that runtime's capabilities). A peer that has not been
 reached is not refused locally: the lowered fields are forwarded and the peer's own refusals
-apply. `posture` is **mutually exclusive** with the fields it replaces (`400`); a malformed
+apply. A create addressed at a peer that names a `runtime` is lowered against **that runtime's** row
+of the table the peer reports on `GET /v1/runtimes` (one row per runtime it runs), not against the
+first row; a body that names none keeps the first row, as before, and a named runtime the table
+does not list is treated like a peer not yet reached (the peer decides, muster #460). `posture` is
+**mutually exclusive** with the fields it replaces (`400`); a malformed
 one (a relative or unclean path, a writable shared temporary directory, an unknown value) is `400`
 on any machine. `unattended` needs the `send` grant on top of `create`, as `bypass` does; a posture
 that only narrows needs `create`. `POST /v1/posture/dry-run` takes `{"posture": {...}}` and
