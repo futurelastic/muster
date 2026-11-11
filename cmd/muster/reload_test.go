@@ -890,3 +890,27 @@ func TestRestartOnlyNamesTheProfilingSwitch(t *testing.T) {
 		}
 	}
 }
+
+// #441: the record switch is copied into the service's config at start, so flipping
+// it in the file is a restart-only change and says so; leaving it alone, or writing
+// false where it was absent, is not.
+func TestRestartOnlyNamesTheRecordSwitch(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		running, next *fileConfig
+		restart       bool
+	}{
+		{"off to on", &fileConfig{}, &fileConfig{RefuseRecordReads: true}, true},
+		{"on to off", &fileConfig{RefuseRecordReads: true}, &fileConfig{}, true},
+		{"on to on", &fileConfig{RefuseRecordReads: true}, &fileConfig{RefuseRecordReads: true}, false},
+		{"absent to false", &fileConfig{}, &fileConfig{RefuseRecordReads: false}, false},
+	} {
+		names := restartOnly(tc.running, tc.next)
+		if got := len(names) > 0; got != tc.restart {
+			t.Errorf("%s: restartOnly = %v, want restart=%v", tc.name, names, tc.restart)
+		}
+		if tc.restart && names[0] != "refuseRecordReads" {
+			t.Errorf("%s: named %v, want refuseRecordReads", tc.name, names)
+		}
+	}
+}

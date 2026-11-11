@@ -193,6 +193,15 @@ const ReasonUnsafeServerContext = "unsafe_server_context"
 // grant would help, so a client does not go asking its operator for one.
 const ReasonLocalOnly = "local-only"
 
+// ReasonRecordOff is the reason on the unsupported answer to a call on the
+// record route (`GET …/record`, muster #441) when this machine's operator has
+// set "refuseRecordReads" in its configuration file. No grant would help, and
+// nothing is wrong with the session: the operator of the machine that owns the
+// session decided the route is not served there. The Reason lets a client show
+// that, instead of parsing Message to tell it from a runtime that cannot read a
+// record.
+const ReasonRecordOff = "record-off"
+
 // The reasons a machine-list route gives (api-http.md §3.1, muster #352). The
 // Kind says whose fault it is (invalid: the list; unsupported: this machine's
 // setup; conflict: a list no newer than the one this machine has accepted); the

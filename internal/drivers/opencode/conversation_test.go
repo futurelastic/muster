@@ -196,6 +196,14 @@ func TestCapabilities_DeclaresWhatAPersonFacingClientNeeds(t *testing.T) {
 		if _, ok := driver.Driver(d).(driver.TurnReader); !ok {
 			t.Errorf("%s: declares ReadsTurns but does not implement driver.TurnReader", name)
 		}
+		// muster #441: no record reader for this runtime yet, so the route answers
+		// unsupported and the flag says so.
+		if caps.ReadsRecord == nil || *caps.ReadsRecord {
+			t.Errorf("%s: ReadsRecord = %v; this runtime has no record reader yet (#441)", name, caps.ReadsRecord)
+		}
+		if _, ok := driver.Driver(d).(driver.RecordReader); ok {
+			t.Errorf("%s: declares ReadsRecord false but implements driver.RecordReader", name)
+		}
 		if caps.ReportsConversation == nil || !*caps.ReportsConversation {
 			t.Errorf("%s: ReportsConversation = %v; every session carries the runtime's own id (#378)", name, caps.ReportsConversation)
 		}

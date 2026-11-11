@@ -46,6 +46,7 @@ func (d *Driver) Capabilities() fleet.DriverCapabilities {
 		// muster #379: this driver supports no operation, and says so — the
 		// declared "cannot" form of each person-facing capability.
 		ReadsTurns:           fleet.Declared(false),
+		ReadsRecord:          fleet.Declared(false),
 		ReportsConversation:  fleet.Declared(false),
 		Respond:              &fleet.RespondSupport{},
 		PermissionModeChange: &fleet.PermissionModeChangeSupport{},

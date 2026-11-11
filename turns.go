@@ -10,10 +10,13 @@ import (
 //
 // # What a Turn is, and what it is not (muster #258)
 //
-// This is the one place this API returns content a SESSION produced rather
+// This is the narrow place this API returns content a SESSION produced rather
 // than content the RUNTIME reported about itself (session-abstraction.md §5.8,
-// narrowed by docs/adr/258-assistant-turns-read.md). The boundary is the whole
-// of the type, so it is stated here where a future field would be added:
+// narrowed by docs/adr/258-assistant-turns-read.md). It is not the only one
+// since #441: RecordMessage (record.go) is the wider shape, on its own route and
+// its own grant (docs/adr/441-a-sessions-full-record-is-read-under-its-own-grant.md).
+// Turn's boundary is unchanged by that, and is the whole of this type, so it is
+// stated here where a future field would be added:
 //
 //   - IN: the text blocks of a record entry the runtime wrote as an assistant
 //     message of the session's own agent.

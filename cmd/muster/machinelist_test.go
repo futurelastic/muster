@@ -377,3 +377,30 @@ func TestDoctorRow(t *testing.T) {
 		t.Errorf("no list: %+v", row)
 	}
 }
+
+// muster #441: an owner-signed list may name the record grant for a peer. That is
+// an explicit act by the fleet's owner (not a default) and it is how one machine
+// is let to read another's records; a list still cannot name push-list or debug,
+// which are local decisions.
+func TestListMayGrantRecord(t *testing.T) {
+	f, cfg := newListFixture(t, "only", 4)
+	doc := machinelist.Document{Fleet: "fleet-1", Seq: 4, Signers: []string{listPub(f.owner)},
+		Machines: []machinelist.Machine{{ID: "m", PublicKey: listPub(listKey(0x22)), Addresses: []string{"http://m:1"}, Grants: []string{"record"}}}}
+	raw, _ := machinelist.Sign(doc, f.owner)
+	_ = os.WriteFile(f.listPath, raw, 0o644)
+	o := loadMachineList(cfg, f.stateDir, "self")
+	if o.err != nil {
+		t.Fatalf("a list naming the record grant was refused: %v", o.err)
+	}
+	base := basePeers(t, cfg)
+	baseP, _ := cfg.principals()
+	var got service.Principal
+	for _, p := range o.principalsFor(baseP, base) {
+		if p.Name == "m" {
+			got = p
+		}
+	}
+	if !got.Allows(service.GrantRecord) || got.Allows(service.GrantSend) {
+		t.Errorf("principal m = %+v, want record and not send", got)
+	}
+}
