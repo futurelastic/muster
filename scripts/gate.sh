@@ -51,6 +51,19 @@ GOOS=windows GOARCH=amd64 go vet ./...
 echo "== go build (windows/arm64) =="
 GOOS=windows GOARCH=arm64 go build ./...
 
+# The sandbox mechanism is split by build tag (internal/sandbox: one file per
+# platform, #439), so a file the host does not compile is a file no local run
+# and no single-OS job type-checks. Vet the two platforms the host layer has an
+# implementation for, on the architecture the host job does not run: the Linux
+# job vets linux/amd64 above and the macOS job's platform is darwin, so without
+# these two lines a break in the linux/arm64 table or a darwin-only file would
+# reach trunk green.
+echo "== go vet (darwin/arm64) =="
+GOOS=darwin GOARCH=arm64 go vet ./...
+
+echo "== go vet (linux/arm64) =="
+GOOS=linux GOARCH=arm64 go vet ./...
+
 # -race because this codebase runs control-mode clients, pumps and an event
 # engine concurrently; a data race there would surface as an event stream
 # that is subtly wrong rather than one that crashes.
@@ -62,4 +75,4 @@ GOOS=windows GOARCH=arm64 go build ./...
 echo "== go test -race =="
 go test -race ./...
 
-echo "PASS: gofmt clean, build/vet/windows-cross/test -race all green."
+echo "PASS: gofmt clean, build/vet/windows-cross/darwin+linux-vet/test -race all green."
