@@ -936,7 +936,7 @@ operating-system sandbox: reads and writes denied outside the working directory 
 session's own private directory, unix-socket connects denied (a path rule does not stop a
 connect, and the multiplexer and ssh-agent sockets are both reachable that way), and system
 services such as the clipboard and `open` denied. Add `readPaths`, `writePaths`, a
-`network` of `open` (default) or `closed` (loopback only), or a `packageCache`
+`network` of `open` (default) or `closed` (loopback only; stricter on Linux, below), or a `packageCache`
 (`private` copy per session, or `shared`; the session finds it in `MUSTER_PACKAGE_CACHE`, and
 for each package manager you list in `managers` in the variable that manager reads — below).
 A runtime that cannot enforce all of it has no `sandbox` entry in `GET /v1/runtimes` and answers
@@ -944,6 +944,20 @@ A runtime that cannot enforce all of it has no `sandbox` entry in `GET /v1/runti
 actually in force. Needs only `create`. Two things are yours: seed the repository's trunk
 reference before the session starts, and treat the working directory as untrusted afterwards — run
 git on it only inside the same profile. See session-abstraction.md §2.1.
+
+*The mechanism is named in the capability* (`sandbox.mechanism`): `macos-sandbox-exec` on macOS,
+and `linux-landlock-seccomp` on Linux (muster #439, [ADR 439](adr/439-the-linux-sandbox-is-landlock-and-seccomp-launched-by-the-service-binary.md)).
+The Linux one is Landlock for files and a seccomp filter for the rest, applied by the service's own
+binary to itself before it becomes the agent. It needs **Linux 6.12 or newer** (Landlock ABI 6) with
+`landlock` among the active security modules (`cat /sys/kernel/security/lsm`); on any other kernel the
+runtime has no `sandbox` entry and `sandboxUnavailable` says which ABI the kernel has and which it
+needs, and the host is offered the mechanism only after a child confined that way was seen unable to do
+each refused thing. Where it differs from macOS: `network: "closed"` allows **no outbound connection at
+all**, loopback included, and no name resolution — only the runtime's own server, on the one port the
+service named, is reachable (by the service); a session cannot create a unix socket (a pre-connected
+stream pair still works), has no shared memory directory, and cannot reach other processes' memory,
+queues or keyrings or signal them. A `readPaths`/`writePaths` entry must exist when the session starts
+(a Linux grant is made by opening the path), and a missing one is refused `invalid`.
 
 **`posture`** (#344) is the one field to send when you drive more than one runtime. It says what
 the work needs, not how a runtime spells it — `attendance` (`attended` default, or `unattended`:

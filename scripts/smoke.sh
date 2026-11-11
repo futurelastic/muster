@@ -14,6 +14,7 @@
 #                          package nobody touched
 #   3. go vet ./...        same reason
 #      GOOS=windows go vet / go build  the Windows cross-compile (#303)
+#      GOOS=darwin / linux go vet      the platform-split sandbox files (#439)
 #   4. go test <packages>  ONLY the packages with a changed .go file, plus
 #                          everything if go.mod / go.sum changed. No -race:
 #                          that is the full gate's job, on a runner.
@@ -49,6 +50,13 @@ GOOS=windows GOARCH=amd64 go vet ./...
 
 echo "== go build (windows/arm64) =="
 GOOS=windows GOARCH=arm64 go build ./...
+
+# The sandbox mechanism is one file per platform (#439); see scripts/gate.sh.
+echo "== go vet (darwin/arm64) =="
+GOOS=darwin GOARCH=arm64 go vet ./...
+
+echo "== go vet (linux/arm64) =="
+GOOS=linux GOARCH=arm64 go vet ./...
 
 trunk="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
 [ -n "$trunk" ] || trunk="origin/main"

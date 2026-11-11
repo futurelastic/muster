@@ -17,6 +17,24 @@
 // (HostSupport applies a profile once to find out, rather than discovering it at
 // the first create).
 //
+// # The Linux mechanism
+//
+// Linux has no host facility that takes a profile, so the same contract is met by
+// two kernel pieces applied by the service's own binary to itself before it
+// becomes the agent (muster #439): Landlock for files — and, from Linux 6.12, for
+// abstract unix sockets and signals — and a seccomp filter for everything a file
+// rule cannot name (unix socket creation, the network under a closed posture,
+// shared memory and queues, io_uring). The policy is the document policy.go
+// renders, the launcher is launcher_linux.go, and the host is offered the
+// mechanism only after a process confined that way was seen unable to do each
+// thing (host_linux.go). Where the kernel cannot back all three classes the
+// capability is absent, with the reason, exactly as on any platform that lacks one.
+//
+// What differs from macOS is stated rather than hidden: a closed network is not
+// "loopback only" there but no outbound connection at all, because the kernel's
+// network rules cannot tell loopback from anywhere else; and a session cannot
+// create a unix socket, where on macOS it can create one it may not connect.
+//
 // # What the profile denies
 //
 // Three classes, together, because each is a way out of the other two:
@@ -53,10 +71,7 @@ package sandbox
 
 import (
 	"fmt"
-	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 
@@ -116,38 +131,6 @@ func Denies() []fleet.SandboxDeny {
 	return []fleet.SandboxDeny{fleet.SandboxDenyFiles, fleet.SandboxDenyUnixSockets, fleet.SandboxDenySystemServices}
 }
 
-// HostSupport reports what the host can enforce, or nil and the reason when it
-// cannot — a statement the capability carries, not an error.
-//
-// It actually applies a profile once: a service that itself runs inside a
-// sandbox cannot start a nested one, and discovering that at the first create
-// would refuse a caller for a reason the capability should have told it.
-//
-// The returned support names no package-cache mode: that is a decision of the
-// driver, which fills it in (or leaves it empty).
-func HostSupport() (*fleet.SandboxSupport, string) {
-	if runtime.GOOS != "darwin" {
-		return nil, fmt.Sprintf("no sandbox mechanism is implemented for %s (only macOS's sandbox-exec is)", runtime.GOOS)
-	}
-	if _, err := os.Stat(ExecPath); err != nil {
-		return nil, ExecPath + " is not present"
-	}
-	out, err := exec.Command(ExecPath, "-p", "(version 1)(allow default)", "/usr/bin/true").CombinedOutput()
-	if err != nil {
-		return nil, fmt.Sprintf("the host refused to apply a sandbox profile (%s): the service may itself be running inside one, which cannot be nested",
-			strings.TrimSpace(string(out)))
-	}
-	return &fleet.SandboxSupport{
-		Mechanism:    Mechanism,
-		Denies:       Denies(),
-		Network:      []fleet.SandboxNetwork{fleet.SandboxNetworkOpen, fleet.SandboxNetworkClosed},
-		PackageCache: []fleet.PackageCacheMode{},
-		// muster #432: a driver that starts sessions from a package cache says
-		// which managers it points at one; the default is none.
-		PackageManagers: []fleet.PackageManager{},
-	}, ""
-}
-
 // ResolvePath resolves symlinks in p when it exists, because the facility
 // matches real paths: a grant on /tmp/x does not cover /private/tmp/x. A path
 // that does not exist is returned cleaned, as given.
@@ -199,12 +182,20 @@ func Dedupe(in []string) []string {
 // Plan is a resolved sandbox request: every path real, every default applied,
 // ready to be rendered as a profile and reported back.
 type Plan struct {
+	// Mechanism names the facility the plan is for: MechanismLinux, or empty for
+	// the macOS facility (the only one before #439, so a plan that does not say
+	// keeps its meaning).
+	Mechanism string
 	// Network is the posture in force; empty means open.
 	Network fleet.SandboxNetwork
 	// Read is every readable directory (writable ones included).
 	Read []string
 	// Write is every writable directory.
 	Write []string
+	// BindTCP are the ports a session may bind while the network is closed (the
+	// port of the runtime server a driver connects into). Only the Linux
+	// mechanism reads it: the macOS profile allows loopback as a whole.
+	BindTCP []int
 }
 
 // State renders the plan as the report a session carries. A driver that has
@@ -222,7 +213,7 @@ func (p *Plan) State() *fleet.SandboxState {
 		network = fleet.SandboxNetworkOpen
 	}
 	return &fleet.SandboxState{
-		Mechanism:  Mechanism,
+		Mechanism:  p.mechanism(),
 		Denies:     Denies(),
 		Network:    network,
 		ReadPaths:  toPaths(p.Read),

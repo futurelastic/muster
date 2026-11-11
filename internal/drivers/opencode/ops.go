@@ -340,11 +340,11 @@ func (d *Driver) startServerIn(ctx context.Context, spec fleet.SessionSpec, exis
 	// muster #281: the sandbox request is resolved and validated here, before a
 	// process exists, so a refusal costs nothing but the directory removed below.
 	var plan *sandboxPlan
-	var profile string
+	var launch launchFunc
 	if spec.Sandbox != nil {
 		plan, err = d.planSandboxFor(ctx, spec, dir, priorCopy)
 		if err == nil {
-			profile, err = plan.profile()
+			launch, err = plan.launcher()
 			if err != nil {
 				err = &fleet.Error{Kind: fleet.ErrorInvalid, Message: "create: " + err.Error(), Machine: d.machine}
 			}
@@ -391,7 +391,7 @@ func (d *Driver) startServerIn(ctx context.Context, spec fleet.SessionSpec, exis
 	if bypass {
 		args = bypassArgs()
 	}
-	srv, err := startServer(ctx, d.bin, string(spec.Cwd), d.username, d.buildEnv(dir, extra), profile, args...)
+	srv, err := startServer(ctx, d.bin, string(spec.Cwd), d.username, d.buildEnv(dir, extra), launch, args...)
 	if err != nil {
 		cleanup()
 		return nil, err

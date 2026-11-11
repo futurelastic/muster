@@ -132,7 +132,7 @@ func TestSubscribe_Process_ASecondSessionIsAttachedWhenItIsCreated(t *testing.T)
 func TestStartServer_ARuntimeThatDiesAtStartNamesItsErrorFromItsLog(t *testing.T) {
 	// A process that logs its error and exits before it ever answers.
 	sh := stubShell(t)
-	_, err := startServer(context.Background(), sh, "", "muster", nil, "")
+	_, err := startServer(context.Background(), sh, "", "muster", nil, nil)
 	if err == nil {
 		t.Fatal("startServer succeeded against a process that exits at once")
 	}

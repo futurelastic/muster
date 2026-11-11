@@ -389,7 +389,10 @@ order of this page and the order of its output are the same.
      host where the agent CLI was measured to start and authenticate inside the
      profile — `GET /v1/runtimes` shows `sandbox` there, or `sandboxUnavailable`
      with the reason where it does not (most often: the agent's login is in the
-     login keychain, which the profile does not open). `FLEET_TMUX_SANDBOX=off`
+     login keychain, which the profile does not open). On Linux (muster #439) it
+     needs kernel 6.12 or newer with `landlock` in `/sys/kernel/security/lsm`, and
+     an agent whose install and interpreter the policy can read (see "What a Linux
+     machine reports about the sandbox", below). `FLEET_TMUX_SANDBOX=off`
      stops the runtime offering it;
    - when `FLEET_RUNTIME_OPENCODE=1`, set `FLEET_OPENCODE_BIN` to the opencode
      binary's absolute path, for the same reason (row: `runtime.opencode`,
@@ -717,6 +720,35 @@ machine has no interactive-terminal driver.** What it does have is the
 `opencode` runtime, driven as a child process, and the whole HTTP API, the
 principal table and federation. The procedure above applies; this section is
 what differs.
+
+### What a Linux machine reports about the sandbox
+
+A Linux host is offered the sandbox (muster #439, mechanism `linux-landlock-seccomp`) only
+when all of this is true, and `GET /v1/runtimes` shows `sandboxUnavailable` with the first
+thing that is not:
+
+- the machine is amd64 or arm64;
+- the kernel is **6.12 or newer** (Landlock ABI 6) and `landlock` is among the active security
+  modules: `cat /sys/kernel/security/lsm` lists it. A kernel built without it, or booted with an
+  `lsm=` list that leaves it out, or a container whose seccomp profile blocks the system call,
+  each get their own reason;
+- a child process confined by the same mechanism was seen unable to read outside its grants,
+  create a unix or UDP socket, connect to loopback under a closed network, touch shared memory,
+  read another process's environment or signal the service. This is run once when the service
+  starts, through the service's own executable, so that executable must be the file the service
+  was started from;
+- for the terminal runtime, the agent CLI, run through the same launch builder a create uses,
+  reports a logged-in account under the policy. An agent installed under a version manager's
+  directory in the home (the policy does not open the home), or as a confined package, cannot be
+  read by its own session and is refused with that reason; install it where the system's
+  directories are.
+
+What a session on Linux gets that a macOS one does not, and the reverse: it cannot create a unix
+socket at all (a pre-connected pair still works), `closed` means no outbound connection even to
+loopback, there is no shared memory directory, and it can read the system's `/etc`, `/usr`,
+`/proc` and `/sys` but nothing of the home. Keep a token or a key out of `/etc`, which sessions
+can read, as on macOS. The reasoning is in
+[ADR 439](adr/439-the-linux-sandbox-is-landlock-and-seccomp-launched-by-the-service-binary.md).
 
 ### What a Windows machine reports
 

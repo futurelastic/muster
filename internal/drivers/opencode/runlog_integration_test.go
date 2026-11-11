@@ -110,7 +110,7 @@ func TestIntegration_ARuntimeLogHoldsNoCommandText(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	srv, err := startServer(ctx, bin, t.TempDir(), "muster", env, "")
+	srv, err := startServer(ctx, bin, t.TempDir(), "muster", env, nil)
 	if err != nil {
 		t.Fatalf("startServer: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestIntegration_ACappedRuntimeLogStillNamesAnError(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	srv, err := startServer(ctx, bin, t.TempDir(), "muster", env, "")
+	srv, err := startServer(ctx, bin, t.TempDir(), "muster", env, nil)
 	if err != nil {
 		t.Fatalf("startServer: %v", err)
 	}

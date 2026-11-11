@@ -103,7 +103,7 @@ func TestStartProcess_CredentialNeverReachesArgv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := buildServeCmd(bin, "", port, "muster", cred, nil, "")
+	cmd := buildServeCmd(bin, "", port, "muster", cred, nil, nil)
 
 	hasPrintLogs := false
 	for _, a := range cmd.Args {
@@ -147,7 +147,7 @@ func stubBinary(t *testing.T) string {
 // carries --print-logs too — checked on its own because the sandbox wrapper is
 // a separate branch of buildServeCmd.
 func TestBuildServeCmd_TheSandboxedCommandAlsoPrintsLogs(t *testing.T) {
-	cmd := buildServeCmd("/bin/true", "", 1234, "muster", "cred", nil, "(version 1)")
+	cmd := buildServeCmd("/bin/true", "", 1234, "muster", "cred", nil, []string{sandboxExecPath, "-p", "(version 1)"})
 	found := false
 	for _, a := range cmd.Args {
 		if a == "--print-logs" {

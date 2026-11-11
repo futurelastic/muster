@@ -36,6 +36,18 @@ func requireSandboxHost(t *testing.T, d *Driver) {
 func TestSandboxCapabilityIsDeclaredOnlyWhereItCanBeEnforced(t *testing.T) {
 	d, _ := newIsolatedDriver(t)
 	sup := d.Capabilities().Sandbox
+	if runtime.GOOS == "linux" {
+		// This test binary has not named a launcher, so the Linux mechanism is not
+		// offered here whatever the kernel could do (sandbox_linux_test.go names
+		// one); the reason must still say which mechanism declined.
+		if sup != nil {
+			t.Fatalf("declared a sandbox with no launcher named: %+v", sup)
+		}
+		if !strings.HasPrefix(d.sandboxWhy, "linux-landlock-seccomp: ") {
+			t.Fatalf("the reason recorded for the absent capability does not name its mechanism: %q", d.sandboxWhy)
+		}
+		return
+	}
 	if runtime.GOOS != "darwin" {
 		if sup != nil {
 			t.Fatalf("declared a sandbox on %s, where none is implemented: %+v", runtime.GOOS, sup)
@@ -74,6 +86,9 @@ func TestSandboxRefusedOnAHostWithoutTheMechanism(t *testing.T) {
 		t.Skip("this host has the mechanism; the shared-mode test covers the refusal path here")
 	}
 	d, _ := newIsolatedDriver(t)
+	if d.Capabilities().Sandbox != nil {
+		t.Skip("this host offers a sandbox; the shared-mode test covers the refusal path here")
+	}
 	_, err := d.Create(context.Background(), testReq, "k-nohost", fleet.SessionSpec{
 		Cwd: fleet.AbsolutePath(t.TempDir()), Sandbox: &fleet.SandboxSpec{},
 	})

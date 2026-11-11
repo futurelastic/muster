@@ -363,6 +363,7 @@ import (
 	"github.com/futurelastic/muster/internal/drivers/stub"
 	"github.com/futurelastic/muster/internal/drivers/tmux"
 	"github.com/futurelastic/muster/internal/grant"
+	"github.com/futurelastic/muster/internal/sandbox"
 	"github.com/futurelastic/muster/internal/service"
 	"github.com/futurelastic/muster/internal/sessionenv"
 	"github.com/futurelastic/muster/internal/state"
@@ -375,6 +376,17 @@ import (
 const retryProbeTimeout = 30 * time.Second
 
 func main() {
+	// The Linux sandbox launcher (muster #439) is this same binary, started where
+	// macOS starts sandbox-exec: it confines itself and becomes the agent. It is the
+	// FIRST thing main does, before any configuration is read and before another
+	// subcommand can claim the arguments, because it must start nothing the
+	// confinement has not yet covered. It is not a command an operator types.
+	if len(os.Args) > 1 && os.Args[1] == sandbox.LauncherArg {
+		os.Exit(sandbox.LauncherMain(os.Args[2:]))
+	}
+	// Name this executable as that launcher before any driver is built: the Linux
+	// mechanism is offered only when there is one to start a session through.
+	sandbox.SetLauncher(sandbox.SelfLauncher())
 	args := os.Args[1:]
 	if legacyBare(os.Args) {
 		args = []string{"serve"}

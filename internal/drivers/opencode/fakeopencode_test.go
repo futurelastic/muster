@@ -19,6 +19,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/futurelastic/muster/internal/sandbox"
 )
 
 // This file lets the isolation tests start REAL per-session processes without
@@ -49,6 +51,20 @@ func TestMain(m *testing.M) {
 				}
 			}
 			fmt.Println("fake-opencode 0.0.0")
+			os.Exit(0)
+		case sandbox.LauncherArg:
+			// muster #439: this test binary is the sandbox launcher on Linux, as the
+			// service's own binary is in production.
+			os.Exit(sandbox.LauncherMain(os.Args[2:]))
+		case "__dial":
+			// A tool a session can run: connect to the address and say what happened.
+			c, err := net.DialTimeout("tcp", os.Args[2], 3*time.Second)
+			if err != nil {
+				fmt.Println("dial failed:", err)
+				os.Exit(1)
+			}
+			_ = c.Close()
+			fmt.Println("dial ok")
 			os.Exit(0)
 		case "__stray":
 			// muster #405: a long-lived process standing in for a browser a tool

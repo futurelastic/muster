@@ -49,6 +49,15 @@ const (
 	SandboxNetworkOpen SandboxNetwork = "open"
 	// SandboxNetworkClosed allows loopback only: the session's own server and
 	// nothing beyond the machine.
+	//
+	// On Linux (mechanism "linux-landlock-seccomp", muster #439) it is STRICTER,
+	// never weaker: the kernel's network rules cannot tell loopback from anywhere
+	// else, so no outbound connection is allowed at all — loopback included — and
+	// no UDP socket, so no name resolution. The only thing that works is being
+	// connected to: a runtime's own server, on the one port the service named, is
+	// reached by the service, which is not confined. A caller that needs a session
+	// to reach a model over loopback reads the mechanism in the capability and
+	// uses an open network there.
 	SandboxNetworkClosed SandboxNetwork = "closed"
 )
 
@@ -207,9 +216,19 @@ const (
 	// connect, and the multiplexer's and the SSH agent's sockets are both
 	// reachable that way — a command started through the first runs outside
 	// the profile entirely.
+	//
+	// On Linux a session cannot create a unix socket at all (a pre-connected
+	// stream pair, as a child-process library makes, still works), which covers
+	// pathname and abstract sockets alike.
 	SandboxDenyUnixSockets SandboxDeny = "unixSockets"
 	// SandboxDenySystemServices: looking up system services (the clipboard,
 	// application launching, scripting of other applications).
+	//
+	// On Linux every such service — the session bus, the desktop's portals and
+	// keyring, a display server — is reached over a unix socket, so denying those
+	// closes them; the same class also covers what is shared between the processes
+	// of one user without a path (shared memory, semaphores and message queues,
+	// the kernel keyrings), and signals to processes outside the session.
 	SandboxDenySystemServices SandboxDeny = "systemServices"
 )
 
@@ -336,9 +355,16 @@ func checkSandboxPath(field string, p AbsolutePath) error {
 // sharedTempRoots are the temporary directories every session on a machine
 // shares. Writing there is a cross-session side channel, so no sandbox may be
 // granted write access to one or to anything that contains one.
+//
+// The list is one for every platform because a request is validated wherever the
+// create lands, which is not always the platform that will enforce it. The last
+// four are Linux's: shared memory, the per-user runtime directories (the session
+// bus and the desktop's sockets live there) and the lock directory. Naming a
+// directory UNDER one on purpose is still allowed, as it is under /tmp.
 var sharedTempRoots = []string{
 	"/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp", "/var", "/private/var",
 	"/var/folders", "/private/var/folders", "/private",
+	"/dev/shm", "/run/shm", "/run/user", "/run/lock",
 }
 
 // sharedTemp reports whether p is, or contains, a shared temporary directory.

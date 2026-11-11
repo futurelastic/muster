@@ -185,6 +185,42 @@ jobs:
         if: failure()
         run: journalctl --user -u muster.service --no-pager -n 100 || true
 
+  # The Linux sandbox mechanism (#439) against a REAL kernel, on its own job so a
+  # failure names the mechanism. It needs Landlock ABI 6 (Linux 6.12). Measured on
+  # 2026-11-11 the hosted image has kernel 7.0 and Landlock ABI 8, so the default
+  # runner is the hosted one; the repository variable MUSTER_LINUX_SANDBOX_RUNNER
+  # names another runner (an older image to prove the refusal on, or a self-hosted
+  # machine) without a change to this file.
+  #
+  # MUSTER_SANDBOX_REQUIRE=1 turns every skip for a missing kernel feature into a
+  # failure. The `go` job runs the same tests and skips them quietly on a kernel
+  # without the feature; this job exists so that a hosted image that moves to such
+  # a kernel makes THIS job red, with the kernel's facts in its log, instead of the
+  # tests going grey where nobody looks.
+  sandbox-linux:
+    name: Linux sandbox (needs Landlock ABI 6)
+    runs-on: ${{ vars.MUSTER_LINUX_SANDBOX_RUNNER || 'ubuntu-latest' }}
+    env:
+      MUSTER_SANDBOX_REQUIRE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: What this kernel offers
+        run: |
+          echo "uname -r: $(uname -r)"
+          echo "active security modules: $(cat /sys/kernel/security/lsm 2>/dev/null || echo unknown)"
+          go test ./internal/sandbox -run TestHostFacts -count=1 -v
+      - name: launcher, policy, filter, and a confined child doing each refused thing
+        run: go test ./internal/sandbox -count=1 -v
+      - name: the opencode driver starts its server under the mechanism
+        run: go test ./internal/drivers/opencode -run 'LinuxSandbox|LinuxPrivate' -count=1 -v
+      - name: the multiplexer driver, on a real multiplexer
+        run: |
+          sudo apt-get install -y tmux
+          FLEET_TMUX_INTEGRATION=1 go test ./internal/drivers/tmux -run 'LiveLinux|LinuxSandbox' -count=1 -v
+
   # The macOS half stops short of loading: a Background launchd job needs a login
   # session a hosted runner does not give. It does run the real install path as
   # far as the unit and lint what was written.

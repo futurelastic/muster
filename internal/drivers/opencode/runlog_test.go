@@ -27,9 +27,9 @@ func flagValue(args []string, flag string) (string, bool) {
 }
 
 func TestBuildServeCmd_CapsTheRuntimeLogBelowInfo(t *testing.T) {
-	for name, profile := range map[string]string{"plain": "", "sandboxed": "(version 1)"} {
+	for name, wrap := range map[string][]string{"plain": nil, "sandboxed": {sandboxExecPath, "-p", "(version 1)"}} {
 		t.Run(name, func(t *testing.T) {
-			cmd := buildServeCmd("/bin/true", "", 1234, "muster", "cred", nil, profile)
+			cmd := buildServeCmd("/bin/true", "", 1234, "muster", "cred", nil, wrap)
 			level, ok := flagValue(cmd.Args, "--log-level")
 			if !ok {
 				t.Fatalf("--log-level missing from argv %v; the runtime would log every bash command at INFO (#420)", cmd.Args)

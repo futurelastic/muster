@@ -291,7 +291,7 @@ const runtimeLogLevel = "WARN"
 // env is the BUILT environment (env.go): the child gets exactly that plus its
 // own server credential, and nothing is inherited from this process. A nil env
 // is therefore an empty environment, not "inherit".
-func buildServeCmd(bin, workdir string, port int, username, password string, env []string, profile string, extraArgs ...string) *exec.Cmd {
+func buildServeCmd(bin, workdir string, port int, username, password string, env []string, wrap []string, extraArgs ...string) *exec.Cmd {
 	serve := []string{"serve",
 		"--port", strconv.Itoa(port),
 		"--hostname", "127.0.0.1",
@@ -313,12 +313,13 @@ func buildServeCmd(bin, workdir string, port int, username, password string, env
 	// --pure). Never anything secret; the credential stays in the environment.
 	serve = append(serve, extraArgs...)
 	var cmd *exec.Cmd
-	if profile != "" {
+	if len(wrap) > 0 {
 		// muster #281: the runtime runs INSIDE the profile, so every tool it
-		// starts inherits it. The profile text holds paths and service names
-		// only — nothing secret — so it travels as an argument; the credential
-		// still travels through the environment alone.
-		cmd = exec.Command(sandboxExecPath, append([]string{"-p", profile, bin}, serve...)...)
+		// starts inherits it. wrap is the facility's command and the profile (or
+		// policy) it is given: paths and service names only — nothing secret — so it
+		// travels as an argument; the credential still travels through the
+		// environment alone.
+		cmd = exec.Command(wrap[0], append(append([]string(nil), wrap[1:]...), append([]string{bin}, serve...)...)...)
 	} else {
 		cmd = exec.Command(bin, serve...)
 	}
@@ -362,7 +363,7 @@ const startAttempts = 3
 // is closed by checking, not by hoping: readiness counts only a 200 (a 401
 // would mean a DIFFERENT server holds the port, with a different credential)
 // and a child that exits before answering is retried on a fresh port.
-func startServer(ctx context.Context, bin, workdir, username string, env []string, profile string, extraArgs ...string) (*server, error) {
+func startServer(ctx context.Context, bin, workdir, username string, env []string, launch launchFunc, extraArgs ...string) (*server, error) {
 	var lastErr error
 	for attempt := 0; attempt < startAttempts; attempt++ {
 		port, err := freePort()
@@ -373,7 +374,16 @@ func startServer(ctx context.Context, bin, workdir, username string, env []strin
 		if err != nil {
 			return nil, err
 		}
-		cmd := buildServeCmd(bin, workdir, port, username, cred, env, profile, extraArgs...)
+		// The prefix is asked for per attempt: on Linux the one port a confined
+		// session may bind is this attempt's.
+		var wrap []string
+		if launch != nil {
+			wrap, err = launch(port)
+			if err != nil {
+				return nil, fmt.Errorf("opencode: preparing the sandbox: %w", err)
+			}
+		}
+		cmd := buildServeCmd(bin, workdir, port, username, cred, env, wrap, extraArgs...)
 		logs := newLogCapture()
 		cmd.Stderr = logs
 		// A tool the session ran can hold the stderr pipe open after the server

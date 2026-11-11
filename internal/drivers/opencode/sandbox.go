@@ -64,15 +64,23 @@ func sandboxSupport(shared bool) (*fleet.SandboxSupport, string) {
 // sandboxPlan is a resolved sandbox request: every path real, every default
 // applied, ready to be rendered as a profile and reported back.
 type sandboxPlan struct {
-	network fleet.SandboxNetwork
-	read    []string
-	write   []string
-	cache   *fleet.SandboxPackageCacheState
+	// mechanism is sandbox.MechanismLinux on a host that confines with the Linux
+	// mechanism, and empty for macOS's (the only one before muster #439).
+	mechanism string
+	network   fleet.SandboxNetwork
+	read      []string
+	write     []string
+	cache     *fleet.SandboxPackageCacheState
+}
+
+// shared is the plan as the shared package renders it.
+func (p *sandboxPlan) shared() *sandbox.Plan {
+	return &sandbox.Plan{Mechanism: p.mechanism, Network: p.network, Read: p.read, Write: p.write}
 }
 
 // state renders the plan as the report a session carries.
 func (p *sandboxPlan) state() *fleet.SandboxState {
-	st := (&sandbox.Plan{Network: p.network, Read: p.read, Write: p.write}).State()
+	st := p.shared().State()
 	if p.cache != nil {
 		c := *p.cache
 		st.PackageCache = &c
@@ -115,12 +123,24 @@ func (d *Driver) planSandboxFor(ctx context.Context, spec fleet.SessionSpec, ses
 	if home != "" {
 		home = resolvePath(home)
 	}
+	// Which facility confines this host decides how a grant is made: macOS matches
+	// a profile against paths that need not exist, Linux attaches a rule to a path
+	// that does.
+	linux := d.sandbox != nil && d.sandbox.Mechanism == sandbox.MechanismLinux
 	// A grant that would include the service user's home puts back exactly what
 	// the profile exists to remove.
 	check := func(field string, p fleet.AbsolutePath) (string, error) {
 		r := resolvePath(string(p))
 		if home != "" && coversOrIs(r, home) {
 			return "", invalid("%s: %q is, or contains, the service user's home directory; grant the specific directory a session needs", field, string(p))
+		}
+		// A Linux grant is made by opening the path, so a path that is not there
+		// cannot be granted, and starting without it would be a weaker profile than
+		// the one asked for.
+		if linux {
+			if err := sandbox.RequireExist(field, []string{r}); err != nil {
+				return "", invalid("%s", err.Error())
+			}
 		}
 		return r, nil
 	}
@@ -137,9 +157,12 @@ func (d *Driver) planSandboxFor(ctx context.Context, spec fleet.SessionSpec, ses
 	if plan.network == "" {
 		plan.network = fleet.SandboxNetworkOpen
 	}
+	if linux {
+		plan.mechanism = sandbox.MechanismLinux
+	}
 
 	write := []string{cwd, resolvePath(sessionDir)}
-	read := append([]string(nil), systemReadRoots...)
+	read := sandbox.SystemReadRootsFor(plan.mechanism)
 	read = append(read, installRoots(d.bin, home)...)
 	for _, p := range d.sandboxRead {
 		read = append(read, resolvePath(p))
@@ -216,6 +239,12 @@ func (d *Driver) planSandboxFor(ctx context.Context, spec fleet.SessionSpec, ses
 		plan.cache = st
 	}
 
+	if linux {
+		// What the operator configured as extra reads may name something this host
+		// does not have; the report is what is enforced, so a grant that could not be
+		// made is not reported as one.
+		read = sandbox.PruneMissing(read)
+	}
 	plan.read = dedupe(append(read, write...))
 	plan.write = dedupe(write)
 	return plan, nil
@@ -346,17 +375,25 @@ func copyTree(ctx context.Context, src, dst string) (string, error) {
 	}
 	_ = privfs.RemoveAll(dst)
 
-	clone, cpCloneErr := exec.CommandContext(ctx, copyBinary, "-cR", src, dst).CombinedOutput()
-	if cpCloneErr == nil {
+	// `cp -c` is a clone only where the platform's copy program says so (macOS).
+	// Where it names something else — GNU coreutils reads -c as --preserve=context
+	// and succeeds on a plain copy — trying it would report "clone" for a full copy,
+	// which is the one thing the report must not say (cpCloneFlag, below).
+	var clone []byte
+	cpCloneErr := errors.New("this platform's copy program has no clone flag")
+	if cpCloneFlag != "" {
+		clone, cpCloneErr = exec.CommandContext(ctx, copyBinary, cpCloneFlag, src, dst).CombinedOutput()
+		if cpCloneErr == nil {
+			if err := ctx.Err(); err != nil {
+				return abandon(err)
+			}
+			return "clone", nil
+		}
 		if err := ctx.Err(); err != nil {
 			return abandon(err)
 		}
-		return "clone", nil
+		_ = privfs.RemoveAll(dst)
 	}
-	if err := ctx.Err(); err != nil {
-		return abandon(err)
-	}
-	_ = privfs.RemoveAll(dst)
 
 	if plain, err := exec.CommandContext(ctx, copyBinary, "-R", src, dst).CombinedOutput(); err != nil {
 		if cerr := ctx.Err(); cerr != nil {
@@ -378,4 +415,29 @@ func copyTree(ctx context.Context, src, dst string) (string, error) {
 // profile renders the plan as sandbox-exec profile text.
 func (p *sandboxPlan) profile() (string, error) {
 	return (&sandbox.Plan{Network: p.network, Read: p.read, Write: p.write}).Profile()
+}
+
+// launchFunc gives the command prefix that starts the runtime under a plan, for
+// the port the server is about to listen on. A start that fails and is retried on
+// another port asks again.
+type launchFunc func(port int) ([]string, error)
+
+// launcher renders the plan once, so a request that cannot be written down is
+// refused before a process exists, and returns the function a start calls with its
+// port. On macOS the prefix is `sandbox-exec -p <profile>` whatever the port. On
+// Linux it is the service's own binary as the launcher, and under a closed network
+// the port is the one thing the session may bind: the runtime's server, which the
+// service connects into.
+func (p *sandboxPlan) launcher() (launchFunc, error) {
+	base := p.shared()
+	if _, err := base.WrapInline(nil); err != nil {
+		return nil, err
+	}
+	return func(port int) ([]string, error) {
+		pl := *base
+		if pl.Mechanism == sandbox.MechanismLinux && pl.Network == fleet.SandboxNetworkClosed {
+			pl.BindTCP = []int{port}
+		}
+		return pl.WrapInline(nil)
+	}, nil
 }
