@@ -233,17 +233,19 @@ jobs:
         run: |
           msg="The Linux sandbox tests that need Landlock ABI 6 (Linux 6.12) did not run: set the repository variable MUSTER_LINUX_SANDBOX_RUNNER to a runner label whose kernel has it. The tests that need less run in the go job."
           echo "::warning title=Linux sandbox lane not configured::${msg}"
+          # Printed to the log as well as the summary: the summary is not in the log,
+          # and what this runner's kernel offers is the fact the warning is about.
           {
             echo "### Linux sandbox lane not configured"
             echo
             echo "${msg}"
             echo
             echo '```'
-            uname -r
-            cat /sys/kernel/security/lsm || true
+            echo "uname -r: $(uname -r)"
+            echo "active security modules: $(cat /sys/kernel/security/lsm 2>/dev/null || echo unknown)"
             go test ./internal/sandbox -run TestHostFacts -count=1 -v | grep -E 'kernel|Landlock|REQUIRE' || true
             echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
   # The macOS half stops short of loading: a Background launchd job needs a login
   # session a hosted runner does not give. It does run the real install path as
