@@ -203,6 +203,9 @@ func (s *Service) recordUnavailable(o OptionalRuntime, cause fleet.UnavailableCa
 		s.unavailable = make(map[fleet.RuntimeId]unavailableRuntime)
 	}
 	s.unavailable[o.Runtime] = u
+	// The row (and the source) this runtime lists as just changed, and nothing
+	// stamps an event for it: no driver exists to publish one (muster #464).
+	s.lists.invalidate()
 }
 
 // unavailableError is what a create naming an enabled-but-unusable runtime

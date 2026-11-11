@@ -294,9 +294,13 @@ func mutating(svc *Service, cfg Config, next http.HandlerFunc) http.HandlerFunc 
 			// Run first, then log what actually happened. Logging the
 			// authorization decision as though it were the outcome made a
 			// destroy and a refusal indistinguishable in the trail.
-			aw := &auditWriter{ResponseWriter: w}
+			gw := &generationWriter{ResponseWriter: w, svc: svc}
+			aw := &auditWriter{ResponseWriter: gw}
 			logActingDrop(p, r)
-			next(aw, r)
+			func() {
+				defer gw.settle()
+				next(aw, r)
+			}()
 			logMutation(p, need, target, r, aw.status)
 			return
 		}
@@ -313,9 +317,59 @@ func mutating(svc *Service, cfg Config, next http.HandlerFunc) http.HandlerFunc 
 			writeError(w, &fleet.Error{Kind: fleet.ErrorUnauthorized, Message: why, Machine: target})
 			return
 		}
-		next(w, r)
+		gw := &generationWriter{ResponseWriter: w, svc: svc}
+		defer gw.settle()
+		next(gw, r)
 	}
 }
+
+// generationWriter moves the list snapshot's generation when a verb that was
+// admitted finishes, and again before its first byte reaches the client.
+//
+// The event plane does not stamp every effect of a mutating request (a close, a
+// create with no labels), and the driver's own event for the rest can arrive
+// after the response. A client that closes a session and immediately lists must
+// not be told it is still there by a snapshot built a moment before, so the
+// generation moves before the response can be read — on the first write, and
+// once more when the handler returns, which covers a handler that never wrote
+// and a write that was flushed early. A refused request (the gates above) never
+// gets here, so a caller without the grant cannot churn the snapshot.
+type generationWriter struct {
+	http.ResponseWriter
+	svc    *Service
+	bumped bool
+}
+
+func (g *generationWriter) bump() {
+	if !g.bumped {
+		g.bumped = true
+		g.svc.lists.invalidate()
+	}
+}
+
+func (g *generationWriter) settle() {
+	g.svc.lists.invalidate()
+}
+
+func (g *generationWriter) WriteHeader(code int) {
+	g.bump()
+	g.ResponseWriter.WriteHeader(code)
+}
+
+func (g *generationWriter) Write(b []byte) (int, error) {
+	g.bump()
+	return g.ResponseWriter.Write(b)
+}
+
+func (g *generationWriter) Flush() {
+	g.bump()
+	if f, ok := g.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap lets http.ResponseController reach the real writer.
+func (g *generationWriter) Unwrap() http.ResponseWriter { return g.ResponseWriter }
 
 // reading gates every read route behind Config.Principals' read grant (§6)
 // — the read-side counterpart mutating already provides for every mutating
@@ -654,6 +708,11 @@ func handleHealth(svc *Service) http.HandlerFunc {
 			// describes — looking at a healthy-looking number that is
 			// actually just recent.
 			"counters": svc.counterSnapshot(),
+			// How the list snapshot is doing (muster #464): reads served from it,
+			// builds it ran, and reads that could not use it (nobody watching, a
+			// fleet read with peers, a runtime the watch does not cover). Like
+			// every count here it resets on restart, so read it against startedAt.
+			"listSnapshot": svc.lists.counters(),
 		}
 		// muster #414: which external delivery modules the operator enabled and
 		// which of them were found. Present only when one was configured, so a
@@ -734,6 +793,21 @@ func handleListSessions(svc *Service) http.HandlerFunc {
 			Agent:     fleet.AgentId(q.Get("agent")),
 			CwdPrefix: q.Get("cwdPrefix"),
 			Labels:    labels,
+		}
+
+		// An unchanged read is answered from the snapshot, and a conditional one
+		// with no body at all (muster #464; listsnapshot.go for what unchanged may
+		// mean and when this declines). Declining is not an error: the read below
+		// is exactly what every read used to be.
+		served, serr := svc.listFromSnapshot(r.Context(), requestFrom(r), scope, filter, parseDeadline(r),
+			strings.Join(r.Header.Values("If-None-Match"), ","))
+		if serr != nil {
+			writeError(w, &fleet.Error{Kind: fleet.ErrorInvalid, Message: serr.Error()})
+			return
+		}
+		if served != nil {
+			writeListServed(w, served)
+			return
 		}
 
 		// Read the sequence position BEFORE enumerating, so a client that

@@ -122,6 +122,11 @@ type Service struct {
 	// #330) — see inputaudit.go.
 	inputAudit *inputAuditStore
 
+	// lists keeps the last listing it built for each distinct question, so a read
+	// with no change since can be answered without enumerating (muster #464) —
+	// see listsnapshot.go for what "no change" is allowed to mean.
+	lists *listSnapshots
+
 	// peerKeys is the rotation overlay for principals that sign (muster #350),
 	// and sigReplay the nonces of the signatures already accepted.
 	peerKeys  *peerKeyStore
@@ -345,6 +350,7 @@ func newService(self fleet.MachineId) *Service {
 		labels:     newLabelStore(),
 		history:    newHistoryStore(self),
 		inputAudit: newInputAuditStore(),
+		lists:      newListSnapshots(),
 		peerKeys:   newPeerKeyStore(),
 		sigReplay:  peerkey.NewReplayCache(maxSignedNonces),
 		// #130: every instance starts with the shipped default in force,
@@ -440,6 +446,7 @@ func (s *Service) RegisterLocalDriver(runtime fleet.RuntimeId, d driver.Driver) 
 	defer s.mu.Unlock()
 	s.local[runtime] = d
 	delete(s.unavailable, runtime)
+	s.lists.invalidate() // under mu, so a reader sees the set and the generation together
 	return nil
 }
 
@@ -452,6 +459,7 @@ func (s *Service) RegisterPeerDriver(machine fleet.MachineId, d driver.Driver) e
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.peers[machine] = d
+	s.lists.invalidate()
 	return nil
 }
 
@@ -462,6 +470,7 @@ func (s *Service) UnregisterPeerDriver(machine fleet.MachineId) driver.Driver {
 	defer s.mu.Unlock()
 	d := s.peers[machine]
 	delete(s.peers, machine)
+	s.lists.invalidate()
 	return d
 }
 
@@ -701,6 +710,26 @@ func (s *Service) localDrivers() []driver.Driver {
 	return out
 }
 
+// localSeat is one local driver's place in a freshly started lane: the runtime
+// it serves, the driver, and the token its pump reports its health through.
+type localSeat struct {
+	rt  fleet.RuntimeId
+	d   driver.Driver
+	tok *pumpTok
+}
+
+// localSeats takes one seat per registered local driver, every one deaf until
+// its pump says otherwise (see pumpTok).
+func (s *Service) localSeats() []localSeat {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]localSeat, 0, len(s.local))
+	for rt, d := range s.local {
+		out = append(out, localSeat{rt: rt, d: d, tok: &pumpTok{rt: rt, deaf: true}})
+	}
+	return out
+}
+
 func (s *Service) peerDrivers() map[fleet.MachineId]driver.Driver {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -725,6 +754,16 @@ func effectiveDeadline(driverMs int64, req time.Duration) time.Duration {
 // never touches peers (§13.1); ScopeFleet asks every local driver plus
 // every peer driver and merges the results into one envelope.
 func (s *Service) ListSessions(ctx context.Context, req fleet.Request, scope Scope, filter driver.ListFilter, callerDeadline time.Duration) (fleet.Collection[fleet.Session], error) {
+	col, _, err := s.listSessions(ctx, req, scope, filter, callerDeadline)
+	return col, err
+}
+
+// listSessions is ListSessions, and also reports whether every driver it asked
+// answered ok. That is not the same as the envelope being complete: a runtime
+// still being retried adds a source of its own (muster #300) that is not ok and
+// that no driver could have changed, and a snapshot may keep a listing that
+// carries one (see listsnapshot.go) but never one a driver failed to answer.
+func (s *Service) listSessions(ctx context.Context, req fleet.Request, scope Scope, filter driver.ListFilter, callerDeadline time.Duration) (col fleet.Collection[fleet.Session], driversOK bool, err error) {
 	var items []fleet.Session
 	var sources []fleet.SourceStatus
 
@@ -766,6 +805,10 @@ func (s *Service) ListSessions(ctx context.Context, req fleet.Request, scope Sco
 		sources = append(sources, srcs...)
 	}
 
+	// Every source so far came from a driver that was asked; the ones added
+	// below are the service's own statements.
+	driversOK = len(sources) == 0 || allSourcesOK(sources)
+
 	// An enabled runtime still being retried has no driver, so nothing above
 	// asked it — and whatever sessions it keeps are not in `items`. Saying so
 	// is this service's job: a driver cannot report on a runtime that has not
@@ -778,6 +821,7 @@ func (s *Service) ListSessions(ctx context.Context, req fleet.Request, scope Sco
 			its, srcs := s.callList(ctx, req, machine, d, filter, callerDeadline)
 			items = append(items, its...)
 			sources = append(sources, srcs...)
+			driversOK = driversOK && allSourcesOK(srcs)
 		}
 	}
 
@@ -803,7 +847,8 @@ func (s *Service) ListSessions(ctx context.Context, req fleet.Request, scope Sco
 		sources = []fleet.SourceStatus{{Machine: s.self, Status: fleet.SourceOK, ObservedAt: time.Now()}}
 	}
 
-	return fleet.NewCollection(items, sources)
+	col, err = fleet.NewCollection(items, sources)
+	return col, driversOK, err
 }
 
 // allSourcesOK reports whether a listing's sources all answered ok.

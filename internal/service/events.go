@@ -182,6 +182,17 @@ type hub struct {
 	linger       time.Duration
 	lingerTimer  *time.Timer
 
+	// laneGen counts the times the LOCAL lane has started or stopped, and
+	// localPumps holds one token per driver the running lane is pumping (see
+	// pumpTok). Together they are what lets a list snapshot ask "is every local
+	// runtime being watched right now, without a hole?" (listsnapshot.go): a
+	// lane that stops and starts again takes a fresh baseline that absorbs
+	// whatever changed in between WITHOUT stamping an event, so a snapshot built
+	// before the stop must not survive it, and laneGen is what tells them apart.
+	// Both guarded by mu.
+	laneGen    uint64
+	localPumps map[*pumpTok]struct{}
+
 	// ensure serialises the whole of ensureStreamForce: reading what the lanes
 	// are doing, deciding, and recording the lanes it starts. mu alone cannot do
 	// that — it is released between the read and the record, which is how two
@@ -537,7 +548,78 @@ func (h *hub) stopLanesLocked() []context.CancelFunc {
 	}
 	h.streamOn, h.streamCancel = false, nil
 	h.peerOn, h.peerCancel = false, nil
+	h.laneGen++
+	h.localPumps = nil
 	return cancels
+}
+
+// pumpTok is one local driver's seat in the running lane: which runtime it is
+// for, and whether its subscription is currently NOT delivering (deaf) — not
+// yet attached, failed, or ended and waiting to be retried. It is created deaf,
+// because a pump that has not yet subscribed has observed nothing.
+//
+// The pump reports through setDeaf; a token the hub no longer lists (its lane
+// was replaced or stopped) is ignored, so a pump winding down after its lane
+// ended cannot mark the next lane's state. A driver that cannot stream at all
+// (ErrUnsupported) stays deaf for the life of the lane, which is what keeps a
+// list snapshot from ever claiming it watches that runtime.
+type pumpTok struct {
+	rt   fleet.RuntimeId
+	deaf bool // guarded by hub.mu
+}
+
+// setDeaf records whether tok's subscription is currently not delivering.
+func (h *hub) setDeaf(tok *pumpTok, deaf bool) {
+	if tok == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if _, live := h.localPumps[tok]; live {
+		tok.deaf = deaf
+	}
+}
+
+// coversLocal reports whether this service is, right now, observing every one
+// of the registered local runtimes with nothing narrowed away, together with
+// the two numbers a snapshot is stamped with: the event cursor and the lane
+// generation. It answers false unless ALL of these hold:
+//
+//   - the local lane is running (a stopped lane stamps nothing, so the cursor
+//     is frozen while the world moves — the same reason FeedPosition withholds
+//     it);
+//   - the lane is unfiltered, so a change to any session reaches the hub;
+//   - the lane pumps exactly the registered runtimes (one registered after the
+//     lane started is never pumped by it);
+//   - no pump is deaf.
+//
+// What it does NOT establish: that every field of a row change with an event.
+// Some do not (see listsnapshot.go), which is why a snapshot also has an age
+// bound.
+func (h *hub) coversLocal(registered []fleet.RuntimeId) (cursor int64, laneGen uint64, ok bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	cursor, laneGen = h.cursor, h.laneGen
+	if !h.streamOn || len(h.streamFilter.Sessions) > 0 || h.streamFilter.CwdPrefix != "" {
+		return cursor, laneGen, false
+	}
+	if len(h.localPumps) != len(registered) {
+		return cursor, laneGen, false
+	}
+	want := make(map[fleet.RuntimeId]struct{}, len(registered))
+	for _, rt := range registered {
+		want[rt] = struct{}{}
+	}
+	for tok := range h.localPumps {
+		if tok.deaf {
+			return cursor, laneGen, false
+		}
+		if _, listed := want[tok.rt]; !listed {
+			return cursor, laneGen, false
+		}
+		delete(want, tok.rt)
+	}
+	return cursor, laneGen, len(want) == 0
 }
 
 func (h *hub) lingerExpired() {
@@ -801,12 +883,21 @@ func (s *Service) ensureStreamForce(ctx context.Context, force bool) {
 			cancel()
 		}
 		streamCtx, newCancel := context.WithCancel(context.WithoutCancel(ctx))
+		seats := s.localSeats()
 		h.mu.Lock()
 		h.streamOn, h.streamFilter, h.streamCancel = true, wantLocal, newCancel
+		// The lane's identity, recorded in the same critical section that turns
+		// it on: every seat starts deaf and the generation moves, so a reader of
+		// coversLocal can never see "on" without also seeing who is watched.
+		h.laneGen++
+		h.localPumps = make(map[*pumpTok]struct{}, len(seats))
+		for _, seat := range seats {
+			h.localPumps[seat.tok] = struct{}{}
+		}
 		h.mu.Unlock()
 
-		for _, d := range s.localDrivers() {
-			go s.pump(streamCtx, s.self, d, fleet.SystemRequest(), wantLocal)
+		for _, seat := range seats {
+			go s.pump(streamCtx, s.self, seat.d, fleet.SystemRequest(), wantLocal, seat.tok)
 		}
 	}
 
@@ -831,7 +922,7 @@ func (s *Service) ensureStreamForce(ctx context.Context, force bool) {
 				// Peers need an authority a local driver does not: see
 				// Service.peerCredential for why this is the service's own and
 				// not some subscriber's.
-				go s.pump(peerCtx, m, d, s.peerRequest(), wantPeer)
+				go s.pump(peerCtx, m, d, s.peerRequest(), wantPeer, nil)
 			}
 		}
 	}
@@ -861,7 +952,14 @@ func (s *Service) ensureStreamForce(ctx context.Context, force bool) {
 // transition only, the way machine.quota is — a subscriber told it is deaf can
 // re-list, and one told the feed is back knows to, because the gap it just
 // lived through was never in the sequence to be replayed.
-func (s *Service) pump(ctx context.Context, machine fleet.MachineId, d driver.Driver, req fleet.Request, filter driver.SubscribeFilter) {
+//
+// tok is this pump's seat in the local lane (nil for a peer's): it is told, in
+// order, whenever the subscription is not delivering, so a list snapshot never
+// relies on a stream that has a hole in it. Deaf is set BEFORE the gap is
+// announced and cleared only AFTER the restoration is, so no reader can see a
+// pump as watching between the moment it stopped and the moment it is
+// believed.
+func (s *Service) pump(ctx context.Context, machine fleet.MachineId, d driver.Driver, req fleet.Request, filter driver.SubscribeFilter, tok *pumpTok) {
 	backoff := pumpBackoffMin
 	gapAnnounced := false
 
@@ -874,6 +972,7 @@ func (s *Service) pump(ctx context.Context, machine fleet.MachineId, d driver.Dr
 			if ctx.Err() != nil {
 				return
 			}
+			s.events.setDeaf(tok, true)
 			if !gapAnnounced {
 				s.announceFeedGap(machine, err)
 				gapAnnounced = true
@@ -901,6 +1000,7 @@ func (s *Service) pump(ctx context.Context, machine fleet.MachineId, d driver.Dr
 			s.announceFeedRestored(machine)
 			gapAnnounced = false
 		}
+		s.events.setDeaf(tok, false)
 		backoff = pumpBackoffMin
 
 		err = s.drainStream(ctx, stream, func(ev fleet.Event) {
@@ -913,6 +1013,7 @@ func (s *Service) pump(ctx context.Context, machine fleet.MachineId, d driver.Dr
 		// The stream ended while somebody was still listening. That is a gap
 		// whatever ended it, and the subscription that replaces it will start
 		// from a fresh baseline.
+		s.events.setDeaf(tok, true)
 		if !gapAnnounced {
 			s.announceFeedGap(machine, err)
 			gapAnnounced = true

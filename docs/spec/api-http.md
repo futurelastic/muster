@@ -133,6 +133,7 @@ GET /v1/health
                        "reason": "the ... runtime is enabled, but ...",
                        "capabilities": { "deadlineMs": 30000,
                                          "source": "assumed" } } ],
+        "listSnapshot": { "served": 0, "built": 0, "bypassed": 0 },   ← §3.2, counted since start
         "modules": { "enabled": ["relay-a", "relay-b"],   ← only when a delivery module is configured (#414)
                      "loaded": ["relay-a"],
                      "skipped": [ { "name": "relay-b",
@@ -800,6 +801,80 @@ actually observing a driver; with nothing subscribed the cursor is frozen while
 the fleet keeps moving, so a number handed out then would look resumable and
 would silently skip everything before the first subscription. A client that
 finds no `feed` has its ordering backwards: **watch first, list second.**
+
+**The list carries a validator when the service can keep its answer current**
+(muster #464).
+
+```
+GET /v1/sessions?...                          If-None-Match: "<validator>"
+→ 200 Collection<Session>   ETag: "<validator>"
+→ 304                       ETag: "<validator>"      (no body)
+```
+
+A response MAY carry a strong `ETag`. It is opaque — send it back, do not read
+it — and it names one built answer to one question: the scope and the filter are
+part of it, so a request with another `status`, `agent`, `cwdPrefix` or `label`
+set has another validator, and one question's validator never matches another's.
+A request whose `If-None-Match` names the **current** validator is answered `304
+Not Modified` with the `ETag` and no body, and the service does not enumerate
+its drivers to say so. The header may be a list (`"a", "b"`), `*` matches any
+current answer, and a `W/` prefix is ignored — the weak comparison RFC 9110
+§13.1.2 prescribes for this header. A validator that is not current is not an
+error: the answer is a `200` with the body and the new validator. Both carry
+`Cache-Control: private, no-cache` (a stored copy must be revalidated before it
+is used) and `Vary: Authorization` (a principal pinned to this machine is
+answered locally for the same URL, see above).
+
+**What a validator promises:** that nothing this service can observe has changed
+since the body was built, and that the fields nothing observes are at most five
+seconds old. The service keeps its last answer for each question and drops it
+when any of these happens:
+
+- an event is stamped into the sequence of §4 — any event, for any session;
+- a request that creates, changes or ends a session is admitted: the answer is
+  dropped before that request's response can be read, so a client that closes a
+  session and then lists is never told it is still there, whether or not the
+  driver's own event has arrived yet;
+- a runtime registers, or the retry state of one that has not registered
+  changes (§3.1, #300);
+- a peer is configured or removed;
+- this service's watch of its own machine starts, stops, or loses a driver's
+  subscription;
+- five seconds have passed.
+
+The five seconds are not decoration. Some fields of a row change without an
+event — a driver reports a state change only when it is material, and
+`conversation`, `model` and the like are read when the listing is built — so a
+kept answer can be up to five seconds behind in exactly those. `observedAt` in
+`sources` is when it was built. A client that needs the changes themselves, not
+a recent list, should build a mirror (§4.1) rather than poll with a validator.
+
+**When there is no validator.** The `ETag` is absent, and the read is exactly
+what it was before validators existed — every driver enumerated, every row
+built — when:
+
+- **nothing is watching this service.** Its sequence is frozen while the world
+  moves (the reason `feed` is absent, above), so it has no way to know that an
+  answer is unchanged. A client that wants validators from a service it does not
+  otherwise watch has to watch it (§4.1);
+- **the watch does not cover every local runtime**: it is narrowed to named
+  sessions, a runtime registered after it started, or a driver's subscription is
+  down or unsupported;
+- **a driver that was asked did not answer `ok`**, including one the caller's
+  `Fleet-Deadline-Ms` cost it. Only a clean answer is kept; a later reader never
+  inherits a degraded one;
+- **`scope=fleet` and at least one peer is configured.** A peer's rows are
+  fetched with the caller's own credential (§13), so one kept answer cannot be
+  shared between callers, and this service hears a peer's changes only while a
+  fleet-scoped watcher exists, so it could not promise that the validator moves
+  when a peer's row does. With no peer configured a fleet read **is** the local
+  read, and carries the same validator as `scope=local`.
+
+An answer that has a validator always carries `feed` as well, and a `304` means
+the `feed` the client already holds is still the current position: nothing has
+been stamped since. `GET /v1/health` reports `listSnapshot` — reads answered
+from a kept answer, answers built, and reads that could not use one — counted
+since start, so a deployment can read its own hit rate.
 
 #### Closed sessions
 
@@ -3158,6 +3233,12 @@ Step 1 before step 2 is not decoration. The service watches only while somebody
 is subscribed, and the first watch is what makes the sequence live; a listing
 taken before it carries no `feed` at all, which is the service telling you the
 ordering is wrong rather than handing you a cursor that would skip.
+
+A client that would otherwise poll `GET /v1/sessions` to learn what changed
+should build a mirror instead. A conditional list (§3.2) saves the body, not
+the question: every unchanged poll is still a request, and every changed one is
+a full listing. The watch is the one delta transport this API has, deliberately
+the only one, which is why the list has no `since=`.
 
 ## 5. Authorization
 
