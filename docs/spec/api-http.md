@@ -25,6 +25,9 @@ served, and the federated ones have been exercised peer to peer.
   <runtime-id>`, and `Fleet-Runtime-Resolution: default` when a configured
   default runtime was the tiebreak (session-abstraction.md §7.1a). See §3.3's
   `rename` entry for the full rule.
+- A `runtime` query parameter on a session-addressed call to a **peer** is
+  forwarded to it unchanged, so the peer's own resolution can use it (§3.3's
+  `rename` entry); a call that gave none is forwarded exactly as before.
 
 ## 2. Error model
 
@@ -2108,6 +2111,25 @@ never reaches this machine's local runtimes at all for a peer-addressed
 call — see session-abstraction.md §13.1 and §7.1a's federation note — so
 there is no local runtime id to report and the configured default plays no
 part in it.
+
+**A `runtime` the caller supplied on a peer-addressed call is forwarded to the
+peer, verbatim, as `runtime=` on the call it makes** (muster #461). This
+machine does not interpret it — it holds no record of the peer's runtimes, and
+the resolution stays the peer's (session-abstraction.md §13.1) — but the
+caller's word is the one thing that settles an id the peer holds under two of
+its runtimes, which the peer otherwise answers `invalid` (400) asking for
+`?runtime=`. That answer, and a `not_found` for a runtime the peer does not
+have, reach the caller as the peer's own. It is forwarded on every
+session-addressed operation that accepts `runtime` here, and on none that does
+not address a session (`create` carries its runtime in the body; a listing is
+not addressed to one). A call that supplies no `runtime` reaches the peer
+exactly as it did before: no query key is added.
+
+On `GET …/sessions/{id}`, which this machine answers from the peer's listing,
+naming a `runtime` also picks the listed row: the one whose `runtime` is the
+one named. A row that states no runtime (a peer older than the field) stands
+only when it is the single row with that id, and when none qualifies the call
+falls through to the peer's own answer for it.
 
 > Origin: session-abstraction.md Appendix A, F1; the default-runtime
 > tiebreak and its headers: muster issue #60.

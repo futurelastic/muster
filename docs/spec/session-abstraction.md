@@ -995,6 +995,7 @@ was refused before any delivery was attempted.
 Request {
   caller : Caller
   expect : Expectation
+  runtimeHint? : RuntimeId  // the runtime the caller named for a session-addressed call (muster #461)
 }
 
 Caller {
@@ -1037,6 +1038,16 @@ rule, which the first remote driver adopts, is to hold no credential at all.
 caller that omits it gets whatever weaker check a driver can offer from its own
 sightings — and must be **told which it got** when the operation refuses, so a
 weak check is never mistaken for a strong one.
+
+`runtimeHint` is the runtime the caller named on a session-addressed call
+(`?runtime=`, api-http.md §3.3), absent when it named none. It is something the
+caller *said* about how to resolve the target, not a fact about the target, so
+it is a field here and not part of a session reference, which is an address. A
+local resolution consumes it where the call is handled. It is carried because a
+peer resolves its own runtimes (§13.1): a remote driver forwards it, verbatim,
+on the peer-addressed call it makes, and a call without it goes out exactly as
+it would have before the field existed. Operations that address no session
+(`create`, which carries its runtime in its body, and listings) ignore it.
 
 **What does not belong here:** deadlines, which the context already carries and
 §4.4 already governs — a second field would be a second source of truth about
@@ -3006,7 +3017,10 @@ and this service does not recurse into asking it to disambiguate (§13.1).
 The default is machine-local in the sharpest sense: applying THIS machine's
 default to an id addressed at a peer would make one bare id mean different
 sessions depending on which machine answered it, exactly the fork this
-section's `(machine, id)` addressing exists to prevent.
+section's `(machine, id)` addressing exists to prevent. What the caller
+*named* is a different matter: a `runtime` it supplied is the caller's own word,
+not this machine's guess, and travels to the peer as `Request.runtimeHint`
+(§2.6), where the peer's resolution may use it (muster #461).
 
 ### 7.2 Peers are statically configured
 
