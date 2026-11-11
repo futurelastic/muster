@@ -192,3 +192,44 @@ func logDenied(p Principal, g Grant, target fleet.MachineId, r *http.Request) {
 	log.Printf("audit: actor=%q verb=%s route=%s target=%s/%s outcome=DENIED",
 		actorOf(p, r), g, routeOf(r), target, r.PathValue("id"))
 }
+
+// logContentRead writes the audit line of a read of session content (muster #441:
+// the record route).
+//
+// # How it is told apart from a state read
+//
+// A state read (a listing, a single session, the composer's digest) writes no
+// line of this shape, and a content read writes exactly this one, with its own
+// event name where a mutation carries `verb=`: `grep 'audit: content-read'`
+// selects every record read and nothing else. It states who, which session and
+// how many entries left, how it ended and how long it took — never what the
+// entries said, the cursor, or the model.
+//
+// A read relayed to a peer writes one line on each machine: the entry machine
+// names the caller, the owning machine names the caller it was told about
+// ("X via <entry machine>"), the same shape every relayed verb has.
+//
+// reason is set only for the operator's refusal (`record-off`), so the line says
+// why nothing was served. A refusal for a missing grant is logDenied's line, from
+// recordGate, which runs before this handler could write one.
+func logContentRead(r *http.Request, target fleet.MachineId, id string, entries, status int, reason string) {
+	actor := callerFrom(r).Principal
+	if p, ok := principalOf(r); ok {
+		actor = actorOf(p, r)
+	}
+	outcome := outcomeOf(status)
+	if reason != "" {
+		// The operator's refusal answers 501, which outcomeOf reads as a failure.
+		// It is a decision, not a fault, and the line should say so.
+		outcome = "refused"
+	}
+	line := fmt.Sprintf("audit: content-read actor=%q route=%s target=%s/%s entries=%d outcome=%s status=%d",
+		actor, routeOf(r), target, id, entries, outcome, status)
+	if t, ok := timingOf(r); ok {
+		line += " took=" + strconv.FormatInt(driver.Millis(time.Since(t.start)), 10)
+	}
+	if reason != "" {
+		line += " reason=" + reason
+	}
+	log.Print(line)
+}

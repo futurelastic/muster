@@ -1030,6 +1030,12 @@ func main() {
 		if svcCfg.Profiling {
 			log.Printf("muster: profiling endpoint ON (profilingEndpoint) — GET /v1/debug/pprof/ for principals holding the debug grant; restart to turn it off")
 		}
+		// The record route (muster #441): served unless the operator refused it
+		// wholesale here. The grant that guards it is nobody's by default.
+		svcCfg.RefuseRecord = cfgFile.RefuseRecordReads
+		if svcCfg.RefuseRecord {
+			log.Printf("muster: record route REFUSED (refuseRecordReads) — GET …/record answers 501 \"record-off\" for every caller; restart to turn it back on")
+		}
 		for _, p := range principals {
 			log.Printf("muster: principal %q grants=%v", p.Name, p.Grants)
 		}

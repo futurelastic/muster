@@ -164,5 +164,12 @@ func legacyGrants(cfg Config) []string {
 	if cfg.AllowPeerRelay {
 		out = append(out, string(GrantRelay))
 	}
+	// The record route has no mutation gate to mirror: with no principal table a
+	// valid token is the credential for it, as for turns (recordGate). Reporting
+	// otherwise would tell a client its own credential cannot do what it can —
+	// unless the operator refused the route wholesale (Config.RefuseRecord).
+	if !cfg.RefuseRecord {
+		out = append(out, string(GrantRecord))
+	}
 	return out
 }

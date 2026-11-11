@@ -45,7 +45,7 @@ served, and the federated ones have been exercised peer to peer.
 | `unauthorized` | 401 / 403 | Caller not permitted for this verb on this machine; or a principal pinned to this machine that named another (`reason: "local-only"`, §5) — no grant would help |
 | `not_found` | 404 | The machine answered, and there is no such session |
 | `conflict` | 409 | Idempotency key reused with a different body; a replayed key whose session has since ended (`reason: "replay-of-ended-session"`, §3.3); or a destructive request whose `startedAt` disagrees with the live session (§5.4) — the request is well formed, the caller's belief is stale |
-| `unsupported` | 501 | Driver lacks the capability (§4.3 of the model); or a runtime this machine's operator enabled has no working driver and no retry under way (`reason: "runtime-unavailable"`, §3.1); or, on macOS, a create that would start the terminal runtime's session server from a context other than `Background` (`reason: "unsafe_server_context"`, `retryable: false`, §3.1); or a create whose `posture` the resolved runtime cannot enforce (`reason: "posture-unenforceable"`, `retryable: false`, §3.2) |
+| `unsupported` | 501 | Driver lacks the capability (§4.3 of the model); or a runtime this machine's operator enabled has no working driver and no retry under way (`reason: "runtime-unavailable"`, §3.1); or, on macOS, a create that would start the terminal runtime's session server from a context other than `Background` (`reason: "unsafe_server_context"`, `retryable: false`, §3.1); or a create whose `posture` the resolved runtime cannot enforce (`reason: "posture-unenforceable"`, `retryable: false`, §3.2); or the record route on a machine whose operator refused it (`reason: "record-off"`, §3.2) — no grant would help |
 | `unreachable` | 504 | **The machine did not answer.** Nothing is known. Also a runtime that is enabled and still being retried (`reason: "runtime-unavailable"`, `retryable: true`, §3.1) |
 
 **`not_found` and `unreachable` must never be conflated.** One means the fleet
@@ -174,9 +174,10 @@ GET /v1/runtimes
                                        "validatesModel": true,
                                        "remoteControl": { "toggle": true,
                                                           "off": true },
-                                       "readsTurns": true,          ← these four are absent when the runtime
-                                       "reportsConversation": true,    did not declare them: NOT DECLARED,
-                                       "respond": { "kinds": ["tool-permission"],   never "cannot" (#379)
+                                       "readsTurns": true,          ← these five are absent when the runtime
+                                       "readsRecord": true,            did not declare them: NOT DECLARED,
+                                       "reportsConversation": true,    never "cannot" (#379, #441)
+                                       "respond": { "kinds": ["tool-permission"],
                                                     "unclassified": false },
                                        "permissionModeChange": { "live": false },
                                        "source": "observed",
@@ -1409,6 +1410,59 @@ with a principal table the `send` grant — the one `input` and `respond` requir
 and not `relay` for a peer target; the owning machine applies its own table to the
 asserted caller. Each read is audited (caller, session, number of turns, outcome),
 never the text. Unrelated to `SessionState.turns`, the liveness count.
+
+```
+GET /v1/machines/{machine}/sessions/{id}/record?since=&limit=&startedAt=&runtime=
+→ 200 { "messages": [ { "at": "...", "kind": "text", "role": "user" | "assistant",
+                        "text": "...", "model": "..."?, "truncated": true? } ],   ← oldest first
+        "next": "<opaque cursor>", "format": 1 }
+→ 200 { "messages": [], "next": "...", "format": 1 }   ← nothing (new): a normal answer to a poll
+→ 400 invalid        limit outside 1..100 (refused, not clamped); startedAt not RFC 3339;
+                     `since` is not a record cursor (a `turns` cursor is not one)
+→ 401 unauthorized   a principal table is configured and the caller lacks `record`
+→ 404 not_found      no such session; or the session exists but no readable record
+                     of its conversation could be identified (retryable: true)
+→ 409 conflict       startedAt disagrees with the live session; or `since` was issued
+                     for another conversation / points past the end of the record
+→ 501 unsupported    the runtime, or the peer's build, cannot read a record
+→ 501 unsupported    reason "record-off" — this machine's operator refused the route
+                     (`refuseRecordReads`); no grant would help
+```
+
+A session's record, oldest first (muster #441; session-abstraction.md §2.16 as
+settled by `docs/adr/441-a-sessions-full-record-is-read-under-its-own-grant.md`).
+It is a route of its own beside `turns`, with its own wire type, its own cursor
+and its own grant, and `turns` is unchanged. A message is `{at, kind, role, text?,
+tool?, parent?, model?, media?, truncated?}`; `format` is `1` and changes only when
+a key is renamed or removed, so a client skips a `kind` it does not know.
+
+**What a runtime emits is the allow-list of its own reader**, held where the record
+is read and nowhere downstream. The terminal runtime emits `text` entries in both
+directions: the assistant's prose (the same predicate as `turns`, with `model`) and
+what a person typed — a top-level user entry of human origin whose content is text
+only and is not the runtime's own markup. Tool calls and results, reasoning,
+sub-agent entries, summaries, system and hook output, attachments, images and a
+message another session sent in are left out, and so is any entry the reader cannot
+classify with certainty. The `opencode` runtime and the test stub declare
+`readsRecord: false` and answer `501` (a later change adds a reader for the first).
+
+The cursor is opaque, bound to the conversation it was issued against, and its own:
+it is `400` on `turns`, and a `turns` cursor is `400` here. Without `since` the most
+recent `limit` entries (default 20, at most 100) are returned; `next` is returned
+even when `messages` is empty. A text field over 64 KiB is cut on a rune boundary
+and carries `"truncated": true`. `startedAt` is corroborated against the live
+session before anything is read, exactly as for `turns`.
+
+**Authority.** With a principal table the `record` grant (§5) — not `read`, not
+`send`, not `relay` — and nothing is implied by anything else. Without one a valid
+token is the credential, as for `turns`. The owning machine applies its own table to
+the asserted caller. **The switch:** `"refuseRecordReads": true` in the config file
+(read at start) refuses the route wholesale on that machine — local, peer target and
+relayed in alike, whatever the caller holds — with `501`, `reason: "record-off"`; the
+grant is checked first. **Audit:** every read writes one `audit: content-read` line —
+caller, session, number of entries, outcome, `took=` — never the content, a cursor or
+a model; a refused caller leaves a `DENIED` line, and a read relayed to a peer is
+audited on each machine. The response is `Cache-Control: no-store`.
 
 ```
 GET /v1/machines/{machine}/sessions/{id}?runtime=
@@ -2941,7 +2995,7 @@ ordering is wrong rather than handing you a cursor that would skip.
   development.
 - Permissions are **per verb, per machine**. `list` and `state` may be granted
   broadly; `create`, `input`, `interrupt`, `close`, `rename`, `discard`, `keys`,
-  `label`, `remote-control`, `push-list`, `debug` and `acting-person` are granted per peer and default to denied. That default is deliberate
+  `label`, `remote-control`, `push-list`, `debug`, `record` and `acting-person` are granted per peer and default to denied. That default is deliberate
   and applies to a fresh deployment as much as an established one — no grant is
   implied by anything else, including a runtime advertising the capability the
   grant gates (§3, `keys`; muster #68).
@@ -2985,6 +3039,24 @@ ordering is wrong rather than handing you a cursor that would skip.
   it: a list that names it is refused whole, because whether this machine can be
   profiled, and by whom, is a local decision. A grant alone is not enough: the
   machine's operator must also switch the endpoint on, and it is off by default.
+- **`record` reads a session's whole record** (muster #441,
+  `GET …/{id}/record`, §3.2). It is the widest read this API has: a record carries
+  whatever the session did and was told — file bodies and command output once tool
+  results are carried, credentials an agent printed, the messages people and other
+  sessions sent in. Its own grant, ruled by the owner (2026-11-11), and not a rider
+  on `send`: `turns` stays on `send` (muster #258) and reads the agent's own prose
+  only, so holding `send` does not reveal a record. Denied by default like every
+  grant, and nothing implies it: not `read`, `send` or `relay`, not the legacy
+  all-verbs flags, and not the set `muster service install` enrols the local
+  service principal with — nobody holds it until an operator writes it down. A
+  signed machine list may name it for a peer: an explicit, owner-signed act, and
+  how one machine of a fleet is allowed to read another's records. For a peer
+  target it does not also require `relay` (muster #81); the machine that owns the
+  session applies its own table to the asserted caller, so a relayed read needs
+  `record` on the entry machine's principal and on the owner, for the principal the
+  entry machine relays as. A grant is not the only lock: the machine's operator may
+  refuse the route wholesale (`refuseRecordReads`, §3.2), which on a machine with no
+  principal table — where a valid token is the credential — is the only one.
 - **`acting-person` is attribution, not a verb** (muster #349). A mutating
   request may carry `Fleet-Acting-Person` (an opaque id) and
   `Fleet-Acting-Issuer` (the id of whatever minted it), both required together,
@@ -3108,14 +3180,18 @@ supervisor is asking the wrong service, or this service has begun to grow into
 a second supervisor.
 
 No endpoint returns a session's screen text, a raw transcript, or content a
-session produced, **except one narrow, owner-ruled route**:
-`GET …/{id}/turns` (§3.3, muster #258) returns what the session's own agent
+session produced, **except two owner-ruled routes, each on its own grant**:
+`GET …/{id}/turns` (§3.2, muster #258) returns what the session's own agent
 wrote — its assistant turns — and nothing else: no tool output, no inbound
-message, no system text. None stores a result on a session's behalf
-(session-abstraction.md §5.8, muster #82, as narrowed by
-`docs/adr/258-assistant-turns-read.md`). The data class is still one this
-service declines to carry in general, not a domain it doesn't understand; the
-exception is bounded by provenance, not by sensitivity. A dispatched agent's
+message, no system text; and `GET …/{id}/record` (§3.2, muster #441) returns a
+session's record under the `record` grant, in the kinds the runtime's reader
+admits (today, text in both directions). None stores a result on a session's
+behalf (session-abstraction.md §5.8, muster #82, as narrowed by
+`docs/adr/258-assistant-turns-read.md` and
+`docs/adr/441-a-sessions-full-record-is-read-under-its-own-grant.md`). The data
+class is still one this service declines to carry in general, not a domain it
+doesn't understand; the exceptions are bounded by provenance and by grant, not by
+sensitivity. A dispatched agent's
 answer may still be delivered by the agent, to a reply address the caller
 supplied at dispatch, over `input`; the two are complementary — one pushes, one
 pulls.

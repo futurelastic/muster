@@ -4,6 +4,11 @@
 **Status:** decided — the owner's ruling, 2026-10-04
 **Supersedes, narrowly:** [`82-session-result-belongs-above-this-layer.md`](82-session-result-belongs-above-this-layer.md)
 
+> **Superseded in part by [441](441-a-sessions-full-record-is-read-under-its-own-grant.md).**
+> The full-record route (`GET …/record`) has its own boundary and its own grant
+> (`record`), and may carry what this ADR kept out. Everything below still governs
+> `turns`, unchanged.
+
 ## Context
 
 #82 ruled that this API returns no content a session produced, and endorsed a

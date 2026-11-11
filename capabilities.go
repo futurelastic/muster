@@ -357,6 +357,16 @@ type DriverCapabilities struct {
 	// implements that interface as a relay, and a terminal driver implements it
 	// even where no record root is configured and every call would fail.
 	ReadsTurns *bool `json:"readsTurns,omitempty"`
+	// ReadsRecord reports whether GET …/record reads this runtime's record
+	// (muster #441). false means every call is unsupported; true does not
+	// promise any one session can be read (404 retryable, 409), and does not say
+	// this machine serves the route: an operator who set "refuseRecordReads"
+	// answers 501 with the reason "record-off" whatever a runtime can do. The
+	// flag is the runtime's, the switch is the operator's.
+	//
+	// Declared, not derived from driver.RecordReader, for the reason ReadsTurns
+	// gives.
+	ReadsRecord *bool `json:"readsRecord,omitempty"`
 	// ReportsConversation reports whether this driver looks for the record the
 	// runtime keeps of a session's conversation (Session.Conversation, §2.9).
 	// false means an absent conversation will never arrive; true means the

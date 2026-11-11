@@ -482,7 +482,7 @@ to it.
   `opencode` (which file holds [the machine's opencode agents](#agents-every-opencode-session-on-this-machine-receives)),
   `models` ([the model lists a client may offer](#models-a-client-may-offer-for-a-create)),
   `maxInputBytes`, `gateRemoteControlInput`, `closedRetentionDays`,
-  `inputAuditRetentionDays`, `profilingEndpoint` and `machineList` are read at start, so an edit that
+  `inputAuditRetentionDays`, `profilingEndpoint`, `refuseRecordReads` and `machineList` are read at start, so an edit that
   changes one of them is **refused whole**, naming it, and none of that edit —
   principals and peers included — is applied until the service restarts. The
   refusal also says whether the restart it points to would work: it runs the same
@@ -687,6 +687,26 @@ Every request is in the service log as `audit: … verb=debug …`, with `took=`
 The same log's `create` lines now end with `took=<ms>` and `phase.*` fields, so a
 slow create can be read from the log before any profile is needed. Contract:
 [`spec/api-http.md`](spec/api-http.md) §3.1.2 and §5.
+
+### Refusing record reads on this machine
+
+`GET …/sessions/{id}/record` returns a session's whole record, and it is guarded by
+the **`record`** grant, which nothing implies and nobody holds by default
+(`muster principal grant <name> record`; it is not in the set `muster service
+install` enrols). To refuse the route outright on this machine, whatever grants are
+held, add `"refuseRecordReads": true` to the config file and **restart** the service
+(it is read at start; an edit made while the service runs is refused whole, naming
+it). The start logs a line saying the route is refused. Every call then answers
+`501 unsupported` with the reason `record-off`, for a local session, a peer target
+and a call relayed in alike; the grant is checked first, so a caller without it
+learns nothing about how the machine is set up.
+
+This is the only lever on a machine with **no principal table**, where a valid
+token is the credential and reads the record as it reads everything else. Every
+read the route serves is in the service log as `audit: content-read …` — who, which
+session, how many entries, never the content. Contract:
+[`spec/api-http.md`](spec/api-http.md) §3.2 and §5, and
+[the decision](adr/441-a-sessions-full-record-is-read-under-its-own-grant.md).
 
 ## Windows
 

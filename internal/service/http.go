@@ -81,6 +81,17 @@ type Config struct {
 	// machine and at start, so a machine nobody is investigating offers nothing
 	// to profile.
 	Profiling bool
+
+	// RefuseRecord refuses the record route (GET …/sessions/{id}/record, muster
+	// #441) wholesale on this machine: every call answers unsupported with the
+	// reason "record-off", whatever grants the caller holds, for a local session,
+	// a peer target and a call relayed in alike. It is the operator's one lever
+	// over the widest read this API has, set in the config file
+	// (`refuseRecordReads`) per machine and at start, and it is the only lever on
+	// a machine with no principal table, where a valid token is the credential.
+	// Off by default: the grant that guards the route is already held by nobody
+	// until written down.
+	RefuseRecord bool
 }
 
 // NewMux builds the routing skeleton of api-http.md §3 over svc, using
@@ -116,6 +127,9 @@ func NewMux(svc *Service, cfg Config) *http.ServeMux {
 	mux.HandleFunc("GET /v1/machines/{machine}/sessions/{id}", withAuth(svc, cfg, reading(handleGetSession(svc))))
 	mux.HandleFunc("GET /v1/machines/{machine}/sessions/{id}/environment", withAuth(svc, cfg, reading(handleSessionEnvironment(svc))))
 	mux.HandleFunc("GET /v1/machines/{machine}/sessions/{id}/turns", withAuth(svc, cfg, revealing(handleTurns(svc))))
+	// The record route (muster #441): the wider sibling of turns, under its own
+	// grant (recordGate) and refusable wholesale by the operator (cfg.RefuseRecord).
+	mux.HandleFunc("GET /v1/machines/{machine}/sessions/{id}/record", withAuth(svc, cfg, recordGate(handleRecord(svc, cfg.RefuseRecord))))
 	mux.HandleFunc("GET /v1/machines/{machine}/sessions/{id}/composer", withAuth(svc, cfg, reading(handleComposer(svc))))
 	mux.HandleFunc("POST /v1/machines/{machine}/sessions/{id}/input", withAuth(svc, cfg, mutating(svc, cfg, handleSendInput(svc))))
 	mux.HandleFunc("GET /v1/machines/{machine}/input-audit", withAuth(svc, cfg, reading(handleInputAudit(svc))))

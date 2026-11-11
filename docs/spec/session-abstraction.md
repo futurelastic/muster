@@ -1862,6 +1862,61 @@ field existed. A consumer reads absent as "not stated". This is the rule
 to the built-in path. Nothing is delivered over a channel whose far end the
 module cannot verify.
 
+### 2.16 RecordPage
+
+One read of a session's record (muster #441, `GET …/{id}/record`, api-http.md §3.2;
+`docs/adr/441-a-sessions-full-record-is-read-under-its-own-grant.md`). It is the
+wider sibling of the assistant-turns read (§5.8): a different route, a different
+wire type, a different cursor and a different grant (`record`), and `turns` is
+unchanged by it. Not a field of `Session` or `SessionState`: a record is read on
+purpose, never carried on a listing.
+
+```
+RecordPage {
+  messages : RecordMessage[]   // oldest first; [] (never null) when there is nothing new
+  next     : string            // opaque cursor, returned even when `messages` is empty; a `turns` cursor is not one
+  format   : number            // 1; changes only when a key is renamed or removed — new kinds do not change it
+}
+
+RecordMessage {
+  at         : Timestamp       // the runtime's own time on the entry
+  kind       : "text" | "reasoning" | "tool" | "image" | "summary" | "system"   // a client skips a kind it does not know
+  role       : "user" | "assistant"
+  text?      : string          // for text, reasoning, summary, system; bounded at 64 KiB
+  tool?      : RecordTool      // for tool: a call and its result, paired by the service
+  parent?    : string          // the tool call an entry was made inside, when it belongs to a delegated sub-task
+  model?     : string          // the model that wrote an assistant entry, when the record says
+  media?     : string          // a reference for an image, read separately; never inline
+  truncated? : boolean         // a text field was cut at 64 KiB
+}
+
+RecordTool {
+  id      : string             // the runtime's id for the call
+  name    : string
+  input?  : any                // as the runtime recorded it
+  result? : string             // absent while the call has not returned
+  status? : string             // the runtime's own word for how the call ended
+}
+```
+
+**Which kinds a driver emits is the allow-list of its own reader**, held where the
+record is read and nowhere downstream. The terminal runtime emits `text` in both
+directions (the assistant's prose by the same predicate as turns, and what a person
+typed); a kind a driver does not emit is absent from every page, not empty, and
+`tool`, `parent` and `media` are declared so the format-1 key set is settled before
+the driver that fills them exists. The runtime's own record is the source and its
+entry shape can change in a release, so a reader fails closed: an entry it cannot
+classify with certainty is omitted, never guessed at. A driver declares whether it
+reads a record at all through `DriverCapabilities.readsRecord` (§4.3); one that does
+not answers `unsupported` (§5.6).
+
+**What does not change from turns:** the cursor is opaque and bound to the
+conversation it was issued against (`conflict` against another conversation or past
+the end of a shrunken record); `limit` over 100 is refused, never clamped; `startedAt`
+is corroborated before anything is read; a record that cannot be identified yet is
+`not_found` with `retryable`, which is not a conversation with nothing admitted
+(`200`, `messages: []`, §5.7); a relay carries the owning machine's page unchanged.
+
 ---
 
 ## 3. Operations
@@ -2119,6 +2174,7 @@ DriverCapabilities {
   validatesModel  : boolean   // checks `model` against the runtime's own list at create and refuses an unknown id `invalid` (§4.3, muster #287)
   remoteControl?  : { toggle: boolean, off: boolean }   // can turn a RUNNING session's remote control on (and off); absent = cannot (muster #269)
   readsTurns?     : boolean   // GET …/turns reads this runtime's assistant turns (§5.8, muster #258, #369); absent = NOT DECLARED (an older peer, or one not reached), never "cannot"; false = every call is `unsupported` (muster #379)
+  readsRecord?    : boolean   // GET …/record reads this runtime's record (§2.16, muster #441); absent = NOT DECLARED, never "cannot"; false = every call is `unsupported`; true does not say this machine serves the route — an operator's switch answers `unsupported` with reason `record-off`
   reportsConversation?: boolean // looks for the runtime's record of a session's conversation (`conversation`, §2.9); absent = not declared; false = an absent `conversation` will never arrive; true = the driver looks, so an absent one is "not yet" (muster #379)
   respond?        : { kinds: PromptKind[], unclassified: boolean } // which prompts `respond` (§3) answers: one whose `kind` is listed, or one carrying NO kind when `unclassified` is true; absent = not declared; {kinds:[],unclassified:false} = answers none (muster #379)
   permissionModeChange?: { live: boolean, via?: string } // whether a RUNNING session's permission mode can be changed: live false = fixed at create (choose it from `createPermissionModes`), live true names the mechanism in `via` (`keys` today: one BTab press advances the mode, read back from `permissionMode`); absent = not declared (muster #379)
@@ -2337,7 +2393,7 @@ the two harnesses measured). (4) The interpreters a session's tools use must be 
 allow-listed directory — an interpreter under the user's home stops being readable once a sandbox
 confines the home.
 
-**`readsTurns`, `reportsConversation`, `respond` and `permissionModeChange` are what a person-facing
+**`readsTurns`, `readsRecord`, `reportsConversation`, `respond` and `permissionModeChange` are what a person-facing
 client — one that shows a session and lets a person type into it — needs before it draws a control**
 (muster #379). Without them a client keeps a table of runtime names, which is wrong the day a
 runtime is added, or offers a control and shows a refusal. They follow a rule the plain booleans
@@ -2355,7 +2411,7 @@ fields that predate this rule keep their meaning: `remoteControl` and `sandbox` 
 absent-means-cannot. For the two object-valued fields "cannot" is the object's own negative form,
 not a bare `false`, so one type decodes both.
 
-All four are per **runtime**, not per session: nothing differs between the sessions of one runtime
+All five are per **runtime**, not per session: nothing differs between the sessions of one runtime
 on one machine, and where one session cannot take part its own `state` and `conversation` already
 say so. A per-session declaration arrives the day something genuinely differs between sessions.
 
@@ -2363,6 +2419,11 @@ say so. A per-session declaration arrives the day something genuinely differs be
   turns interface: a remote driver always implements that as a relay, and a terminal driver
   implements it even where no record root is configured and every call would fail. `true` does not
   promise any one session can be read (`404` retryable, `409`).
+- **`readsRecord`** (muster #441) is declared the same way and for the same reasons as
+  `readsTurns`: not derived from whether the driver implements the optional record interface.
+  It reports what the **runtime** can do. Whether the **machine** serves the route is the
+  operator's policy (`refuseRecordReads`), reported by the refusal's `reason: "record-off"`
+  and not by masking the flag, so a client that offers the control must be ready for it.
 - **`respond`** is a test, not a list of labels: a prompt is answerable when its `kind` (§2.7) is in
   `kinds`, or when it has no kind and `unclassified` is true. An agent's own question with options
   is reported with no kind, so `unclassified` is the declaration that covers it. `kinds` is an open
@@ -2626,6 +2687,18 @@ failure to observe will report its ignorance as the world's.*
 > (`driver.TurnReader`): the terminal runtime and `opencode` (muster #369) do, each
 > enforcing the allow-list at the point it reads its own record, and a driver that
 > does not answers `unsupported` (§5.6).
+>
+> **Narrowed again, on its own route (muster #441, 2026-11-11).** The owner ruled
+> that a session's **full record** may be read through `GET …/{id}/record`
+> (api-http.md §3.2, §2.16 above) — both sides of the conversation and, as the
+> kinds are added, tool calls and results, reasoning, sub-task entries and images —
+> under a **`record` grant** that nothing implies and nobody holds by default. The
+> boundary above still binds `turns` unchanged and stays on `send`; the record route
+> has its own boundary, drawn by each runtime's reader, its own `content-read` audit
+> event, and an operator switch that refuses it wholesale. Same reasoning as the note
+> above: the premises were not outweighed, the thing they were applied to was
+> narrowed again, behind a stronger lock. Full argument and what it costs:
+> `docs/adr/441-a-sessions-full-record-is-read-under-its-own-grant.md`.
 
 **The boundary this API draws around content is provenance, not
 sensitivity.** A field may carry the runtime's own words about itself —
@@ -2883,7 +2956,10 @@ adopts them. Anything it finds but cannot confidently identify is surfaced as
 > of whether a caller may *read back* what a session's agent said: it may, for
 > assistant turns only (§5.8's note; `docs/adr/258-assistant-turns-read.md`).
 > The reply-address convention remains the way to push an answer; the turns
-> route is the way to pull one.
+> route is the way to pull one. **Amended again by muster #441:** a caller holding
+> the `record` grant may read a session's full record through its own route
+> (§5.8's second note; `docs/adr/441-a-sessions-full-record-is-read-under-its-own-grant.md`).
+> Still no result slot and no result-carrying field.
 
 Dispatching a named agent to a peer through this API is a complete round
 trip for everything except the answer: create, drive, answer a dialog,
