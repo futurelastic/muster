@@ -2855,7 +2855,7 @@ statements about whose view is stale:
 | `reason` | what happened |
 |---|---|
 | `epoch_changed` | you hold another instance's cursors |
-| `cursor_expired` | your cursor is older than what is retained — or newer than anything this service has stamped, which it equally cannot supply |
+| `cursor_expired` | your cursor is older than what is retained — which after a restart is every cursor below the one the service restarted at, because the window is not kept — or newer than anything this service has stamped, which it equally cannot supply |
 | `feed_gap` | **the sequence is intact and this service stopped watching.** Its subscription to a driver dropped and was re-established, so changes in between were never stamped at all |
 
 `feed_gap` is not a politer `cursor_expired`. One says the caller fell behind;
