@@ -196,7 +196,8 @@ GET /v1/runtimes
                      "grants": [ { "provider": "openai",        ← a provider sign-in this machine holds (#451);
                                    "state": "ok",                 absent when none; this machine's own rows only
                                    "accessExpiresAt": "...",
-                                   "refreshedAt": "..." } ] },
+                                   "refreshedAt": "...",
+                                   "quota": { "state": "limited", ... } } ] },   ← only while the provider refuses the sign-in (#458)
                    { "machine": "...", "runtime": "...",         ← enabled, no working driver
                      "status": "unavailable",
                      "cause": "probe-timeout",
@@ -311,6 +312,15 @@ RuntimeGrant {
   accessExpiresAt? : Timestamp    // when the stored access token stops working; absent when signed out
   refreshedAt?     : Timestamp    // when the sign-in was last renewed, else when it was made
   reason?          : string       // one sentence for a person; present unless state is "ok"
+  quota?           : GrantQuota   // present only while the provider keeps refusing requests made with the sign-in (#458)
+}
+
+GrantQuota {
+  state      : "limited"    // the set is open on read: treat one you do not know as limited
+  since      : Timestamp    // when the first session on the sign-in was seen refused, in this episode
+  observedAt : Timestamp    // when this service last saw it still so
+  sessions?  : integer      // how many sessions on the sign-in are refused right now; absent when the answer is read from a stored mark
+  message?   : string       // the provider's own message as the runtime reported it, cut short; never parsed
 }
 ```
 
@@ -325,6 +335,19 @@ RuntimeGrant {
   one you do not know as not usable.
 - It never carries a credential, and it is answered from what the service holds: no
   request is made to a provider to build it.
+- **`quota` is a state of the sign-in, not of any one session** (muster #458). Every
+  session on a subscription shares one plan and its usage windows, so when the window
+  runs out it runs out for all of them at once and they recover together. The runtime
+  does not fail such a turn: it keeps retrying a usage-limit answer with a growing delay, so a session
+  waits in its own retry loop (`status: "working"`, `lastTurn.retryable`). `quota` is
+  that wait, said once for the account: it is present while at least one session on the
+  subscription has been refused repeatedly (the runtime's retry attempt is 3 or more), and
+  absent the moment none is. The signal is what the runtime states and the cause is **not
+  parsed**: an exhausted plan window is the case it exists for, and `message` is the
+  provider's own words for which it was. It does not change `state` — a limited plan is
+  still a good sign-in — and it is not the session-level `quota` block of a `quota_blocked`
+  session, which is one session's own report. Sessions on an API key are not
+  counted: their limits are per token and theirs alone.
 
 **A runtime the operator enabled is listed even when it has no working
 driver** (muster #297). It used to be omitted — a runtime whose version check
@@ -2415,7 +2438,13 @@ separate event. `reasoning` (a runtime's separately reported tokens, additional 
 `output`) and `cost` (what the runtime itself reported) are present only when the
 runtime reports them; nothing is priced by this service. **Absent means not yet
 known, never zero**: `reportsUsage` in `/v1/runtimes` says whether it can ever
-arrive (an unreached peer reports it `assumed`). A peer built before the field
+arrive (an unreached peer reports it `assumed`). `credential` (muster #458) is which of
+the provider's two accounts the figures were spent on, `"subscription"` (a sign-in whose
+plan every session on it shares) or `"api-key"` (billed per token): the one the service
+gave the session at its start, by the operator's rule or the documented default, so a
+consumer summing cost keeps the two apart. It is named only while the session's newest
+request ran on that provider; absent means the service chose none or the request was
+elsewhere, never unknown. A peer built before the field
 sends no key, and a relay passes the block through untouched. A change in any
 figure fires `session.state` (§4); it never changes `status`.
 

@@ -365,6 +365,7 @@ Usage {
   cacheWrite : integer      // tokens written into the runtime's prompt cache
   reasoning? : integer      // reasoning tokens the runtime reports APART from `output`, additional to it; absent = it does not split them out
   cost?      : number       // what the runtime itself reports the requests cost; absent = it reports none — never priced here
+  credential?: "subscription" | "api-key"  // which of the openai provider's two accounts the session was put on (#458), named while its newest request ran on that provider; absent = the service chose none or the request was elsewhere. The set is open on read
   source     : "observed" | "inferred"   // from a structured API / inferred from a record the runtime writes
   asOf       : Timestamp    // the runtime's own newest entry counted in these figures, not the time of the read
   lastTurn?  : TurnUsage    // the same figures for the most recent COMPLETED turn

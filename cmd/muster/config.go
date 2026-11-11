@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	fleet "github.com/futurelastic/muster"
+	"github.com/futurelastic/muster/internal/credrule"
 	"github.com/futurelastic/muster/internal/drivers/opencode"
 	"github.com/futurelastic/muster/internal/drivers/tmux"
 	"github.com/futurelastic/muster/internal/peerkey"
@@ -129,6 +130,31 @@ type fileConfig struct {
 			Markers  []string `json:"markers,omitempty"`
 		} `json:"appliesTo,omitempty"`
 	} `json:"sessionEnv,omitempty"`
+
+	// ProviderCredentials is the operator's rule for which credential a session
+	// runs on when a provider can be reached two ways (muster #458): today the
+	// openai provider's subscription sign-in (`muster grant login`) or an API key
+	// in the session's environment (a sessionEnv entry). Each entry names the
+	// provider, the kind to use ("subscription" or "api-key") and an optional
+	// appliesTo scope shaped exactly like a sessionEnv entry's. The FIRST entry
+	// whose scope matches a session decides, in file order; an entry after one that
+	// matches everything it could is refused at start. The service enforces it at
+	// every create and relaunch by what is absent: the other credential never
+	// reaches the session, and a named credential that is missing refuses the
+	// create instead of falling back to the other account. It only chooses between
+	// credentials; FLEET_OPENCODE_PROVIDERS still decides whether the provider may
+	// be used at all. With no matching entry the documented default applies
+	// (docs/install.md). Config-file-only and per machine, like SessionEnv, and
+	// read at start: changing it needs a restart.
+	ProviderCredentials []struct {
+		Provider  string `json:"provider"`
+		Use       string `json:"use"`
+		AppliesTo *struct {
+			Runtimes []string `json:"runtimes,omitempty"`
+			Agents   []string `json:"agents,omitempty"`
+			Markers  []string `json:"markers,omitempty"`
+		} `json:"appliesTo,omitempty"`
+	} `json:"providerCredentials,omitempty"`
 
 	// Opencode holds this machine's settings for the opencode runtime that are
 	// not environment variables. Today that is Agents (muster #396): the path of
@@ -388,6 +414,24 @@ func (c *fileConfig) sessionEnv() []sessionenv.Entry {
 			}
 		}
 		out = append(out, entry)
+	}
+	return out
+}
+
+// credentialRules converts the wire shape into internal/credrule's own type, the
+// division sessionEnv() keeps: this file knows the JSON shape, the package owns what
+// a valid rule means (credrule.Validate is called by the caller).
+func (c *fileConfig) credentialRules() credrule.Rules {
+	if c == nil || len(c.ProviderCredentials) == 0 {
+		return nil
+	}
+	out := make(credrule.Rules, 0, len(c.ProviderCredentials))
+	for _, e := range c.ProviderCredentials {
+		r := credrule.Rule{Provider: e.Provider, Use: fleet.CredentialKind(e.Use)}
+		if e.AppliesTo != nil {
+			r.AppliesTo = sessionenv.Scope{Runtimes: e.AppliesTo.Runtimes, Agents: e.AppliesTo.Agents, Markers: e.AppliesTo.Markers}
+		}
+		out = append(out, r)
 	}
 	return out
 }

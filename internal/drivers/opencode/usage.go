@@ -8,6 +8,7 @@ import (
 	"time"
 
 	fleet "github.com/futurelastic/muster"
+	"github.com/futurelastic/muster/internal/grant"
 )
 
 // Token usage, read from the runtime's own message record (muster #285).
@@ -53,6 +54,7 @@ type usageMsg struct {
 	figures   fleet.UsageFigures
 	has       bool // the message reported any usage at all
 	at        time.Time
+	provider  string // the provider the message ran on, as the runtime resolved it (muster #458)
 }
 
 // usageMemo is the remembered history of one session.
@@ -98,7 +100,7 @@ func (d *Driver) usageOf(ctx context.Context, srv *server, id string, idle bool)
 		}
 		var wire []wireMessage
 		if err := d.do(ctx, srv, "GET", path, nil, &wire); err != nil {
-			return m.snapshot(idle) // stale beats absent; AsOf says how stale
+			return m.stamp(m.snapshot(idle), srv.credential) // stale beats absent; AsOf says how stale
 		}
 		fresh := make([]usageMsg, 0, len(wire))
 		for _, w := range wire {
@@ -116,7 +118,7 @@ func (d *Driver) usageOf(ctx context.Context, srv *server, id string, idle bool)
 		}
 		limit *= usageTailGrowth
 	}
-	return m.snapshot(idle)
+	return m.stamp(m.snapshot(idle), srv.credential)
 }
 
 // indexOf finds where the fetched tail overlaps the memory: the position in
@@ -141,6 +143,7 @@ func usageOfMessage(w wireMessage) usageMsg {
 		user:      w.Info.Role == "user",
 		assistant: w.Info.Role == "assistant",
 		finished:  w.Info.Time.Completed > 0,
+		provider:  w.Info.ProviderID,
 	}
 	switch {
 	case w.Info.Time.Completed > 0:
@@ -269,7 +272,28 @@ func (d *Driver) usageSnapshot(id string, idle bool) *fleet.Usage {
 	if !m.have {
 		return nil
 	}
-	return m.snapshot(idle)
+	return m.stamp(m.snapshot(idle), d.credentialOf(id))
+}
+
+// stamp names the account a snapshot's figures were spent on (muster #458). The
+// memory holds figures only; which credential the session runs on is a fact of its
+// server, so it is added where the block leaves the driver, and only when the newest
+// figures were spent on the provider the credential is for: a session that ran its
+// latest request on another provider spent nothing on either openai account.
+// Called with m.mu held.
+func (m *usageMemo) stamp(u *fleet.Usage, kind fleet.CredentialKind) *fleet.Usage {
+	if u == nil || kind == "" {
+		return u
+	}
+	for i := len(m.msgs) - 1; i >= 0; i-- {
+		if m.msgs[i].has {
+			if m.msgs[i].provider == grant.ProviderOpenAI {
+				u.Credential = kind
+			}
+			break
+		}
+	}
+	return u
 }
 
 // forgetUsage drops a session's remembered history once the session is gone.
@@ -277,4 +301,5 @@ func (d *Driver) forgetUsage(id string) {
 	d.usageMu.Lock()
 	delete(d.usageMemos, id)
 	d.usageMu.Unlock()
+	d.forgetRefused(id) // muster #458: a closed session holds no episode open
 }

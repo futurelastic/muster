@@ -300,6 +300,13 @@ func (d *Driver) startServerIn(ctx context.Context, spec fleet.SessionSpec, exis
 	if extra == nil {
 		extra = map[string]string{}
 	}
+	// muster #458: which of the provider's two credentials this session runs on, and
+	// the other one taken out of its environment, decided before any directory or
+	// process exists so a refusal costs nothing.
+	cred, err := d.planCredential(ctx, spec, extra)
+	if err != nil {
+		return nil, err
+	}
 	// muster #432: a variable this session's package cache sets for a manager is
 	// this driver's for the session, so one the caller (or this machine's
 	// sessionEnv) already names is refused here, before a directory or a copy
@@ -382,8 +389,10 @@ func (d *Driver) startServerIn(ctx context.Context, spec fleet.SessionSpec, exis
 	// muster #451: the machine's provider sign-in, as an access token only, before
 	// the server starts — the runtime decides at its start whether the provider is
 	// usable. Written on a relaunch too, so a parked session wakes with a token that
-	// is current rather than the one it was parked with.
-	if err := d.giveSessionGrant(ctx, dir); err != nil {
+	// is current rather than the one it was parked with. Since #458 only a session the
+	// rule (or the default) put on the subscription gets it; any other loses an entry
+	// an earlier launch left.
+	if err := d.applyCredential(dir, cred); err != nil {
 		cleanup()
 		return nil, &fleet.Error{Kind: fleet.ErrorInvalid, Message: "create: " + err.Error(), Machine: d.machine}
 	}
@@ -407,6 +416,7 @@ func (d *Driver) startServerIn(ctx context.Context, spec fleet.SessionSpec, exis
 	if plan != nil {
 		srv.sandbox = plan.state()
 	}
+	srv.credential = cred.kind
 	srv.dir = dir
 	if !fresh {
 		// A directory that already held a session is not this call's to remove,
@@ -422,7 +432,9 @@ func (d *Driver) startServerIn(ctx context.Context, spec fleet.SessionSpec, exis
 	}
 	// muster #451: a renewal between the write above and the tracking just done
 	// reached nobody; read the token again and write it if it moved.
-	d.catchUpGrant(ctx, dir)
+	if cred.kind == fleet.CredentialSubscription {
+		d.catchUpGrant(ctx, dir)
+	}
 	srv.touch(d.now()) // muster #421: a server that has just started is not idle
 	return srv, nil
 }
@@ -679,7 +691,9 @@ func (d *Driver) readState(ctx context.Context, ref fleet.SessionRef) (fleet.Ses
 		// a *fleet.Error's Kind verbatim), never a 200 carrying "idle".
 		return fleet.SessionState{}, err
 	}
-	if ws, present := statuses[ref.ID]; present {
+	ws, present := statuses[ref.ID]
+	d.observeStatus(srv, ref.ID, present, ws) // muster #458
+	if present {
 		// muster #283: busy is the runtime's word for "its turn has not ended",
 		// which a turn stopped on a permission ask also satisfies.
 		st := d.withPermission(ctx, srv, ref.ID, classify(true, ws))
@@ -1082,6 +1096,7 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 		default:
 			live = true
 			ws, present := r.statuses[id]
+			d.observeStatus(info.srv, id, present, ws) // muster #458
 			st = classify(present, ws)
 			if present {
 				// One extra read per BUSY session, never per idle one: a

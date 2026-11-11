@@ -484,7 +484,7 @@ to it.
   the start applies, the service keeps the last good table, logs the reason, and
   records it for `muster doctor` (row `config.reload`: `warn`, with the reason).
   Fix the file and the next check applies it.
-- Only the two tables move. `trustRoots`, `defaultRuntime`, `sessionEnv`,
+- Only the two tables move. `trustRoots`, `defaultRuntime`, `sessionEnv`, `providerCredentials`,
   `opencode` (which file holds [the machine's opencode agents](#agents-every-opencode-session-on-this-machine-receives)),
   `models` ([the model lists a client may offer](#models-a-client-may-offer-for-a-create)),
   `maxInputBytes`, `gateRemoteControlInput`, `closedRetentionDays`,
@@ -493,7 +493,7 @@ to it.
   principals and peers included — is applied until the service restarts. The
   refusal also says whether the restart it points to would work: it runs the same
   file checks as `muster doctor`'s `config.load` row and as the start itself (the
-  principal table, trust roots, `sessionEnv`, `opencode.agents`, `models`, a `defaultRuntime` the machine does
+  principal table, trust roots, `sessionEnv`, `providerCredentials`, `opencode.agents`, `models`, a `defaultRuntime` the machine does
   not run, `maxInputBytes`, the retention days, a `machineList` in mode `only`
   that does not verify, the peer list), and ends either "the file passes start-up
   validation" or "a restart would fail: <the start-up error>". Read that before
@@ -634,11 +634,73 @@ What it does, and why it is shaped this way (`docs/adr/451-*`):
   `grants` field of `GET /v1/runtimes`, and the reason on a create the missing
   provider refuses. A renewal that fails for a reason that is not the sign-in's fault
   (the provider unreachable) is `degraded` and retried with a backoff; it never revokes.
-- All sessions on a machine share one plan's usage windows. How a usage-limit hit
-  reads on a turn has not been measured here (it needs a live subscription).
+- All sessions on a machine share one plan's usage windows. When the window runs out,
+  the runtime does not fail a turn: it keeps retrying the provider's refusal (watched
+  for over three minutes: attempt 7, the delay doubling, no failed turn ever recorded), so
+  every session on the subscription just waits. That is one state of the sign-in, and
+  it is reported as one: the `quota` of the grant on `GET /v1/runtimes` and a `warn` on
+  `runtime.opencode.grant` while the provider keeps refusing the sign-in, gone when it
+  stops. The cause is not parsed (an exhausted window reads like any other persistent
+  refusal; the provider's own message says which); what a real exhausted window looks like
+  on a live subscription is not yet measured.
 - **Terms.** Whether one subscription may be shared by automated sessions is a
   question of the provider's terms, and for the operator to settle; muster does not
   decide it. Nothing is signed in until someone chooses to.
+
+### Which credential an openai session runs on
+
+A machine can hold **two** credentials for the `openai` provider: the ChatGPT sign-in
+above, and an API key (a `sessionEnv` entry supplying `OPENAI_API_KEY`). They are
+separate accounts with separate metering. The subscription has plan usage windows shared
+by every session on it; the key is billed per token. The runtime, left to itself, takes
+the sign-in and ignores the key (measured on 1.18.3; `docs/adr/458-*`), and nobody chose
+that. So the operator chooses, in the file `FLEET_CONFIG` names:
+
+```json
+{
+  "providerCredentials": [
+    { "provider": "openai", "use": "api-key",      "appliesTo": { "markers": ["metered"] } },
+    { "provider": "openai", "use": "subscription" }
+  ]
+}
+```
+
+- **An entry names the provider (`openai`), the credential (`"subscription"` or
+  `"api-key"`) and an optional `appliesTo`** with `runtimes`, `agents` and `markers`,
+  the same shape and the same matching as a `sessionEnv` entry's. **The first entry
+  whose scope matches a session decides**, in file order. An entry written after one
+  that already matches everything it could is refused at start, naming it: it would do
+  nothing. A misspelt runtime id is refused the same way.
+- **It is enforced at every create and every relaunch, by what is absent.** On
+  `subscription` the session gets the sign-in's access token and the key is removed
+  from its environment. On `api-key` the session gets no sign-in (one an earlier launch
+  wrote is taken out of its `auth.json`) and keeps the key. The other credential never
+  reaches the session, so nothing falls back to whichever the runtime would have found.
+- **A named credential that is missing refuses the create, with the reason**, when the
+  session is certain to need the provider: it pins a `provider/model` on `openai`, or
+  `FLEET_OPENCODE_PROVIDERS` names `openai` alone. A session that can run on another
+  provider is not refused for a credential it may never use; it simply gets neither.
+  The key is not used in place of a missing sign-in and the sign-in is not used in
+  place of a missing key.
+- **A create does not choose.** Under a `subscription` rule, a create whose own `env`
+  carries `OPENAI_API_KEY` is refused by name. Under an `api-key` rule there is
+  nothing for it to override. **Supply the key with a `sessionEnv` entry**: a create's
+  own `env` values are not kept, so a key sent that way does not come back at a
+  relaunch, which an `api-key` rule then refuses for a session bound for `openai`,
+  naming the missing variable.
+- **With no rule that matches:** a usable sign-in is used and the key is withheld; with
+  no usable sign-in, the key is used. That is what the runtime did before, now decided
+  by the service and so unable to change with a runtime release, and it adds no
+  per-token spend. `muster doctor` row `runtime.opencode.credentials` warns when both
+  credentials reach sessions and no rule chooses between them, and when a rule names a
+  credential this machine does not hold.
+- **A rule only chooses between credentials.** Whether `openai` may be used at all is
+  `FLEET_OPENCODE_PROVIDERS`'s decision, unchanged: where it does not permit `openai`,
+  the rule applies to no session and nothing is stripped or written.
+- **Usage names the kind.** A session's `usage.credential` is `subscription` or
+  `api-key` (`docs/api.md`), so spend on the two accounts is never added together.
+- The declaration is read at start and changing it needs a restart, like `sessionEnv`;
+  a reload that changes it is refused whole.
 
 ### Models a client may offer for a create
 

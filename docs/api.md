@@ -374,6 +374,17 @@ a person signs in again with `muster grant login`). The key is absent on a runti
 no sign-in and on every peer's row, and absent never means "signed out". It carries no
 credential. See `docs/install.md`, *A ChatGPT subscription for every opencode session*.
 
+A grant also carries **`quota`** (#458) while the provider keeps refusing requests made with
+it: `{state: "limited", since, observedAt, sessions?, message?}`. Every session on a
+subscription shares one plan and its usage windows, so an exhausted window is one state of
+the account, not a failed turn per session: the runtime keeps retrying a usage-limit
+answer with a growing delay and records no failure, and each affected session just waits (`status: "working"`,
+`lastTurn.retryable`). `quota` appears when a session on the subscription has been
+refused repeatedly and is gone the moment none is. The cause is not parsed; `message`
+is the provider's own wording. It does not change the grant's `state` (a limited plan is a
+good sign-in), and sessions on an API key are not counted. `muster doctor` shows the same
+thing as a warning on `runtime.opencode.grant`.
+
 A runtime the operator enabled is listed **even when it has no working driver**
 (#297). Its row has `status: "unavailable"`, a `cause` (`not-installed`,
 `not-executable`, `probe-timeout`, `probe-failed` or `start-failed` — an open
@@ -1888,6 +1899,7 @@ not in the response.
     "permissionMode": "acceptEdits",
     "usage": {
       "input": 311, "output": 42, "cacheRead": 3013, "cacheWrite": 60,
+      "credential": "subscription",
       "source": "inferred", "asOf": "…",
       "lastTurn": { "at": "…", "input": 311, "output": 42, "cacheRead": 3013, "cacheWrite": 60 },
       "context": { "tokens": 142000, "window": null, "model": "…", "at": "…" }
@@ -1970,6 +1982,19 @@ a runtime that does not record per-request figures, a read that failed):
 arrive. Whether the context is "full" is the client's policy; nothing here judges
 it. Only counts, a model name and a timestamp leave the runtime's record — no
 content. A change fires `session.state`.
+
+**`usage.credential`** (#458) — which of the provider's two accounts the figures were
+spent on: `"subscription"` (a sign-in whose plan every session on it shares) or
+`"api-key"` (billed per token). A machine can hold both for `openai`, and they are
+separate accounts with separate metering, so a client summing cost keeps them apart.
+It is the credential the service gave the session at its start, decided by the
+operator's `providerCredentials` rule or the documented default
+(`docs/install.md`, *Which credential an openai session runs on*), not something read
+back out of the runtime, and it is named only while the session's newest request ran on
+`openai`: a request on another provider spent nothing on either account. Absent means
+the service chose none for the session, or the newest request was not on the provider,
+and is never "unknown". The set is open on read: treat a kind you do not know as a third
+account.
 
 **`scratch`** (#419, #431) — how much the session's scratch directory holds, so a
 session waiting for review on gigabytes of test fixtures can be seen before the

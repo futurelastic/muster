@@ -190,6 +190,7 @@ import (
 	"time"
 
 	fleet "github.com/futurelastic/muster"
+	"github.com/futurelastic/muster/internal/credrule"
 	"github.com/futurelastic/muster/internal/driver"
 	"github.com/futurelastic/muster/internal/privfs"
 	"github.com/futurelastic/muster/internal/procgroup"
@@ -270,6 +271,12 @@ type Driver struct {
 	// subscription; nil when there is none.
 	grants      GrantSource
 	grantCancel func()
+	// credRules is the operator's rule for which credential a session runs on
+	// (WithCredentialRules, muster #458); empty leaves the documented default.
+	credRules credrule.Rules
+	// limit is the live view of subscription sessions the provider keeps refusing
+	// (muster #458; quota.go).
+	limit limitWatch
 
 	// agentsFile is the operator's agent definition file (WithOperatorAgents,
 	// muster #396): its path is fixed here, its content is read again on every
@@ -659,6 +666,9 @@ func New(ctx context.Context, machine fleet.MachineId, opts ...Option) (*Driver,
 	if err := checkSessionEnvEntries(d.sessionEnv, d.runtime); err != nil {
 		return nil, err
 	}
+	if err := credrule.Validate(d.credRules, nil); err != nil {
+		return nil, fmt.Errorf("opencode: %w", err)
+	}
 	// Folded once, on a copy, so a create's names (folded the same way) meet a
 	// configured entry exactly. A no-op where names are case-sensitive.
 	d.sessionEnv = foldEntryNames(d.sessionEnv)
@@ -720,6 +730,7 @@ func New(ctx context.Context, machine fleet.MachineId, opts ...Option) (*Driver,
 	// Every live session's sign-in is rewritten whenever the access token changes.
 	if d.grants != nil {
 		d.grantCancel = d.grants.Subscribe(d.pushAccess)
+		d.clearStaleLimit() // muster #458: a usage mark an earlier process left is not known to be true now
 	}
 	return d, nil
 }

@@ -160,6 +160,10 @@ type server struct {
 	// dir is the session-scoped directory (HOME, TMPDIR, XDG_*), removed with
 	// the server. Empty in shared mode.
 	dir string
+	// credential is which of the provider's two accounts this server's session was
+	// put on at its start (muster #458); empty when the service chose none. Written
+	// once, before the server is tracked, and read-only after.
+	credential fleet.CredentialKind
 	// logs is the tail of the process's own log (muster #284); nil in shared
 	// mode, where the server is not this driver's to read. Every method on it
 	// tolerates nil.

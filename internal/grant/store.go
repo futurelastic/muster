@@ -76,6 +76,7 @@ func (s *Store) Replace(g Grant) (Grant, error) {
 		g.Version = 1
 		g.Generation = prev + 1
 		g.Revoked = nil
+		g.Limit = nil // a new sign-in may be a different account
 		out = g
 		return s.write(g)
 	})

@@ -3,7 +3,6 @@ package opencode
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -116,6 +115,13 @@ func writeSessionAuth(dir string, a grant.Access, create bool) error {
 		return fmt.Errorf("opencode: encoding the session's sign-in: %w", err)
 	}
 	entries[grant.ProviderOpenAI] = rawEntry
+	return writeAuthFile(path, entries)
+}
+
+// writeAuthFile writes the session's auth file whole beside the target and renames
+// it over, so the runtime — which reads it before every request — never sees half
+// of one.
+func writeAuthFile(path string, entries map[string]json.RawMessage) error {
 	raw, err := json.MarshalIndent(entries, "", "  ")
 	if err != nil {
 		return fmt.Errorf("opencode: encoding the session's auth file: %w", err)
@@ -140,24 +146,6 @@ func writeSessionAuth(dir string, a grant.Access, create bool) error {
 	return nil
 }
 
-// giveSessionGrant writes the current sign-in into the session directory dir
-// before its server starts. A machine with no usable sign-in is not an error: the
-// session starts as it always did and the state (GET /v1/runtimes, doctor) says
-// why it has no `openai`. Only a real fault writing the file refuses the start.
-func (d *Driver) giveSessionGrant(ctx context.Context, dir string) error {
-	if !d.grantUsable() {
-		return nil
-	}
-	a, err := d.grants.Access(ctx)
-	if err != nil {
-		if !errors.Is(err, grant.ErrSignedOut) {
-			d.say("opencode: this session was started without the openai sign-in: %v", err)
-		}
-		return nil
-	}
-	return writeSessionAuth(dir, a, true)
-}
-
 // pushAccess is the subscription: the access token changed, so every live
 // session's file is rewritten in place. A failure on one session is said and does
 // not stop the others; a session that missed it keeps a token that is good until
@@ -169,7 +157,10 @@ func (d *Driver) pushAccess(a grant.Access) {
 	d.mu.RLock()
 	dirs := make([]string, 0, len(d.live))
 	for s := range d.live {
-		if s.dir != "" {
+		// muster #458: only a session the service put on the subscription holds its
+		// token. One on an API key was given no sign-in, and a rewrite here would
+		// hand it the other account.
+		if s.dir != "" && s.credential == fleet.CredentialSubscription {
 			dirs = append(dirs, s.dir)
 		}
 	}
@@ -254,6 +245,7 @@ func (d *Driver) Grants() []fleet.RuntimeGrant {
 		t := st.SignedInAt.UTC().Truncate(time.Second)
 		g.RefreshedAt = &t
 	}
+	g.Quota = d.liveQuota() // muster #458
 	return []fleet.RuntimeGrant{g}
 }
 

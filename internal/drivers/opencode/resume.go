@@ -211,6 +211,7 @@ func (d *Driver) noteRelaunch(rec *sessionRecord, failed bool) {
 func (r *sessionRecord) spec() fleet.SessionSpec {
 	return fleet.SessionSpec{
 		Cwd: fleet.AbsolutePath(r.Cwd), Agent: fleet.AgentId(r.SpecAgent), Marker: r.SpecMarker,
+		Model:   r.SpecModel, // muster #458: a relaunch judges "is this session bound for the provider" as the create did
 		Sandbox: r.Sandbox, PermissionMode: r.PermissionMode,
 	}
 }
@@ -276,13 +277,14 @@ func (d *Driver) parkedServerFor(rec *sessionRecord) *server {
 		return nil
 	}
 	spec := rec.spec()
-	if _, err := d.sessionEnvFor(spec); err != nil {
+	env, err := d.sessionEnvFor(spec)
+	if err != nil {
 		return nil
 	}
 	if _, err := d.operatorAgentsFor(); err != nil {
 		return nil
 	}
-	srv := &server{dir: rec.Dir}
+	srv := &server{dir: rec.Dir, credential: d.credentialOfRecord(spec, env)}
 	if spec.PermissionMode == fleet.PermissionModeBypass {
 		srv.permission = fleet.PermissionModeBypass
 	}

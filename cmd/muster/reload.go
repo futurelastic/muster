@@ -321,6 +321,9 @@ func restartOnly(running, next *fileConfig) []string {
 	check("trustRoots", running.TrustRoots, next.TrustRoots)
 	check("defaultRuntime", running.DefaultRuntime, next.DefaultRuntime)
 	check("sessionEnv", running.SessionEnv, next.SessionEnv)
+	// The credential rule (#458) is handed to the opencode driver once, at start, so a
+	// live edit would read as applied while every session kept the old choice.
+	check("providerCredentials", running.ProviderCredentials, next.ProviderCredentials)
 	check("opencode", running.Opencode, next.Opencode)
 	check("models", running.Models, next.Models)
 	check("maxInputBytes", running.MaxInputBytes, next.MaxInputBytes)

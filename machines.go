@@ -204,6 +204,44 @@ type RuntimeGrant struct {
 	RefreshedAt *Timestamp `json:"refreshedAt,omitempty"`
 	// Reason is one sentence for a person, present unless State is ok.
 	Reason string `json:"reason,omitempty"`
+	// Quota is present while the provider is refusing requests on this sign-in
+	// (muster #458): the plan's usage window is the case it exists for. It is a
+	// state of the GRANT, not of any one session: every session on the
+	// subscription is affected at once and they recover together. Absent says
+	// nobody reports a limit, never that none exists.
+	Quota *GrantQuota `json:"quota,omitempty"`
+}
+
+// GrantQuotaState is where a sign-in's usage stands. The set is open on read: a
+// client must treat a state it does not know as limited.
+type GrantQuotaState string
+
+const (
+	// QuotaLimited: sessions on the sign-in are sitting in the runtime's retry loop
+	// because the provider keeps refusing their requests. The runtime retries without
+	// end, so a session does not fail: it waits, and recovers on its own when the
+	// provider lets requests through.
+	QuotaLimited GrantQuotaState = "limited"
+)
+
+// GrantQuota is the quota state of one sign-in (muster #458).
+//
+// The signal is what the runtime states, not a cause this service parsed: an
+// exhausted plan window and any other persistent refusal look the same to the
+// runtime, and Message is the provider's own words for which it was.
+type GrantQuota struct {
+	State GrantQuotaState `json:"state"`
+	// Since is when the first session on the sign-in was seen refused, in this
+	// episode; ObservedAt is when the service last saw it still so.
+	Since      Timestamp `json:"since"`
+	ObservedAt Timestamp `json:"observedAt"`
+	// Sessions is how many sessions on the sign-in are refused right now, on the
+	// answering machine. Absent when this answer is read from a stored mark
+	// rather than from live sessions.
+	Sessions *int `json:"sessions,omitempty"`
+	// Message is the provider's own message as the runtime reported it, cut to a
+	// short length. It is not parsed.
+	Message string `json:"message,omitempty"`
 }
 
 // ModelsSource says where a RuntimeModels list came from, and so how far a
