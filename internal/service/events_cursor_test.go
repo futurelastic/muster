@@ -242,3 +242,273 @@ func TestAnExactCursorFromAnOlderBuildReadsAsACeiling(t *testing.T) {
 		t.Errorf("file holds %d, below the cursor %d just handed out", seq.Cursor, ev.Cursor)
 	}
 }
+
+// openRestartable opens the service the way startup does, over one directory, so
+// a test can "restart" by opening it again. Whatever the first run left in the
+// directory is all the second one has — no ring, no subscribers.
+func openRestartable(t *testing.T, dir string) *Service {
+	t.Helper()
+	st, err := state.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := NewWithState("testbox", st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return svc
+}
+
+// publishN publishes n events through a subscriber and returns the last cursor
+// that subscriber received — "handed out" is only observable on the receiving
+// side.
+func publishN(t *testing.T, svc *Service, n int) int64 {
+	t.Helper()
+	sub, _, _ := svc.events.add(ScopeFleet, driver.SubscribeFilter{}, 0, "")
+	var last int64
+	for i := 0; i < n; i++ {
+		svc.events.publish(sessionEvent("a", fleet.StatusIdle))
+		last = (<-sub.ch).Cursor
+	}
+	return last
+}
+
+// #418 (a), at the hub: restored the way startup restores it — the cursor and the
+// epoch kept, the ring empty. The window check used to read an empty ring as
+// "holds everything" because the floor stayed 0, so a subscriber that was behind
+// the cursor was resumed with an empty backlog instead of being told its events
+// were gone. The same answer is now given before and after the first event
+// arrives.
+func TestAnEmptyWindowAfterARestoreAnnouncesAnyCursorBelowTheRestoredOne(t *testing.T) {
+	restored := func() *hub {
+		h := newHub("testbox", "e")
+		h.cursor = 100
+		return h
+	}
+	for _, c := range []struct {
+		name   string
+		cursor int64
+		resync bool
+	}{
+		{"behind the restored cursor", 50, true},
+		{"one behind", 99, true},
+		{"zero, with the epoch", 0, true},
+		{"exactly the restored cursor", 100, false},
+		{"ahead of anything stamped", 101, true},
+	} {
+		h := restored()
+		_, backlog, resync := h.add(ScopeFleet, driver.SubscribeFilter{}, c.cursor, "e")
+		if resync != c.resync || len(backlog) != 0 {
+			t.Errorf("%s: resync=%v backlog=%d, want resync=%v backlog=0", c.name, resync, len(backlog), c.resync)
+		}
+
+		// After the first event the ring is not empty and the older check applies;
+		// it must agree with what the empty ring said.
+		h.publish(sessionEvent("a", fleet.StatusIdle))
+		_, _, after := h.add(ScopeFleet, driver.SubscribeFilter{}, c.cursor, "e")
+		if c.cursor <= 100 && after != c.resync {
+			t.Errorf("%s: resync=%v with an empty ring but %v once an event arrived — the answer must not depend on whether anything has happened yet", c.name, c.resync, after)
+		}
+	}
+
+	// Not a restore: nothing stamped, nothing below the cursor, and a subscriber
+	// with no history is not made to resync.
+	fresh := newHub("testbox", "e")
+	if _, _, resync := fresh.add(ScopeFleet, driver.SubscribeFilter{}, 0, "e"); resync {
+		t.Error("a hub that has stamped nothing resynced a subscriber at cursor 0")
+	}
+	if _, _, resync := fresh.add(ScopeFleet, driver.SubscribeFilter{}, 0, ""); resync {
+		t.Error("a subscriber with no cursor and no epoch must start from now, not resync")
+	}
+}
+
+// #418 (a) and (b), across a real graceful restart through the real store: a
+// subscriber that held the last cursor is resumed, one that was behind it is
+// told, and the first event after the restart reaches the resumed one as its
+// backlog.
+func TestAGracefulStopLetsACaughtUpSubscriberResumeAndAnnouncesTheOthers(t *testing.T) {
+	dir := t.TempDir()
+	first := openRestartable(t, dir)
+	last := publishN(t, first, 7)
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	second := openRestartable(t, dir)
+	if second.epoch != first.epoch {
+		t.Fatalf("epoch changed across the restart: %q -> %q", first.epoch, second.epoch)
+	}
+	if got := second.events.currentCursor(); got != last {
+		t.Fatalf("restored cursor = %d, want %d: Close must leave the file holding exactly the last cursor handed out, not the block-ahead ceiling", got, last)
+	}
+
+	_, backlog, resync := second.events.add(ScopeFleet, driver.SubscribeFilter{}, last, first.epoch)
+	if resync || len(backlog) != 0 {
+		t.Fatalf("a subscriber caught up at %d before a graceful restart: resync=%v backlog=%d, want neither", last, resync, len(backlog))
+	}
+	if _, _, resync := second.events.add(ScopeFleet, driver.SubscribeFilter{}, last-1, first.epoch); !resync {
+		t.Errorf("a subscriber one event behind (%d, last was %d) was resumed silently, though that event is gone", last-1, last)
+	}
+	if _, _, resync := second.events.add(ScopeFleet, driver.SubscribeFilter{}, 1, first.epoch); !resync {
+		t.Error("a subscriber far behind was resumed silently across the restart")
+	}
+
+	second.events.publish(sessionEvent("a", fleet.StatusIdle))
+	_, backlog, resync = second.events.add(ScopeFleet, driver.SubscribeFilter{}, last, first.epoch)
+	if resync || len(backlog) != 1 || backlog[0].Cursor != last+1 {
+		t.Fatalf("after one event, the caught-up subscriber got resync=%v backlog=%v, want exactly cursor %d", resync, backlog, last+1)
+	}
+}
+
+// The same restart without the stop: the file holds the ceiling, which is above
+// the last event, so a subscriber that was caught up cannot be told apart from
+// one that was behind and is announced like every other. That is the honest side
+// of the trade the issue names — and the property to protect, because the
+// alternative resumes the ones that were behind without a word.
+func TestACrashAnnouncesCursorExpiredToEverySubscriberBelowTheCeiling(t *testing.T) {
+	dir := t.TempDir()
+	first := openRestartable(t, dir)
+	last := publishN(t, first, 7) // far below one block of 1024: the file holds the ceiling
+
+	second := openRestartable(t, dir) // no Close
+	if got := second.events.currentCursor(); got <= last {
+		t.Fatalf("restored cursor %d is not above the last cursor handed out (%d): a crash must continue from the ceiling", got, last)
+	}
+	for _, c := range []int64{last, last - 1, 1} {
+		if _, backlog, resync := second.events.add(ScopeFleet, driver.SubscribeFilter{}, c, first.epoch); !resync || len(backlog) != 0 {
+			t.Errorf("after a crash a subscriber at %d (last handed out %d) got resync=%v backlog=%d, want resync", c, last, resync, len(backlog))
+		}
+	}
+}
+
+// Close must not lower the durable ceiling under a publisher: a cursor handed
+// out above what the file holds is reused by the next run (§7.3). Held open
+// mid-write, the seal must stop a publisher from stamping, and when it lets go
+// the file must end up above every cursor handed out.
+func TestAPublisherCannotStampWhileTheSealIsBeingWritten(t *testing.T) {
+	h := newHub("testbox", "e")
+	var (
+		mu       sync.Mutex
+		ceilings []int64
+	)
+	entered, release := make(chan struct{}), make(chan struct{})
+	h.block = 1000
+	h.reserve = func(c int64) error {
+		mu.Lock()
+		isSeal := len(ceilings) == 1
+		mu.Unlock()
+		if isSeal { // the second write is the seal's: hold it open
+			close(entered)
+			<-release
+		}
+		mu.Lock()
+		ceilings = append(ceilings, c)
+		mu.Unlock()
+		return nil
+	}
+	sub, _, _ := h.add(ScopeFleet, driver.SubscribeFilter{}, 0, "")
+	for i := 0; i < 5; i++ {
+		h.publish(sessionEvent("a", fleet.StatusIdle))
+		<-sub.ch
+	}
+	if h.currentCursor() != 5 {
+		t.Fatalf("setup: cursor %d, want 5", h.currentCursor())
+	}
+
+	sealed := make(chan error, 1)
+	go func() { sealed <- h.seal() }()
+	<-entered
+
+	published := make(chan struct{})
+	go func() {
+		defer close(published)
+		h.publish(sessionEvent("a", fleet.StatusIdle))
+	}()
+	select {
+	case <-published:
+		t.Fatal("a publisher stamped while the seal was lowering the file: its cursor would be above what is durable")
+	case <-time.After(150 * time.Millisecond):
+	}
+	if got := h.currentCursor(); got != 5 {
+		t.Fatalf("cursor moved to %d while the seal's write was in flight", got)
+	}
+
+	close(release)
+	if err := <-sealed; err != nil {
+		t.Fatal(err)
+	}
+	<-published
+	ev := <-sub.ch
+	mu.Lock()
+	defer mu.Unlock()
+	if len(ceilings) != 3 || ceilings[1] != 5 {
+		t.Fatalf("ceilings written = %v, want [first block, exact 5, a fresh one]", ceilings)
+	}
+	if last := ceilings[len(ceilings)-1]; last < ev.Cursor {
+		t.Fatalf("the file ends at %d, below the cursor %d just handed out", last, ev.Cursor)
+	}
+}
+
+// A disk that will not take the seal leaves the feed alone. The ceiling is left
+// to be rewritten by the next publish rather than trusted, so the invariant that
+// the file never trails a handed-out cursor still holds.
+func TestAFailedSealIsReportedAndTheNextPublishRestoresACeiling(t *testing.T) {
+	h := newHub("testbox", "e")
+	r := &reservations{}
+	h.reserve, h.block = r.save, 8
+	sub, _, _ := h.add(ScopeFleet, driver.SubscribeFilter{}, 0, "")
+	for i := 0; i < 3; i++ {
+		h.publish(sessionEvent("a", fleet.StatusIdle))
+		<-sub.ch
+	}
+
+	r.mu.Lock()
+	r.fail = true
+	r.mu.Unlock()
+	if err := h.seal(); err == nil {
+		t.Fatal("a seal the disk refused reported success")
+	}
+	r.mu.Lock()
+	r.fail = false
+	r.mu.Unlock()
+
+	h.publish(sessionEvent("a", fleet.StatusIdle))
+	ev := <-sub.ch
+	if ev.Cursor != 4 {
+		t.Fatalf("event after a failed seal = cursor %d, want 4", ev.Cursor)
+	}
+	if _, ceiling := r.snapshot(); ceiling < ev.Cursor {
+		t.Fatalf("the durable ceiling %d is below the cursor %d just handed out", ceiling, ev.Cursor)
+	}
+}
+
+// Nothing to adjust costs nothing: a service without durable state, and a run
+// that is already exact (a quiet one restored from an exact file), neither
+// flush for it.
+func TestSealWritesNothingWhenThereIsNothingToMakeExact(t *testing.T) {
+	if err := newHub("testbox", "e").seal(); err != nil {
+		t.Errorf("seal without durable state = %v, want nil", err)
+	}
+	if err := New("testbox").Close(); err != nil {
+		t.Errorf("Close on a service without a store = %v, want nil", err)
+	}
+
+	h := newHub("testbox", "e")
+	r := &reservations{}
+	h.reserve, h.block = r.save, 8
+	h.cursor, h.reserved = 40, 40
+	if err := h.seal(); err != nil {
+		t.Fatal(err)
+	}
+	if saves, _ := r.snapshot(); saves != 0 {
+		t.Errorf("seal of a file that was already exact wrote %d times, want 0", saves)
+	}
+
+	h.publish(sessionEvent("a", fleet.StatusIdle)) // 41, makes 48 durable
+	if err := h.seal(); err != nil {
+		t.Fatal(err)
+	}
+	if saves, ceiling := r.snapshot(); saves != 2 || ceiling != 41 {
+		t.Errorf("after one event and a seal: %d writes, file at %d, want 2 writes and 41", saves, ceiling)
+	}
+}

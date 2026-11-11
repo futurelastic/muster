@@ -3992,7 +3992,15 @@ therefore continues from the ceiling and skips up to one block of numbers;
 cursors are ordered, never contiguous. The retained event
 *window* deliberately is not: a subscriber resuming from an old cursor still
 gets `resync_required`, but now with the truthful reason — the sequence
-continued, this service simply cannot replay that far back. Persisting the
+continued, this service simply cannot replay that far back. That holds from the
+first moment after a restart, before any event has been published: the restored
+cursor is the oldest one a subscriber can resume from, so a subscriber holding
+anything below it is told, not resumed with an empty backlog (muster #418). A
+graceful stop writes the exact cursor, so a subscriber that was caught up then is
+resumed; after a crash (a kill, a Windows service stop) the file holds the
+ceiling, a caught-up subscriber cannot be told apart from one that was behind,
+and every subscriber below it is told — announced and recoverable, which a
+silent resume is not. Persisting the
 window would buy transparent restarts at the cost of durably storing every
 event, a much larger mechanism than the problem justifies.
 

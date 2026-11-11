@@ -1160,6 +1160,15 @@ func main() {
 		}
 	}
 	stopGrant() // after the driver: a renewal in flight finishes into a driver that has stopped listening
+
+	// Last, once nothing is left to publish: make the persisted event cursor the
+	// exact one, so a subscriber that was caught up before this stop resumes after
+	// the restart instead of being told cursor_expired (#418). A failure is not
+	// fatal — the file keeps its ceiling, the next start reads as a crash, and
+	// every subscriber refetches.
+	if err := svc.Close(); err != nil {
+		log.Printf("muster: persisting the exact event cursor on stop: %v — the next start will ask subscribers to resync", err)
+	}
 }
 
 func getenv(key, fallback string) string {
