@@ -226,9 +226,11 @@ func (d *Driver) checkRelaunchable(rec *sessionRecord) error {
 		// is refused rather than relaunched pre-approved with nothing confining it.
 		return fmt.Errorf("its record asks for permission mode %q without a sandbox, which this driver never starts", rec.PermissionMode)
 	}
-	if rec.Sandbox != nil && d.sandbox == nil {
-		return fmt.Errorf("it was created in a sandbox and this driver can no longer enforce one (%s); "+
-			"it is not relaunched unconfined", d.sandboxWhy)
+	if rec.Sandbox != nil {
+		if sup, why := d.sandboxSupportNow(); sup == nil {
+			return fmt.Errorf("it was created in a sandbox and this driver can no longer enforce one (%s); "+
+				"it is not relaunched unconfined", why)
+		}
 	}
 	if !d.ownsDir(rec.Dir) {
 		return fmt.Errorf("its recorded directory %q is not one this driver made", rec.Dir)

@@ -2299,7 +2299,21 @@ Linux 6.12 or newer, enforced with Landlock and a seccomp filter applied by the 
 (`linux-landlock-seccomp`, muster #439, with the same three classes and the stricter closed network
 §2.1 describes); on any other platform or kernel, in the test-only shared mode (one server cannot confine one of its sessions),
 or when the service itself already runs inside a sandbox (a profile cannot be nested), it is absent
-and the reason is in the refusal. The tmux driver declares it **only where it was measured to work**
+and the reason is in the refusal. On a host that can confine, the opencode driver also declares it
+**only where the runtime was measured to start under the policy** (muster #456): the runtime's own
+version report, started through the same launcher and under the strictest plan the capability offers
+(a closed network, so a runtime that answers under it answers under the open one too), must answer.
+A runtime that cannot — an interpreter outside the granted directories, a file it needs that the
+policy does not open — leaves `sandbox` absent with the reason in `sandboxUnavailable`, in the
+launcher's own words where the launcher declined, and a create that needs confinement is refused
+`unsupported` with it, where it used to fail with a generic start error. The answer is kept for the
+lifetimes the tmux driver keeps its own: five minutes when the runtime answered, thirty seconds when it
+did not, doubling in the background to five minutes while it keeps failing, and a create is never made to
+sit out that backoff. A recorded sandboxed session whose runtime no longer starts under the policy is
+not relaunched unconfined. And when the launcher declines a real start (the policy is malformed, a
+granted path is gone, the kernel is below the floor, or the exec of the runtime itself failed) the start
+is **not** retried as if it had lost a port race: the create fails once, with the launcher's reason.
+The tmux driver declares it **only where it was measured to work**
 (muster #345). Its sessions live in the user's own multiplexer, whose server socket is exactly what a
 sandbox must keep a session from, so the server stays outside the profile and only the agent program
 inside the pane is wrapped, with a unix-socket connect denied outright. "The host can apply a

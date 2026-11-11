@@ -743,7 +743,16 @@ thing that is not:
   reports a logged-in account under the policy. An agent installed under a version manager's
   directory in the home (the policy does not open the home), or as a confined package, cannot be
   read by its own session and is refused with that reason; install it where the system's
-  directories are.
+  directories are;
+- for the opencode runtime (muster #456), its own `--version`, started through the launcher under
+  the strictest plan a create can ask for (a closed network), answers. A runtime whose interpreter
+  lives outside the directories the policy opens (a version manager's shim, an interpreter in the
+  home), or that reads a file the policy denies, is refused with the launcher's reason or the
+  runtime's last line in `sandboxUnavailable`, before any create; grant the directory it needs with
+  `FLEET_OPENCODE_SANDBOX_READ`, or install it where the system's directories are. The answer is
+  kept five minutes when it was good and thirty seconds when it was not (longer, in the
+  background, while it keeps failing), so a runtime installed or fixed while the service runs is
+  offered again without a restart.
 
 What a session on Linux gets that a macOS one does not, and the reverse: it cannot create a unix
 socket at all (a pre-connected pair still works), `closed` means no outbound connection even to

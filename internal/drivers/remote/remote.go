@@ -181,6 +181,14 @@ type Driver struct {
 	// distinguishable because the cached capabilities say `assumed` in
 	// exactly that case.
 	runtime fleet.RuntimeId
+	// rows is every available runtime the peer listed for itself on that same
+	// probe, in runtime-id order (muster #459). caps, models and runtime above are
+	// the first of them in the peer's own order, which is what the single-value
+	// accessors keep answering; everything else this driver holds about the peer —
+	// transport, signing, health, standing, the learned deadline — is per machine
+	// and stays single. Replaced whole on every refresh, so a runtime the peer has
+	// stopped listing leaves the table, and aged by the same observation time.
+	rows []peerRuntimeRow
 	// build is what the peer said it was running, the last time it said
 	// anything. Cached beside caps because it is learned the same way and
 	// is stale in the same manner: a peer that has restarted onto new code
@@ -398,7 +406,13 @@ func (d *Driver) Capabilities() fleet.DriverCapabilities {
 	d.mu.RLock()
 	caps, seen := d.caps, d.capsSeen
 	d.mu.RUnlock()
+	return d.presentCaps(caps, seen)
+}
 
+// presentCaps is what a cached capabilities value may be reported as: the one
+// rule Capabilities and PeerRuntimes share, so every runtime of a peer degrades
+// the same way (muster #459).
+func (d *Driver) presentCaps(caps fleet.DriverCapabilities, seen bool) fleet.DriverCapabilities {
 	caps.DeadlineMs = d.effectiveDeadline().Milliseconds()
 	if !seen {
 		// Nobody has told this driver anything about the peer. The flags
@@ -477,6 +491,12 @@ func cloneModels(m fleet.RuntimeModels) fleet.RuntimeModels {
 // be able to fail, and it needs to be callable again later. A method the
 // interface does not know about is a poor substitute for a signature that
 // admitted this in the first place (FINDING 1).
+//
+// One read learns every available runtime the peer lists for itself, not only the
+// first (muster #459): PeerRuntimes answers for all of them, while Capabilities,
+// Models and Runtime keep answering for the first. The driver stays one per peer —
+// the health probe, the down state, signing and the event stream are the
+// machine's, not a runtime's.
 func (d *Driver) RefreshCapabilities(ctx context.Context, req fleet.Request) error {
 	// Deliberately NOT bounded by this driver's own deadline.
 	//
@@ -503,6 +523,10 @@ func (d *Driver) RefreshCapabilities(ctx context.Context, req fleet.Request) err
 	if err := d.do(ctx, req, http.MethodGet, "/v1/runtimes", nil, &body); err != nil {
 		return err
 	}
+	// Every available row the peer lists for itself is learned from this one
+	// read (muster #459). The first, in the peer's own order, is also the single
+	// value Capabilities, Models and Runtime answer with.
+	var learned []learnedRuntime
 	for _, ri := range body.Items() {
 		if ri.Machine != d.machine {
 			continue
@@ -514,47 +538,118 @@ func (d *Driver) RefreshCapabilities(ctx context.Context, req fleet.Request) err
 			// driver can never use; the next row may be the one that works.
 			continue
 		}
-		d.mu.Lock()
-		// Adopt what the peer said about itself, then stamp WHEN we heard
-		// it — the peer's own timestamp would be on the peer's clock (§11),
-		// and freshness here is a local judgement about a local cache.
-		d.caps = ri.Capabilities.Observed(d.now())
-		d.capsSeen = true
-		d.models = nil
-		if ri.Models != nil {
-			m := cloneModels(*ri.Models)
-			d.models = &m
-		}
-		// The peer named its runtime in the same row. Discarding it and
-		// reporting "" was a placeholder that survived: a client cannot use
-		// ?runtime= to disambiguate a peer's session if the peer's runtime
-		// is never reported.
-		d.runtime = ri.Runtime
-		d.mu.Unlock()
-
-		// Learn which code the peer is running, and its effective input
-		// limit, on the same probe rather than a second one each. Failure
-		// here is deliberately not propagated: both are diagnostic, and a
-		// peer that answers /v1/runtimes but not /v1/health is still a
-		// working peer. Losing the deadline we just learned in order to
-		// report a missing diagnostic would trade a correctness property
-		// for an informational one.
-		if h, err := d.peerHealth(ctx, req); err == nil {
-			d.mu.Lock()
-			d.build = h.Build
-			d.maxInputBytes = h.MaxInputBytes
-			d.labelLimits = h.Labels
-			d.supportsConversationId = h.SupportsConversationId
-			d.supportsIsolateEnvironment = h.SupportsIsolateEnvironment
-			d.supportsIsolateConfiguration = h.SupportsIsolateConfiguration
-			d.supportsSandbox = h.SupportsSandbox
-			d.supportsLaunchSettings = h.SupportsLaunchSettings
-			d.launchSettingsOutsideBypass = h.LaunchSettingsOutsideBypass
-			d.mu.Unlock()
-		}
-		return nil
+		learned = append(learned, learnedRuntime{
+			runtime: ri.Runtime, caps: ri.Capabilities, models: ri.Models,
+		})
 	}
-	return fmt.Errorf("remote: peer %q reported no runtimes for itself", d.machine)
+	if len(learned) == 0 {
+		return fmt.Errorf("remote: peer %q reported no runtimes for itself", d.machine)
+	}
+	d.mu.Lock()
+	// Adopt what the peer said about itself, then stamp WHEN we heard
+	// it — the peer's own timestamp would be on the peer's clock (§11),
+	// and freshness here is a local judgement about a local cache.
+	observedAt := d.now()
+	first := learned[0]
+	d.caps = first.caps.Observed(observedAt)
+	d.capsSeen = true
+	d.models = nil
+	if first.models != nil {
+		m := cloneModels(*first.models)
+		d.models = &m
+	}
+	// The peer named its runtime in the same row. Discarding it and
+	// reporting "" was a placeholder that survived: a client cannot use
+	// ?runtime= to disambiguate a peer's session if the peer's runtime
+	// is never reported.
+	d.runtime = first.runtime
+	d.rows = peerRuntimeRows(learned, observedAt)
+	d.mu.Unlock()
+
+	// Learn which code the peer is running, and its effective input
+	// limit, on the same probe rather than a second one each. Failure
+	// here is deliberately not propagated: both are diagnostic, and a
+	// peer that answers /v1/runtimes but not /v1/health is still a
+	// working peer. Losing the deadline we just learned in order to
+	// report a missing diagnostic would trade a correctness property
+	// for an informational one.
+	if h, err := d.peerHealth(ctx, req); err == nil {
+		d.mu.Lock()
+		d.build = h.Build
+		d.maxInputBytes = h.MaxInputBytes
+		d.labelLimits = h.Labels
+		d.supportsConversationId = h.SupportsConversationId
+		d.supportsIsolateEnvironment = h.SupportsIsolateEnvironment
+		d.supportsIsolateConfiguration = h.SupportsIsolateConfiguration
+		d.supportsSandbox = h.SupportsSandbox
+		d.supportsLaunchSettings = h.SupportsLaunchSettings
+		d.launchSettingsOutsideBypass = h.LaunchSettingsOutsideBypass
+		d.mu.Unlock()
+	}
+	return nil
+}
+
+// learnedRuntime is one available row of the peer's /v1/runtimes, as read.
+type learnedRuntime struct {
+	runtime fleet.RuntimeId
+	caps    fleet.DriverCapabilities
+	models  *fleet.RuntimeModels
+}
+
+// peerRuntimeRow is one runtime of the peer as this driver caches it: what the
+// peer said, stamped with when it was heard.
+type peerRuntimeRow struct {
+	runtime fleet.RuntimeId
+	caps    fleet.DriverCapabilities // Source observed, ObservedAt the local read time
+	models  *fleet.RuntimeModels
+}
+
+// peerRuntimeRows is the table for one read: runtime-id order, the first row
+// the peer listed for a runtime id kept (one runtime is one row), each stamped
+// with the same observation time.
+func peerRuntimeRows(learned []learnedRuntime, observedAt time.Time) []peerRuntimeRow {
+	rows := make([]peerRuntimeRow, 0, len(learned))
+	seen := make(map[fleet.RuntimeId]bool, len(learned))
+	for _, l := range learned {
+		if seen[l.runtime] {
+			continue
+		}
+		seen[l.runtime] = true
+		row := peerRuntimeRow{runtime: l.runtime, caps: l.caps.Observed(observedAt)}
+		if l.models != nil {
+			m := cloneModels(*l.models)
+			row.models = &m
+		}
+		rows = append(rows, row)
+	}
+	sort.SliceStable(rows, func(i, j int) bool { return rows[i].runtime < rows[j].runtime })
+	return rows
+}
+
+// PeerRuntimes lists every runtime the peer reported for itself on its last
+// answer, one entry each, in runtime-id order (muster #459). Implements
+// driver.PeerRuntimesReporter, which is how internal/service.ListRuntimes shows a
+// peer that runs several runtimes as several rows rather than one.
+//
+// Each entry is what Capabilities and Models give for a single runtime: the
+// same degrade to an assumed floor and to "no models" once the observation is
+// older than capabilityStaleness, decided on every read, so all of a peer's rows
+// degrade together and none can outlive the cache it came from. Empty until the
+// peer has answered.
+func (d *Driver) PeerRuntimes() []driver.PeerRuntime {
+	d.mu.RLock()
+	rows := d.rows
+	d.mu.RUnlock()
+	out := make([]driver.PeerRuntime, 0, len(rows))
+	for _, row := range rows {
+		caps := d.presentCaps(row.caps, true)
+		models := fleet.NoModels()
+		if row.models != nil && d.capsFresh(row.caps) {
+			models = cloneModels(*row.models)
+		}
+		out = append(out, driver.PeerRuntime{Runtime: row.runtime, Capabilities: caps, Models: models})
+	}
+	return out
 }
 
 // peerHealthBody is the subset of GET /v1/health this driver reads to learn
@@ -1025,6 +1120,7 @@ func (d *Driver) authKind() string {
 
 var _ driver.PeerStandingReporter = (*Driver)(nil)
 var _ driver.ModelsReporter = (*Driver)(nil)
+var _ driver.PeerRuntimesReporter = (*Driver)(nil)
 
 // Runtime reports the peer's runtime id, empty until the peer has answered.
 func (d *Driver) Runtime() fleet.RuntimeId {
