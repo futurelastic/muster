@@ -138,7 +138,8 @@ every configured peer, exactly one hop — peers never recurse.
 | `GET` | `/v1/machines/{machine}/sessions/{id}` | Read one session | — ⚠️ | yes |
 | `GET` | `…/{id}/environment` | What environment the process actually got | — ⚠️ | yes |
 | `GET` | `…/{id}/turns` | What the session's agent wrote — assistant turns only | `send` | yes |
-| `GET` | `…/{id}/record` | One session's record: what the person and the agent wrote (text, both directions; more kinds to come under the same format) | `record` ⚠️ | yes |
+| `GET` | `…/{id}/record` | One session's record: what the person and the agent wrote and did (text, reasoning, tool calls with results, sub-task entries, summaries, images by reference) | `record` ⚠️ | yes |
+| `GET` | `…/{id}/record/media/{ref}` | One image of that record, by the reference an `image` entry carries (the bytes, not JSON) | `record` ⚠️ | yes |
 | `GET` | `…/{id}/composer` | The unsent text in the composer, with the digest `discard` accepts | `read` ⚠️ | yes |
 | `POST` | `…/{id}/input` | Deliver text to the composer | `send` | yes |
 | `GET` | `/v1/machines/{machine}/input-audit` | Which principal sent which text (by hash) to which session, and when | `read` | this machine only |
@@ -706,11 +707,11 @@ One message is `{"at", "kind", "role", "text"?, "tool"?, "parent"?, "model"?, "m
 | `kind` | `text` · `reasoning` · `tool` · `image` · `summary` · `system`. **Skip a kind you do not know**: later work adds kinds under the same `format`. |
 | `role` | `user` or `assistant`. |
 | `text` | For `text`, `reasoning`, `summary` and `system`. |
-| `tool` | `{id, name, input, result, status}`: a call and its result, paired by the service. |
-| `parent` | The tool call an entry was made inside, when it belongs to a delegated sub-task. |
+| `tool` | `{id, name, input, result, status}`: a call and its result, paired by exact id. `status` is `running`, `completed` or `error`. **A `tool` message whose `tool.id` you already hold replaces it** — see below. |
+| `parent` | The id of the tool call that started the delegated sub-task this entry was made inside; absent for a top-level entry. |
 | `model` | The model that wrote an assistant entry, when the record says. |
-| `media` | A reference for an `image`, read separately; image bytes are never inline. |
-| `truncated` | `true` when a text field was cut at 64 KiB. |
+| `media` | A reference for an `image`, read through `GET …/record/media/{ref}`; image bytes are never inline. Opaque. |
+| `truncated` | `true` when a field was cut at 64 KiB (for a tool call: its `input`, which then reads as a JSON string holding the leading part, or its `result`). |
 
 `format` is `1`. It changes only when a key is renamed or removed; new kinds do
 not change it. `next` is returned even when `messages` is empty, so a poller
@@ -719,18 +720,37 @@ relaunch) is `409`; so is one past the end of a record that shrank. A session
 whose record cannot be identified yet is `404` with `retryable`, which is not the
 same as a conversation with nothing admitted (`200`, `messages: []`).
 
-**What each runtime emits today.** The terminal runtime emits `text` entries in
-both directions: the assistant's prose (by the same predicate `turns` uses, with
-`model`), and what a person typed (a human-origin message whose content is text
-only, not the runtime's own markup — a slash command or its output, a bash-mode
-line, a reminder or hook output, an interruption note). Everything else its record
-holds — tool calls and results, reasoning, sub-agent entries, summaries, system and
-hook output, attachments, images, a message that mixes text with another block,
-and a message another session sent in — is left out, and an entry the reader
-cannot classify with certainty is left out too. They are absent, not empty. The
-`opencode` runtime does not read a record yet: it answers `501` and declares
-`capabilities.readsRecord: false`. Read that capability before offering the
+**What each runtime emits today** (muster #442; `docs/adr/442-the-record-carries-tool-calls-sub-tasks-summaries-and-images-by-reference.md`).
+The terminal runtime emits: `text` in both directions (the assistant's prose by the
+same predicate `turns` uses, with `model`; what a person typed — a human-origin
+message that is not the runtime's own markup, a slash command or its output, a
+bash-mode line, a reminder or hook output, an interruption note — with or without
+images); `reasoning` when the runtime wrote it out; `tool` for any tool's call, paired
+with its result; `summary` for a compaction; `image` for the images a person attached
+and those a tool returned; and `parent` on every entry a delegated sub-task wrote.
+Left out: meta and hook output, attachments, queued placeholders, a message another
+session sent in, a message that mixes text with a block that is neither text nor an
+image, and any entry the reader cannot classify with certainty. They are absent, not
+empty. The `opencode` runtime does not read a record yet: it answers `501` and
+declares `capabilities.readsRecord: false`. Read that capability before offering the
 control.
+
+**A tool call is updated by id.** A call is sent where it was recorded. With the
+result in the same page it goes out once, `status: "completed"` (or `"error"`), with
+the result. Without it, it goes out `status: "running"` and no `result`, and a **later
+page** that reads the result carries the same message again, complete: the same
+`tool.id`, the call's own `at`, in the position where the result was read. Apply one
+rule: *a `tool` message whose `tool.id` you hold replaces it*. `at` is therefore not
+monotonic within a page, and a client that does not apply the rule shows the call twice
+and loses nothing. A result that cannot be tied to a call with exactly its id is
+omitted, never attached to another. `input` is the raw JSON the runtime recorded, and a
+`result` is the tool's text, each cut at 64 KiB.
+
+**Sub-tasks.** The entries a delegated sub-task wrote carry `parent`, the id of the
+tool call that started it (its first message, the prompt it was given, is a `text`
+entry with role `user` and the same `parent`). They arrive in the same pages, merged
+by time with the conversation's. The cursor therefore holds a position per sub-task
+still being read and can be a few hundred bytes; pass it back unchanged.
 
 **Authority.** The `record` grant under a principal table — `read` and `send` do
 not stand in for it, and it is in no default set (`muster service install` does not
@@ -756,9 +776,35 @@ writes a line on each machine. A refused caller leaves a `DENIED` line. The resp
 carries `Cache-Control: no-store`.
 
 ⚠️ **What a record holds is whatever the session did and was told**: file bodies
-and command output once tool results are carried, credentials an agent printed,
-messages people sent in. Grant `record` the way you grant `keys`: to a principal
-meant to see everything a session did.
+and command output in tool results, credentials an agent printed, messages people
+sent in, images. Grant `record` the way you grant `keys`: to a principal meant to see
+everything a session did.
+
+### `GET /v1/machines/{machine}/sessions/{id}/record/media/{ref}`
+
+One **image** of a session's record, by the `media` reference an `image` entry of
+`…/record` carries (muster #442). The answer is the image's bytes — not JSON — with
+`Content-Type` one of `image/png`, `image/jpeg`, `image/gif`, `image/webp` (at most
+16 MiB), `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`. Query:
+`startedAt` as for the record.
+
+It is the record route's sibling and shares everything with it: the **`record` grant**
+(nothing else stands in for it; a principal holding only `record` is served), the
+**`refuseRecordReads` switch** (`501`, `reason: "record-off"`), `startedAt`
+corroboration, the relay, and the **`audit: content-read` line** — its `route` is the
+route pattern and so never carries the reference, and `entries` is `1` when an image
+left.
+
+A reference is a *place* in the runtime's record, bound to the conversation it was read
+from. It holds no content and no path, and the service keeps nothing about it, so it is
+valid for as long as the record holds the entry: it stops working when the session's
+conversation is replaced (a `/clear`, a relaunch) or the record goes, and it has no
+time limit of its own. **Every way a reference can fail is one answer, `404 not_found`
+with `retryable: false`:** malformed, never issued, issued for another conversation,
+expired, or no longer an image the reader admits. A reference handed to a different
+session is one of these, so it never returns another session's image. A record that
+cannot be identified yet is the retryable `404` the record route has; an operator's
+switch is `501`; a runtime that carries no images is `501`.
 
 ### `GET /v1/machines/{machine}/sessions/{id}/composer`
 

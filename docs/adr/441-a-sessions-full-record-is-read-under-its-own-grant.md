@@ -4,6 +4,7 @@
 **Status:** decided — the owner's ruling, 2026-11-11 (option B of the three below)
 **Supersedes, for this route only:** the content boundary of [`258-assistant-turns-read.md`](258-assistant-turns-read.md)
 **Further narrows:** [`82-session-result-belongs-above-this-layer.md`](82-session-result-belongs-above-this-layer.md)
+**Extended by:** [`442-the-record-carries-tool-calls-sub-tasks-summaries-and-images-by-reference.md`](442-the-record-carries-tool-calls-sub-tasks-summaries-and-images-by-reference.md) — what the terminal runtime emits (the paragraph "What each runtime emits today" below is the state at #441; ADR 442 supersedes it), the media route, and cursor version 2. The route, the grant, the audit event and the switch are unchanged.
 
 ## Context
 

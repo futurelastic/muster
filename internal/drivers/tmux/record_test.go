@@ -51,27 +51,31 @@ func recordTexts(p fleet.RecordPage) []string {
 	return out
 }
 
-// The oracle's own test: a record holding every category the ruling names, in
-// the runtime's own shapes, returns the text of the conversation in both
-// directions and not one marker of anything else.
-func TestReadRecord_TextBothDirectionsAndNothingElse(t *testing.T) {
+// The first oracle: a record holding every category the ruling still keeps out,
+// in the runtime's own shapes, returns the text of the conversation in both
+// directions and not one marker of anything else. (What #442 admits, a tool call
+// with its result, reasoning, a sub-task, a summary and an image, has its own
+// tests in recordsources_test.go and recordmedia_test.go.)
+func TestReadRecord_ExcludedStayOut(t *testing.T) {
 	const leak = "LEAK-MARKER"
 	lines := []string{
 		user(t, 1, "user-prompt-string", nil),
 		userBlocks(t, 2, nil, textBlock("user-prompt-blocks")),
 		assistant(t, 3, textBlock("assistant-text")),
-		// the assistant's reasoning and tool call: not text
-		assistant(t, 4, map[string]any{"type": "thinking", "thinking": leak + " reasoning"}),
-		assistant(t, 5, map[string]any{"type": "tool_use", "id": "t1", "name": "Bash", "input": map[string]any{"command": leak + " tool input"}}),
-		// a tool result is recorded as a user entry
-		userBlocks(t, 6, map[string]any{"toolUseResult": map[string]any{"stdout": leak + " tool output"}},
-			map[string]any{"type": "tool_result", "tool_use_id": "t1", "content": leak + " tool output"}),
-		userBlocks(t, 6, nil, map[string]any{"type": "tool_result", "tool_use_id": "t1", "content": leak + " result without toolUseResult"}),
+		// the assistant's reasoning, redacted or empty: nothing to carry
+		assistant(t, 4, map[string]any{"type": "thinking", "thinking": ""}),
+		assistant(t, 4, map[string]any{"type": "redacted_thinking", "data": leak}),
+		// a tool call with no usable id or name
+		assistant(t, 5, map[string]any{"type": "tool_use", "id": "", "name": "Bash", "input": map[string]any{"command": leak}}),
+		assistant(t, 5, map[string]any{"type": "tool_use", "id": "t0", "name": "", "input": map[string]any{"command": leak}}),
+		// a result line that mixes a result with text
+		userBlocks(t, 6, nil,
+			map[string]any{"type": "tool_result", "tool_use_id": "t1", "content": leak + " mixed"}, textBlock(leak+" beside a result")),
 		user(t, 7, leak+" meta", map[string]any{"isMeta": true}),
 		user(t, 8, leak+" sub-agent prompt", map[string]any{"isSidechain": true}),
 		jsonLine(t, map[string]any{"type": "assistant", "timestamp": tsAt(9), "isSidechain": true,
 			"message": map[string]any{"role": "assistant", "model": "model-x", "content": []map[string]any{textBlock(leak + " sub-agent")}}}),
-		user(t, 10, leak+" summary", map[string]any{"isCompactSummary": true}),
+		user(t, 10, leak+" summary that is also meta", map[string]any{"isCompactSummary": true, "isMeta": true}),
 		user(t, 11, leak+" viewer only", map[string]any{"isVisibleInTranscriptOnly": true}),
 		user(t, 12, "<command-name>/clear</command-name> "+leak, nil),
 		user(t, 13, "<local-command-stdout>"+leak+"</local-command-stdout>", nil),
@@ -80,7 +84,8 @@ func TestReadRecord_TextBothDirectionsAndNothingElse(t *testing.T) {
 		user(t, 16, "[Request interrupted by user]"+leak, nil),
 		user(t, 17, leak+" from a peer", map[string]any{"origin": map[string]any{"kind": "peer"}}),
 		user(t, 18, leak+" other source", map[string]any{"promptSource": "other"}),
-		userBlocks(t, 19, nil, textBlock(leak+" with an image"), map[string]any{"type": "image", "source": map[string]any{"type": "base64", "data": leak}}),
+		// text beside a block this reader does not read
+		userBlocks(t, 19, nil, textBlock(leak+" with a document"), map[string]any{"type": "document", "source": map[string]any{"type": "base64", "data": leak}}),
 		jsonLine(t, map[string]any{"type": "system", "subtype": "hook", "timestamp": tsAt(20), "content": leak + " hook"}),
 		jsonLine(t, map[string]any{"type": "attachment", "timestamp": tsAt(21), "attachment": map[string]any{"text": leak}}),
 		jsonLine(t, map[string]any{"type": "queue-operation", "operation": "enqueue", "timestamp": tsAt(22), "content": leak + " queued"}),
@@ -93,6 +98,8 @@ func TestReadRecord_TextBothDirectionsAndNothingElse(t *testing.T) {
 		user(t, 25, "explicit-human", map[string]any{"origin": map[string]any{"kind": "human"}, "promptSource": "typed"}),
 		// a user entry with an origin of an unexpected shape fails closed
 		user(t, 26, leak+" odd origin", map[string]any{"origin": "human"}),
+		// a person's text whose structured tool result is attached to the line
+		user(t, 27, leak+" with a toolUseResult", map[string]any{"toolUseResult": map[string]any{"stdout": leak}}),
 	}
 	page, err := readRecord(writeTurnsRecord(t, lines...), "", 50)
 	if err != nil {
@@ -112,7 +119,7 @@ func TestReadRecord_TextBothDirectionsAndNothingElse(t *testing.T) {
 			t.Errorf("kind = %q, want text", m.Kind)
 		}
 		if m.Tool != nil || m.Parent != "" || m.Media != "" {
-			t.Errorf("a message carries a field this issue does not fill: %+v", m)
+			t.Errorf("a message carries a field nothing here should fill: %+v", m)
 		}
 		switch m.Role {
 		case fleet.RecordRoleAssistant:
@@ -152,12 +159,20 @@ func TestReadRecord_AssistantHalfIsTurnsPredicate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rec.Messages) != len(turns.Turns) {
-		t.Fatalf("record %d assistant messages, turns %d", len(rec.Messages), len(turns.Turns))
+	// The record also carries the reasoning and the tool call on the second line
+	// (#442); what must agree is the agent's text.
+	var texts []fleet.RecordMessage
+	for _, m := range rec.Messages {
+		if m.Kind == fleet.RecordKindText && m.Role == fleet.RecordRoleAssistant {
+			texts = append(texts, m)
+		}
+	}
+	if len(texts) != len(turns.Turns) {
+		t.Fatalf("record %d assistant text messages, turns %d", len(texts), len(turns.Turns))
 	}
 	for i := range turns.Turns {
-		if rec.Messages[i].Text != turns.Turns[i].Text || !rec.Messages[i].At.Equal(turns.Turns[i].At) {
-			t.Errorf("entry %d differs: record %+v, turn %+v", i, rec.Messages[i], turns.Turns[i])
+		if texts[i].Text != turns.Turns[i].Text || !texts[i].At.Equal(turns.Turns[i].At) || texts[i].Truncated != turns.Turns[i].Truncated {
+			t.Errorf("entry %d differs: record %+v, turn %+v", i, texts[i], turns.Turns[i])
 		}
 	}
 }
@@ -187,7 +202,7 @@ func TestReadRecord_CursorResumesExactlyAfterTheLastEntryAcrossAppends(t *testin
 		user(t, 5, "e", nil),
 		jsonLine(t, map[string]any{"type": "mode"}),
 		assistant(t, 6, textBlock("f")),
-		assistant(t, 7, map[string]any{"type": "thinking", "thinking": "skip"}),
+		jsonLine(t, map[string]any{"type": "attachment", "timestamp": tsAt(7)}),
 		user(t, 8, "g", nil),
 		assistant(t, 9, textBlock("h")),
 	} {
@@ -312,7 +327,7 @@ func TestReadRecord_TruncatesAt64KiBOnARuneBoundary(t *testing.T) {
 	}
 
 	// A line over the reader's own limit is skipped whole, without an error.
-	huge := user(t, 4, strings.Repeat("x", recordLineLimit+1), nil)
+	huge := user(t, 4, strings.Repeat("x", recordEntryLineLimit+1), nil)
 	p2 := writeTurnsRecord(t, user(t, 1, "before", nil), huge, user(t, 5, "after", nil))
 	page, err = readRecord(p2, "", 10)
 	if err != nil {
@@ -347,8 +362,12 @@ func TestDriverRecord_ResolvesCorroboratesAndRefuses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(recordTexts(page), "|"); got != "user:hello alpha|assistant:hi from alpha" {
+	// The third line is a tool call: a `tool` message with no text (#442).
+	if got := strings.Join(recordTexts(page), "|"); got != "user:hello alpha|assistant:hi from alpha|assistant:" {
 		t.Fatalf("record = %q", got)
+	}
+	if last := page.Messages[len(page.Messages)-1]; last.Kind != fleet.RecordKindTool || last.Tool == nil || last.Tool.Status != fleet.RecordToolRunning {
+		t.Fatalf("the last message is %+v, want a running tool call", last)
 	}
 	appendLine(t, conv, user(t, 4, "and later", nil))
 	later, err := d.Record(ctx, fleet.Request{}, ref, fleet.RecordQuery{Since: page.Next})

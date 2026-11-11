@@ -685,6 +685,32 @@ type RecordReader interface {
 	Record(ctx context.Context, req fleet.Request, ref fleet.SessionRef, q fleet.RecordQuery) (fleet.RecordPage, error)
 }
 
+// RecordMediaReader is an OPTIONAL capability (muster #442): a driver whose record
+// carries `image` entries can read one of those images back by the reference the
+// entry carries. It is a separate interface from RecordReader because a driver
+// may read a record and carry no images; the service answers `unsupported` when a
+// driver does not implement it.
+//
+// # What an implementation owes the caller
+//
+//   - The same corroboration a record read owes: req.Expect.StartedAt is checked
+//     against the live session before anything is read, a session the machine
+//     does not hold is fleet.ErrNoSuchSession, a record that cannot be identified
+//     is fleet.ErrNoTurnRecord.
+//   - A reference is read through the SAME allow-list that produced it, against
+//     the session the caller named: a reference that is malformed, unknown, issued
+//     against another conversation, or that no longer names an admissible image is
+//     fleet.ErrNoSuchMedia — one answer for all four, never another session's
+//     image.
+//   - The bytes returned are the image the entry named, at most
+//     fleet.MaxRecordMediaBytes, checked to be the content type returned.
+//
+// A relaying driver forwards the call and never reads or rewrites the bytes; the
+// owning machine applies its own authorization to the asserted caller (§13).
+type RecordMediaReader interface {
+	RecordMedia(ctx context.Context, req fleet.Request, ref fleet.SessionRef, media string) (fleet.RecordMedia, error)
+}
+
 // ComposerReader is an OPTIONAL capability (muster #276): a driver that can say
 // what text is sitting unsent in a session's composer, not merely that some is.
 //
