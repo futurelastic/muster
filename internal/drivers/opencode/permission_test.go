@@ -380,11 +380,11 @@ func TestCapabilities_ObservesPermissionModeOnlyWhereTheDriverSetsIt(t *testing.
 }
 
 func TestBuildServeCmd_ExtraArgsFollowTheFixedOnes(t *testing.T) {
-	cmd := buildServeCmd("/bin/true", "", 1234, "muster", "cred", nil, "", "--pure")
+	cmd := buildServeCmd("/bin/true", "", 1234, "muster", "cred", nil, nil, "--pure")
 	if got := cmd.Args[len(cmd.Args)-1]; got != "--pure" {
 		t.Errorf("argv = %v, want --pure last", cmd.Args)
 	}
-	if cmd := buildServeCmd("/bin/true", "", 1234, "muster", "cred", nil, ""); contains(cmd.Args, "--pure") {
+	if cmd := buildServeCmd("/bin/true", "", 1234, "muster", "cred", nil, nil); contains(cmd.Args, "--pure") {
 		t.Errorf("argv = %v carries --pure without being asked", cmd.Args)
 	}
 }

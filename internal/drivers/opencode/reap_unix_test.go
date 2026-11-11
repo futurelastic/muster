@@ -86,7 +86,7 @@ func unknownSessionWithStray(t *testing.T, portShift int) (d *Driver, state, id 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	stray, err = startServer(ctx, exe, t.TempDir(), "muster", d.buildEnv(rec.Dir, nil), "")
+	stray, err = startServer(ctx, exe, t.TempDir(), "muster", d.buildEnv(rec.Dir, nil), nil)
 	if err != nil {
 		t.Fatalf("starting the stand-in server: %v", err)
 	}

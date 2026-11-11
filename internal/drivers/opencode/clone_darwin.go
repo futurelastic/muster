@@ -37,6 +37,9 @@ const (
 	cloneNoOwnerCopy = 0x0002
 )
 
+// cpCloneFlag is the flag that makes this platform's `cp` clone: macOS's -c.
+const cpCloneFlag = "-cR"
+
 // cloneDirectory makes dst, which must not exist, a copy-on-write clone of the
 // directory src as one operation. The cost is the kernel's walk of the tree, not
 // one process and one call per file. The call cannot be interrupted once it has
