@@ -142,6 +142,21 @@ func threeDirs(t *testing.T) (write, read, outside string) {
 	return filepath.Join(root, "write"), filepath.Join(root, "read"), filepath.Join(root, "outside")
 }
 
+// TestHostFacts records what this host's kernel offers, so a run's log says which
+// of the tests below could run and which skipped, and why. It cannot fail.
+func TestHostFacts(t *testing.T) {
+	rel, _ := os.ReadFile("/proc/sys/kernel/osrelease")
+	lsm, _ := os.ReadFile("/sys/kernel/security/lsm")
+	abi, err := landlockABI()
+	t.Logf("kernel %s; active security modules [%s]", strings.TrimSpace(string(rel)), strings.TrimSpace(string(lsm)))
+	if err != nil {
+		t.Logf("Landlock: not available (%v)", err)
+	} else {
+		t.Logf("Landlock ABI %d (the mechanism is offered from ABI %d, Linux 6.12)", abi, MinLandlockABI)
+	}
+	t.Logf("MUSTER_SANDBOX_REQUIRE=%q", os.Getenv("MUSTER_SANDBOX_REQUIRE"))
+}
+
 func TestFilesAreDeniedOutsideTheGrantsAndAChildInheritsThat(t *testing.T) {
 	requireABI(t, 3)
 	write, read, outside := threeDirs(t)
