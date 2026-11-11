@@ -1341,8 +1341,18 @@ func handleCreateSession(svc *Service) http.HandlerFunc {
 		// dry run reports such a runtime as unavailable, not as unenforceable.
 		// A runtime that cannot enforce the posture refuses here, the driver
 		// never asked — and the same refusal the dry run shows.
+		//
+		// A create relayed to a peer that names a runtime is lowered against THAT
+		// runtime's row of the peer's table (muster #460): the peer driver's own
+		// Capabilities() is only the first row it learned, and the body already
+		// carries `runtime` on to the peer, which is the runtime that will run the
+		// session. A body that names none keeps that first row, as before.
 		if body.Posture != nil {
-			mapped, perr := body.Posture.Lower(d.Capabilities())
+			caps := d.Capabilities()
+			if via == resolvedPeer && body.Runtime != "" {
+				caps = peerRuntimeCapabilities(d, body.Runtime)
+			}
+			mapped, perr := body.Posture.Lower(caps)
 			if perr != nil {
 				var fe *fleet.Error
 				if errors.As(perr, &fe) {

@@ -1131,6 +1131,32 @@ func peerRuntimesOf(d driver.Driver) []driver.PeerRuntime {
 	return []driver.PeerRuntime{{Runtime: rt, Capabilities: d.Capabilities(), Models: *modelsOf(d)}}
 }
 
+// peerRuntimeCapabilities is what a peer driver holds about the ONE runtime a
+// create names (muster #460): the row of its table (peerRuntimesOf) for that
+// runtime id, from what the driver already holds and without a network call.
+//
+// Capabilities() on a peer driver is the first row of the peer's table, not the
+// runtime a body names, so a check that wants "what can the runtime this create
+// is for do" must come here instead.
+//
+// A runtime the table does not list answers as one nobody has reached: the
+// assumed floor, which says "unknown", never "incapable" (§4.3, D3), so the
+// check passes through and the peer — which resolves the runtime itself and is
+// the only party that knows whether it has it, up, right now — makes the call.
+// The table lists only what the peer could use when it last answered, and a
+// refusal made on a cache that has since moved would put this machine between
+// the caller and a runtime that works.
+func peerRuntimeCapabilities(d driver.Driver, rt fleet.RuntimeId) fleet.DriverCapabilities {
+	for _, row := range peerRuntimesOf(d) {
+		if row.Runtime == rt {
+			return row.Capabilities
+		}
+	}
+	var floor fleet.DriverCapabilities
+	floor.DeadlineMs = d.Capabilities().DeadlineMs
+	return floor.Assumed()
+}
+
 // driverSummary is one row of GET /v1/health's `drivers`: an enabled runtime
 // on this machine. Status, Cause and Reason mean what they mean on a
 // GET /v1/runtimes row (muster #297, #300): an enabled runtime with no working
