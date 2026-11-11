@@ -830,6 +830,9 @@ func (d *Driver) Capabilities() fleet.DriverCapabilities {
 		// both directions, reasoning, tool calls with their state, summaries and
 		// images by reference (#443, record.go).
 		ReadsRecord: fleet.Declared(true),
+		// muster #444: the format that route is served in — the page's own
+		// fleet.RecordFormat, so the capability and the route cannot disagree.
+		RecordFormat: fleet.DeclaredInt(fleet.RecordFormat),
 		// conversation: every session carries the runtime's own id, captured at
 		// create (#378, conversation.go).
 		ReportsConversation: fleet.Declared(true),

@@ -174,9 +174,11 @@ GET /v1/runtimes
                                        "validatesModel": true,
                                        "remoteControl": { "toggle": true,
                                                           "off": true },
-                                       "readsTurns": true,          ← these five are absent when the runtime
+                                       "readsTurns": true,          ← these six are absent when the runtime
                                        "readsRecord": true,            did not declare them: NOT DECLARED,
-                                       "reportsConversation": true,    never "cannot" (#379, #441)
+                                       "recordFormat": 1,              never "cannot" (#379, #441, #444);
+                                       "reportsConversation": true,    recordFormat is present exactly when
+                                                                       readsRecord is true
                                        "respond": { "kinds": ["tool-permission"],
                                                     "unclassified": false },
                                        "permissionModeChange": { "live": false },
@@ -2822,8 +2824,9 @@ per watched session, in which case a caller that can only describe what it
 wants pays for every match (§5.5).
 
 Both selectors apply to every frame that is about one session —
-`session.created`, `session.state`, `session.closed`, `session.labels` — whether
-that session runs on this machine or the frame was relayed from a peer. Only
+`session.created`, `session.state`, `session.closed`, `session.labels`,
+`session.record` — whether that session runs on this machine or the frame was
+relayed from a peer. Only
 `session.created` carries the session's working directory, so a service
 remembers the directory it has seen for each session (from created frames and
 from its own listings, and by asking the source when a frame names a session it
@@ -2870,10 +2873,36 @@ resumption needs no client code. The server honours that header when no
 | `session.closed` | ref + final state |
 | `session.renamed` | `{ "machine", "from", "to", "startedAt"?, "corroboration" }` — a session's **id** changed (session-abstraction.md §3's `rename`); a subscriber filtering by id must re-key on `to` or it silently stops matching a session that is still alive |
 | `session.labels` | `{ "ref", "startedAt"?, "labels" }` — a session's labels changed, or a create carried some; `labels` is the **whole** map after the change, never the patch (muster #153). A driver's own `session.created` can be observed before a create's labels are stored and carry `{}`; this event is the guarantee |
+| `session.record` | `{ "ref", "startedAt"?, "cursor" }` — a session's **record** grew (muster #444). A reference and the cursor `GET …/record` would answer as `next` at that moment; **never content**, and these are the only keys |
 | `source.status` | a machine's reachability changed |
 | `machine.quota` | `{ "machine", "blocked": bool, "quota"? }` — this machine's **account** started or stopped refusing work |
 | `machine.account` | `{ "machine", "generation" }` — this machine's local **credential material** changed |
 | `control.resync` | `{ "reason": "epoch_changed" \| "cursor_expired" }` |
+
+**`session.record` says a record grew, with a cursor and never content** (muster #444;
+`docs/adr/444-a-record-that-grew-is-said-with-a-cursor-and-never-content.md`). A client
+that holds a cursor from the record route (§3.2) pulls from **its own last cursor** to
+read what the event announced; the event's `cursor` is where the record had reached, so
+passing it as `since` answers what is recorded *after* the event, which is empty until
+the next append. It is opaque and not comparable with another cursor.
+
+- **Coalesced.** At most one event per session per window, the window being the
+  driver's own (one pass of the terminal runtime's stream; about 250 ms for `opencode`);
+  a client must not rely on a number. A burst of appends is one event.
+- **A hint.** The record can grow by something the reader leaves out or has not yet
+  settled, and the pull is then an empty page, a normal answer (§2.16). `opencode` sends
+  no event whose cursor equals the last it sent for the session.
+- **A replaced conversation is an event** with a cursor of the new one: a client's old
+  cursor is a conflict against it (§2.16) and it starts again without `since`.
+- **Authority.** The feed is read under `read`, so the event is; the content stays under
+  `record`. While the operator's `refuseRecordReads` switch is on this machine publishes
+  no `session.record` of its own, because the route answers `501 record-off` and pointing
+  a client at it would mislead; a frame relayed from a peer is that peer's own statement
+  and passes unchanged.
+- **Where growth is noticed.** In each driver's own stream, not in the service: the
+  terminal runtime on the pass its multiplexer notifications wake (no timer of its own,
+  so a record that grows behind a screen that never repaints is reported on the next
+  wake), `opencode` off the runtime's bus.
 
 `source.status` exists so a client learns a peer went away as an **event**,
 rather than inferring it from data that stopped arriving. Inferring absence

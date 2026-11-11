@@ -100,3 +100,69 @@ func TestRuntimes_PersonFacingCapabilitiesPassThrough(t *testing.T) {
 		}
 	}
 }
+
+// The record capabilities (muster #441, #444) cross GET /v1/runtimes as declared:
+// a runtime that reads a record says so and names the format; one that cannot
+// says false and names none (there is no format to name); a peer that predates
+// the fields sends neither, which is not declared and never "cannot".
+func TestRuntimes_RecordCapabilitiesPassThrough(t *testing.T) {
+	svc, srv := newTestServer(t) // the stub runtime declares readsRecord:false
+
+	if err := svc.RegisterLocalDriver("declared", declaringDriver{Driver: &stub.Driver{DeadlineMs: 200}, caps: fleet.DriverCapabilities{
+		DeadlineMs: 200, Source: fleet.CapabilitiesObserved,
+		ReadsRecord: fleet.Declared(true), RecordFormat: fleet.DeclaredInt(fleet.RecordFormat),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.RegisterPeerDriver("otherbox", declaringDriver{Driver: &stub.Driver{DeadlineMs: 200}, caps: fleet.DriverCapabilities{
+		DeadlineMs: 200, Source: fleet.CapabilitiesObserved, SupportsResume: true,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := http.DefaultClient.Do(authedRequest(t, http.MethodGet, srv.URL+"/v1/runtimes", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var body struct {
+		Items []struct {
+			Machine      string                     `json:"machine"`
+			Runtime      string                     `json:"runtime"`
+			Capabilities map[string]json.RawMessage `json:"capabilities"`
+		} `json:"items"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+
+	// "" means the key must be absent.
+	want := map[string]map[string]string{
+		"test-machine/declared": {"readsRecord": `true`, "recordFormat": `1`},
+		"test-machine/stub":     {"readsRecord": `false`, "recordFormat": ``},
+		"otherbox/":             {"readsRecord": ``, "recordFormat": ``},
+	}
+	seen := map[string]bool{}
+	for _, it := range body.Items {
+		id := it.Machine + "/" + it.Runtime
+		w, ok := want[id]
+		if !ok {
+			continue
+		}
+		seen[id] = true
+		for k, wv := range w {
+			got, present := it.Capabilities[k]
+			switch {
+			case wv == "" && present:
+				t.Errorf("%s: %s = %s; it must be absent", id, k, got)
+			case wv != "" && (!present || string(got) != wv):
+				t.Errorf("%s: %s = %s (present %v), want %s", id, k, got, present, wv)
+			}
+		}
+	}
+	for id := range want {
+		if !seen[id] {
+			t.Errorf("no row for %s in /v1/runtimes", id)
+		}
+	}
+}

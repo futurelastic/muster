@@ -224,6 +224,7 @@ func subTaskDir(convPath string) string {
 type subTaskFile struct {
 	id    string
 	mtime time.Time
+	size  int64
 }
 
 // listSubTaskFiles lists the candidates of a conversation, by name and file time
@@ -249,7 +250,7 @@ func listSubTaskFiles(convPath string) []subTaskFile {
 		if err != nil || !fi.Mode().IsRegular() {
 			continue
 		}
-		out = append(out, subTaskFile{id: id, mtime: fi.ModTime()})
+		out = append(out, subTaskFile{id: id, mtime: fi.ModTime(), size: fi.Size()})
 	}
 	return out
 }

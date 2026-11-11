@@ -204,6 +204,11 @@ func TestCapabilities_DeclaresWhatAPersonFacingClientNeeds(t *testing.T) {
 		if _, ok := driver.Driver(d).(driver.RecordReader); !ok {
 			t.Errorf("%s: declares ReadsRecord but does not implement driver.RecordReader", name)
 		}
+		// muster #444: the format the route is served in, so a client knows before
+		// it reads whether it can render it.
+		if caps.RecordFormat == nil || *caps.RecordFormat != fleet.RecordFormat {
+			t.Errorf("%s: RecordFormat = %v; want declared %d, the page's own", name, caps.RecordFormat, fleet.RecordFormat)
+		}
 		if _, ok := driver.Driver(d).(driver.RecordMediaReader); !ok {
 			t.Errorf("%s: reads a record but does not implement driver.RecordMediaReader", name)
 		}

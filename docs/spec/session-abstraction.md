@@ -1945,6 +1945,14 @@ is corroborated before anything is read; a record that cannot be identified yet 
 `not_found` with `retryable`, which is not a conversation with nothing admitted
 (`200`, `messages: []`, §5.7); a relay carries the owning machine's page unchanged.
 
+**Following a record live** (muster #444). The event feed says a record grew
+(`session.record`, api-http.md §4): a reference and the cursor this route would answer as
+`next`, never content. The driver mints that cursor by the same read this route makes, so
+it resumes after the last entry by construction; a client reads from the cursor of its own
+last read, and the event's cursor is opaque and not comparable with one it holds. Growth is
+noticed in the driver's own stream (§5.5: edge-triggered, no timer of the service's own) and
+coalesced there: at most one event per session per window, the window being the driver's.
+
 ### 2.17 RecordMedia
 
 One image of a session's record (muster #442,
@@ -2240,6 +2248,7 @@ DriverCapabilities {
   remoteControl?  : { toggle: boolean, off: boolean }   // can turn a RUNNING session's remote control on (and off); absent = cannot (muster #269)
   readsTurns?     : boolean   // GET …/turns reads this runtime's assistant turns (§5.8, muster #258, #369); absent = NOT DECLARED (an older peer, or one not reached), never "cannot"; false = every call is `unsupported` (muster #379)
   readsRecord?    : boolean   // GET …/record reads this runtime's record (§2.16, muster #441); absent = NOT DECLARED, never "cannot"; false = every call is `unsupported`; true does not say this machine serves the route — an operator's switch answers `unsupported` with reason `record-off`
+  recordFormat?   : number    // the RecordPage `format` this runtime's record is read in (§2.16, muster #444); present exactly when `readsRecord` is true; absent = NOT DECLARED (an older peer, one not reached, or a runtime that cannot read a record), never a format of 0
   reportsConversation?: boolean // looks for the runtime's record of a session's conversation (`conversation`, §2.9); absent = not declared; false = an absent `conversation` will never arrive; true = the driver looks, so an absent one is "not yet" (muster #379)
   respond?        : { kinds: PromptKind[], unclassified: boolean } // which prompts `respond` (§3) answers: one whose `kind` is listed, or one carrying NO kind when `unclassified` is true; absent = not declared; {kinds:[],unclassified:false} = answers none (muster #379)
   permissionModeChange?: { live: boolean, via?: string } // whether a RUNNING session's permission mode can be changed: live false = fixed at create (choose it from `createPermissionModes`), live true names the mechanism in `via` (`keys` today: one BTab press advances the mode, read back from `permissionMode`); absent = not declared (muster #379)
@@ -2460,7 +2469,7 @@ the two harnesses measured). (4) The interpreters a session's tools use must be 
 allow-listed directory — an interpreter under the user's home stops being readable once a sandbox
 confines the home.
 
-**`readsTurns`, `readsRecord`, `reportsConversation`, `respond` and `permissionModeChange` are what a person-facing
+**`readsTurns`, `readsRecord`, `recordFormat`, `reportsConversation`, `respond` and `permissionModeChange` are what a person-facing
 client — one that shows a session and lets a person type into it — needs before it draws a control**
 (muster #379). Without them a client keeps a table of runtime names, which is wrong the day a
 runtime is added, or offers a control and shows a refusal. They follow a rule the plain booleans
@@ -2478,9 +2487,16 @@ fields that predate this rule keep their meaning: `remoteControl` and `sandbox` 
 absent-means-cannot. For the two object-valued fields "cannot" is the object's own negative form,
 not a bare `false`, so one type decodes both.
 
-All five are per **runtime**, not per session: nothing differs between the sessions of one runtime
+All six are per **runtime**, not per session: nothing differs between the sessions of one runtime
 on one machine, and where one session cannot take part its own `state` and `conversation` already
 say so. A per-session declaration arrives the day something genuinely differs between sessions.
+**`readsRecord` and `recordFormat` have none today** (muster #444): both drivers that read a
+record read it for every session they hold, and a session whose record is not identified yet
+(`not_found`, retryable), is parked or has been replaced already says so on the route. Shipping a
+per-session value nothing produces would put a closed set in the contract that no driver fills
+(F52: a closed set nothing produces is in the contract all the same). It arrives with the first session whose runtime process is
+not the one its runtime row describes, as an optional `readsRecord?` on the session under the
+table above, **absent meaning "as its runtime says"**.
 
 - **`readsTurns`** is declared by the driver, not derived from whether it implements the optional
   turns interface: a remote driver always implements that as a relay, and a terminal driver
@@ -2491,6 +2507,12 @@ say so. A per-session declaration arrives the day something genuinely differs be
   It reports what the **runtime** can do. Whether the **machine** serves the route is the
   operator's policy (`refuseRecordReads`), reported by the refusal's `reason: "record-off"`
   and not by masking the flag, so a client that offers the control must be ready for it.
+- **`recordFormat`** (muster #444) is the `RecordPage.format` the runtime's record is read in, a
+  number and not a flag, so the pointer-and-omit rule is what keeps "never asked" from reading as
+  a format nothing speaks. It is present exactly when `readsRecord` is true and is the page's own
+  `fleet.RecordFormat`, so the capability and the route cannot disagree. A client that holds a table
+  of the formats it can render reads it before it reads a record; a number a newer peer declares
+  passes through the relay unchanged.
 - **`respond`** is a test, not a list of labels: a prompt is answerable when its `kind` (§2.7) is in
   `kinds`, or when it has no kind and `unclassified` is true. An agent's own question with options
   is reported with no kind, so `unclassified` is the declaration that covers it. `kinds` is an open

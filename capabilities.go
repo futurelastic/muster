@@ -140,6 +140,10 @@ type PermissionModeChangeSupport struct {
 // DriverCapabilities whose absence means "not declared" (muster #379).
 func Declared(v bool) *bool { return &v }
 
+// DeclaredInt is Declared for a number whose absence means "not declared"
+// (muster #444: DriverCapabilities.RecordFormat).
+func DeclaredInt(v int) *int { return &v }
+
 // DriverCapabilities is what a driver declares about itself (§4.3). Callers
 // must consult this (GET /v1/runtimes, api-http.md §3.1) and degrade rather
 // than assume (§5.6) — a driver never silently emulates a capability it
@@ -367,6 +371,17 @@ type DriverCapabilities struct {
 	// Declared, not derived from driver.RecordReader, for the reason ReadsTurns
 	// gives.
 	ReadsRecord *bool `json:"readsRecord,omitempty"`
+	// RecordFormat is the RecordPage.Format this runtime's record is read in
+	// (muster #444): the highest version it emits, so a client that holds a table
+	// of the formats it can render knows before it reads whether it can render
+	// this one. Present exactly when ReadsRecord is true, and then it is the
+	// RecordFormat the driver was built with.
+	//
+	// Absent means NOT DECLARED — a peer built before the field, an unreached
+	// peer's floor, a runtime that cannot read a record at all (ReadsRecord says
+	// which). It is a number and not a bool, so the pointer is what keeps "never
+	// asked" from reading as a format 0 that nothing speaks.
+	RecordFormat *int `json:"recordFormat,omitempty"`
 	// ReportsConversation reports whether this driver looks for the record the
 	// runtime keeps of a session's conversation (Session.Conversation, §2.9).
 	// false means an absent conversation will never arrive; true means the

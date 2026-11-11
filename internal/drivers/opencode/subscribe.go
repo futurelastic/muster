@@ -47,10 +47,14 @@ import (
 //	permission.*      an ask raised, answered or withdrawn    -> session.state (see below)
 //	Close, process exit                                       -> session.closed
 //
-// Everything else the bus publishes — message and part updates, file and LSP
-// events, session.updated (a title change; rename is unsupported here),
-// question prompts (Respond does not answer them), heartbeats — is DROPPED, and
-// none of it is invented into an existing kind. Events about a session this
+//	message.updated, message.part.updated, message.part.delta,
+//	message.removed, message.part.removed                  -> session.record, coalesced
+//	                                                         (recordevent.go, muster #444)
+//
+// Everything else the bus publishes — file and LSP events, session.updated (a
+// title change; rename is unsupported here), question prompts (Respond does not
+// answer them), heartbeats — is DROPPED, and none of it is invented into an
+// existing kind. Events about a session this
 // driver did not create (a child session the runtime started for itself) are
 // dropped too: they are not in this driver's session universe.
 //
@@ -186,6 +190,12 @@ func (d *Driver) Subscribe(ctx context.Context, req fleet.Request, filter driver
 type sessionTrack struct {
 	last    string
 	pending *fleet.TurnEnd
+
+	// recordArmed is true while a session.record window is open for this session
+	// (muster #444, recordevent.go); recordLast is the cursor the last event of
+	// this subscription carried, "" before the first.
+	recordArmed bool
+	recordLast  string
 }
 
 type subscription struct {
@@ -519,6 +529,11 @@ func (s *subscription) handle(srv *server, ev busEvent) {
 		s.failure(ref, srv, p.Error)
 	case "permission.asked", "permission.updated", "permission.replied":
 		s.permissionChanged(ref, srv)
+	case "message.updated", "message.removed", "message.part.updated", "message.part.removed", "message.part.delta":
+		// The runtime's record changed (muster #444). A hint to look, never a
+		// payload to decode: recordGrew opens a window and the event is minted at
+		// its end from the same read Record makes (recordevent.go).
+		s.recordGrew(ref)
 	case "session.deleted":
 		// The runtime's own word that the session is gone, the same authority
 		// Close's 404 path acts on (#78).

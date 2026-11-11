@@ -18,15 +18,15 @@ import (
 
 func notDeclared(t *testing.T, where string, c fleet.DriverCapabilities) {
 	t.Helper()
-	if c.ReadsTurns != nil || c.ReadsRecord != nil || c.ReportsConversation != nil || c.Respond != nil || c.PermissionModeChange != nil {
-		t.Errorf("%s: a field nobody declared reads as %v / %v / %v / %+v / %+v; want all absent (not declared, never \"cannot\")",
-			where, c.ReadsTurns, c.ReadsRecord, c.ReportsConversation, c.Respond, c.PermissionModeChange)
+	if c.ReadsTurns != nil || c.ReadsRecord != nil || c.RecordFormat != nil || c.ReportsConversation != nil || c.Respond != nil || c.PermissionModeChange != nil {
+		t.Errorf("%s: a field nobody declared reads as %v / %v / %v / %v / %+v / %+v; want all absent (not declared, never \"cannot\")",
+			where, c.ReadsTurns, c.ReadsRecord, c.RecordFormat, c.ReportsConversation, c.Respond, c.PermissionModeChange)
 	}
 	b, err := json.Marshal(c)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"readsTurns", "readsRecord", "reportsConversation", "respond", "permissionModeChange"} {
+	for _, k := range []string{"readsTurns", "readsRecord", "recordFormat", "reportsConversation", "respond", "permissionModeChange"} {
 		if strings.Contains(string(b), `"`+k+`"`) {
 			t.Errorf("%s: re-marshalled capabilities carry %q; an undeclared field must stay off the wire: %s", where, k, b)
 		}
@@ -85,7 +85,7 @@ func TestRefreshCapabilities_AdoptsADeclaredFalse(t *testing.T) {
 
 func TestRefreshCapabilities_RelaysADeclaredYes(t *testing.T) {
 	srv := peerServing(t, 200, runtimesBody(
-		`{"readsTurns":true,"readsRecord":true,"reportsConversation":true,"respond":{"kinds":["tool-permission","something-newer"],"unclassified":true},`+
+		`{"readsTurns":true,"readsRecord":true,"recordFormat":2,"reportsConversation":true,"respond":{"kinds":["tool-permission","something-newer"],"unclassified":true},`+
 			`"permissionModeChange":{"live":true,"via":"keys"},"deadlineMs":5000,"source":"observed"}`), nil)
 	d := New("peerbox", srv.URL)
 	if err := d.RefreshCapabilities(context.Background(), caller); err != nil {
@@ -97,6 +97,11 @@ func TestRefreshCapabilities_RelaysADeclaredYes(t *testing.T) {
 	}
 	if c.ReadsRecord == nil || !*c.ReadsRecord {
 		t.Errorf("ReadsRecord = %v; a declared yes was lost (#441)", c.ReadsRecord)
+	}
+	// A format number a newer peer declares passes through unchanged (muster #444):
+	// the remote driver never decides which formats a client can render.
+	if c.RecordFormat == nil || *c.RecordFormat != 2 {
+		t.Errorf("RecordFormat = %v; the peer's own number must pass through (#444)", c.RecordFormat)
 	}
 	if c.Respond == nil || !c.Respond.Unclassified || len(c.Respond.Kinds) != 2 || c.Respond.Kinds[1] != "something-newer" {
 		t.Errorf("Respond = %+v; a kind a newer peer lists must pass through unchanged", c.Respond)

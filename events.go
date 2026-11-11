@@ -26,6 +26,15 @@ const (
 	// can be observed before the service has stored the create's labels, so
 	// that event may carry `{}` for a session this one then labels.
 	EventSessionLabels EventKind = "session.labels"
+	// EventSessionRecord says a session's record grew (muster #444). It carries
+	// the session and a cursor and NEVER content: a client that holds the record
+	// route's cursor (#441) pulls from its own last cursor to read what is new.
+	//
+	// It is a hint, like the multiplexer driver's notifications are to its own
+	// reads: it says "look", never what to see. A burst of appends inside one
+	// window is one event, so two events for one session are never closer than
+	// that driver's window, and a client must not rely on a number.
+	EventSessionRecord EventKind = "session.record"
 	EventSourceStatus  EventKind = "source.status"
 	// EventMachineQuota reports that this machine's ACCOUNT started or
 	// stopped refusing work — a fact about the machine, not about any one
@@ -108,6 +117,29 @@ type SessionLabelsPayload struct {
 	Labels    map[string]string `json:"labels"`
 }
 
+// SessionRecordPayload is session.record's payload (muster #444): the session,
+// when it started, and where its record has reached.
+//
+// These are the only keys, and a test holds it so: the event exists so a client
+// can learn that a record grew WITHOUT the record travelling on the feed, which
+// is readable under the `read` grant while the record itself is readable only
+// under `record` (docs/adr/441-…). A field added here is a field of content
+// risk, and needs its own ruling.
+//
+// Cursor is the cursor GET …/record would return as `next` at that moment: pass
+// it as `since` and the route answers what is recorded AFTER this event, which
+// is empty until the next append. To read what the event announced, a client
+// reads from the cursor of ITS last read, not from this one. The cursor is
+// opaque, exactly as RecordPage.Next is, and is not comparable with one.
+type SessionRecordPayload struct {
+	Ref SessionRef `json:"ref"`
+	// StartedAt is when the session started, so a subscriber can tell a recycled
+	// id apart (§5.4), as session.labels carries it. Absent when the driver does
+	// not know it.
+	StartedAt *Timestamp `json:"startedAt,omitempty"`
+	Cursor    string     `json:"cursor"`
+}
+
 // MachineQuotaPayload is machine.quota's payload.
 //
 // Blocked is explicit rather than implied by Quota being nil, so a recovery
@@ -150,6 +182,7 @@ type MachineAccountPayload struct {
 //   - EventSessionCreated -> Session
 //   - EventSessionState, EventSessionClosed -> SessionStatePayload
 //   - EventSessionLabels -> SessionLabelsPayload
+//   - EventSessionRecord -> SessionRecordPayload
 //   - EventSourceStatus -> SourceStatus
 //   - EventMachineQuota -> MachineQuotaPayload
 //   - EventMachineAccount -> MachineAccountPayload

@@ -366,6 +366,11 @@ type eventStream struct {
 	credentialKnown bool
 	credentialGen   *fleet.Timestamp
 
+	// recordMarks is what the last pass saw of each watched session's record, by
+	// session id (#444, recordevent.go). Seeded by Subscribe, then owned by run()
+	// alone — no lock.
+	recordMarks map[string]recordMark
+
 	// senders counts the goroutines OTHER than run() that write to out — today
 	// only the lifecycle supervisor. run() owns closing out, and must not do so
 	// while one of them can still send: closing a channel under a concurrent
@@ -449,6 +454,8 @@ func (d *Driver) Subscribe(ctx context.Context, req fleet.Request, filter driver
 		reattach: map[string]reattachState{},
 		closeCh:  make(chan struct{}),
 		trigger:  make(chan struct{}, 1),
+
+		recordMarks: map[string]recordMark{},
 	}
 
 	trigger := s.trigger
@@ -542,6 +549,8 @@ func (d *Driver) Subscribe(ctx context.Context, req fleet.Request, filter driver
 			seed[sess.ID] = sess
 		}
 	}
+
+	s.seedRecordMarks(seed)
 
 	go s.run(streamCtx, trigger, seed)
 	return s, nil
@@ -913,6 +922,9 @@ func (s *eventStream) run(ctx context.Context, trigger <-chan struct{}, known ma
 			if s.takeReattach(sess.ID) {
 				s.attachContent(ctx, sess)
 			}
+			// After the state diff, so a client sees a session's state change
+			// before the record growth that came with it.
+			s.noteRecord(ctx, sess, !had)
 			known[sess.ID] = sess
 			if settled(sess.State) {
 				delete(settling, sess.ID)
@@ -933,6 +945,7 @@ func (s *eventStream) run(ctx context.Context, trigger <-chan struct{}, known ma
 			})
 			delete(known, id)
 			delete(settling, id)
+			delete(s.recordMarks, id)
 			s.detachContent(id)
 			// The session is gone, so any re-attach mark for it is stale, and
 			// its futile count must not be carried into a future incarnation.

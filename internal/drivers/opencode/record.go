@@ -90,6 +90,31 @@ func (d *Driver) Record(ctx context.Context, req fleet.Request, ref fleet.Sessio
 	if err != nil {
 		return fleet.RecordPage{}, err
 	}
+	return d.recordPage(ctx, srv, ref, created, q, limit)
+}
+
+// recordHead is the cursor Record(since="") answers as `next` right now, read the
+// way Record reads it and without a caller's request: what the stream mints a
+// session.record event's cursor from (muster #444). One code path decides what a
+// cursor means, so the event's cursor resumes after the last entry by construction.
+// The page it reads is discarded; only the cursor and the session's start leave.
+func (d *Driver) recordHead(ctx context.Context, ref fleet.SessionRef) (cursor string, started time.Time, err error) {
+	ctx, cancel := d.bounded(ctx)
+	defer cancel()
+	srv, created, err := d.openRead(ctx, fleet.Request{}, ref, "record")
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	page, err := d.recordPage(ctx, srv, ref, created, fleet.RecordQuery{}, 1)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	return page.Next, created, nil
+}
+
+// recordPage is the read Record and recordHead share, after the session has been
+// opened and corroborated and the limit validated.
+func (d *Driver) recordPage(ctx context.Context, srv *server, ref fleet.SessionRef, created time.Time, q fleet.RecordQuery, limit int) (fleet.RecordPage, error) {
 	sc := recordScope{session: ref.ID, created: created.UnixMilli()}
 
 	var cur recordCursor

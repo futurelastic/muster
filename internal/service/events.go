@@ -672,13 +672,15 @@ func eventSubject(ev fleet.Event) (id, cwd string, hasCwd bool) {
 		return p.Ref.ID, "", false
 	case fleet.SessionLabelsPayload:
 		return p.Ref.ID, "", false
+	case fleet.SessionRecordPayload:
+		return p.Ref.ID, "", false
 	case map[string]any:
 		switch ev.Kind {
 		case fleet.EventSessionCreated:
 			id, _ = p["id"].(string)
 			cwd, hasCwd = p["cwd"].(string)
 			return id, cwd, hasCwd && id != ""
-		case fleet.EventSessionState, fleet.EventSessionClosed, fleet.EventSessionLabels:
+		case fleet.EventSessionState, fleet.EventSessionClosed, fleet.EventSessionLabels, fleet.EventSessionRecord:
 			ref, _ := p["ref"].(map[string]any)
 			id, _ = ref["id"].(string)
 			return id, "", false
@@ -888,6 +890,14 @@ func (s *Service) drainStream(ctx context.Context, stream driver.EventStream, re
 		ev, err := stream.Next(ctx)
 		if err != nil {
 			return err
+		}
+		// This machine's record switch is on: its record route answers 501, so an
+		// event telling a client to pull it would mislead (muster #444). Dropped
+		// before it takes a cursor, so the sequence has no hole. A frame a PEER
+		// sent is that peer's own statement about its own route and is relayed as
+		// received.
+		if ev.Kind == fleet.EventSessionRecord && (ev.Machine == "" || ev.Machine == s.self) && s.refuseRecord.Load() {
+			continue
 		}
 		resolve(ev)
 		// A LOCAL driver's session.created carries no labels — the driver

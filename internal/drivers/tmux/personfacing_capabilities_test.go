@@ -34,6 +34,14 @@ func TestCapabilities_TurnsAndConversationFollowTheRecordRoot(t *testing.T) {
 		if c.ReadsRecord == nil || *c.ReadsRecord != tc.want {
 			t.Errorf("%s: ReadsRecord = %v, want declared %v", name, c.ReadsRecord, tc.want)
 		}
+		// muster #444: the record's format is declared exactly when it can be
+		// read, and is the page's own: the capability and the route cannot disagree.
+		switch {
+		case tc.want && (c.RecordFormat == nil || *c.RecordFormat != fleet.RecordFormat):
+			t.Errorf("%s: RecordFormat = %v, want declared %d", name, c.RecordFormat, fleet.RecordFormat)
+		case !tc.want && c.RecordFormat != nil:
+			t.Errorf("%s: RecordFormat = %d on a runtime that cannot read a record; there is no format to declare", name, *c.RecordFormat)
+		}
 	}
 	// A declared "can read turns" must be a driver that implements the read.
 	if _, ok := any(with).(driver.TurnReader); !ok {

@@ -441,12 +441,13 @@ an unreached peer reports it `assumed` and absent, which says nobody has
 answered, not that the peer cannot.
 
 **What a client that shows a session and lets a person type into it needs
-(#379, #441).** Five capabilities, each per runtime, each **absent when not declared**:
+(#379, #441, #444).** Six capabilities, each per runtime, each **absent when not declared**:
 
 | `capabilities.…` | declared yes | declared no |
 |---|---|---|
 | `readsTurns` | `true`: `GET …/turns` reads this runtime's turns (a given session can still be `404` retryable or `409`) | `false`: every call is `501` |
 | `readsRecord` | `true`: `GET …/record` reads this runtime's record (a given session can still be `404` retryable or `409`). It does not say this machine serves the route: an operator's switch answers `501` with the reason `record-off` whatever a runtime can do | `false`: every call is `501` |
+| `recordFormat` | a number (muster #444): the `format` of the pages this runtime's record is read in, today `1`. Present exactly when `readsRecord` is `true`, so a client that holds the formats it can render knows before it reads | absent for a runtime that cannot read a record: there is no format to name |
 | `reportsConversation` | `true`: the driver looks, so `conversation` is an answer when it arrives | `false`: `conversation` will never be set |
 | `respond` | `{"kinds": ["tool-permission"], "unclassified": false}`: `…/respond` answers a prompt whose `kind` is listed, or one with no `kind` when `unclassified` is `true` | `{"kinds": [], "unclassified": false}` |
 | `permissionModeChange` | `{"live": true, "via": "keys"}`: a running session's mode changes through `POST …/keys` `BTab`, read back in `state.permissionMode` | `{"live": false}`: the mode is fixed at create; choose it from `createPermissionModes` |
@@ -455,7 +456,16 @@ The terminal runtime, with its record root configured, declares all four yes
 (`respond` lists every kind and `unclassified: true`; `permissionModeChange` is
 `keys`). `opencode` declares `readsTurns`, `readsRecord` and `reportsConversation` yes, `respond`
 `["tool-permission"]` with `unclassified: false` (its own structured question is
-never offered as a prompt), and `permissionModeChange: {"live": false}`.
+never offered as a prompt), and `permissionModeChange: {"live": false}`. Both runtimes that
+read a record declare `recordFormat: 1`; the test runtime declares `readsRecord: false` and no
+format.
+
+These are per **runtime**, not per session: nothing differs between the sessions of one runtime
+on one machine, so the session object carries no `readsRecord` of its own (muster #444). A
+session that cannot be read right now says so where it always did (`404` retryable while its
+record is not identified, `409` for a parked or replaced one). The day a session's process is
+not the one its runtime describes, a per-session value arrives on the session with the same
+rule: absent means "as its runtime says".
 
 **Absent is not `false`.** A peer on a build from before these fields sends none
 of them, and a missing key means *nobody said* — offer nothing on it, and do not
@@ -802,6 +812,40 @@ carries `Cache-Control: no-store`.
 and command output in tool results, credentials an agent printed, messages people
 sent in, images. Grant `record` the way you grant `keys`: to a principal meant to see
 everything a session did.
+
+**Following a record live: `session.record`** (muster #444;
+`docs/adr/444-a-record-that-grew-is-said-with-a-cursor-and-never-content.md`). The
+event feed has one event for a session whose record grew, so a client that holds a
+cursor from this route pulls instead of polling. The payload is `{ref, startedAt?,
+cursor}` and **nothing else**: no entry, no text, no count.
+
+- **Pull from your own last cursor.** The event says "look". To read what it announced,
+  call this route with the `next` of **your** last read. The event's `cursor` is where
+  the record had reached: pass it as `since` and the route answers what is recorded
+  *after* the event, which is empty until the next append. Cursors are opaque and are
+  not comparable with each other, so do not test one against another to decide whether
+  you are up to date.
+- **Bursts are coalesced.** At most one event per session per window. The window is
+  the runtime's own (one pass of the terminal runtime's stream; about 250 ms for
+  `opencode`), so two events for one session are never closer than that, and you
+  must not rely on a number.
+- **It is a hint.** The record can grow by something the reader leaves out, or by
+  something not yet settled (`opencode` holds an unsettled part), and the pull is then
+  an empty page: a normal answer. `opencode` sends no event whose cursor equals the
+  last one it sent for that session.
+- **A new conversation is an event too.** When a session's conversation is replaced (a
+  `/clear`), your cursor is `409` against it; the event tells you to start again
+  without `since`.
+- **Authority.** The event rides `read`, like every event; the content stays under
+  `record`. It is not offered while the operator's `refuseRecordReads` switch is on
+  (the route answers `501` then, so pointing a client at it would mislead): that
+  machine publishes none of its own. A frame relayed from a peer is the peer's.
+- **Limit of the terminal runtime.** Its stream is woken by the multiplexer's
+  notifications and never by a timer, so a record that grows while the screen does not
+  change is reported on the next wake. Re-read when you need to be sure.
+
+Read `capabilities.readsRecord` and `capabilities.recordFormat` before offering any of
+this.
 
 ### `GET /v1/machines/{machine}/sessions/{id}/record/media/{ref}`
 
@@ -2015,8 +2059,8 @@ Filters on both: `session` (repeatable — name the ones you care about),
 `cwdPrefix`, `scope`.
 
 **Kinds:** `session.created`, `session.state`, `session.closed`,
-`session.renamed`, `session.labels`, `source.status`, `machine.quota`, `machine.account`,
-`control.resync`.
+`session.renamed`, `session.labels`, `session.record`, `source.status`, `machine.quota`,
+`machine.account`, `control.resync`.
 
 **Cursor and epoch.** The epoch identifies a service *instance*; a restart gets
 a new one. The cursor is monotonic within an epoch. A relayed event keeps the

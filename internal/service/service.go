@@ -201,6 +201,13 @@ type Service struct {
 	// assumed rather than inventing an answer (muster #154).
 	selfGrants func(token string) []string
 
+	// refuseRecord is the operator's record switch (Config.RefuseRecord), handed
+	// over by NewMux like selfGrants. While it is on this machine publishes no
+	// session.record event of its own: a client told to pull a route that answers
+	// 501 record-off is misled, not informed (muster #444). A Service used
+	// without a mux never refuses.
+	refuseRecord atomic.Bool
+
 	// verifyMu single-flights GET /v1/machines?verify=1: a caller holding
 	// only read must not be able to multiply probes to every peer.
 	verifyMu sync.Mutex

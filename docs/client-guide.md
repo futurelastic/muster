@@ -1487,6 +1487,7 @@ This is the part to get right before you build a UI on it.
 | a session ends | `session.closed` |
 | a session's **status** changes (idle → working, → waiting_input) | `session.state` |
 | a session's prompt, nonce, `waitingOn`, composer digest, quota or `lastTurn` changes | `session.state` |
+| a session's **record** grows (a line is written to what `GET …/record` reads) | `session.record`: a reference and a cursor, never content, at most one per window; pull from the cursor of your own last read ([`api.md`](api.md)) |
 | the agent prints output, the spinner ticks, the screen scrolls | **no** |
 | the `evidence` prose is reworded | **no** |
 | this service's own view of a machine goes deaf, and comes back | `source.status`, then `control.resync` with `feed_gap` |

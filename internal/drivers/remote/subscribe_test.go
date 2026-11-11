@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -138,6 +139,58 @@ func TestRelayedEventCarriesOriginAndDefersLocalStamping(t *testing.T) {
 	}
 	if ev.Machine != "peerbox" {
 		t.Errorf("machine = %q; an event must keep naming where it happened", ev.Machine)
+	}
+}
+
+// session.record (muster #444) is relayed like every other frame: the peer's
+// payload — a reference and a cursor, nothing else — arrives as the peer sent it,
+// with the peer's coordinates as provenance. The remote driver adds no logic for
+// the kind, and this holds that it does not need any.
+func TestRelayedSessionRecordKeepsItsPayloadAndOrigin(t *testing.T) {
+	data := `{"cursor":7,"epoch":"peer-epoch","machine":"peerbox","kind":"session.record",` +
+		`"payload":{"ref":{"machine":"peerbox","id":"s1"},"startedAt":"2026-11-11T06:00:00Z","cursor":"peer-cursor"}}`
+	srv := ssePeer(t, []string{frame("session.record", data)}, nil, true)
+	d := New("peerbox", srv.URL)
+
+	s, err := d.Subscribe(context.Background(), caller, driver.SubscribeFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ev, err := s.Next(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.Kind != fleet.EventSessionRecord {
+		t.Fatalf("kind = %q, want session.record", ev.Kind)
+	}
+	p, ok := ev.Payload.(map[string]any)
+	if !ok {
+		t.Fatalf("a relayed payload decodes to %T, want the generic map", ev.Payload)
+	}
+	if p["cursor"] != "peer-cursor" {
+		t.Errorf("cursor = %v; the peer's cursor is a position in the peer's record and must pass through untouched", p["cursor"])
+	}
+	ref, _ := p["ref"].(map[string]any)
+	if ref["id"] != "s1" || ref["machine"] != "peerbox" {
+		t.Errorf("ref = %v, want the peer's session", ref)
+	}
+	keys := make([]string, 0, len(p))
+	for k := range p {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	if strings.Join(keys, ",") != "cursor,ref,startedAt" {
+		t.Errorf("payload keys = %v; the relay must add nothing to a reference and a cursor", keys)
+	}
+	if ev.Origin == nil || ev.Origin.Cursor != 7 || ev.Origin.Epoch != "peer-epoch" {
+		t.Errorf("origin = %+v, want the peer's own coordinates", ev.Origin)
+	}
+	if ev.Cursor != 0 || ev.Epoch != "" {
+		t.Errorf("cursor/epoch = %d/%q; the local hub stamps these", ev.Cursor, ev.Epoch)
 	}
 }
 

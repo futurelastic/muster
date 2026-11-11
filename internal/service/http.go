@@ -107,6 +107,7 @@ func NewMux(svc *Service, cfg Config) *http.ServeMux {
 	// cfg, which only the mux holds.
 	svc.setSelfGrantResolver(func(tok string) []string { return grantsForToken(cfg, tok) })
 	svc.setPrincipalTable(cfg.Table)
+	svc.refuseRecord.Store(cfg.RefuseRecord)
 
 	mux.HandleFunc("GET /v1/health", withAuth(svc, cfg, reading(handleHealth(svc))))
 	// GET /v1/whoami deliberately skips reading()'s GrantRead gate — see

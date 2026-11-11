@@ -1145,7 +1145,11 @@ func (d *Driver) Capabilities() fleet.DriverCapabilities {
 		ReadsTurns: fleet.Declared(d.conversations != nil),
 		// muster #441: the record route reads the same file as turns, so it is
 		// readable exactly when turns is. Declared, not derived.
-		ReadsRecord:         fleet.Declared(d.conversations != nil),
+		ReadsRecord: fleet.Declared(d.conversations != nil),
+		// muster #444: the format the record route is served in, declared exactly
+		// when it can be read at all — the page's own fleet.RecordFormat, so the
+		// capability and the route cannot disagree.
+		RecordFormat:        recordFormatIf(d.conversations != nil),
 		ReportsConversation: fleet.Declared(d.conversations != nil),
 		// respond answers every prompt this driver reports, with or without a
 		// kind: it works from the screen's own option list, and refuses by the
@@ -8698,4 +8702,13 @@ func splitHeightTrailer(out, mark string) paneCapture {
 		c.height = h
 	}
 	return c
+}
+
+// recordFormatIf is DriverCapabilities.RecordFormat for a driver that reads a
+// record when reads is true and declares none otherwise (muster #444).
+func recordFormatIf(reads bool) *int {
+	if !reads {
+		return nil
+	}
+	return fleet.DeclaredInt(fleet.RecordFormat)
 }
