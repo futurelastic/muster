@@ -92,7 +92,7 @@ func (d *Driver) observeStatus(srv *server, id string, present bool, st wireStat
 	if srv == nil || srv.credential != fleet.CredentialSubscription {
 		return
 	}
-	now := d.now()
+	now := d.clock()
 	refused := present && st.Type == "retry" && st.Attempt >= limitAttempt
 	d.limit.mu.Lock()
 	if refused {
@@ -109,6 +109,14 @@ func (d *Driver) observeStatus(srv *server, id string, present bool, st wireStat
 	d.runLimitAction(act)
 }
 
+// clock is the driver's clock; a Driver built without one (a test literal) reads the real one.
+func (d *Driver) clock() time.Time {
+	if d.now == nil {
+		return time.Now()
+	}
+	return d.now()
+}
+
 // forgetRefused drops a session that is gone, so a closed session cannot hold an
 // episode open.
 func (d *Driver) forgetRefused(id string) {
@@ -117,7 +125,7 @@ func (d *Driver) forgetRefused(id string) {
 	delete(d.limit.refused, id)
 	act := limitAction{}
 	if was {
-		act = d.limit.decide(d.now())
+		act = d.limit.decide(d.clock())
 	}
 	d.limit.mu.Unlock()
 	d.runLimitAction(act)
@@ -189,7 +197,7 @@ func (d *Driver) clearStaleLimit() {
 func (d *Driver) liveQuota() *fleet.GrantQuota {
 	d.limit.mu.Lock()
 	defer d.limit.mu.Unlock()
-	d.limit.prune(d.now())
+	d.limit.prune(d.clock())
 	n := len(d.limit.refused)
 	if n == 0 || d.limit.since.IsZero() {
 		return nil
