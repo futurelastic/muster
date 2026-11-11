@@ -2456,8 +2456,19 @@ the `runtime.opencode.sessions` row, oldest first,
 each with its id, its age and the size of its directory, and only as a warning: it removes nothing, and
 reaping stays with the caller, because a session listed `unknown` is still one somebody created. A
 session whose directory a running server holds is not listed (the service is up and has not restarted
-since the create), and neither is one whose relaunch failed for a reason that may pass — it is tried
-again at every start, and from a record it cannot be told from a service that is stopped.
+since the create).
+
+The same row counts a second kind (#446): a session whose relaunch **failed at the last start** for a
+reason that may pass — the runtime would not start, a sandbox that cannot be enforced now, a context
+file that is gone. A restart tries such a session again every time, and the service is the only process
+that knows a start has failed it, so it writes one fact onto the session's record when it lists the
+session `unknown`: the time of that start (`relaunchFailedAtMs`, optional, no reason and nothing else; the
+record's version is unchanged, and a build that does not know the field ignores it). The first start
+that relaunches the session takes the fact off. The doctor reads the record, offline, and counts a
+session that carries it, marked `relaunch failed` in the row; a session of a stopped service whose
+record carries nothing is not counted, because a restart relaunches it — which is what keeps the row
+quiet when the doctor is run before the service starts. The fact is as current as the last start, so
+a cause fixed since clears the row after the next start and not before, and the row says so.
 
 **What isolation does not do, stated plainly.** (1) The model-provider key a session needs is *in
 its environment*, and the runtime exposes that environment to its tool shell (`env` lists it).

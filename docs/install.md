@@ -402,7 +402,9 @@ order of this page and the order of its output are the same.
      directories no record names, a `warn` whose leftovers the service removes by
      itself (at its next start, and hourly while it runs) and whose directories that
      may hold a conversation it never does; row `runtime.opencode.sessions` lists the
-     sessions that run no server and that a restart cannot relaunch (created with caller-supplied environment), each
+     sessions that run no server and that a restart did not or cannot relaunch (created with
+     caller-supplied environment, or marked `relaunch failed` because the last start of the service
+     could not relaunch them — the next start that can takes the mark off), each
      with its age and the size of the directory it holds, a `warn` that removes nothing:
      closing the session is what removes its record and directory, and that stays with
      the caller that created it; row

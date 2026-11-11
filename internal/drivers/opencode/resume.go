@@ -33,7 +33,10 @@ import (
 //   - unknown, with the reason it could not be relaunched: the sandbox can no longer
 //     be enforced, a required sessionEnv file is gone, the directory is missing, the
 //     runtime would not start, the runtime no longer has the session. The record and
-//     the directory stay, so a later start tries again, and Close removes them.
+//     the directory stay, so a later start tries again, and Close removes them. The
+//     record also says the start failed (noteRelaunch, muster #446), which is the one
+//     way `muster doctor`, a different process that cannot see this one's memory,
+//     can count the session; the start that relaunches it takes that off.
 //
 // A session whose record says it was parked (muster #423) is not relaunched while
 // the idle bound that parked it still holds: it is listed with the stopped server
@@ -109,6 +112,7 @@ func (d *Driver) resumeOne(ctx context.Context, it loaded) {
 			base.unknown = "the session could not be relaunched after the restart: its context file can no longer be used, " +
 				"and a session is not relaunched without the context it was created with (" + describeCreateError(err) + "); it needs re-creation"
 			base.conversation = unconfirmed(base.unknown)
+			d.noteRelaunch(rec, true)
 			d.markSeen(rec.ID, base)
 			return
 		}
@@ -116,6 +120,7 @@ func (d *Driver) resumeOne(ctx context.Context, it loaded) {
 	}
 	// muster #423: a session that was parked stays parked, with nothing started.
 	if srv := d.parkedServerFor(rec); srv != nil {
+		d.noteRelaunch(rec, false) // this start did not fail it
 		base.srv = srv
 		base.conversation = unconfirmed("the session was left parked, so its runtime has not been asked; " +
 			"the input that starts it confirms the record")
@@ -129,6 +134,7 @@ func (d *Driver) resumeOne(ctx context.Context, it loaded) {
 	if err != nil {
 		base.unknown = "the session could not be relaunched after the restart: " + err.Error()
 		base.conversation = unconfirmed(base.unknown)
+		d.noteRelaunch(rec, true)
 		d.markSeen(rec.ID, base)
 		return
 	}
@@ -168,11 +174,36 @@ func (d *Driver) relaunch(ctx context.Context, rec *sessionRecord) (*server, *fl
 	// muster #423: a process serves the session now, so the record no longer says
 	// parked, in the same write that names the process.
 	rec.Parked = nil
+	// muster #446: and a start that worked no longer has a failed one to report.
+	rec.RelaunchFailedAtMs = 0
 	if err := d.store.write(rec); err != nil {
 		srv.pauseForShutdown()
 		return nil, nil, err
 	}
 	return srv, d.interruptedTurn(ctx, srv, rec.ID), nil
+}
+
+// noteRelaunch keeps rec's record saying what the last start did with the session
+// (muster #446): failed marks it, and anything else takes the mark off. It writes only
+// when that changes the record, so a session that fails every start is written once,
+// not once per start, and a healthy session's record is never touched.
+//
+// A failed write is logged and nothing more. The listing already carries the session
+// as unknown with its reason, which is what a start owes; the record is only what lets
+// the doctor count it from disk later, and a record this driver cannot write is a
+// state directory with larger problems than one uncounted session.
+func (d *Driver) noteRelaunch(rec *sessionRecord, failed bool) {
+	switch {
+	case failed && rec.RelaunchFailedAtMs == 0:
+		rec.RelaunchFailedAtMs = d.now().UnixMilli()
+	case !failed && rec.RelaunchFailedAtMs != 0:
+		rec.RelaunchFailedAtMs = 0
+	default:
+		return
+	}
+	if err := d.store.write(rec); err != nil {
+		d.say("opencode: could not update the record of session %s after the start: %v", rec.ID, err)
+	}
 }
 
 // spec is the create's request as the record kept it: what a start needs to build

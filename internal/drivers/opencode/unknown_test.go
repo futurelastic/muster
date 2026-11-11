@@ -128,6 +128,53 @@ func TestUnknownSessions_CountsWhatARestartCannotRelaunch(t *testing.T) {
 	}
 }
 
+// muster #446: a session whose relaunch failed at the last start is counted from its
+// record, a session of a stopped service that no start has failed is not.
+func TestUnknownSessions_CountsASessionWhoseRelaunchFailedAtTheLastStart(t *testing.T) {
+	f := newScopedFixture(t)
+	day := 24 * time.Hour
+	started := func(ago time.Duration) int64 { return time.Now().Add(-ago).UnixMilli() }
+	failedAt := time.Now().Add(-time.Hour).UnixMilli()
+
+	// Failed at the last start: no caller environment, and a mark saying the relaunch failed.
+	f.recordWith(sessionRecord{ID: "ses_failed", StartedAtMs: started(3 * day), RelaunchFailedAtMs: failedAt,
+		Dir: f.dir("muster-opencode-1", day, map[string]string{"xdg/data/opencode/opencode.db": "123456", "tmp/a": "1234"})})
+	// The stopped service's session: nothing in its record says a start failed it, so it is
+	// the session a restart relaunches, and it is not counted however long it has been down.
+	f.recordWith(sessionRecord{ID: "ses_stopped", StartedAtMs: started(9 * day),
+		Dir: f.dir("muster-opencode-2", day, map[string]string{"tmp/a": "12"})})
+	// Marked, but a running server holds its directory: the service is up and serves it.
+	f.recordWith(sessionRecord{ID: "ses_serving", StartedAtMs: started(8 * day), RelaunchFailedAtMs: failedAt,
+		Dir: f.dir("muster-opencode-3", day, map[string]string{"tmp/a": "12"})})
+	// Both: it needs re-creation whatever else is wrong, so it is the first class.
+	f.recordWith(sessionRecord{ID: "ses_both", StartedAtMs: started(2 * day), RelaunchFailedAtMs: failedAt, EnvNames: []string{"MODEL_KEY"},
+		Dir: f.dir("muster-opencode-4", day, map[string]string{"tmp/a": "1"})})
+	// A caller-environment session beside them, as before.
+	f.recordWith(sessionRecord{ID: "ses_env", StartedAtMs: started(day), EnvNames: []string{"MODEL_KEY"},
+		Dir: f.dir("muster-opencode-5", day, map[string]string{"tmp/a": "12"})})
+
+	rep, err := unknownSessionReport(f.storeDir, f.root, serversHolding("muster-opencode-3"), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := ids(rep), "ses_failed,ses_both,ses_env"; got != want {
+		t.Fatalf("counted %q; want %q (oldest first; a session no start failed, and one a server holds, are not counted)", got, want)
+	}
+	by := map[string]UnknownSession{}
+	for _, s := range rep.Sessions {
+		by[s.ID] = s
+	}
+	if s := by["ses_failed"]; !s.RelaunchFailed || !s.Measured || s.Bytes != 10 || time.Since(s.StartedAt) < 3*day {
+		t.Errorf("ses_failed = %+v; want the failed class, with its age and its 10 measured bytes", s)
+	}
+	if by["ses_both"].RelaunchFailed || by["ses_env"].RelaunchFailed {
+		t.Errorf("a caller-environment session is reported as a failed relaunch: %+v, %+v", by["ses_both"], by["ses_env"])
+	}
+	if n := rep.RelaunchFailedCount(); n != 1 {
+		t.Errorf("RelaunchFailedCount = %d; want 1", n)
+	}
+}
+
 func TestUnknownSessions_ReadsAndRemovesNothing(t *testing.T) {
 	f := newScopedFixture(t)
 	for i, id := range []string{"ses_a", "ses_b", "ses_c"} {
