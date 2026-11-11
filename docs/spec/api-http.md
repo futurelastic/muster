@@ -858,8 +858,9 @@ built — when:
   answer is unchanged. A client that wants validators from a service it does not
   otherwise watch has to watch it (§4.1);
 - **the watch does not cover every local runtime**: it is narrowed to named
-  sessions, a runtime registered after it started, or a driver's subscription is
-  down or unsupported;
+  sessions, or a driver's subscription is down, unsupported or not yet attached
+  (a runtime that registers while the watch runs is subscribed at once, §4, and is
+  read without a validator only until that subscription is up);
 - **a driver that was asked did not answer `ok`**, including one the caller's
   `Fleet-Deadline-Ms` cost it. Only a clean answer is kept; a later reader never
   inherits a degraded one;
@@ -3156,6 +3157,24 @@ announces nothing extra, because no cursor of the old one survives (`epoch_chang
 and a subscriber with no cursor holds nothing stale. The cost is one refetch
 per subscriber per restart, which is the price of the sequence never being
 resumed silently from a point the service was not watching (§7.3).
+
+**A runtime that joins mid-run is announced** (muster #465). A runtime this
+machine's operator enabled can be unavailable when the service starts and
+register on a later retry (§3.1). The driver subscription the service holds
+while somebody watches is opened per registered runtime when it starts, so a
+runtime that registers afterwards is subscribed **at that moment**: only that
+runtime, under the same filter as the running subscription, without restarting
+the others (a restart gives every runtime a fresh baseline that absorbs a
+change without stamping it). The sessions the runtime already has are in no
+event, so a watcher holds none of them from before; on the first successful
+subscription the service says what it says after an outage: `source.status: ok`
+for the machine and a `control.resync` with reason `feed_gap`, in the continuing
+sequence. If that subscription cannot be opened at once, the machine is
+announced `degraded` and the same pair arrives when it is, like any other
+subscription that failed. A runtime that registers while nobody watches is
+subscribed by the next start with every other, and announces nothing. After the
+resync a re-list contains the runtime, and from then on its changes arrive as
+events. Registering a runtime a second time does not subscribe it a second time.
 
 `feed_gap` is not a politer `cursor_expired`. One says the caller fell behind;
 the other is this service admitting the hole is its own, and telling a caller

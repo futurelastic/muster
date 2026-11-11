@@ -192,6 +192,11 @@ type hub struct {
 	// Both guarded by mu.
 	laneGen    uint64
 	localPumps map[*pumpTok]struct{}
+	// laneCtx is the running local lane's context, nil while the lane is off.
+	// A runtime that registers while the lane runs is pumped under it (see
+	// joinLocalLane), so the lane ending ends that pump with the others. Guarded
+	// by mu.
+	laneCtx context.Context
 
 	// ensure serialises the whole of ensureStreamForce: reading what the lanes
 	// are doing, deciding, and recording the lanes it starts. mu alone cannot do
@@ -550,6 +555,7 @@ func (h *hub) stopLanesLocked() []context.CancelFunc {
 	h.peerOn, h.peerCancel = false, nil
 	h.laneGen++
 	h.localPumps = nil
+	h.laneCtx = nil
 	return cancels
 }
 
@@ -590,7 +596,8 @@ func (h *hub) setDeaf(tok *pumpTok, deaf bool) {
 //     it);
 //   - the lane is unfiltered, so a change to any session reaches the hub;
 //   - the lane pumps exactly the registered runtimes (one registered after the
-//     lane started is never pumped by it);
+//     lane started is pumped from then on, joinLocalLane, but is no more
+//     covered than any other until its subscription attaches);
 //   - no pump is deaf.
 //
 // What it does NOT establish: that every field of a row change with an event.
@@ -809,6 +816,58 @@ func eventSubject(ev fleet.Event) (id, cwd string, hasCwd bool) {
 	return "", "", false
 }
 
+// joinLocalLane gives a local runtime that registered while the local lane is
+// running a pump of its own (#465). The lane seats the drivers registered when
+// it STARTS; a runtime that is enabled but unavailable at startup and registers
+// on a later retry (§3.1) is not among them, and nothing else would ever pump
+// it — the lane survives its last watcher for the linger and, under a mirror
+// client that never leaves, indefinitely — so a watcher attached before the
+// runtime registered would never hear one of its sessions change, with a feed
+// that looks healthy and says nothing about it.
+//
+// It starts ONE pump, under the lane's own context and with the filter the lane
+// runs with, and leaves every other pump alone. The alternative, restarting the
+// lane the way a filter change does, would give every runtime a fresh baseline
+// that absorbs a change in between without stamping it, and would say nothing
+// (a stream the hub itself restarts is not announced, §4) — a second silent hole
+// to close the first. The pump's first subscription is announced as a
+// restoration (see pump's joined): the runtime's sessions already exist and are
+// in no event.
+//
+// A runtime the lane already pumps is left alone, and so is a lane that is off:
+// the next lane seats every registered runtime. In particular this does not
+// re-pump a runtime registered a second time; registration adds a driver, it
+// does not replace one a running lane subscribed to.
+//
+// Called by RegisterLocalDriver after it released s.mu: this takes h.ensure,
+// which ensureStreamForce holds while it takes s.mu, so calling it under s.mu
+// would invert the order. Serialised with ensureStreamForce by h.ensure, so a
+// lane starting concurrently either saw the new driver among its seats or has
+// finished starting by the time this reads it.
+func (s *Service) joinLocalLane(rt fleet.RuntimeId, d driver.Driver) {
+	h := s.events
+	h.ensure.Lock()
+	defer h.ensure.Unlock()
+
+	h.mu.Lock()
+	if !h.streamOn || h.laneCtx == nil {
+		h.mu.Unlock()
+		return
+	}
+	for tok := range h.localPumps {
+		if tok.rt == rt {
+			h.mu.Unlock()
+			return
+		}
+	}
+	ctx, filter := h.laneCtx, h.streamFilter
+	tok := &pumpTok{rt: rt, deaf: true}
+	h.localPumps[tok] = struct{}{}
+	h.mu.Unlock()
+
+	go s.pump(ctx, s.self, d, fleet.SystemRequest(), filter, tok, true)
+}
+
 // ensureStream starts, restarts or stops the driver-side subscription so that
 // it watches exactly the union of what subscribers want.
 //
@@ -890,6 +949,7 @@ func (s *Service) ensureStreamForce(ctx context.Context, force bool) {
 		// it on: every seat starts deaf and the generation moves, so a reader of
 		// coversLocal can never see "on" without also seeing who is watched.
 		h.laneGen++
+		h.laneCtx = streamCtx
 		h.localPumps = make(map[*pumpTok]struct{}, len(seats))
 		for _, seat := range seats {
 			h.localPumps[seat.tok] = struct{}{}
@@ -897,7 +957,7 @@ func (s *Service) ensureStreamForce(ctx context.Context, force bool) {
 		h.mu.Unlock()
 
 		for _, seat := range seats {
-			go s.pump(streamCtx, s.self, seat.d, fleet.SystemRequest(), wantLocal, seat.tok)
+			go s.pump(streamCtx, s.self, seat.d, fleet.SystemRequest(), wantLocal, seat.tok, false)
 		}
 	}
 
@@ -922,7 +982,7 @@ func (s *Service) ensureStreamForce(ctx context.Context, force bool) {
 				// Peers need an authority a local driver does not: see
 				// Service.peerCredential for why this is the service's own and
 				// not some subscriber's.
-				go s.pump(peerCtx, m, d, s.peerRequest(), wantPeer, nil)
+				go s.pump(peerCtx, m, d, s.peerRequest(), wantPeer, nil, false)
 			}
 		}
 	}
@@ -959,7 +1019,14 @@ func (s *Service) ensureStreamForce(ctx context.Context, force bool) {
 // announced and cleared only AFTER the restoration is, so no reader can see a
 // pump as watching between the moment it stopped and the moment it is
 // believed.
-func (s *Service) pump(ctx context.Context, machine fleet.MachineId, d driver.Driver, req fleet.Request, filter driver.SubscribeFilter, tok *pumpTok) {
+//
+// joined is true for a pump started into a lane that was already running (see
+// joinLocalLane). Its first subscription is a restoration like any other: the
+// sessions its runtime already had are in no event, so a watcher that holds a
+// view from before the runtime was pumped holds none of them, and is told so
+// the way one is told after an outage — once the subscription is attached,
+// however many attempts that took (#465).
+func (s *Service) pump(ctx context.Context, machine fleet.MachineId, d driver.Driver, req fleet.Request, filter driver.SubscribeFilter, tok *pumpTok, joined bool) {
 	backoff := pumpBackoffMin
 	gapAnnounced := false
 
@@ -996,9 +1063,10 @@ func (s *Service) pump(ctx context.Context, machine fleet.MachineId, d driver.Dr
 		// settles the restart's announcement too: the pair it publishes for the
 		// outage is the one the restart owes, and saying it twice would make
 		// every subscriber refetch twice.
-		if restored := s.events.takeRestoreGap(machine); gapAnnounced || restored {
+		if restored := s.events.takeRestoreGap(machine); gapAnnounced || restored || joined {
 			s.announceFeedRestored(machine)
 			gapAnnounced = false
+			joined = false
 		}
 		s.events.setDeaf(tok, false)
 		backoff = pumpBackoffMin

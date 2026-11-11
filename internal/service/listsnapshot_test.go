@@ -411,17 +411,19 @@ func TestListSnapshot_PendingRuntimeChangeInvalidates(t *testing.T) {
 	}
 }
 
-func TestListSnapshot_LateRegisteredRuntimeBypasses(t *testing.T) {
+func TestListSnapshot_LateRegisteredRuntimeBypassesUntilItIsPumped(t *testing.T) {
 	rig := newListRig(t, 5)
 	if listGet(t, rig.srv, "?scope=local", nil).etag() == "" {
 		t.Fatal("no validator before the runtime registered")
 	}
+	// A runtime registered after the lane started is pumped from then on (#465);
+	// this one cannot attach on its first attempt, so for one backoff nothing the
+	// snapshot could be coherent against reports its changes.
 	late := newFleetFakeDriver(nil)
+	late.failFirst, late.failWith = 1, fmt.Errorf("the runtime was not answering yet")
 	if err := rig.svc.RegisterLocalDriver("late", late); err != nil {
 		t.Fatal(err)
 	}
-	// The running lane was started without it and does not pump it, so nothing
-	// the snapshot could be coherent against reports its changes.
 	for i := 0; i < 3; i++ {
 		got := listGet(t, rig.srv, "?scope=local", nil)
 		if got.etag() != "" {
@@ -430,6 +432,15 @@ func TestListSnapshot_LateRegisteredRuntimeBypasses(t *testing.T) {
 	}
 	if rig.d.Enumerations() < 3 || late.Enumerations() < 3 {
 		t.Fatalf("reads were not enumerated: %d / %d", rig.d.Enumerations(), late.Enumerations())
+	}
+
+	// Once it is pumped the listing is cached again — it does not bypass for as
+	// long as the lane runs, which is what it did while nothing ever pumped it.
+	waitCovered(t, rig.svc)
+	first := listGet(t, rig.srv, "?scope=local", nil)
+	second := listGet(t, rig.srv, "?scope=local", nil)
+	if first.etag() == "" || first.etag() != second.etag() {
+		t.Fatalf("after the late runtime was pumped: validators %q / %q", first.etag(), second.etag())
 	}
 }
 

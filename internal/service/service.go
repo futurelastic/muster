@@ -438,15 +438,22 @@ func (s *Service) Self() fleet.MachineId { return s.self }
 // rejects a driver whose declared capabilities fail Validate (§4.4) — an
 // undeadlined driver is refused at registration, not discovered by a
 // req blocking forever.
+//
+// A runtime registered while the event plane's local lane is running is pumped
+// from then on (joinLocalLane, #465): the lane seats only the drivers that were
+// registered when it started, so without that a watcher attached earlier would
+// never hear this runtime's sessions change.
 func (s *Service) RegisterLocalDriver(runtime fleet.RuntimeId, d driver.Driver) error {
 	if err := d.Capabilities().Validate(); err != nil {
 		return fmt.Errorf("service: registering local driver %q: %w", runtime, err)
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.local[runtime] = d
 	delete(s.unavailable, runtime)
 	s.lists.invalidate() // under mu, so a reader sees the set and the generation together
+	s.mu.Unlock()
+	// After the unlock, never under it: see joinLocalLane for the lock order.
+	s.joinLocalLane(runtime, d)
 	return nil
 }
 
