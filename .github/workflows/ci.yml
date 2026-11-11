@@ -185,18 +185,21 @@ jobs:
         if: failure()
         run: journalctl --user -u muster.service --no-pager -n 100 || true
 
-  # The Linux sandbox mechanism (#439) against a REAL kernel. It needs Landlock
-  # ABI 6 (Linux 6.12): ubuntu-latest's kernel may be older, so the lane runs on a
-  # runner the repository names in the variable MUSTER_LINUX_SANDBOX_RUNNER (a
-  # label such as a newer hosted image, or a self-hosted runner), and not at all
-  # when it is unset. MUSTER_SANDBOX_REQUIRE=1 turns every skip for a missing
-  # kernel feature into a failure, so a lane that is configured cannot go green on
-  # a kernel that proved nothing. The other half of the tests, the ones that need
-  # less than ABI 6, run in the `go` job above on whatever kernel it has.
+  # The Linux sandbox mechanism (#439) against a REAL kernel, on its own job so a
+  # failure names the mechanism. It needs Landlock ABI 6 (Linux 6.12). Measured on
+  # 2026-11-11 the hosted image has kernel 7.0 and Landlock ABI 8, so the default
+  # runner is the hosted one; the repository variable MUSTER_LINUX_SANDBOX_RUNNER
+  # names another runner (an older image to prove the refusal on, or a self-hosted
+  # machine) without a change to this file.
+  #
+  # MUSTER_SANDBOX_REQUIRE=1 turns every skip for a missing kernel feature into a
+  # failure. The `go` job runs the same tests and skips them quietly on a kernel
+  # without the feature; this job exists so that a hosted image that moves to such
+  # a kernel makes THIS job red, with the kernel's facts in its log, instead of the
+  # tests going grey where nobody looks.
   sandbox-linux:
     name: Linux sandbox (needs Landlock ABI 6)
-    if: ${{ vars.MUSTER_LINUX_SANDBOX_RUNNER != '' }}
-    runs-on: ${{ vars.MUSTER_LINUX_SANDBOX_RUNNER }}
+    runs-on: ${{ vars.MUSTER_LINUX_SANDBOX_RUNNER || 'ubuntu-latest' }}
     env:
       MUSTER_SANDBOX_REQUIRE: "1"
     steps:
@@ -206,8 +209,8 @@ jobs:
           go-version-file: go.mod
       - name: What this kernel offers
         run: |
-          uname -r
-          cat /sys/kernel/security/lsm || true
+          echo "uname -r: $(uname -r)"
+          echo "active security modules: $(cat /sys/kernel/security/lsm 2>/dev/null || echo unknown)"
           go test ./internal/sandbox -run TestHostFacts -count=1 -v
       - name: launcher, policy, filter, and a confined child doing each refused thing
         run: go test ./internal/sandbox -count=1 -v
@@ -217,35 +220,6 @@ jobs:
         run: |
           sudo apt-get install -y tmux
           FLEET_TMUX_INTEGRATION=1 go test ./internal/drivers/tmux -run 'LiveLinux|LinuxSandbox' -count=1 -v
-
-  # When the lane is not configured, say so on every run, with what this runner's
-  # kernel does offer, instead of a job that silently does not exist.
-  sandbox-linux-lane-missing:
-    name: Linux sandbox lane (not configured)
-    if: ${{ vars.MUSTER_LINUX_SANDBOX_RUNNER == '' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-      - name: Say what did not run
-        run: |
-          msg="The Linux sandbox tests that need Landlock ABI 6 (Linux 6.12) did not run: set the repository variable MUSTER_LINUX_SANDBOX_RUNNER to a runner label whose kernel has it. The tests that need less run in the go job."
-          echo "::warning title=Linux sandbox lane not configured::${msg}"
-          # Printed to the log as well as the summary: the summary is not in the log,
-          # and what this runner's kernel offers is the fact the warning is about.
-          {
-            echo "### Linux sandbox lane not configured"
-            echo
-            echo "${msg}"
-            echo
-            echo '```'
-            echo "uname -r: $(uname -r)"
-            echo "active security modules: $(cat /sys/kernel/security/lsm 2>/dev/null || echo unknown)"
-            go test ./internal/sandbox -run TestHostFacts -count=1 -v | grep -E 'kernel|Landlock|REQUIRE' || true
-            echo '```'
-          } | tee -a "$GITHUB_STEP_SUMMARY"
 
   # The macOS half stops short of loading: a Background launchd job needs a login
   # session a hosted runner does not give. It does run the real install path as

@@ -91,10 +91,13 @@ The facts that decide the shape, measured on the target and in a VM:
 ## Consequences
 
 - A Linux host on a kernel older than 6.12 reports `sandboxUnavailable` with the
-  ABI it has and the one it needs. Hosted CI's image may be such a host; the tests
-  that need ABI 6 run in a job whose runner the repository names in a variable
-  (`MUSTER_LINUX_SANDBOX_RUNNER`), and when it is unset the workflow says so on
-  every run. The tests that need less run everywhere.
+  ABI it has and the one it needs. The hosted CI image measured on 2026-11-11 has
+  kernel 7.0 and Landlock ABI 8, so the whole test set runs there; the
+  `sandbox-linux` job runs it with `MUSTER_SANDBOX_REQUIRE=1`, so a hosted image
+  that moves to a kernel without the feature turns that job red (with the kernel's
+  facts in its log) instead of the tests skipping quietly in the ordinary job. The
+  repository variable `MUSTER_LINUX_SANDBOX_RUNNER` points the job at another
+  runner without a change to the workflow.
 - A session cannot create a unix socket at all (a pre-connected stream pair, as a
   child-process library makes, still works), has no shared memory directory, and
   cannot use io_uring. An agent installed under a version manager's directory in
