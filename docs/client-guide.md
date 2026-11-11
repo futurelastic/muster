@@ -1526,6 +1526,7 @@ This is the part to get right before you build a UI on it.
 | the `evidence` prose is reworded | **no** |
 | this service's own view of a machine goes deaf, and comes back | `source.status`, then `control.resync` with `feed_gap` |
 | this service is **restarted** and starts watching a machine again | `source.status: ok`, then `control.resync` with `feed_gap`, once per restart |
+| a runtime on this machine **registers after you started watching** (it was unavailable at startup and came up on a retry) | `source.status: ok`, then `control.resync` with `feed_gap`, once for that runtime; its sessions are in the re-list |
 | a machine becomes unreachable | `source.status` |
 | this machine's **account** starts or stops refusing work | `machine.quota` |
 | this machine's local **credential material** changes | `machine.account` |
@@ -1629,6 +1630,14 @@ the first time the restarted service watches it, even though your cursor is
 valid: re-list on it as on any other. It arrives once per restart, not on every
 reconnect afterwards. A service with no state to restore starts a new epoch
 instead, and you get `epoch_changed`.
+
+**A runtime that comes up late is announced the same way.** A runtime that was
+unavailable when the service started can register on a later retry, while you
+are already watching. The service subscribes to it from that moment and, on its
+first subscription, sends `source.status: ok` and a `control.resync` with
+`feed_gap`: the sessions it already had are in no event, and what you hold does
+not list them. Re-list on it. Until then a client that only watched would have
+heard nothing about that runtime at all, which is what this closes.
 
 `feed_gap` is worth distinguishing in your logs from the other two resync
 reasons. `epoch_changed` and `cursor_expired` are about your view; `feed_gap`
