@@ -33,10 +33,14 @@ import (
 // code has never seen contribute nothing. Anything it cannot classify with
 // certainty is left out, never guessed at.
 //
-// This file is also the ONLY place in the package that decodes a part's text.
-// wireMessageInfo and wirePart (client.go) deliberately do not, which is what
-// keeps state and usage unable to read content by construction; the wire types
-// below are separate for that reason, not by accident.
+// This file is one of TWO places in the package that decode a part's text; the
+// other is recordclassify.go, the allow-list of the record route (muster #443),
+// which docs/adr/441-a-sessions-full-record-is-read-under-its-own-grant.md widened
+// on its own route and under its own grant. wireMessageInfo and wirePart
+// (client.go) deliberately do not decode content, which is what keeps state and
+// usage unable to read it by construction; the wire types below, and the record's,
+// are separate for that reason, not by accident. This file's boundary is unchanged:
+// turns still returns the agent's finished prose and nothing else.
 //
 // # One turn per assistant message
 //
@@ -98,37 +102,14 @@ func (d *Driver) Turns(ctx context.Context, req fleet.Request, ref fleet.Session
 		return fleet.TurnsPage{}, fmt.Errorf("limit must be between 1 and %d", fleet.MaxTurnsLimit)
 	}
 
-	known, ok := d.wasSeen(ref.ID)
-	if !ok {
-		return fleet.TurnsPage{}, fmt.Errorf("%w: %q", fleet.ErrNoSuchSession, ref.ID)
-	}
-	if err := d.requireLive(known); err != nil {
-		return fleet.TurnsPage{}, err
-	}
-	if d.phaseOf(known.srv) == phaseParked {
-		// muster #421: the history lives in the runtime's store, which only its process
-		// reads, and a read does not start one (a poll would keep the session awake).
-		return fleet.TurnsPage{}, d.parkedError("turns")
-	}
 	ctx, cancel := d.bounded(ctx)
 	defer cancel()
-	srv := known.srv
-
 	// §5.4, before anything is read: a recycled id must not hand one session's
 	// words to a caller who meant another's. The session is read live, not from
 	// the cache, because the cursor is bound to its start time too.
-	var sess wireSession
-	if err := d.do(ctx, srv, "GET", "/session/"+url.PathEscape(ref.ID), nil, &sess); err != nil {
-		if isNotFound(err) {
-			return fleet.TurnsPage{}, fmt.Errorf("%w: %q", fleet.ErrNoSuchSession, ref.ID)
-		}
+	srv, created, err := d.openRead(ctx, req, ref, "turns")
+	if err != nil {
 		return fleet.TurnsPage{}, err
-	}
-	created := time.UnixMilli(sess.Time.Created)
-	if want := req.Expect.StartedAt; want != nil && !created.Equal(*want) {
-		return fleet.TurnsPage{}, fmt.Errorf(
-			"%w: id %q now holds a session started at %s; the caller meant the one started at %s",
-			fleet.ErrAmbiguousTarget, ref.ID, created.Format(time.RFC3339), want.Format(time.RFC3339))
 	}
 
 	var anchor string

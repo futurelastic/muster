@@ -453,7 +453,7 @@ answered, not that the peer cannot.
 
 The terminal runtime, with its record root configured, declares all four yes
 (`respond` lists every kind and `unclassified: true`; `permissionModeChange` is
-`keys`). `opencode` declares `readsTurns` and `reportsConversation` yes, `respond`
+`keys`). `opencode` declares `readsTurns`, `readsRecord` and `reportsConversation` yes, `respond`
 `["tool-permission"]` with `unclassified: false` (its own structured question is
 never offered as a prompt), and `permissionModeChange: {"live": false}`.
 
@@ -731,9 +731,32 @@ and those a tool returned; and `parent` on every entry a delegated sub-task wrot
 Left out: meta and hook output, attachments, queued placeholders, a message another
 session sent in, a message that mixes text with a block that is neither text nor an
 image, and any entry the reader cannot classify with certainty. They are absent, not
-empty. The `opencode` runtime does not read a record yet: it answers `501` and
-declares `capabilities.readsRecord: false`. Read that capability before offering the
-control.
+empty. Read `capabilities.readsRecord` before offering the control.
+
+**`opencode`** (muster #443; `docs/adr/443-the-opencode-record-is-read-by-part-and-a-running-call-is-sent-once-and-updated-by-id.md`)
+answers the same route and the media route, declares `readsRecord: true`, and emits
+the same kinds with one entry **per part** in the order the runtime wrote them (not
+one per message, as `turns` joins them): `text` for what a person typed and what the
+agent wrote (a part the runtime flags `synthetic` or `ignored` is out, as in `turns`),
+`reasoning`, `tool` for any tool's call with its input and the state the runtime holds
+for it (`running`, `completed`, or `error` with the runtime's error text as the
+`result`), `summary` for a compaction summary, and `image` for an inline image a person
+attached and one a completed tool returned. A model round is a message, so a prompt
+that uses a tool reads as two assistant `text` entries with the `tool` between them.
+Left out: an errored message, a message from no model, step, snapshot, patch, agent,
+retry, compaction and subtask parts, a tool's metadata and title, a file that is not an
+inline image of the four types (a link, a path, an SVG), and any part the reader cannot
+classify. A delegated sub-task is a separate session in this runtime, so no entry
+carries `parent`.
+
+It is read **while a message is still being written**: the settled parts of the message
+in flight are returned as they settle, and nothing past an unsettled part (a text still
+streaming, a call whose input is still arriving). A running call goes out once with
+`status: "running"`, and when a later page finds it finished the page carries it again,
+complete, in front of what is new (the rule above: replace by `tool.id`). A message the
+runtime never finished, with a later assistant message after it, is a remnant of a
+cut-off turn: its calls with no outcome go out `error` with no `result`. A parked
+session is a `409` that says so, never an empty page.
 
 **A tool call is updated by id.** A call is sent where it was recorded. With the
 result in the same page it goes out once, `status: "completed"` (or `"error"`), with
