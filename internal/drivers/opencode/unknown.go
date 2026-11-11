@@ -21,39 +21,54 @@ import (
 //
 // Which sessions are listed `unknown` is decided by the running service, in memory,
 // at its start (resumeOne). The doctor is another process, and for a session that
-// has no server the listing carries no size either. What a record on disk does say
-// with certainty is the one class a restart can never relaunch: a create that carried
-// caller-supplied environment, whose values this driver never kept
-// (recreateReason). That is the class measured on a machine that had the problem,
-// and it is the one counted here.
+// has no server the listing carries no size either. A record on disk says two things
+// about it, and both are counted here:
+//
+//   - a create that carried caller-supplied environment, whose values this driver
+//     never kept (recreateReason). That is the class a restart can never relaunch,
+//     and the one measured on a machine that had the problem (#445);
+//   - a relaunch that FAILED at the last start, for a reason that may pass: the
+//     runtime would not start, a sandbox that cannot be enforced now, a context file
+//     that is gone (#446). The service writes that fact onto the record when it lists
+//     the session unknown (noteRelaunch), because from a record alone such a session
+//     looks exactly like one of a service that is merely stopped.
 //
 // Not counted, on purpose:
-//   - a session whose relaunch failed for a reason that may pass (the runtime would
-//     not start, a sandbox that could be enforced again). It is tried again at every
-//     start, and from a record alone it cannot be told from a service that is simply
-//     stopped — counting it would warn about every session whenever the doctor is
-//     run before the service starts, which is when it is meant to be run;
+//   - a session with no such mark, whatever the service is doing. A stopped service
+//     leaves every session without a server, and a restart relaunches the clean ones;
+//     counting them would warn about every session whenever the doctor is run before
+//     the service starts, which is when it is meant to be run. The mark is the one
+//     thing that separates a session that has failed a start from one that has not
+//     been asked yet;
 //   - a record that cannot be read. It is listed `unknown` too, but names no
 //     directory to measure; it is counted apart (Unreadable), like the dirs row does.
 //
-// A session of the counted class whose directory a running server holds is not
-// counted: the service is up and has not restarted since it was created, so it is
-// listed as running. That is the same identity the dirs row uses for "a server holds
-// it", and it is what keeps a healthy machine quiet.
+// What the mark says is what the LAST start did, not what the next one will: a
+// session it names is retried at every start and its mark comes off when one works
+// (relaunch), so a person who has fixed the cause sees the row clear after the next
+// start and not before. That is said in the row, because it is the one way the row
+// can be out of date.
 //
-// A counted session is therefore one of two things in the running service: `unknown`
-// (a restart found it and could not relaunch it) or `dead` (its server exited since
-// it was created, and nothing has closed it). The doctor cannot tell them apart from
-// a record, and the remedy is the same — its caller closes it — so the row says both.
-// What it can never be is a session that is merely idle: a session created with
-// caller-supplied environment is never parked (park.go), so a record that says so
-// and has no server is not a live session waiting for its next input.
+// A session of either class whose directory a running server holds is not counted: the
+// service is up and a server serves it, so it is listed as running. That is the same
+// identity the dirs row uses for "a server holds it", and it is what keeps a healthy
+// machine quiet.
+//
+// A counted session of the first class is one of two things in the running service:
+// `unknown` (a restart found it and could not relaunch it) or `dead` (its server exited
+// since it was created, and nothing has closed it). The doctor cannot tell them apart
+// from a record, and the remedy is the same — its caller closes it — so the row says
+// both. What it can never be is a session that is merely idle: a session created with
+// caller-supplied environment is never parked (park.go), so a record that says so and
+// has no server is not a live session waiting for its next input. A session of the
+// second class is `unknown` in the running service, and listed so with its reason.
 //
 // Everything here only reads. It removes no record and no directory, and it starts
 // and stops nothing: reaping stays with the caller that created the session.
 
-// UnknownSession is one session a restart cannot relaunch, which runs no server: listed
-// `unknown` by the service, or `dead` when its server exited since it was created.
+// UnknownSession is one session that runs no server and that a restart did not or cannot
+// relaunch: listed `unknown` by the service, or `dead` when its server exited since it
+// was created.
 type UnknownSession struct {
 	// ID is the runtime's own session id, what a caller passes to close it. The
 	// session's name is deliberately not carried: a title is free text.
@@ -70,6 +85,11 @@ type UnknownSession struct {
 	Measured bool
 	// Partial is true when the walk stopped at its bound, so Bytes is a lower bound.
 	Partial bool
+	// RelaunchFailed is true for a session that could have been relaunched but whose
+	// relaunch failed at the last start (muster #446); false for one created with
+	// caller-supplied environment, which no start can relaunch. A record that is
+	// both is the second: it needs re-creation whatever else is wrong with it.
+	RelaunchFailed bool
 }
 
 // UnknownReport is what the doctor says about the sessions a restart left unknown.
@@ -82,6 +102,18 @@ type UnknownReport struct {
 	// Uninspected is the number of processes that look like servers but could not be
 	// inspected: with it non-zero a counted session may in fact be running.
 	Uninspected int
+}
+
+// RelaunchFailedCount is how many of the sessions are ones whose relaunch failed at the
+// last start (muster #446), the rest being the ones no start can relaunch.
+func (r UnknownReport) RelaunchFailedCount() int {
+	n := 0
+	for _, s := range r.Sessions {
+		if s.RelaunchFailed {
+			n++
+		}
+	}
+	return n
 }
 
 // Bytes is the sum of the measured sizes, and whether any figure in it is a lower
@@ -105,8 +137,8 @@ func (r UnknownReport) Bytes() (total int64, exact bool) {
 // did not reach is reported without a size, and one it cut short as a lower bound.
 const unknownWalkBudget = 20 * time.Second
 
-// UnknownSessions reports the sessions under stateDir that a restart cannot relaunch
-// and that run no server (muster #445). Like OrphanServers and OrphanDirs it runs from
+// UnknownSessions reports the sessions under stateDir that a restart cannot relaunch,
+// or failed to at its last start, and that run no server (muster #445, #446). Like OrphanServers and OrphanDirs it runs from
 // the doctor, another process. err is ErrScanUnsupported where the platform cannot
 // list processes: without that, a session that is running cannot be told from one
 // that is not, and nothing is reported rather than a guess.
@@ -137,8 +169,10 @@ func unknownSessionReport(storeDir, root string, scan func(string) ([]serverProc
 			rep.Unreadable++
 			continue
 		}
-		if it.rec.recreateReason() == "" {
-			continue // a restart relaunches it: it is listed as running, or tried again at the next start
+		callerEnv := it.rec.recreateReason() != ""
+		failed := !callerEnv && it.rec.RelaunchFailedAtMs > 0
+		if !callerEnv && !failed {
+			continue // a restart relaunches it, and none has failed to: not a session anything is waiting on
 		}
 		if it.rec.Dir != "" && held[filepath.Base(filepath.Clean(it.rec.Dir))] {
 			continue // a server holds its directory: the service is up and has not restarted since the create
@@ -153,7 +187,7 @@ func unknownSessionReport(storeDir, root string, scan func(string) ([]serverProc
 	})
 
 	for _, rec := range counted {
-		s := UnknownSession{ID: rec.ID}
+		s := UnknownSession{ID: rec.ID, RelaunchFailed: rec.recreateReason() == ""}
 		if rec.StartedAtMs > 0 {
 			s.StartedAt = time.UnixMilli(rec.StartedAtMs)
 		}

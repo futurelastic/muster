@@ -91,6 +91,19 @@ type sessionRecord struct {
 	// the record's version is unchanged; a build that does not know the field
 	// ignores it and starts the session, as every build before #423 did.
 	Parked *parkedRecord `json:"parked,omitempty"`
+	// RelaunchFailedAtMs is when a start of the service listed the session `unknown`
+	// because its relaunch failed for a reason that may pass (muster #446): the runtime
+	// would not start, a sandbox that cannot be enforced now, a context file that is
+	// gone. Zero when no start has. Written by resumeOne, cleared by the write that
+	// records a process started in the session's place (relaunch) or by a start that
+	// leaves the session parked, so a record that carries it says what the LAST start
+	// did. It is the one fact about that start that outlives the service, which is what
+	// lets `muster doctor` count the session from disk without guessing from a service
+	// that is merely stopped (unknown.go). It holds no reason, only the time: the
+	// reason is in the listing, and may name a path. Optional, so a record from before
+	// it existed reads as "no failed start recorded" and the record's version is
+	// unchanged; a build that does not know the field ignores it.
+	RelaunchFailedAtMs int64 `json:"relaunchFailedAtMs,omitempty"`
 }
 
 // parkedRecord is the part of a parkNote (park.go) that outlives the service: when

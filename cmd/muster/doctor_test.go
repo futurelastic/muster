@@ -956,6 +956,11 @@ func TestDoctorOpencodeSessionsRow(t *testing.T) {
 	sess := func(id string, age time.Duration, bytes int64) opencode.UnknownSession {
 		return opencode.UnknownSession{ID: id, StartedAt: ago(age), Bytes: bytes, Measured: true}
 	}
+	failed := func(id string, age time.Duration, bytes int64) opencode.UnknownSession {
+		s := sess(id, age, bytes)
+		s.RelaunchFailed = true
+		return s
+	}
 	many := opencode.UnknownReport{}
 	for i := 0; i < 13; i++ {
 		many.Sessions = append(many.Sessions, sess("ses_"+string(rune('a'+i)), time.Duration(20-i)*day, mib))
@@ -980,8 +985,20 @@ func TestDoctorOpencodeSessionsRow(t *testing.T) {
 			[]string{"no opencode session without a server is waiting"}, nil, nil},
 		{"two sessions, with age and size", true, "/state", scanning(opencode.UnknownReport{Sessions: []opencode.UnknownSession{
 			sess("ses_old", 5*day+3*time.Hour, 1*gib), sess("ses_new", 2*time.Hour+10*time.Minute, 512*mib)}}, nil), statusWarn,
-			[]string{"2 opencode session(s) run no server and cannot be relaunched by a restart", "hold 1.5 GiB", "(the oldest 5d old)"},
-			[]string{"ses_old (5d old, 1.0 GiB); ses_new (2h old, 512.0 MiB)", "oldest first", "needs re-creation", "listed dead", "Nothing here removes them", "tried again at every start"}, nil},
+			[]string{"2 opencode session(s) run no server and were not relaunched by a restart", "hold 1.5 GiB", "(the oldest 5d old)"},
+			[]string{"ses_old (5d old, 1.0 GiB); ses_new (2h old, 512.0 MiB)", "oldest first", "each was created with caller-supplied environment", "needs re-creation",
+				"listed dead", "Nothing here removes them", "a restart relaunches it"}, []string{"relaunch failed"}},
+		{"a session whose relaunch failed at the last start, with age and size", true, "/state", scanning(opencode.UnknownReport{Sessions: []opencode.UnknownSession{
+			failed("ses_down", 3*day, 7*mib)}}, nil), statusWarn,
+			[]string{"1 opencode session(s) run no server and were not relaunched by a restart", "hold 7.0 MiB", "(the oldest 3d old)"},
+			[]string{"ses_down (3d old, 7.0 MiB, relaunch failed)", "it was marked \"relaunch failed\"", "listed such a session unknown because its relaunch failed",
+				"takes the mark off the first time one works", "clears this after the next start, not before", "Nothing here removes them"},
+			[]string{"caller-supplied environment", "needs re-creation"}},
+		{"both classes in one list, each said apart", true, "/state", scanning(opencode.UnknownReport{Sessions: []opencode.UnknownSession{
+			sess("ses_env", 6*day, mib), failed("ses_down", 2*day, 2*mib), failed("ses_down2", day, mib)}}, nil), statusWarn,
+			[]string{"3 opencode session(s)", "hold 4.0 MiB"},
+			[]string{"ses_env (6d old, 1.0 MiB); ses_down (2d old, 2.0 MiB, relaunch failed); ses_down2 (24h old, 1.0 MiB, relaunch failed)",
+				"1 was created with caller-supplied environment", "2 were marked \"relaunch failed\""}, nil},
 		{"an age below an hour is minutes, one below two days is hours", true, "/state", scanning(opencode.UnknownReport{Sessions: []opencode.UnknownSession{
 			sess("ses_a", 47*time.Hour, mib), sess("ses_b", 59*time.Minute, mib)}}, nil), statusWarn,
 			[]string{"(the oldest 47h old)"}, []string{"ses_a (47h old, 1.0 MiB); ses_b (59m old, 1.0 MiB)"}, nil},
@@ -1077,10 +1094,13 @@ func TestDoctorOpencodeSessionsRowReadsARealStateDirectory(t *testing.T) {
 		}
 		return dir
 	}
-	rec := func(id, dir string, env bool) string {
+	rec := func(id, dir string, env bool, extra ...string) string {
 		m := map[string]any{"version": 1, "id": id, "startedAtMs": started, "dir": dir}
 		if env {
 			m["envNames"] = []string{"MODEL_KEY"}
+		}
+		if len(extra) > 0 { // muster #446: the mark a start that failed to relaunch the session leaves
+			m["relaunchFailedAtMs"] = started
 		}
 		raw, err := json.Marshal(m)
 		if err != nil {
@@ -1090,8 +1110,10 @@ func TestDoctorOpencodeSessionsRowReadsARealStateDirectory(t *testing.T) {
 	}
 	left := mkdir("muster-opencode-1", 3000)
 	relaunched := mkdir("muster-opencode-2", 5000)
+	failedDir := mkdir("muster-opencode-3", 4000)
 	write("ses_left.json", rec("ses_left", left, true))
 	write("ses_plain.json", rec("ses_plain", relaunched, false))
+	write("ses_failed.json", rec("ses_failed", failedDir, false, "failed"))
 
 	env := testDoctorEnv(map[string]string{"FLEET_RUNTIME_OPENCODE": "1", "FLEET_STATE_DIR": state})
 	rows := runChecks(context.Background(), env)
@@ -1099,18 +1121,19 @@ func TestDoctorOpencodeSessionsRowReadsARealStateDirectory(t *testing.T) {
 	if row.Status == statusSkip && strings.Contains(row.Summary, "cannot list") {
 		t.Skip("this platform cannot list processes with their environment")
 	}
-	if row.Status != statusWarn || !strings.Contains(row.Summary, "1 opencode session(s)") {
-		t.Fatalf("got %+v; want one session counted (the plain one is relaunched by a restart)", row)
+	if row.Status != statusWarn || !strings.Contains(row.Summary, "2 opencode session(s)") {
+		t.Fatalf("got %+v; want two sessions counted (the plain one is relaunched by a restart, no start has failed it)", row)
 	}
-	if !strings.Contains(row.Detail, "ses_left (26h old, 3 KiB)") || strings.Contains(row.Detail, "ses_plain") {
-		t.Errorf("detail = %q; want ses_left with its age and size, and not ses_plain", row.Detail)
+	if !strings.Contains(row.Detail, "ses_left (26h old, 3 KiB)") || !strings.Contains(row.Detail, "ses_failed (26h old, 4 KiB, relaunch failed)") ||
+		strings.Contains(row.Detail, "ses_plain") {
+		t.Errorf("detail = %q; want ses_left and ses_failed with their age and size, and not ses_plain", row.Detail)
 	}
 	if strings.Contains(row.Summary+row.Detail, state) {
 		t.Errorf("row carries a filesystem path: %+v", row)
 	}
 	// Nothing was removed or rewritten.
-	for _, p := range []string{filepath.Join(storeDir, "ses_left.json"), filepath.Join(storeDir, "ses_plain.json"),
-		filepath.Join(left, "xdg", "data", "opencode.db"), filepath.Join(relaunched, "xdg", "data", "opencode.db")} {
+	for _, p := range []string{filepath.Join(storeDir, "ses_left.json"), filepath.Join(storeDir, "ses_plain.json"), filepath.Join(storeDir, "ses_failed.json"),
+		filepath.Join(left, "xdg", "data", "opencode.db"), filepath.Join(relaunched, "xdg", "data", "opencode.db"), filepath.Join(failedDir, "xdg", "data", "opencode.db")} {
 		if _, err := os.Stat(p); err != nil {
 			t.Errorf("the doctor removed %s: %v", filepath.Base(p), err)
 		}

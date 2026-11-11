@@ -1500,10 +1500,10 @@ func checkOpencodeDirs(enabled bool, stateDir string, scan func(string) (opencod
 // most likely means to close are the ones shown.
 const unknownSessionsListed = 10
 
-// checkOpencodeSessions is the runtime.opencode.sessions row (muster #445): the
-// opencode sessions a restart cannot relaunch and that run no server — listed
-// `unknown` after a restart, or `dead` if their server exited since — each with its
-// age and the size of the directory it holds.
+// checkOpencodeSessions is the runtime.opencode.sessions row (muster #445, #446): the
+// opencode sessions that run no server and that a restart did not or cannot relaunch —
+// listed `unknown` after a restart, or `dead` if their server exited since — each with
+// its age and the size of the directory it holds.
 //
 // A restart adopts such a session and lists it `unknown` (spec §7.5): its record and
 // its directory — a whole runtime store and package cache — stay until the caller
@@ -1517,13 +1517,16 @@ const unknownSessionsListed = 10
 // what removes the record and the directory. Like every row here it names no path
 // and no session title, only ids.
 //
-// Which sessions a restart cannot relaunch is the one class a record decides on its
-// own (the create carried caller-supplied environment, which this driver never
-// kept). A session whose relaunch failed for a reason that may pass is retried at
-// every start and, from a record, cannot be told from a stopped service, so it is not
-// counted — the detail says so.
+// Two classes are counted, and each is decided by the record alone. The create carried
+// caller-supplied environment, which this driver never kept, so no restart can relaunch
+// it (#445). Or the last start of the service tried to relaunch it and failed, for a
+// reason that may pass — the runtime would not start, a sandbox that cannot be enforced
+// now — and wrote that onto the record (#446). A session with neither is not counted: a
+// stopped service leaves every session without a server, and a restart relaunches it —
+// the detail says so. The second class is only as current as the last start, which the
+// detail also says.
 func checkOpencodeSessions(enabled bool, stateDir string, now time.Time, scan func(string) (opencode.UnknownReport, error)) doctorRow {
-	row := doctorRow{ID: "runtime.opencode.sessions", Refs: []int{445}}
+	row := doctorRow{ID: "runtime.opencode.sessions", Refs: []int{445, 446}}
 	switch {
 	case !enabled:
 		row.Status = statusSkip
@@ -1563,7 +1566,7 @@ func checkOpencodeSessions(enabled bool, stateDir string, now time.Time, scan fu
 		case !exact:
 			size = "at least " + size
 		}
-		row.Summary = fmt.Sprintf("%d opencode session(s) run no server and cannot be relaunched by a restart; they hold %s", len(rep.Sessions), size)
+		row.Summary = fmt.Sprintf("%d opencode session(s) run no server and were not relaunched by a restart; they hold %s", len(rep.Sessions), size)
 		// The list is oldest first, but a record with no start time sorts before every
 		// other; the oldest age worth saying is the first one that is known.
 		for _, s := range rep.Sessions {
@@ -1579,15 +1582,28 @@ func checkOpencodeSessions(enabled bool, stateDir string, now time.Time, scan fu
 		items := make([]string, len(shown))
 		for i, s := range shown {
 			items[i] = fmt.Sprintf("%s (%s, %s)", s.ID, sessionAge(now, s), sessionSize(s))
+			if s.RelaunchFailed {
+				items[i] = fmt.Sprintf("%s (%s, %s, relaunch failed)", s.ID, sessionAge(now, s), sessionSize(s))
+			}
 		}
 		list := strings.Join(items, "; ")
 		if more := len(rep.Sessions) - len(shown); more > 0 {
 			list += fmt.Sprintf("; and %d more", more)
 		}
-		detail = append(detail, "oldest first: "+list,
-			"each was created with caller-supplied environment, which is never kept, so a restart lists it unknown and it needs re-creation "+
-				"(one whose server exited since is listed dead); either way its record and directory stay until its caller closes it. "+
-				"Nothing here removes them — a session left unknown is still one somebody created")
+		failed := rep.RelaunchFailedCount()
+		detail = append(detail, "oldest first: "+list)
+		if callerEnv := len(rep.Sessions) - failed; callerEnv > 0 {
+			detail = append(detail, fmt.Sprintf("%s created with caller-supplied environment, which is never kept: a restart lists such "+
+				"a session unknown and it needs re-creation (one whose server exited since is listed dead)", countOf(callerEnv, len(rep.Sessions))))
+		}
+		if failed > 0 {
+			detail = append(detail, fmt.Sprintf("%s marked \"relaunch failed\": the last start of the service listed such a session unknown "+
+				"because its relaunch failed (the runtime would not start, a sandbox that cannot be enforced, a context file that is gone); the "+
+				"listing gives the reason, and every start tries again and takes the mark off the first time one works — so a cause fixed since "+
+				"clears this after the next start, not before", countOf(failed, len(rep.Sessions))))
+		}
+		detail = append(detail, "either way its record and directory stay until its caller closes it. "+
+			"Nothing here removes them — a session left unknown is still one somebody created")
 	}
 	if rep.Unreadable > 0 && len(rep.Sessions) > 0 {
 		detail = append(detail, fmt.Sprintf("%d session record(s) could not be read; the service lists each unknown too, but there is nothing to measure", rep.Unreadable))
@@ -1599,9 +1615,23 @@ func checkOpencodeSessions(enabled bool, stateDir string, now time.Time, scan fu
 		detail = append(detail, fmt.Sprintf("%d process(es) look like opencode servers but could not be inspected, so a counted session may be running "+
 			"(run the doctor as the service user)", rep.Uninspected))
 	}
-	detail = append(detail, "a session whose relaunch failed for a reason that may pass is tried again at every start and is not counted here")
+	detail = append(detail, "a session of a stopped service that no start has failed to relaunch is not counted here: a restart relaunches it")
 	row.Detail = strings.Join(detail, ". ")
 	return row
+}
+
+// countOf says how many of the n counted sessions a sentence is about, so a row of one
+// class does not say "all" of a list that has a second one.
+func countOf(k, n int) string {
+	switch {
+	case k == n && n == 1:
+		return "it was"
+	case k == n:
+		return "each was"
+	case k == 1:
+		return "1 was"
+	}
+	return fmt.Sprintf("%d were", k)
 }
 
 // sessionSize is one session's size as the row writes it.

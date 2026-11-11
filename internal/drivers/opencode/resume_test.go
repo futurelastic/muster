@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	fleet "github.com/futurelastic/muster"
 	"github.com/futurelastic/muster/internal/driver"
@@ -305,6 +306,97 @@ func TestResume_ASessionThatCannotBeFoundIsStillListedWithTheReason(t *testing.T
 	// A session the runtime lost is kept on disk for the next start to retry.
 	if _, err := os.Stat(filepath.Join(state, "opencode", "sessions", gone.ID+".json")); err != nil {
 		t.Errorf("the record of a session that could not be relaunched was removed: %v", err)
+	}
+}
+
+// muster #446: a start that lists a session unknown because its relaunch failed says so
+// on the session's record, and the first start that relaunches it takes that off, so the
+// doctor can count the session from disk and stop counting it once it works.
+func TestResume_AFailedRelaunchIsMarkedOnTheRecordAndClearedByASuccessfulOne(t *testing.T) {
+	state := t.TempDir()
+	d1 := newStateDriver(t, state)
+	broken := mustCreate(t, d1, "k1", fleet.SessionSpec{})
+	healthy := mustCreate(t, d1, "k2", fleet.SessionSpec{})
+	kBroken, _ := d1.wasSeen(broken.ID)
+	store := filepath.Join(kBroken.srv.dir, "xdg", "data", "fake-session.json")
+	saved, err := os.ReadFile(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = d1.Shutdown()
+	rec := func(id string) *sessionRecord {
+		t.Helper()
+		storeDir, _ := stateLayout(state)
+		r := (&recordStore{dir: storeDir}).load(id)
+		if r == nil {
+			t.Fatalf("no record for %s", id)
+		}
+		return r
+	}
+	if rec(broken.ID).RelaunchFailedAtMs != 0 {
+		t.Fatal("a record carries a failed relaunch before any restart")
+	}
+
+	// The runtime's store lost the session: the relaunch fails, the session is listed unknown.
+	if err := os.Remove(store); err != nil {
+		t.Fatal(err)
+	}
+	// The real clock, not an injected one: the driver builds its relaunch deadline from
+	// d.now(), so a clock that stands still in the past would expire every relaunch at once.
+	before := time.Now()
+	d2 := newStateDriver(t, state)
+	if got := listed(t, d2)[broken.ID].State.Status; got != fleet.StatusUnknown {
+		t.Fatalf("the session whose store is gone is %q after the restart; want unknown", got)
+	}
+	firstFail := rec(broken.ID).RelaunchFailedAtMs
+	if firstFail < before.UnixMilli() || firstFail > time.Now().UnixMilli() {
+		t.Errorf("RelaunchFailedAtMs = %d; want the time of the start that failed it (between %d and now)", firstFail, before.UnixMilli())
+	}
+	if h := listed(t, d2)[healthy.ID]; h.State.Status == fleet.StatusUnknown || rec(healthy.ID).RelaunchFailedAtMs != 0 {
+		t.Errorf("the session that relaunched is %q (%s), mark %d; want running and unmarked", h.State.Status, h.State.Evidence, rec(healthy.ID).RelaunchFailedAtMs)
+	}
+	_ = d2.Shutdown()
+
+	// A second start that fails the same way keeps the time of the first: it is written once.
+	time.Sleep(5 * time.Millisecond)
+	d3 := newStateDriver(t, state)
+	if got := rec(broken.ID).RelaunchFailedAtMs; got != firstFail {
+		t.Errorf("RelaunchFailedAtMs = %d after a second failed start; want the first one's %d", got, firstFail)
+	}
+	_ = d3.Shutdown()
+
+	// The cause is fixed; the next start relaunches the session and the mark comes off.
+	if err := os.WriteFile(store, saved, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d4 := newStateDriver(t, state)
+	t.Cleanup(func() { _ = d4.Shutdown() })
+	if got := listed(t, d4)[broken.ID].State.Status; got == fleet.StatusUnknown {
+		t.Fatalf("the session is still unknown once its store is back")
+	}
+	if got := rec(broken.ID).RelaunchFailedAtMs; got != 0 {
+		t.Errorf("RelaunchFailedAtMs = %d after a start that relaunched it; want 0", got)
+	}
+}
+
+// muster #446: the mark holds a time and nothing else, and a record written before it
+// existed reads as no failed start.
+func TestResume_TheFailedRelaunchMarkHoldsOnlyATime(t *testing.T) {
+	rec := sessionRecord{Version: recordVersion, ID: "ses_a", StartedAtMs: 1, RelaunchFailedAtMs: 1762851600000}
+	raw, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"relaunchFailedAtMs":1762851600000`) {
+		t.Errorf("record = %s; want the mark as one number", raw)
+	}
+	var old sessionRecord
+	if err := json.Unmarshal([]byte(`{"version":1,"id":"ses_old","startedAtMs":1}`), &old); err != nil || old.RelaunchFailedAtMs != 0 {
+		t.Errorf("a record from before the mark: %+v, %v; want no failed start", old, err)
+	}
+	clear, _ := json.Marshal(sessionRecord{Version: recordVersion, ID: "ses_b"})
+	if strings.Contains(string(clear), "relaunchFailed") {
+		t.Errorf("a record with no failed start still writes the field: %s", clear)
 	}
 }
 
