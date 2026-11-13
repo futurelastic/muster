@@ -1275,13 +1275,26 @@ fleet are not created through this service at all, so no request exists for
 that consent to travel on. The tmux driver's trust-seed maintainer
 (`internal/trustseed`, muster issue #47) closes that gap by writing the
 runtime's own record of the answer — per-directory keys in its own state
-file — ahead of time, under a fixed, operator-configured set of roots, so
-the question is never raised for any session under one, whoever started it.
-It seeds the two questions' keys independently and counts them apart
-(`trust_seed.granted`, `trust_seed.imports_granted`), so a reader can tell
-which is being written. It covers exactly the directories the runtime keys
-its answer under — a repository or worktree root, and a directory in no
-repository — and never widens that.
+file — ahead of time, under a fixed, operator-configured set of roots. What is
+covered under a root depends on what the directory is, and on when. A
+repository or worktree is answered by the maintainer's periodic sweep, so the
+question is not raised for any session there, whoever started it and whether or
+not it went through this service; the sweep looks at most five directory levels
+below a root (or below the nearest repository above it) and does not descend
+into dependency and build directories. A directory in no repository, and a
+repository nested deeper than that bound, are not reached by the sweep: each is
+answered only from the moment this service has created a session in it, and
+then only that directory, so a session started there any other way before then
+still meets the question. A directory outside every root is never answered. A
+root can never be the home directory or `/`, spelled any way or reached through
+a symlink, because answering for home would vouch for everything under it; the
+service refuses to start on such a root. The maintainer seeds the two
+questions' keys independently and counts them apart (`trust_seed.granted`,
+`trust_seed.imports_granted`), so a reader can tell which is being written. It
+covers exactly the directories the runtime keys its answer under — a repository
+or worktree root, and a directory in no repository — and never widens that;
+the sweep reaches the first of these within its bound, and only a create
+reaches the second.
 
 This is still the SAME decision the consent table already commits to on
 create, only standing rather than per-request: an operator, not this
