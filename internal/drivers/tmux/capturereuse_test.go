@@ -2,7 +2,9 @@ package tmux
 
 import (
 	"context"
+	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -27,13 +29,28 @@ type reuseRig struct {
 	now time.Time
 	// seen is how many of f's calls earlier listings already accounted for.
 	seen int
+	// beforeRead, when set, runs once, just before the multiplexer is asked for the
+	// next capture: what happens to a pane between a listing and the read that
+	// follows it.
+	beforeRead func()
 }
 
 func newReuseRig(t *testing.T, f *fakeMux, opts ...Option) *reuseRig {
 	t.Helper()
 	r := &reuseRig{t: t, f: f, now: reuseBase}
 	all := append([]Option{
-		withExec(f.exec),
+		withExec(func(ctx context.Context, name string, args ...string) ([]byte, error) {
+			if slices.Contains(args, "capture-pane") {
+				r.mu.Lock()
+				hook := r.beforeRead
+				r.beforeRead = nil
+				r.mu.Unlock()
+				if hook != nil {
+					hook()
+				}
+			}
+			return f.exec(ctx, name, args...)
+		}),
 		withNonce(func() string { return testNonce }),
 		withClock(func() time.Time { r.mu.Lock(); defer r.mu.Unlock(); return r.now }),
 	}, opts...)
@@ -362,35 +379,163 @@ func TestCaptureReuse_AVerbThatActsReadsTheScreenFresh(t *testing.T) {
 	}
 }
 
-// The signal is checked against reality, and a miss turns reuse off for good.
-func TestCaptureReuse_AMissedChangeIsCaughtCountedAndSwitchesReuseOff(t *testing.T) {
-	r := newReuseRig(t, idleAndBusy(), WithCaptureReuse(testIdleAfter, testMaxAge))
+// idleFleet is n sessions, every one silent for an hour and long past its start-up
+// window: %1 .. %n.
+func idleFleet(n int) *fakeMux {
+	at := reuseBase.Unix()
+	f := &fakeMux{captures: map[string]string{}}
+	for i := 1; i <= n; i++ {
+		name := fmt.Sprintf("idle%d", i)
+		id := fmt.Sprintf("%%%d", i)
+		f.sessions = append(f.sessions, fakeSession{name: name, paneID: id, cwd: "/work/" + name,
+			pid: 100 + i, created: at - 160000, title: "2_1_220", activity: at - 3600})
+		f.captures[id] = idleFixtureFor(name)
+	}
+	return f
+}
+
+// settle takes the two listings after which an idle fleet is fully cached, then
+// moves the clock past every pane's ceiling so the next listing re-reads them all.
+func (r *reuseRig) settle() {
+	r.t.Helper()
 	r.list()
 	r.advance(time.Second)
-	r.list()
-
-	// The screen changes and the fingerprint does not move: a multiplexer that
-	// failed to report output.
-	r.f.mu.Lock()
-	r.f.captures["%1"] = fixtureUnsent
-	r.f.mu.Unlock()
+	if _, read := r.list(); len(read) != 0 {
+		r.t.Fatalf("a settled idle fleet was read again: %v", read)
+	}
 	r.advance(testMaxAge + time.Second)
+}
+
+func (r *reuseRig) screenChanges(pane string) {
+	r.f.mu.Lock()
+	defer r.f.mu.Unlock()
+	r.f.captures[pane] = fixtureUnsent
+}
+
+// Output that arrives between a listing and the read that follows it makes the
+// screen differ under a fingerprint that has not moved yet. That is a race inside
+// the check; the next listing shows the fingerprint moved. It must not cost the
+// saving (muster #472: it did, for the life of the process).
+func TestCaptureReuse_OutputBetweenTheListingAndTheReadIsARaceNotAMiss(t *testing.T) {
+	logs := captureLog(t)
+	r := newReuseRig(t, idleFleet(4), WithCaptureReuse(testIdleAfter, testMaxAge))
+	r.settle()
+
+	r.mu.Lock()
+	r.beforeRead = func() {
+		r.screenChanges("%1")
+		r.f.mu.Lock()
+		r.f.sessions[0].activity = r.now.Unix()
+		r.f.mu.Unlock()
+	}
+	r.mu.Unlock()
+	r.list() // every pane's ceiling has passed, so all are read; %1 changed under the read
+
+	r.advance(time.Second)
 	got, read := r.list()
-	if !sameSet(read, []string{"%1", "%2"}) {
-		t.Fatalf("past the ceiling the idle pane was read %v, want both", read)
+	if !slices.Contains(read, "%1") {
+		t.Fatalf("the pane whose fingerprint moved was not read: %v", read)
+	}
+	if got["idle1"].State.Status == fleet.StatusIdle {
+		t.Errorf("the changed screen still reports as the old one: %q", got["idle1"].State.Status)
+	}
+	if !r.d.reuse.enabled() {
+		t.Fatal("reuse was switched off by output that raced the listing")
+	}
+	c := r.d.Counters()
+	if c[counterCaptureReuseMissed] != 0 || c[counterCaptureReuseRaced] != 1 {
+		t.Fatalf("reuse_missed=%d reuse_raced=%d, want 0 and 1", c[counterCaptureReuseMissed], c[counterCaptureReuseRaced])
+	}
+	if len(r.d.reuse.distrusted) != 0 {
+		t.Fatalf("a raced pane was distrusted: %v", r.d.reuse.distrusted)
+	}
+	if strings.Contains(logs.String(), "cannot be trusted") {
+		t.Errorf("the log says the signal cannot be trusted:\n%s", logs)
+	}
+}
+
+// A change that no listing explains is a miss, and it costs the pane that showed
+// it: that one is read on every pass, the others keep their saving.
+func TestCaptureReuse_AChangeNoListingExplainsDistrustsThatPaneOnly(t *testing.T) {
+	logs := captureLog(t)
+	r := newReuseRig(t, idleFleet(5), WithCaptureReuse(testIdleAfter, testMaxAge))
+	r.settle()
+
+	r.screenChanges("%1") // the fingerprint does not move
+	r.list()              // past every ceiling: all read, %1 differs, suspected
+	if n := r.d.Counters()[counterCaptureReuseMissed]; n != 0 {
+		t.Fatalf("capture.reuse_missed = %d after one listing, want 0: the verdict waits for the next", n)
+	}
+
+	r.advance(time.Second)
+	_, read := r.list() // the fingerprint is still the cached one: confirmed
+	if !sameSet(read, []string{"%1"}) {
+		t.Fatalf("the listing that confirmed the miss read %v, want only the pane that missed", read)
 	}
 	if n := r.d.Counters()[counterCaptureReuseMissed]; n != 1 {
 		t.Fatalf("capture.reuse_missed = %d, want 1", n)
 	}
-	if got["idle"].State.Status == fleet.StatusIdle {
-		t.Errorf("the pass that found the change still reported the old screen: %q", got["idle"].State.Status)
+	if !r.d.reuse.enabled() {
+		t.Fatal("one pane shown to miss switched reuse off for the whole host")
 	}
+	for i := 0; i < 3; i++ {
+		r.advance(time.Second)
+		if _, read := r.list(); !sameSet(read, []string{"%1"}) {
+			t.Fatalf("listing %d after the miss read %v, want %%1 on every pass and nothing else", i+1, read)
+		}
+	}
+	if !strings.Contains(logs.String(), "pane %1 changed although") {
+		t.Errorf("the log does not name the pane:\n%s", logs)
+	}
+}
+
+// Several distinct panes disagreeing with their fingerprints is what a
+// multiplexer that does not report output looks like: that switches reuse off.
+func TestCaptureReuse_SeveralPanesShownToMissSwitchReuseOffForTheHost(t *testing.T) {
+	logs := captureLog(t)
+	r := newReuseRig(t, idleFleet(5), WithCaptureReuse(testIdleAfter, testMaxAge))
+	r.settle()
+
+	for _, p := range []string{"%1", "%2", "%3"} {
+		r.screenChanges(p)
+	}
+	r.list()
+	r.advance(time.Second)
+	r.list()
 	if r.d.reuse.enabled() {
-		t.Fatal("reuse is still on after the signal was shown to miss output")
+		t.Fatalf("reuse is still on after %d panes were shown to miss", reuseDistrustLimit)
+	}
+	if n := r.d.Counters()[counterCaptureReuseMissed]; n != 3 {
+		t.Fatalf("capture.reuse_missed = %d, want 3", n)
 	}
 	r.advance(time.Second)
-	if _, read := r.list(); !sameSet(read, []string{"%1", "%2"}) {
-		t.Fatalf("after the miss a listing read %v, want every pane every pass again", read)
+	if _, read := r.list(); len(read) != 5 {
+		t.Fatalf("with reuse off a listing read %v, want every pane", read)
+	}
+	if !strings.Contains(logs.String(), "cannot be trusted here") {
+		t.Errorf("the host-wide switch-off was not logged:\n%s", logs)
+	}
+}
+
+// A suspect whose pane goes away before the next listing is dropped unjudged.
+func TestCaptureReuse_ASuspectWhosePaneClosedIsDropped(t *testing.T) {
+	r := newReuseRig(t, idleFleet(3), WithCaptureReuse(testIdleAfter, testMaxAge))
+	r.settle()
+	r.screenChanges("%1")
+	r.list()
+	r.f.mu.Lock()
+	r.f.sessions = r.f.sessions[1:]
+	r.f.mu.Unlock()
+	r.advance(time.Second)
+	r.list()
+	if n := r.d.Counters()[counterCaptureReuseMissed]; n != 0 {
+		t.Fatalf("capture.reuse_missed = %d for a pane that no longer exists", n)
+	}
+	r.d.reuse.mu.Lock()
+	left := len(r.d.reuse.suspects) + len(r.d.reuse.distrusted)
+	r.d.reuse.mu.Unlock()
+	if left != 0 {
+		t.Fatalf("%d suspect/distrust records outlived their pane", left)
 	}
 }
 
