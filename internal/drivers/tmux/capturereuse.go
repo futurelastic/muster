@@ -53,13 +53,33 @@ import (
 //   - a ceiling on how old a reused capture may be (maxAge), spread per pane so a
 //     fleet cached in one pass is not read again in one pass;
 //   - a self-check: when a read forced by that ceiling finds the screen different
-//     although the fingerprint said nothing happened, the signal missed output on
-//     this host. That is counted, logged once, and reuse is switched off for the
-//     life of the process — a measurement, not a guess, that it cannot be trusted
-//     here;
+//     although the fingerprint said nothing happened, the signal may have missed
+//     output. The read is taken AFTER the listing that fingerprinted the pane, so
+//     output between the two also makes the screen differ; only the NEXT listing
+//     can tell the two apart, and the verdict waits for it (muster #472, below);
 //   - no reuse for a pane that is dead, still starting, or listed without the
 //     fields (a multiplexer that does not report them), and none after any input
 //     this driver sent to it.
+//
+// # A suspected miss is judged by the next listing, and costs one pane
+//
+// The first version of the self-check judged on the spot and switched reuse off
+// for the life of the process. A listing and the read that follows it are two
+// moments, and on a loaded host they are seconds apart: output arriving between
+// them changes the screen under a fingerprint that has not moved yet, and that
+// was taken for a missed signal. It fired three times in two and a half days on
+// one host, each time latching every pane back to being read on every pass, and
+// the next burst of load then ran the capture budget out and made listings
+// incomplete (muster #472).
+//
+// So a differing read is only a SUSPECT. The next listing settles it: if the
+// pane's fingerprint has moved, the output is explained and nothing was missed
+// (counted as a race, capture.reuse_raced); if it still equals the cached one,
+// nothing explains the change and the signal missed it. Then the pane that was
+// shown to miss is read on every pass from now on, and the rest keep their
+// saving. Only reuseDistrustLimit panes shown to miss switch it off for the
+// host, because several distinct panes disagreeing is what a multiplexer that
+// does not report output looks like.
 //
 // Off unless the composition root asks (WithCaptureReuse): a driver built for a
 // test reads every pane every time, as it always did.
@@ -116,8 +136,21 @@ type captureReuse struct {
 
 	mu      sync.Mutex
 	entries map[string]cachedCapture
-	off     bool // latched by the self-check
+	off     bool // latched when reuseDistrustLimit panes were shown to miss output
+
+	// suspects are the panes whose last forced read showed a screen different from
+	// the cached one under an unchanged fingerprint, keyed to that fingerprint.
+	// The next listing resolves each one (split).
+	suspects map[string]string
+	// distrusted are the panes whose fingerprint was shown to miss output: they
+	// are read on every pass for as long as the pane lives.
+	distrusted map[string]bool
 }
+
+// reuseDistrustLimit is how many distinct panes must be shown to change under an
+// unmoved fingerprint before the signal is judged unreliable on the whole host
+// and reuse is switched off until restart.
+const reuseDistrustLimit = 3
 
 func (c *captureReuse) enabled() bool {
 	if c == nil || c.idleAfter <= 0 || c.maxAge <= 0 {
@@ -148,6 +181,13 @@ type reuseDecision struct {
 	// verify are the entries whose age alone forced a read although the fingerprint
 	// held: the read is compared against them (the self-check).
 	verify map[string]cachedCapture
+	// confirmed are the panes this listing showed to have changed under a
+	// fingerprint that did not move, now distrusted; raced is how many suspects the
+	// listing cleared because the fingerprint had moved. switchedOff is set when
+	// the confirmations reached reuseDistrustLimit and reuse is now off.
+	confirmed   []string
+	raced       int
+	switchedOff bool
 }
 
 // split decides, for every listed row, whether its screen is read or reused. now is
@@ -156,10 +196,12 @@ func (c *captureReuse) split(rows []paneRow, now time.Time) reuseDecision {
 	dec := reuseDecision{reused: map[string]paneCapture{}, verify: map[string]cachedCapture{}}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.resolveSuspects(rows, &dec)
 	for _, r := range rows {
 		e, have := c.entries[r.paneID]
 		switch {
-		case !have, r.sig == "", !e.safe, e.sig != r.sig,
+		case c.distrusted[r.paneID],
+			!have, r.sig == "", !e.safe, e.sig != r.sig,
 			!e.created.Equal(r.created), e.pid != r.pid,
 			r.dead, now.Sub(r.created) < startingWindow,
 			now.Sub(time.Unix(r.activity, 0)) < c.idleAfter:
@@ -190,6 +232,16 @@ func (c *captureReuse) remember(rows, read []paneRow, captured map[string]paneCa
 	for id := range c.entries {
 		if !live[id] {
 			delete(c.entries, id)
+		}
+	}
+	for id := range c.distrusted {
+		if !live[id] {
+			delete(c.distrusted, id)
+		}
+	}
+	for id := range c.suspects {
+		if !live[id] {
+			delete(c.suspects, id)
 		}
 	}
 	for _, r := range read {
@@ -244,33 +296,80 @@ func (c *captureReuse) noteInput(args []string) {
 	}
 }
 
-// verifyAgainst is the self-check. It compares the screens a pass read against the
-// entries whose read was forced by age alone; a screen that differs where the
-// fingerprint said nothing happened means the signal cannot be trusted on this
-// host, and reuse stays off. It reports how many differed.
-func (d *Driver) verifyReuse(verify map[string]cachedCapture, captured map[string]paneCapture) int {
-	missed := 0
-	for id, e := range verify {
-		if got, ok := captured[id]; ok && got.text != e.pane.text {
-			missed++
+// resolveSuspects settles the suspects the previous pass recorded, against the
+// fingerprints of this listing. Called with c.mu held. A pane whose fingerprint
+// moved had output the previous pass could not have seen (it raced the listing);
+// one whose fingerprint is still the cached one changed with nothing to explain
+// it, so its signal is not trusted any more. A suspect with no signal this time,
+// or whose pane is gone, is dropped unjudged.
+func (c *captureReuse) resolveSuspects(rows []paneRow, dec *reuseDecision) {
+	if len(c.suspects) == 0 {
+		return
+	}
+	for _, r := range rows {
+		sig, ok := c.suspects[r.paneID]
+		if !ok || r.sig == "" {
+			continue
+		}
+		if r.sig != sig {
+			dec.raced++
+			continue
+		}
+		if c.distrusted == nil {
+			c.distrusted = map[string]bool{}
+		}
+		if !c.distrusted[r.paneID] {
+			c.distrusted[r.paneID] = true
+			dec.confirmed = append(dec.confirmed, r.paneID)
 		}
 	}
-	if missed == 0 {
-		return 0
+	c.suspects = nil
+	if len(c.distrusted) >= reuseDistrustLimit && !c.off {
+		c.off = true
+		c.entries = nil
+		dec.switchedOff = true
 	}
-	d.counters.add(counterCaptureReuseMissed, int64(missed))
+}
+
+// suspectReuseMisses is the self-check's first half. It compares the screens a
+// pass read against the entries whose read was forced by age alone, and records a
+// suspect for every one that differs; it judges nothing, because the read came
+// after the listing that fingerprinted the pane (see the file comment).
+func (d *Driver) suspectReuseMisses(verify map[string]cachedCapture, captured map[string]paneCapture) {
 	c := d.reuse
 	c.mu.Lock()
-	already := c.off
-	c.off = true
-	c.entries = nil
-	c.mu.Unlock()
-	if !already {
-		log.Printf("tmux: %d pane(s) changed although the listing's activity fingerprint did not move; "+
-			"this multiplexer's activity signal cannot be trusted here, so every pane is read on every "+
-			"pass again until the service restarts (#449)", missed)
+	defer c.mu.Unlock()
+	for id, e := range verify {
+		if got, ok := captured[id]; ok && got.text != e.pane.text {
+			if c.suspects == nil {
+				c.suspects = map[string]string{}
+			}
+			c.suspects[id] = e.sig
+		}
 	}
-	return missed
+}
+
+// noteReuseVerdicts counts and reports what a listing's resolution of last
+// pass's suspects decided: a race is only counted, a pane shown to miss is logged
+// by name (once, since it is distrusted from then on), and the host-wide
+// switch-off is logged once.
+func (d *Driver) noteReuseVerdicts(dec reuseDecision) {
+	if dec.raced > 0 {
+		d.counters.add(counterCaptureReuseRaced, int64(dec.raced))
+	}
+	if len(dec.confirmed) == 0 {
+		return
+	}
+	d.counters.add(counterCaptureReuseMissed, int64(len(dec.confirmed)))
+	for _, id := range dec.confirmed {
+		log.Printf("tmux: pane %s changed although its activity fingerprint did not move across two "+
+			"listings; this pane is read on every pass from now on (#472)", id)
+	}
+	if dec.switchedOff {
+		log.Printf("tmux: %d panes changed under an activity fingerprint that did not move; this "+
+			"multiplexer's activity signal cannot be trusted here, so every pane is read on every "+
+			"pass again until the service restarts (#449)", reuseDistrustLimit)
+	}
 }
 
 // WithCaptureReuse lets List serve a pane's screen from its last capture while the

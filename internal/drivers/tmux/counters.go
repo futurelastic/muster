@@ -161,10 +161,16 @@ const (
 	// muster #449: panes whose screen a listing served from the last capture
 	// instead of reading it (reused, counted per pane per listing), and panes that
 	// changed under an activity fingerprint that said nothing happened
-	// (reuse_missed). Any nonzero reuse_missed means the signal was wrong on this
-	// host and reuse switched itself off; capture.reused then stops growing.
+	// (reuse_missed, counted when the NEXT listing agrees the fingerprint did not
+	// move: that pane is then read on every pass, and three such panes switch
+	// reuse off for the host, after which capture.reused stops growing). muster
+	// #472: reuse_raced counts a differing read the next listing explained,
+	// because the output came between the listing and the read; it is not a miss
+	// and changes nothing, and is on record so a host where it is common can be told
+	// from one where it never happens.
 	counterCaptureReused      = "capture.reused"
 	counterCaptureReuseMissed = "capture.reuse_missed"
+	counterCaptureReuseRaced  = "capture.reuse_raced"
 
 	// muster#150: the inbox send path's exits. sendViaInbox reports
 	// every fallback as the same ok=false, and a fallback costs only

@@ -290,9 +290,10 @@
 //	                       the longest a captured screen is reused before it is
 //	                       read again regardless (default 30s). Go durations;
 //	                       `0` or `off` on either reads every pane every pass.
-//	                       A pane that changes where the multiplexer said nothing
-//	                       moved switches the saving off until restart (counter
-//	                       capture.reuse_missed). muster #449.
+//	                       A pane that changes where two listings in a row said
+//	                       nothing moved is read on every pass from then on, and
+//	                       three such panes switch the saving off until restart
+//	                       (counter capture.reuse_missed). muster #449, #472.
 //	FLEET_CAPTURE_LINES    how many lines of each pane this driver captures
 //	                       to classify it. Absent, or not a positive
 //	                       integer, means the built-in default is used and

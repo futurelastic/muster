@@ -1496,6 +1496,7 @@ func (d *Driver) enumerateWith(ctx context.Context, rereadUnread, reuseIdle bool
 	reusing := reuseIdle && d.reuse.enabled()
 	if reusing {
 		decision = d.reuse.split(rows, listedAt)
+		d.noteReuseVerdicts(decision)
 		capRows = decision.capture
 	}
 	byIndex := make(map[string]paneCapture, len(capRows))
@@ -1629,9 +1630,8 @@ func (d *Driver) enumerateWith(ctx context.Context, rereadUnread, reuseIdle bool
 			captures[id] = c
 		}
 		d.counters.add(counterCaptureReused, int64(len(decision.reused)))
-		if d.verifyReuse(decision.verify, captures) == 0 {
-			d.reuse.remember(rows, capRows, captures, listedAt)
-		}
+		d.suspectReuseMisses(decision.verify, captures)
+		d.reuse.remember(rows, capRows, captures, listedAt)
 	}
 	return rows, captures, nil
 }

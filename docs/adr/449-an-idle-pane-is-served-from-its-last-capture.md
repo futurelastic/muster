@@ -52,6 +52,8 @@ Bounds, because the signal is the multiplexer's and not this service's:
 - **A self-check.** A read forced by the ceiling that finds the screen different
   although the fingerprint held means the signal missed output on this host. It is
   counted (`capture.reuse_missed`), logged once, and reuse is off until restart.
+  Amended by [ADR 472](472-a-suspected-capture-miss-is-judged-by-the-next-listing.md): the
+  verdict waits for the next listing, and one pane costs one pane, not the host.
 - **No reuse** for a dead or starting pane, one listed without the fingerprint
   fields, or after any input this driver sent to it (one wrapper around the
   runner, because input goes out from more than twenty places).
