@@ -1120,11 +1120,24 @@ not for a list of files you never saw, and the question's own warning is never
 to allow it for a repository you do not own. Consent to it only for a directory
 that is yours.
 
-On a machine whose operator configured `trustRoots`, you rarely need to: every
-repository and worktree under a root has both questions answered ahead of time,
-whoever started the session and whether or not it went through this service. A
-directory outside every root still shows the question, and
-`state.prompt.kind` reads `external-imports`.
+On a machine whose operator configured `trustRoots`, you often need not, but
+what is covered depends on what the directory is:
+
+- **A repository or worktree under a root** has both questions answered ahead of
+  time by the service's periodic sweep, whoever started the session and whether
+  or not it went through this service. The sweep looks at most five directory
+  levels below a root, or below the nearest repository above, and does not
+  descend into dependency and build directories such as `node_modules`. A
+  repository nested deeper is treated like a plain folder, below.
+- **A plain folder under a root** — one with no `.git` at or above it — is not
+  covered by the sweep. It is answered only when a session is created in it
+  through this service, and then only that folder: not its siblings, not its
+  parent. Until the service has created a session there, one started any other
+  way (a terminal, another launcher) meets both questions, even under a root.
+- **A directory outside every root** is never answered ahead of time.
+
+A session that meets one of the questions reports it as `state.prompt.kind`
+`folder-trust` or `external-imports`.
 
 **`feedback-review` is a person's decision, and a client only carries it.** When
 an agent drafts product feedback the runtime paints a card above the composer:
