@@ -1,0 +1,23 @@
+{
+  "name": "external-imports-wrapped-long-path",
+  "for": "The runtime's external-imports question (does the working directory's instruction file get to import a file from outside it?) as it paints for a directory outside every trust root when the question text wraps over three rows and the imported file's path is long enough to wrap over two. The path in a real screen is non-ASCII, holds spaces and an ampersand and is the widest thing on it; redaction keeps its ROWS and drops its text, so this case pins the layout (a rule, a three-row question, a two-row wrapped path indented under 'External imports:', prose, then the two unnumbered options with the DECLINE highlighted, under the 'Enter to confirm' footer) and TestExternalImportsOnAWrappedLongPath pins the same screen with the path's real properties written out. Field report #467: a client drew two buttons from this state, the person chose the affirmative one, and respond refused it as 'not waiting on a prompt'. The property here is the one the report is about: the screen classifies waiting_input with kind external-imports, and the reading respond takes of the SAME screen is that same prompt (kind, options, nonce) -- TestStateAndRespondReadTheSamePromptOnEveryCorpusScreen replays every case in this directory for exactly that, and TestRespondAnswersTheExternalImportsCorpusScreen answers this one through Respond (arrows, a read proving the highlight arrived, then C-m).",
+  "source": "#467",
+  "redactedFrom": "reconstructed, not captured: no screen was kept from the field report. Built from the dialog's measured layout (fixtureExternalImportsMenu, #211) with the question widened to three rows and the path to two wrapped rows, then redacted by corpus-redact; every row but the two options and the footer is [redacted], so the fixture carries no path from any machine",
+  "alive": true,
+  "observations": [
+    {
+      "afterSeconds": 0,
+      "young": false,
+      "want": "waiting_input",
+      "wantKind": "external-imports",
+      "wantOptions": ["No, disable external imports", "Yes, allow external imports"],
+      "wantFreeText": false
+    },
+    {
+      "afterSeconds": 30,
+      "young": false,
+      "want": "waiting_input",
+      "wantKind": "external-imports"
+    }
+  ]
+}

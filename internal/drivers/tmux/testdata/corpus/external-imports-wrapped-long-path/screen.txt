@@ -1,0 +1,19 @@
+
+────────────────────────────────────────────────────────────────────────────────
+  [redacted]
+
+  [redacted]
+  [redacted]
+  [redacted]
+
+  [redacted]
+    [redacted]
+    [redacted]
+
+  [redacted]
+  [redacted]
+
+  ❯ No, disable external imports
+    Yes, allow external imports
+
+  Enter to confirm · Esc to cancel

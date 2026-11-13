@@ -162,6 +162,14 @@ const (
 	promptClearWindow   = 3 * time.Second
 	promptClearInterval = 200 * time.Millisecond
 
+	// respondRereads and respondRereadInterval size Respond's second look at a
+	// screen that shows no prompt although a state read reported one
+	// (muster#467): three more captures, 150ms apart, so a refusal costs under
+	// half a second and only ever on a session that had just been reported
+	// blocked.
+	respondRereads        = 3
+	respondRereadInterval = 150 * time.Millisecond
+
 	// stallPresses bounds how many CONSECUTIVE identical captures Discard's
 	// clear loop tolerates once it has already seen the composer move at
 	// least once (#87). Before any movement, "unchanged" is not yet
@@ -712,7 +720,38 @@ type observation struct {
 	// throughout. A screen's age is a property of the screen, not of the
 	// reader's cadence.
 	digestSince time.Time
+
+	// prompt is the last prompt a read of this pane REPORTED, carried across the
+	// reads that did not see one (muster#467). `status` above is overwritten by
+	// every read, so a pane that showed a dialog and then showed none forgets
+	// the dialog in one poll; this is what lets Respond, which finds the screen
+	// without a prompt, say that a state read had reported one a moment ago
+	// instead of claiming nothing was ever being asked. Zero until a prompt is
+	// seen; never read after promptSightingTTL.
+	prompt promptSighting
 }
+
+// promptSighting is one reported prompt: what a state read published, and when.
+type promptSighting struct {
+	kind  fleet.PromptKind
+	nonce string
+	at    time.Time
+}
+
+// promptSightingOf is the sighting a read's state contributes, or the zero value
+// when that read reported no prompt.
+func promptSightingOf(st fleet.SessionState, now time.Time) promptSighting {
+	if st.Status != fleet.StatusWaitingInput || st.WaitingOn != fleet.WaitingPrompt || st.Prompt == nil {
+		return promptSighting{}
+	}
+	return promptSighting{kind: st.Prompt.Kind, nonce: st.Prompt.Nonce, at: now}
+}
+
+// promptSightingTTL bounds how long a reported prompt is remembered for the
+// purpose of explaining a refusal. A client acts on the state it last read, and
+// a person reading buttons and clicking one takes seconds to a minute or two;
+// beyond that the prompt is history and a refusal needs no footnote about it.
+const promptSightingTTL = 2 * time.Minute
 
 // Option configures a Driver.
 type Option func(*Driver)
@@ -2212,6 +2251,7 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 			status: st.Status, statusSince: *st.Since, digest: digest,
 			digestSince:   digestSince,
 			sinceRestored: carried,
+			prompt:        promptSightingOf(st, now),
 		}, captured, *st.Since)
 		st.Stalled = d.stallVerdict(st, digest, digestSince, now) // muster #391
 		started := r.created
@@ -2720,6 +2760,7 @@ func (d *Driver) State(ctx context.Context, req fleet.Request, ref fleet.Session
 			status: st.Status, statusSince: *st.Since, digest: digest,
 			digestSince:   digestSince,
 			sinceRestored: carried,
+			prompt:        promptSightingOf(st, now),
 		}, captured, *st.Since)
 		st.Stalled = d.stallVerdict(st, digest, digestSince, now) // muster #391
 		d.mu.Unlock()
@@ -5946,7 +5987,31 @@ func (d *Driver) Respond(ctx context.Context, req fleet.Request, ref fleet.Sessi
 	}
 
 	screenNow := captures[target.paneID].screen()
-	before, shape := parsePromptShape(screenNow)
+	// The same reading the state published its prompt from (muster#467).
+	before, shape := readPrompt(screenNow)
+	// A state read had reported a prompt on this session, and this capture shows
+	// none. Two captures of one screen cannot disagree, so the screen moved
+	// between them: the dialog was answered or dropped, or a capture caught the
+	// runtime partway through repainting it. A repaint is over in well under a
+	// second and a dialog that is really gone stays gone, so reading again a few
+	// times separates the two without sending a key; only when every read agrees
+	// is it refused, and then with the disagreement named (below).
+	seen, wasReported := d.reportedPrompt(ref.ID)
+	rereads := 0
+	if before == nil && wasReported {
+		for rereads < respondRereads && before == nil {
+			select {
+			case <-ctx.Done():
+				return fleet.DeliveryReceipt{}, ctx.Err()
+			case <-time.After(respondRereadInterval):
+			}
+			rereads++
+			if sc, ok := d.captureForClassify(ctx, target.paneID); ok {
+				screenNow = sc
+				before, shape = readPrompt(sc)
+			}
+		}
+	}
 	unnumbered := shape.unnumbered
 	if before == nil {
 		// muster#215: the feedback-draft card over a composer row that holds
@@ -5955,6 +6020,24 @@ func (d *Driver) Respond(ctx context.Context, req fleet.Request, ref fleet.Sessi
 		// there is no composer. Name it.
 		if reason, isCard := feedbackNoticeRefusal(screenNow); isCard {
 			return fleet.DeliveryReceipt{Outcome: fleet.OutcomeRefused, Reason: reason}, nil
+		}
+		// muster#467: a state read had reported a prompt within the last couple of
+		// minutes and this read, repeated, finds none. That is not "nothing is
+		// being asked" — something was, a moment ago — and a client that drew
+		// buttons from that state needs to be told the buttons are stale rather
+		// than that its session was never waiting. The refusal itself stays: with
+		// nothing on screen to answer, a key would land in whatever is there now.
+		disagreement := ""
+		if wasReported {
+			what := "a prompt"
+			if seen.kind != "" {
+				what += " (" + string(seen.kind) + ")"
+			}
+			disagreement = "the state read of this session reported " + what + " " +
+				d.now().Sub(seen.at).Round(time.Second).String() + " ago, but this read of the screen, " +
+				"taken now and repeated " + strconv.Itoa(rereads) + " more time(s), finds none: the " +
+				"prompt has gone since that read, or the screen could not be read as that prompt. " +
+				"No key was sent; read the state again and answer the prompt it reports, if any. "
 		}
 		// muster #64: this refusal fires whenever the screen has no
 		// structured prompt this driver recognises — which is right and
@@ -5975,13 +6058,13 @@ func (d *Driver) Respond(ctx context.Context, req fleet.Request, ref fleet.Sessi
 		if _, scan := composerText(screenNow); scan != composerAbsent {
 			return fleet.DeliveryReceipt{
 				Outcome: fleet.OutcomeRefused,
-				Reason: "session is not waiting on a prompt; a keypress would be " +
+				Reason: disagreement + "session is not waiting on a prompt; a keypress would be " +
 					"consumed by whatever it is doing instead",
 			}, nil
 		}
 		return fleet.DeliveryReceipt{
 			Outcome: fleet.OutcomeRefused,
-			Reason: "no recognised prompt is on screen, and no composer either. If " +
+			Reason: disagreement + "no recognised prompt is on screen, and no composer either. If " +
 				"the runtime is not asking anything, this refusal is the correct " +
 				"one. If it is — a full-screen interface this driver did not " +
 				"recognise as a structured prompt — respond() cannot answer it: " +
@@ -6704,8 +6787,7 @@ func (d *Driver) promptReadiness(ctx context.Context, id string) readinessCheck 
 				reason: "the session's process has already exited"}
 		}
 		sc := captures[r.paneID].screen()
-		if p := parsePrompt(sc); p != nil {
-			p.Kind = classifyPromptKind(p)
+		if p, _ := readPrompt(sc); p != nil {
 			reason := "parked on a prompt this driver does not recognise; " +
 				"a human may need to look at the session directly"
 			if p.Kind != "" {
@@ -8045,7 +8127,27 @@ func (d *Driver) recordObservationLocked(id string, o observation, captured bool
 			return
 		}
 	}
+	// A read that saw no prompt keeps the last one that did (muster#467); a
+	// read that saw one replaces it. See observation.prompt.
+	if o.prompt.at.IsZero() {
+		if prior, ok := d.observed[id]; ok {
+			o.prompt = prior.prompt
+		}
+	}
 	d.observed[id] = o
+}
+
+// reportedPrompt is the prompt a state read of this session published within
+// promptSightingTTL, if any. It is the other half of a respond that finds none:
+// whether the state a client acted on had said one was there.
+func (d *Driver) reportedPrompt(id string) (promptSighting, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	seen := d.observed[id].prompt
+	if seen.at.IsZero() || d.now().Sub(seen.at) > promptSightingTTL {
+		return promptSighting{}, false
+	}
+	return seen, true
 }
 
 // persistedRecord reads one session's durable record. Caller holds d.mu.

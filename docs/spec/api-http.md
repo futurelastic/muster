@@ -2365,7 +2365,15 @@ The set is the same three outcomes `keys` reports, and the meanings match:
   is why `submitted` is reachable here and `queued` is not.
 - `refused` — nothing was sent. The session is not at a prompt, the `nonce` no
   longer matches, the choice names no option, or the prompt's kind does not take
-  that form of answer. `reason` says which.
+  that form of answer. `reason` says which. "At a prompt" is the same reading of
+  the screen that `state.prompt` is published from, so a screen whose state
+  carries a prompt is a screen `respond` can answer. The two are separate
+  captures, though, and the pane can move between them: when a state read of the
+  session reported a prompt within the last two minutes and `respond` finds none
+  on the screen, it reads the screen a few more times (a capture can land on a
+  repaint), and if every read agrees the refusal opens by saying that a prompt was
+  reported and is gone, rather than that nothing is being asked (muster#467). A
+  session no state read ever reported a prompt on is refused exactly as before.
 - `unknown` — the answer was sent, once, and the driver could not confirm it: the
   prompt is still on screen afterwards, the key landed in the composer instead of
   the prompt, or the runtime reported it did not process the reply. It is **not**
