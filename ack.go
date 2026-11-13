@@ -18,8 +18,15 @@ import "encoding/json"
 //
 // rename() does NOT return this — see RenameAck below for why that
 // operation earns its own shape instead of being squeezed into this one.
+//
+// Note is the one addition, and it is absent on every ordinary answer. A close
+// of a session whose runtime could not be asked (its own confirmation failed
+// or was not available) still goes ahead where this service holds the
+// session's record — it stops what it started and drops the record — and says
+// so here, in prose a person reads; a caller never parses it (muster #473).
 type Ack struct {
-	Accepted bool `json:"accepted"`
+	Accepted bool   `json:"accepted"`
+	Note     string `json:"note,omitempty"`
 }
 
 // RenameAck is rename()'s own response (muster #222), not the bare Ack

@@ -216,6 +216,14 @@ func runFakeOpencode(args []string) {
 			return
 		}
 		path := r.URL.Path
+		// muster #473: a server that is up and answers 500 to everything but the
+		// test-only endpoints, from the moment the marker file appears in its
+		// working directory — the shape of a runtime whose sandbox lost its own
+		// directory after the session was created.
+		if !strings.HasPrefix(path, "/__test/") && fileExists(".fake-fail-all") {
+			http.Error(w, "the server cannot read its own directory", http.StatusInternalServerError)
+			return
+		}
 		switch {
 		case path == "/session" && r.Method == http.MethodGet:
 			writeJSON(w, []wireSession{})

@@ -1010,6 +1010,24 @@ func TestCloseWithoutExpectationSendsNone(t *testing.T) {
 	}
 }
 
+// muster #473: a close the peer carried out without its runtime's confirmation
+// says so, and a relay must not turn that into silence. An answer with no body
+// at all (a peer from before the note existed) is still an accepted close.
+func TestCloseCarriesThePeersNoteAndToleratesNone(t *testing.T) {
+	note := "the runtime's own confirmation was not available (500)"
+	srv := peerServing(t, 202, fleet.Ack{Accepted: true, Note: note}, nil)
+	ack, err := New("peerbox", srv.URL).Close(context.Background(), caller, fleet.SessionRef{ID: "s1"})
+	if err != nil || !ack.Accepted || ack.Note != note {
+		t.Fatalf("Close = %+v, %v; want accepted with the peer's note", ack, err)
+	}
+
+	srv = peerServing(t, 202, nil, nil)
+	ack, err = New("peerbox", srv.URL).Close(context.Background(), caller, fleet.SessionRef{ID: "s1"})
+	if err != nil || !ack.Accepted || ack.Note != "" {
+		t.Fatalf("Close with no body = %+v, %v; want a plain accepted close", ack, err)
+	}
+}
+
 // §14 D7: a proxy that waits less time than its peer declared abandons calls
 // the peer would have completed, and reports a healthy machine as unreachable.
 func TestProxyWaitsAtLeastAsLongAsThePeerDeclared(t *testing.T) {

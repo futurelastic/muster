@@ -34,6 +34,8 @@ type fakeServer struct {
 	// unauthorized, when true, makes every request fail Basic auth
 	// regardless of what was sent — simulates a credential mismatch.
 	unauthorized bool
+	// failAll makes every authenticated request answer 500 (muster #473).
+	failAll bool
 	// statusDown, when true, makes GET /session/status fail as a
 	// transport error (connection reset) rather than answering — the
 	// read-failure half of #55's discrimination.
@@ -223,6 +225,13 @@ func (f *fakeServer) handle(w http.ResponseWriter, r *http.Request) {
 	f.mu.Unlock()
 	if unauthorized || !ok || user != wantUser || pass != wantPass {
 		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	f.mu.Lock()
+	failAll := f.failAll
+	f.mu.Unlock()
+	if failAll {
+		http.Error(w, "the server is broken", http.StatusInternalServerError)
 		return
 	}
 

@@ -838,6 +838,19 @@ func (d *Driver) Interrupt(ctx context.Context, req fleet.Request, ref fleet.Ses
 // an id cannot have been recycled inside it and an unreachable server is no
 // reason to refuse — the caller's expectation is then checked against the
 // cached start time, and the process is torn down regardless.
+//
+// # A server that answers, but not with an answer (muster #473)
+//
+// The same holds when the server is up and its read of the session FAILS — it
+// answers 500 to everything, say, because the directory it was given has been
+// moved from under its sandbox. A session whose server is broken is exactly the
+// session its holder most needs to remove, and the read is only the runtime's
+// confirmation of what this driver already knows from its own record. So in
+// isolated mode every failure of that read but "no such session" is read the way
+// an unreachable server is: the process is torn down and the record dropped, and
+// the ack says the runtime's own confirmation was not available. A real 404 is
+// still ErrNoSuchSession, and shared mode still refuses — there the server is
+// every session's, and a failed read is no licence to guess about one.
 func (d *Driver) Close(ctx context.Context, req fleet.Request, ref fleet.SessionRef) (fleet.Ack, error) {
 	// muster #421: under the session's lock, so a close and a park or a start of the
 	// same session do not interleave.
@@ -865,6 +878,9 @@ func (d *Driver) Close(ctx context.Context, req fleet.Request, ref fleet.Session
 
 	var sess wireSession
 	liveStart := priorStart
+	// unconfirmed is set when the runtime's own read of the session failed and the
+	// close goes ahead on this driver's record alone; it is what the ack says.
+	var unconfirmed error
 	err := d.do(ctx, srv, "GET", "/session/"+url.PathEscape(ref.ID), nil, &sess)
 	switch {
 	case err == nil:
@@ -877,10 +893,12 @@ func (d *Driver) Close(ctx context.Context, req fleet.Request, ref fleet.Session
 		d.forgetSeen(ref.ID)
 		d.discardServer(srv)
 		return fleet.Ack{}, fmt.Errorf("%w: %q", fleet.ErrNoSuchSession, ref.ID)
-	case isolated && isUnreachable(err):
-		// The server is gone or not answering; the session's process is the
-		// session, so closing it is exactly "tear it down". Corroborate with
-		// what this driver last saw (liveStart == priorStart).
+	case isolated:
+		// The server is gone, not answering, or answering with an error of its own
+		// (muster #473); the session's process is the session, so closing it is
+		// exactly "tear it down". Corroborate with what this driver last saw
+		// (liveStart == priorStart).
+		unconfirmed = err
 	default:
 		return fleet.Ack{}, err
 	}
@@ -897,6 +915,14 @@ func (d *Driver) Close(ctx context.Context, req fleet.Request, ref fleet.Session
 			fleet.ErrAmbiguousTarget, ref.ID)
 	}
 
+	// A server that just failed to read the session is not asked to delete it: the
+	// process is about to be killed, which removes the session more thoroughly.
+	if unconfirmed != nil {
+		d.forgetSeen(ref.ID)
+		d.announceClosed(srv, prior, fleet.SessionRef{Machine: d.machine, ID: ref.ID, Name: prior.name})
+		d.discardServer(srv)
+		return fleet.Ack{Accepted: true, Note: unconfirmedNote(unconfirmed)}, nil
+	}
 	if err := d.do(ctx, srv, "DELETE", "/session/"+url.PathEscape(ref.ID), nil, nil); err != nil {
 		switch {
 		case isNotFound(err):
@@ -922,6 +948,27 @@ func (d *Driver) Close(ctx context.Context, req fleet.Request, ref fleet.Session
 	d.announceClosed(srv, prior, fleet.SessionRef{Machine: d.machine, ID: ref.ID, Name: prior.name})
 	d.discardServer(srv)
 	return fleet.Ack{Accepted: true}, nil
+}
+
+// unconfirmedNote is what a close says when it went ahead without the runtime's
+// own confirmation (muster #473): prose for a person, with the reason the read
+// gave, bounded because a server's error body is the server's to size.
+func unconfirmedNote(err error) string {
+	reason := err.Error()
+	const max = 300
+	if r := []rune(reason); len(r) > max {
+		reason = string(r[:max]) + "…"
+	}
+	return "the runtime's own confirmation was not available (" + reason +
+		"); the session's process was stopped and its record dropped on this service's own record of it"
+}
+
+// Holds reports whether this driver has a record of the session, from its own
+// memory and never the runtime's (driver.RecordHolder, muster #473). It is what
+// lets a close with no ?runtime= find a session whose server cannot be read.
+func (d *Driver) Holds(id string) bool {
+	_, ok := d.wasSeen(id)
+	return ok
 }
 
 // Discard is not implemented. There is no composer holding unsent text on

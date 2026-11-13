@@ -1992,10 +1992,27 @@ func (d *Driver) Close(ctx context.Context, req fleet.Request, ref fleet.Session
 		path += "?startedAt=" + url.QueryEscape(want.UTC().Format(time.RFC3339Nano))
 	}
 	path = withRuntimeHint(req, path)
-	if err := d.do(ctx, req, http.MethodDelete, path, nil, nil); err != nil {
+	// The peer's own note travels (muster #473): a close it carried out without its
+	// runtime's confirmation says so, and a relay that dropped that would turn the
+	// peer's candour into the relay's silence. A peer that predates it sends none.
+	var peerNote closeNote
+	if err := d.do(ctx, req, http.MethodDelete, path, nil, &peerNote); err != nil {
 		return fleet.Ack{}, err
 	}
-	return fleet.Ack{Accepted: true}, nil
+	return fleet.Ack{Accepted: true, Note: peerNote.note}, nil
+}
+
+// closeNote reads the optional note out of a peer's accepted close, and nothing
+// else: the close was accepted by the status line, so a body that is empty, not
+// JSON, or from a build with no note must never turn that into an error.
+type closeNote struct{ note string }
+
+func (c *closeNote) readBody(resp *http.Response, _ fleet.MachineId) error {
+	var a fleet.Ack
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&a); err == nil {
+		c.note = a.Note
+	}
+	return nil
 }
 
 // Discard clears unsent composer text on a session belonging to the peer (§3).

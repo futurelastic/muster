@@ -2965,6 +2965,20 @@ Both are `202 Accepted`: they express intent, and confirmation arrives as a
 state change on the event stream. A driver may not be able to promise
 synchronous completion, and pretending otherwise would be emulation.
 
+**A close whose runtime cannot be asked still goes ahead (muster #473).** A
+session this service started in a process of its own is removed by stopping that
+process and dropping the record, and the runtime's own read of the session is
+only a confirmation of what the service already knows. When that read fails — the
+runtime answers with an error of its own, or does not answer — the close is still
+`202`, and the answer carries one more field, `note`, in prose for a person: the
+runtime's own confirmation was not available, and why. The field is absent on every
+ordinary close and a caller never parses it. Only a runtime that says the session
+does not exist makes a close `404`. A runtime whose one server serves every session
+keeps its refusal: a failed read of it says nothing about one session's fate. A
+bare id (no `?runtime=`) is resolved to the runtime whose own record holds it, even
+when that runtime cannot be read — "could not be confirmed against all of them"
+remains the answer only when no runtime holds the id and one could not be asked.
+
 ## 4. Events
 
 ```

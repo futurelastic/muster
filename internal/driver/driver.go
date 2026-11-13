@@ -303,6 +303,26 @@ func (f ListFilter) IsZero() bool {
 	return f.Status == "" && f.Agent == "" && f.CwdPrefix == "" && len(f.Labels) == 0 && f.ID == ""
 }
 
+// RecordHolder is an OPTIONAL capability: a driver that keeps its own record of
+// the sessions it manages and can say, with no round trip to the runtime,
+// whether it holds one (muster #473).
+//
+// It exists for the one probe State cannot serve. The service resolves a bare id
+// (no ?runtime=) by asking every local driver's State, and a State that fails
+// for a reason other than "never had it" is "could not be asked" — inconclusive,
+// so the caller is sent away to name the runtime. That is right for a runtime
+// that is down. It is wrong for a session this driver itself started, whose
+// runtime is the thing that is broken: the driver holds that session, and the
+// only honest answer to "who holds it" is the driver, not "could not be
+// confirmed". A driver that holds an id it cannot read is a holder; the
+// operation routed to it then fails or succeeds on its own terms.
+type RecordHolder interface {
+	// Holds reports whether this driver has a record of the session. It reads the
+	// driver's own memory, never the runtime, and is false for an id the driver
+	// never saw or has since closed.
+	Holds(id string) bool
+}
+
 // ClosedLister is an OPTIONAL capability: a driver fronting a PEER that can
 // read that peer's own closed-session records (muster #179). Local
 // drivers never implement it — the records are kept by the service, not by a
