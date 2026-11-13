@@ -818,6 +818,39 @@ func parsePromptShape(s screen) (p *fleet.SessionPrompt, shape menuShape) {
 	return nil, menuShape{}
 }
 
+// readPrompt is THE reading of a screen's prompt: what the state publishes as
+// `state.prompt`, and what every verb that answers a prompt reads before it
+// sends a key (muster#467).
+//
+// # Why one function, and what it does and does not promise
+//
+// A client draws its buttons from the state's prompt and then calls respond.
+// Respond refuses a screen "that is not waiting on a prompt", so the two reads
+// must be the SAME reading of whatever screen each was handed: a state that
+// says "this is an external-imports question, here are its two options" and a
+// respond that finds nothing on that screen would be a client shown buttons that
+// cannot work. The state path and respond used to reach the parser through two
+// different call chains (parsePrompt then classifyPromptKind, and
+// parsePromptShape); the kind was attached on one side only. They are one call
+// now, so a change to what counts as a prompt, or to its kind, lands on both.
+//
+// What it does NOT promise is that two captures agree: the state is built from
+// one capture of the pane and a respond reads another, taken later. Over a
+// screen that holds still the two readings are identical (a corpus-wide test
+// pins that: TestStateAndRespondReadTheSamePromptOnEveryCorpusScreen); over a
+// screen that moved between the captures they can differ, and respond says so
+// instead of calling it "nothing is being asked" (see Respond).
+//
+// The returned prompt carries its kind (classifyPromptKind), which is the only
+// thing the state added after parsing.
+func readPrompt(s screen) (*fleet.SessionPrompt, menuShape) {
+	p, shape := parsePromptShape(s)
+	if p != nil {
+		p.Kind = classifyPromptKind(p)
+	}
+	return p, shape
+}
+
 // parseMenuShape is the numbered, unnumbered and preview-pane menus'
 // recogniser: everything parsePromptShape read before the feedback-draft card.
 func parseMenuShape(s screen) (p *fleet.SessionPrompt, shape menuShape) {
@@ -2195,12 +2228,19 @@ func promptNonceWithHeader(p *fleet.SessionPrompt, header string, tab tabPositio
 // than "blocked on a human".
 func selectionPrompt(s screen) (string, bool) {
 	if p := parsePrompt(s); p != nil {
-		if p.Selected > 0 && p.Selected <= len(p.Options) {
-			return strconv.Itoa(p.Selected) + ". " + p.Options[p.Selected-1], true
-		}
-		return "", true
+		return highlightedOption(p), true
 	}
 	return "", false
+}
+
+// highlightedOption names a prompt's highlighted row as "N. text", or "" when
+// no row is marked (a footer-only match whose marker scrolled out of the
+// capture).
+func highlightedOption(p *fleet.SessionPrompt) string {
+	if p.Selected > 0 && p.Selected <= len(p.Options) {
+		return strconv.Itoa(p.Selected) + ". " + p.Options[p.Selected-1]
+	}
+	return ""
 }
 
 // awaitingSelection reports whether the TUI is showing a menu that blocks
@@ -2715,19 +2755,18 @@ func classifyAgedDetailVisible(raw string, paneHeight int, alive, young bool) (s
 		return fleet.UnknownState(fleet.ConfidenceInferred, "pane captured empty"), ambNone
 	}
 
-	if option, blocked := selectionPrompt(s); blocked {
+	// readPrompt, not selectionPrompt + parsePrompt: the prompt the state
+	// publishes and the prompt respond reads are one reading (muster#467).
+	if prompt, _ := readPrompt(s); prompt != nil {
 		evidence := "blocked on a prompt awaiting a keypress"
-		if option != "" {
+		if option := highlightedOption(prompt); option != "" {
 			// Name what it is asking. A supervisor deciding whether to
 			// accept the default needs to know what the default IS.
 			evidence += "; highlighted option: " + option
 		}
 		st := fleet.InferredState(fleet.StatusWaitingInput, evidence, nil)
 		st.WaitingOn = fleet.WaitingPrompt
-		st.Prompt = parsePrompt(s)
-		if st.Prompt != nil {
-			st.Prompt.Kind = classifyPromptKind(st.Prompt)
-		}
+		st.Prompt = prompt
 		if st.Prompt != nil && st.Prompt.Kind == fleet.PromptFeedbackReview {
 			// muster#215: the card is not a menu awaiting a keypress in the
 			// sense every other prompt is, and saying so would be the wrong
