@@ -153,6 +153,13 @@ type server struct {
 	// sandbox is the profile this server's process runs under, nil when it is
 	// not sandboxed (muster #281). Reported on every state read.
 	sandbox *fleet.SandboxState
+	// cwdGiven is the working directory exactly as this server's process was
+	// started in it, and cwdPlanned the real path its sandbox plan granted for it
+	// (muster #474). Both are empty when there is nothing to compare: the session
+	// is not sandboxed, or the host's mechanism holds its grant by the directory
+	// itself rather than by its path (sandbox.go, noteWorkdir). Written once,
+	// before the server is tracked, and read-only after.
+	cwdGiven, cwdPlanned string
 	// permission is the posture this server's configuration was written with:
 	// "bypass" for a pre-approved session (muster #283), empty when none was
 	// configured — which is not a claim about what the runtime defaults to.

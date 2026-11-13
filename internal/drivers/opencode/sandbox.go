@@ -71,6 +71,10 @@ type sandboxPlan struct {
 	read      []string
 	write     []string
 	cache     *fleet.SandboxPackageCacheState
+	// cwd is the real path the working directory resolved to when this plan was
+	// made, and so the path the profile grants for it (muster #474). A session
+	// keeps it so a later read can tell that the directory is no longer there.
+	cwd string
 }
 
 // shared is the plan as the shared package renders it.
@@ -153,7 +157,7 @@ func (d *Driver) planSandboxFor(ctx context.Context, spec fleet.SessionSpec, ses
 		return nil, invalid("cwd %q is, or contains, the service user's home directory, which a sandboxed session would then write to", string(spec.Cwd))
 	}
 
-	plan := &sandboxPlan{network: sb.Network}
+	plan := &sandboxPlan{network: sb.Network, cwd: cwd}
 	if plan.network == "" {
 		plan.network = fleet.SandboxNetworkOpen
 	}
@@ -440,4 +444,88 @@ func (p *sandboxPlan) launcher() (launchFunc, error) {
 		}
 		return pl.WrapInline(nil)
 	}, nil
+}
+
+// noteWorkdir records, on a server just started under plan, the directory its
+// process was started in and the real path the plan granted for it, so a later
+// failed read can tell whether the directory has since moved (muster #474).
+//
+// Only a host that matches a profile against PATHS has anything to compare: there,
+// a directory renamed behind a symlink resolves to a path the grant does not name.
+// The Linux mechanism makes each grant by opening the path (muster #439), so its
+// grant follows the directory itself and a rename cannot take it out from under
+// the session; recording there would blame a move for an unrelated failure.
+func noteWorkdir(srv *server, plan *sandboxPlan, given string) {
+	if plan == nil || plan.mechanism == sandbox.MechanismLinux {
+		return
+	}
+	srv.cwdGiven, srv.cwdPlanned = given, plan.cwd
+}
+
+// cwdMoved says, in a sentence, that this server's working directory is no longer
+// where its sandbox was planned for, or "" when it is, or when there is nothing to
+// compare (a server that is not sandboxed, or was not given a path-matched plan).
+//
+// It compares the real path the directory resolved to when the plan was made with
+// the real path it resolves to now — never the path as given with either — so a
+// working directory that is a link by design, or one reached through a system link
+// such as /var → /private/var, is never reported. filepath.EvalSymlinks is called
+// here and not resolvePath because resolvePath falls back to the cleaned input
+// when a path does not resolve, which would hide a directory that is gone.
+func (d *Driver) cwdMoved(srv *server) string {
+	if srv == nil || srv.cwdPlanned == "" {
+		return ""
+	}
+	now, err := filepath.EvalSymlinks(srv.cwdGiven)
+	if err != nil {
+		return fmt.Sprintf("the working directory %q no longer resolves (%v); its sandbox was planned for %q; "+
+			"put it back, or close the session and create it again",
+			srv.cwdGiven, err, srv.cwdPlanned)
+	}
+	if now == srv.cwdPlanned {
+		return ""
+	}
+	// A relaunch plans the sandbox again from where the directory is now (every
+	// start does, startServerIn), and the service relaunches every session it has a
+	// record of when it starts. Without a state directory there is no record, so the
+	// only way out is a new session.
+	next := "close the session and create it again"
+	if d.store != nil {
+		next = "the service's next start relaunches it under a sandbox planned for where the directory is now, " +
+			"or close the session and create it again"
+	}
+	return fmt.Sprintf("the working directory moved: its sandbox was planned for %q, and %q now resolves to %q, "+
+		"which the sandbox does not allow, so its runtime fails every request; %s",
+		srv.cwdPlanned, srv.cwdGiven, now, next)
+}
+
+// answeredWithAnError reports whether err is a refusal the runtime itself gave to
+// a request it received — which is what a profile denying its own directory looks
+// like — as opposed to no answer at all, or a credential problem. Only the first
+// is worth explaining by a moved directory.
+func answeredWithAnError(err error) bool {
+	var fe *fleet.Error
+	return errors.As(err, &fe) && fe.Kind == fleet.ErrorInvalid
+}
+
+// explainReadFailure puts the moved-directory cause in front of a failed read of
+// srv's runtime when there is one, keeping the error's kind and every other field
+// as they were, so a caller that branches on them is not affected. With no cause
+// it returns err unchanged, and it never wraps a message twice.
+func (d *Driver) explainReadFailure(srv *server, err error) error {
+	if !answeredWithAnError(err) {
+		return err
+	}
+	cause := d.cwdMoved(srv)
+	if cause == "" {
+		return err
+	}
+	var fe *fleet.Error
+	errors.As(err, &fe)
+	if strings.HasPrefix(fe.Message, cause) {
+		return err
+	}
+	out := *fe
+	out.Message = cause + " (" + fe.Message + ")"
+	return &out
 }
