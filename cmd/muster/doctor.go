@@ -286,8 +286,29 @@ func runChecks(ctx context.Context, env doctorEnv) []doctorRow {
 	var cfg *fileConfig
 	var principals []service.Principal
 	cfgFailed := false
+	// configRefused is "config.load failed", from either cause: the file did not load,
+	// or the start-up settings that read only the environment were refused. It is
+	// what the trust.roots row waits for. It is NOT cfgFailed: a refused environment
+	// leaves every other row decidable, because with no file they read nothing else.
+	configRefused := false
 	switch {
 	case cfgPath == "":
+		// The start runs the same checks with a nil config (main.go), so an
+		// environment-only machine is refused there for exactly what this refuses
+		// (muster #471): a relative, home or "/" trust root, an invalid
+		// FLEET_OPENCODE_PROVIDERS entry. Until this call they passed the doctor, which
+		// stopped at the single-token warning below.
+		if err := validateConfigExtras(nil, getenv); err != nil {
+			configRefused = true
+			// The row stays config.load, as it is when a file is refused, and still says
+			// "single-token mode": the mode is true of this machine and is the reason there
+			// is no file to look in, so a refusal must not read as if it were gone.
+			c.add(doctorRow{ID: "config.load", Status: statusFail,
+				Summary: "FLEET_CONFIG unset (single-token mode), and the environment's own start-up settings are refused — the service refuses to start",
+				Detail:  err.Error(),
+				Refs:    []int{95, 471}})
+			break
+		}
 		c.add(doctorRow{ID: "config.load", Status: statusWarn,
 			Summary: "FLEET_CONFIG unset — single-token mode",
 			Detail: "one shared secret, no per-verb grants and no per-peer credentials; " +
@@ -303,6 +324,7 @@ func runChecks(ctx context.Context, env doctorEnv) []doctorRow {
 		}
 		if err != nil {
 			cfgFailed = true
+			configRefused = true
 			c.add(doctorRow{ID: "config.load", Status: statusFail,
 				Summary: "FLEET_CONFIG does not load — the service refuses to start",
 				Detail:  redact(err.Error(), cfgPath, "FLEET_CONFIG"),
@@ -318,8 +340,10 @@ func runChecks(ctx context.Context, env doctorEnv) []doctorRow {
 
 	// --- trust roots (muster #469) -----------------------------------------
 	// After config because the roots may come from it. No row on a machine that
-	// has none configured, so a report from one is unchanged.
-	if row, ok := checkTrustRoots(cfg, cfgFailed, getenv); ok {
+	// has none configured, so a report from one is unchanged. A root the service
+	// refuses is config.load's failure, not this row's (#471): the row lists the
+	// roots once config.load has passed them.
+	if row, ok := checkTrustRoots(cfg, configRefused, getenv); ok {
 		c.add(row)
 	}
 
@@ -663,8 +687,9 @@ func (c *checker) last() doctorRow { return c.rows[len(c.rows)-1] }
 // default runtime's driver is registered right now (opencode enabled but its
 // binary missing, say). That stays at the start, in SetDefaultRuntime, and
 // docs/install.md says so. cfg may be nil (no FLEET_CONFIG): the environment's
-// own settings are still checked. The error is safe to show: a sessionEnv
-// fromFile path is replaced.
+// own settings are still checked, by the start and, since muster #471, by the
+// doctor, which used to stop at the single-token warning instead of calling this.
+// The error is safe to show: a sessionEnv fromFile path is replaced.
 func validateConfigExtras(cfg *fileConfig, getenv func(string) string) error {
 	// Trust roots are the tmux driver's: a start with another primary runtime does
 	// not read them, and so does not stop on one that is not absolute.

@@ -254,6 +254,13 @@ order of this page and the order of its output are the same.
    smaller value refuses more — and restart, because it is read at start;
    `muster doctor` validates it (row `config.load`).
 
+   With no `FLEET_CONFIG` the settings that live in the environment are checked
+   the same way, because the start refuses on them with no file too: a trust root
+   that is not absolute (or is home, or `/`), and a `FLEET_OPENCODE_PROVIDERS`
+   entry that cannot be one while the opencode runtime is enabled. Such an
+   environment fails `config.load`, whose summary still says "single-token mode";
+   a clean one gets the single-token warning, as before.
+
 6. **Peers, both halves** — only for a fleet. Each direction needs one secret
    in two places, and the far half is invisible from the near machine:
 
@@ -549,8 +556,9 @@ would vouch for every folder under it, including ones nobody chose. That holds f
 any spelling of them: with a trailing separator, with a `.` in it, or through a
 symlink that points there. The service refuses to start on such a root and says so
 instead of dropping it: the error names the root and what it is, `muster doctor`
-fails its `trust.roots` row (and `config.load` too when there is a config file),
-and a reload whose file adds one is refused with "a restart would fail". It is
+fails its `config.load` row (with or without a config file; with none the row
+still says "single-token mode"), and a reload whose file adds one is refused with
+"a restart would fail". It is
 refused even beside a valid root, because what the operator wrote cannot work. A
 `trustRoots` edit takes effect only when a person restarts the service.
 
@@ -559,9 +567,10 @@ Three places say what is actually in force:
 - the start-up line `trust-seed active for N root(s)` counts the roots the service
   is active under, not the length of the list; zero is `trust-seed has NO active
   root`;
-- `muster doctor` row `trust.roots` lists them (relative to home, as `~/projects`)
-  and fails on a root the service would refuse. It is the only check available
-  where there is no `FLEET_CONFIG` and the roots come from the environment;
+- `muster doctor` row `trust.roots` lists them (relative to home, as `~/projects`).
+  A root the service would refuse is `config.load`'s failure, not this row's, and
+  the row waits (a skip) while `config.load` fails; that holds where there is no
+  `FLEET_CONFIG` and the roots come from the environment too;
 - a session created through the service in a folder under a root logs one line
   when the create wrote an answer: `trustseed: seeded <folder> at create: answered
   folder trust and external imports` (or only the one it answered). A create whose
