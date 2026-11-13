@@ -532,6 +532,43 @@ to it.
   naming the file it started with and the machine list it loaded, so a restart
   clears a refusal the restart resolved; a reload after that moves it on.
 
+### Trust roots: which folders a session's first questions are answered under
+
+The terminal runtime asks two questions the first time it is pointed at a
+directory — whether to trust the folder, and whether to allow imports from outside
+it — and holds the session until a person answers. `trustRoots` (a list of absolute
+directories in the config file) or `FLEET_TRUST_ROOTS` (the same, comma-separated;
+it wins when both are set) tells the service which folders are the operator's own,
+so it can answer both ahead of time. With neither set the feature is off and the
+state file the runtime keeps is never opened. What is covered under a root, and
+what is not, is in [the client guide](client-guide.md#creating-a-session).
+
+**A root is the folder that holds the working folders** — a projects directory
+under home, say — **never the home directory itself, and never `/`.** Seeding home
+would vouch for every folder under it, including ones nobody chose. That holds for
+any spelling of them: with a trailing separator, with a `.` in it, or through a
+symlink that points there. The service refuses to start on such a root and says so
+instead of dropping it: the error names the root and what it is, `muster doctor`
+fails `config.load` and the `trust.roots` row on it, and a reload whose file adds
+one is refused with "a restart would fail". It is refused even beside a valid root,
+because what the operator wrote cannot work. A `trustRoots` edit takes effect only
+when a person restarts the service.
+
+Three places say what is actually in force:
+
+- the start-up line `trust-seed active for N root(s)` counts the roots the service
+  is active under, not the length of the list; zero is `trust-seed has NO active
+  root`;
+- `muster doctor` row `trust.roots` lists them (relative to home, as `~/projects`)
+  and fails on a root the service would refuse. It is the only check available
+  where there is no `FLEET_CONFIG` and the roots come from the environment;
+- a session created through the service in a folder under a root logs one line
+  when the create wrote an answer: `trustseed: seeded <folder> at create: answered
+  folder trust and external imports` (or only the one it answered). A create whose
+  answers were already in place says nothing, so the line means the state file
+  changed. A folder the service declined to seed (outside every root, or one that
+  resolves to home) is logged as a `trust-seed` refusal, as before.
+
 ### Agents every opencode session on this machine receives
 
 An `opencode` session runs with a home and configuration directories of its own,

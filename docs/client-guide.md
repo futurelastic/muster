@@ -1136,6 +1136,13 @@ what is covered depends on what the directory is:
   way (a terminal, another launcher) meets both questions, even under a root.
 - **A directory outside every root** is never answered ahead of time.
 
+A root is the folder that holds the working folders (a projects directory under
+the operator's home, for example). It can never be the home directory or `/`: the
+service refuses to start on one, because seeding home would vouch for everything
+under it. A client does not see the roots, but a machine whose roots are right
+logs `trust-seed active for N root(s)` at start, and `muster doctor` lists them
+(row `trust.roots`); see [Install](install.md#trust-roots-which-folders-a-sessions-first-questions-are-answered-under).
+
 A session that meets one of the questions reports it as `state.prompt.kind`
 `folder-trust` or `external-imports`.
 

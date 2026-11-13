@@ -367,6 +367,7 @@ import (
 	"github.com/futurelastic/muster/internal/service"
 	"github.com/futurelastic/muster/internal/sessionenv"
 	"github.com/futurelastic/muster/internal/state"
+	"github.com/futurelastic/muster/internal/trustseed"
 )
 
 // retryProbeTimeout bounds the opencode version check on every retry after the
@@ -660,7 +661,9 @@ func main() {
 					"could not be determined (needed for the never-seed-home guard): %v", homeErr)
 			}
 			opts = append(opts, tmux.WithTrustSeed(trustStatePath, home, trustRoots))
-			log.Printf("muster: trust-seed configured for %d root(s)", len(trustRoots))
+			// The roots the seeder is ACTIVE under, not the length of the list: a
+			// root it dropped must not be reported as configured (muster #469).
+			log.Print(trustSeedStartLine(len(trustRoots), trustseed.ActiveRoots(home, trustRoots)))
 		}
 		// muster issue #94: this machine's declared session identity,
 		// parsed and validated above the runtime switch.

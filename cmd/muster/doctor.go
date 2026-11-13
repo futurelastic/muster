@@ -28,6 +28,7 @@ import (
 	"github.com/futurelastic/muster/internal/sandbox"
 	"github.com/futurelastic/muster/internal/service"
 	"github.com/futurelastic/muster/internal/sessionenv"
+	"github.com/futurelastic/muster/internal/trustseed"
 )
 
 // doctorServiceTask answers the service.task row. A variable so the generic
@@ -93,7 +94,10 @@ func runTmuxVersion(ctx context.Context, bin string) (string, error) {
 // Paste-safe. It never prints a token value, a filesystem path, or a peer's
 // address — rows name the VARIABLE instead (FLEET_STATE_DIR, not its value),
 // the same discipline main.go's own startup logging follows. Machine ids and
-// principal names are printed; `principal list` already prints names.
+// principal names are printed; `principal list` already prints names. The one
+// exception is trust.roots (#469), which lists the configured trust roots because
+// confirming which folders are covered is its whole job, and shows them relative
+// to home ("~/projects") rather than as absolute paths.
 //
 // It reads the environment of the shell that runs it. A service manager hands
 // the service a different, usually barer, environment — run doctor under the
@@ -310,6 +314,13 @@ func runChecks(ctx context.Context, env doctorEnv) []doctorRow {
 				Refs:    []int{95}})
 			c.add(checkReloadStatus(getenv("FLEET_STATE_DIR"), cfgPath))
 		}
+	}
+
+	// --- trust roots (muster #469) -----------------------------------------
+	// After config because the roots may come from it. No row on a machine that
+	// has none configured, so a report from one is unchanged.
+	if row, ok := checkTrustRoots(cfg, cfgFailed, getenv); ok {
+		c.add(row)
 	}
 
 	// --- machine id and peers ---------------------------------------------
@@ -658,13 +669,29 @@ func validateConfigExtras(cfg *fileConfig, getenv func(string) string) error {
 	// Trust roots are the tmux driver's: a start with another primary runtime does
 	// not read them, and so does not stop on one that is not absolute.
 	if name, ok := primaryRuntime(getenv); ok && name == runtimeTmux {
-		roots := splitList(getenv("FLEET_TRUST_ROOTS"))
-		if len(roots) == 0 && cfg != nil {
-			roots = cfg.TrustRoots
-		}
+		roots := configuredTrustRoots(cfg, getenv)
+		// Home is not known to a getenv-only caller, so it is read the way main.go
+		// reads it. When it cannot be (no HOME), the home comparison is simply not
+		// made here: main.go refuses that start on its own, and "/" is still caught.
+		home, _ := os.UserHomeDir()
 		for _, r := range roots {
 			if !filepath.IsAbs(r) {
 				return fmt.Errorf("trust root %q must be an absolute path", r)
+			}
+			// muster #469. A root that is the home directory (spelled any way, or by a
+			// link) or "/" was dropped by the seeder without a word while the start-up
+			// line counted it as configured. It can never do what the operator wrote it
+			// for — seeding home would vouch for everything under it — so it stops the
+			// start like a relative root does, and shows in the doctor and in a reload's
+			// refusal. Refusing costs no behaviour that worked: such a root has never
+			// seeded anything. The folder to name is the one that holds the working
+			// folders.
+			if why := trustseed.RootRefusal(home, r); why != "" {
+				// Named home-relative, like the trust.roots row: this error reaches the
+				// doctor's config.load detail, which does not print an absolute path.
+				return fmt.Errorf("trust root %q is %s, which cannot be a trust root: it would "+
+					"vouch for everything under it; name the folder that holds the working "+
+					"folders instead (a projects directory under home, for example)", homeRelative(home, r), why)
 			}
 		}
 	}

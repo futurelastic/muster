@@ -59,6 +59,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -147,7 +148,6 @@ type Seeder struct {
 	statePath string
 	roots     []configuredRoot
 	home      string // absolute, cleaned; "" if unknown
-	sysRoot   string // the filesystem root, e.g. "/"
 	// keys are the fields this Seeder sets on a project entry: seededKeys for
 	// every Seeder New builds, the trust key alone for NewTrustOnly.
 	keys []string
@@ -162,6 +162,12 @@ type Seeder struct {
 
 	counters   sync.Mutex
 	counterMap map[string]int64
+
+	// logf writes the one line a create-time seed that set a key leaves
+	// behind (muster #469). log.Printf in production, the same writer the
+	// tmux driver's own trust-seed refusal line goes to; a test swaps it to
+	// read what was said. Never nil on a Seeder New built.
+	logf func(format string, args ...any)
 
 	// afterRead is a test hook: called once, after the state file has been
 	// read and before ensureKeys decides what to write, so a test can inject
@@ -186,10 +192,15 @@ type Seeder struct {
 // the OS path separator alone are refused as seeding targets regardless of
 // what roots say (see SeedPath).
 //
-// Any root that is relative, empty, or equal to home or the filesystem root
-// is dropped here rather than reported per-pass — that is a configuration
+// Any root that is relative, empty, a repeat, or the home directory or the
+// filesystem root (RootRefusal: spelled any way, or through a symlink) is
+// dropped here rather than reported per-pass — that is a configuration
 // mistake at construction time, not the "root not found yet" case
-// CounterRootMissing exists for.
+// CounterRootMissing exists for. It is dropped, not fatal, because this
+// constructor has no way to say so; the operator is told by whoever builds
+// the roots list (RootRefusal, called by the service's config validation
+// before this is reached) and by ActiveRoots, which is what the start-up line
+// and `muster doctor` report — never the configured count.
 //
 // Each surviving root is resolved once, here, into a configuredRoot — see
 // its doc comment for why discoverIslands needs both forms (muster
@@ -198,23 +209,77 @@ func New(statePath, home string, roots []string) *Seeder {
 	s := &Seeder{
 		statePath:  statePath,
 		home:       cleanAbs(home),
-		sysRoot:    string(filepath.Separator),
 		counterMap: map[string]int64{},
 		keys:       seededKeys,
+		logf:       log.Printf,
 	}
+	for _, c := range ActiveRoots(home, roots) {
+		s.roots = append(s.roots, configuredRoot{spelling: c, walk: resolveRootForWalk(c)})
+	}
+	return s
+}
+
+// ActiveRoots returns the roots New would keep out of roots, cleaned and in
+// the order given: absolute, not repeated, and not refused by RootRefusal. It
+// is the one definition of "active", so the count the service reports at
+// start-up and the roots `muster doctor` lists are the roots the Seeder seeds
+// under, not the length of the list the operator wrote (muster #469 — a
+// single root equal to home was reported as "configured for 1 root" while
+// none was active).
+func ActiveRoots(home string, roots []string) []string {
+	var active []string
 	seen := map[string]bool{}
 	for _, r := range roots {
 		c := cleanAbs(r)
 		if c == "" || !filepath.IsAbs(c) || seen[c] {
 			continue
 		}
-		if c == s.home || c == s.sysRoot {
+		if RootRefusal(home, c) != "" {
 			continue
 		}
 		seen[c] = true
-		s.roots = append(s.roots, configuredRoot{spelling: c, walk: resolveRootForWalk(c)})
+		active = append(active, c)
 	}
-	return s
+	return active
+}
+
+// RootRefusal says why root can never be a trust root, or returns "" when it
+// may. A root that is the home directory or the filesystem root is refused
+// because seeding it would vouch for everything under it — every repository
+// the account will ever clone, not the folder the operator meant. The guard
+// is deliberate and unchanged; what this adds is that it can be asked, so a
+// caller can say so instead of the root vanishing (muster #469).
+//
+// root is judged as the operator spelled it (cleaned, so "~/." style
+// spellings and a trailing separator count) AND with its symlinks resolved,
+// against home in both forms too: a link that points at home, or a home that
+// is itself reached through a link, is the same directory. A path that does
+// not exist yet resolves to itself, so only a spelling that already is home
+// or "/" is refused on that ground, which is also all a not-yet-created
+// folder can be. A relative or empty root has no answer here: it is not an
+// absolute path at all, which the service's own validation reports apart.
+func RootRefusal(home, root string) string {
+	c := cleanAbs(root)
+	if c == "" || !filepath.IsAbs(c) {
+		return ""
+	}
+	sys := string(filepath.Separator)
+	h := cleanAbs(home)
+	var homes []string
+	if h != "" && filepath.IsAbs(h) {
+		homes = []string{h, resolveRootForWalk(h)}
+	}
+	for _, f := range []string{c, resolveRootForWalk(c)} {
+		if f == sys {
+			return "the filesystem root"
+		}
+		for _, hh := range homes {
+			if f == hh {
+				return "the home directory"
+			}
+		}
+	}
+	return ""
 }
 
 // configuredRoot carries one configured trust root in the two forms this
@@ -418,7 +483,7 @@ func (s *Seeder) SeedPath(dir string) error {
 	abs = filepath.Clean(abs)
 
 	root := s.enclosingRoot(abs)
-	if root == s.home || root == s.sysRoot {
+	if RootRefusal(s.home, root) != "" {
 		s.incr(CounterRefused)
 		return fmt.Errorf("trustseed: refusing %s: resolves to the home directory or filesystem root", root)
 	}
@@ -437,7 +502,33 @@ func (s *Seeder) SeedPath(dir string) error {
 	}
 	s.add(CounterGranted, granted.trust)
 	s.add(CounterImportsGranted, granted.imports)
+	s.logGranted(root, granted)
 	return nil
+}
+
+// logGranted says that a create-time seed wrote a key: which directory and
+// which questions it answered ahead of time (muster #469). Before this only a
+// refusal was logged, so a success could be confirmed only by watching a
+// session start without being asked. A seed that wrote nothing — the keys were
+// already there, as on every create after the first in a folder — says
+// nothing, so the line means "this create changed the state file" and a log
+// that is read for it stays short.
+//
+// Only SeedPath calls it: a SeedAll pass already has its own Result for the
+// caller to report, and one line per directory a sweep found would drown
+// the log on the first pass of a large root.
+func (s *Seeder) logGranted(dir string, g grants) {
+	var questions []string
+	if g.trust > 0 {
+		questions = append(questions, "folder trust")
+	}
+	if g.imports > 0 {
+		questions = append(questions, "external imports")
+	}
+	if len(questions) == 0 || s.logf == nil {
+		return
+	}
+	s.logf("trustseed: seeded %s at create: answered %s", dir, strings.Join(questions, " and "))
 }
 
 // enclosingRoot walks up from dir looking for the nearest ancestor carrying
