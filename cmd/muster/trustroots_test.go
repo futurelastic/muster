@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // muster #469: a trust root that is the home directory or "/" was dropped by the
@@ -220,5 +221,74 @@ func TestDoctorReportsATrustRootThatIsHome(t *testing.T) {
 	}())
 	if row := rowByID(t, rows, "trust.roots"); row.Status != statusPass {
 		t.Fatalf("trust.roots for a valid root = %+v, want a pass", row)
+	}
+}
+
+// serveTrustLines starts the real `serve` path with the given trust roots and home,
+// and returns its stderr lines up to the point the service is serving or has
+// stopped, together with whether the process had exited by then. The wiring in
+// main.go is what this covers: the helpers above judge a root, and nothing else
+// asserts that the start calls them.
+func serveTrustLines(t *testing.T, home, roots string) (lines []string, exited bool) {
+	t.Helper()
+	cmd, sc := startServe(t,
+		"HOME="+home, "FLEET_TRUST_ROOTS="+roots, "FLEET_RUNTIME=tmux", "FLEET_TOKEN=secret",
+		"FLEET_MACHINE=testbox", "FLEET_ADDR=127.0.0.1:0", "FLEET_STATE_DIR="+filepath.Join(home, "state"),
+		"FLEET_RUNTIME_OPENCODE=", "FLEET_CONFIG=", "FLEET_PEERS=", "FLEET_LOG_FILE=", "FLEET_TRUST_STATE_PATH=")
+	done := make(chan struct{})
+	out := make(chan string)
+	go func() {
+		defer close(done)
+		for sc.Scan() {
+			out <- sc.Text()
+		}
+	}()
+	deadline := time.After(20 * time.Second)
+	for {
+		select {
+		case l := <-out:
+			lines = append(lines, l)
+			// Everything the trust wiring says comes before the listener does.
+			if listeningRe.MatchString(l) || strings.Contains(l, "trust-seed active") || strings.Contains(l, "NO active root") {
+				return lines, false
+			}
+		case <-done:
+			_ = cmd.Wait()
+			return lines, true
+		case <-deadline:
+			t.Fatalf("the service neither stopped nor said anything about its trust roots; saw %q", lines)
+		}
+	}
+}
+
+// The wiring, end to end: a trust root that is home stops the real start with the
+// refusal, and a valid root's start says it is active for one root — the count of
+// roots in force, not of the list. Needs only the environment, not a running tmux:
+// everything asserted is logged before the runtime's driver is built.
+func TestServeRefusesAHomeTrustRootAndCountsActiveOnes(t *testing.T) {
+	home := trustHome(t)
+	if err := os.MkdirAll(filepath.Join(home, "projects"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	lines, exited := serveTrustLines(t, home, home)
+	if !exited {
+		t.Fatalf("a service whose only trust root is home kept going: %q", lines)
+	}
+	if got := strings.Join(lines, "\n"); !strings.Contains(got, "the home directory") {
+		t.Errorf("the refusal does not say why: %q", got)
+	}
+
+	lines, _ = serveTrustLines(t, home, filepath.Join(home, "projects"))
+	if got := strings.Join(lines, "\n"); !strings.Contains(got, "trust-seed active for 1 root(s)") {
+		t.Errorf("a valid root's start does not report it active: %q", got)
+	}
+
+	// A root written twice is one root in force: the line counts what is active, so
+	// it is the case that goes red if main.go goes back to counting the list.
+	twice := filepath.Join(home, "projects")
+	lines, _ = serveTrustLines(t, home, twice+","+twice)
+	if got := strings.Join(lines, "\n"); !strings.Contains(got, "trust-seed active for 1 of 2 configured root(s)") {
+		t.Errorf("the start counted the list, not the roots in force: %q", got)
 	}
 }

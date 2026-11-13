@@ -549,10 +549,10 @@ would vouch for every folder under it, including ones nobody chose. That holds f
 any spelling of them: with a trailing separator, with a `.` in it, or through a
 symlink that points there. The service refuses to start on such a root and says so
 instead of dropping it: the error names the root and what it is, `muster doctor`
-fails `config.load` and the `trust.roots` row on it, and a reload whose file adds
-one is refused with "a restart would fail". It is refused even beside a valid root,
-because what the operator wrote cannot work. A `trustRoots` edit takes effect only
-when a person restarts the service.
+fails its `trust.roots` row (and `config.load` too when there is a config file),
+and a reload whose file adds one is refused with "a restart would fail". It is
+refused even beside a valid root, because what the operator wrote cannot work. A
+`trustRoots` edit takes effect only when a person restarts the service.
 
 Three places say what is actually in force:
 
