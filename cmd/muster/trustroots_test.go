@@ -118,9 +118,10 @@ func TestTrustSeedStartLineCountsActiveRootsNotConfiguredOnes(t *testing.T) {
 	}
 }
 
+// The row lists; it does not judge (muster #471). A root the service refuses is
+// config.load's failure, so the cases here are the ones where config.load passed.
 func TestCheckTrustRoots(t *testing.T) {
 	home := trustHome(t)
-	link := trustLink(t, home)
 	a := filepath.Join(home, "projects")
 	b := filepath.Join(home, "work")
 	tmux_ := map[string]string{"FLEET_RUNTIME": "tmux"}
@@ -129,7 +130,7 @@ func TestCheckTrustRoots(t *testing.T) {
 		name       string
 		roots      string
 		env        map[string]string
-		cfgFailed  bool
+		undecided  bool
 		wantRow    bool
 		wantStatus rowStatus
 		summary    string // must appear in the summary
@@ -140,11 +141,11 @@ func TestCheckTrustRoots(t *testing.T) {
 		{"another runtime does not read them: no row", home, map[string]string{"FLEET_RUNTIME": "none"}, false, false, "", "", "", ""},
 		{"two valid roots", a + "," + b, tmux_, false, true, statusPass, "2 trust root(s) active of 2", "~/projects, ~/work", home},
 		{"a root written twice counts once", a + "," + a, tmux_, false, true, statusPass, "1 trust root(s) active of 2", "counts once", ""},
-		{"home alone fails and names it", home, tmux_, false, true, statusFail, "1 of 1 configured trust root(s) cannot be used", "~ is the home directory", home},
-		{"a symlink to home fails", link, tmux_, false, true, statusFail, "cannot be used", "is the home directory", ""},
-		{"the filesystem root fails", "/", tmux_, false, true, statusFail, "cannot be used", "/ is the filesystem root", ""},
-		{"home beside a valid root still fails", a + "," + home, tmux_, false, true, statusFail, "1 of 2 configured", "the home directory", ""},
-		{"a relative root fails", "work/repos", tmux_, false, true, statusFail, "cannot be used", "not an absolute path", ""},
+		// config.load failed, for whatever reason: nothing here is decided, and the row
+		// says so instead of listing roots a refused configuration would not start with.
+		{"undecided with no roots", "", tmux_, true, true, statusSkip, "undecidable until config.load passes", "", ""},
+		{"undecided with roots", a, tmux_, true, true, statusSkip, "undecidable until config.load passes", "", home},
+		{"undecided with a root the start refuses", home, tmux_, true, true, statusSkip, "undecidable until config.load passes", "", home},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -155,7 +156,7 @@ func TestCheckTrustRoots(t *testing.T) {
 			if c.roots != "" {
 				env["FLEET_TRUST_ROOTS"] = c.roots
 			}
-			row, ok := checkTrustRoots(nil, c.cfgFailed, envOf(env))
+			row, ok := checkTrustRoots(nil, c.undecided, envOf(env))
 			if ok != c.wantRow {
 				t.Fatalf("row present = %v, want %v (%+v)", ok, c.wantRow, row)
 			}
@@ -181,8 +182,8 @@ func TestCheckTrustRoots(t *testing.T) {
 	}
 }
 
-// The roots come from the config file when the environment names none, and a file
-// that did not load leaves the row undecidable rather than silent.
+// The roots come from the config file when the environment names none, and a
+// configuration that was refused leaves the row undecidable rather than silent.
 func TestCheckTrustRootsReadsTheFileAndWaitsForAConfigThatLoads(t *testing.T) {
 	home := trustHome(t)
 	a := filepath.Join(home, "projects")
@@ -199,9 +200,10 @@ func TestCheckTrustRootsReadsTheFileAndWaitsForAConfigThatLoads(t *testing.T) {
 	}
 }
 
-// The row is in the doctor's report, ahead of anything that needs a network, and a
-// root that is home turns the exit code red — with no FLEET_CONFIG at all, where
-// validateConfigExtras is not run and the row is the only thing that says it.
+// The report, ahead of anything that needs a network: a trust root that is home
+// turns the exit code red with no FLEET_CONFIG at all, as config.load's failure
+// (muster #471). The trust.roots row does not repeat it: it waits on config.load,
+// and lists the roots once config.load has passed them.
 func TestDoctorReportsATrustRootThatIsHome(t *testing.T) {
 	home := trustHome(t)
 	rows := runChecks(context.Background(), func() doctorEnv {
@@ -209,9 +211,15 @@ func TestDoctorReportsATrustRootThatIsHome(t *testing.T) {
 		e.Offline = true
 		return e
 	}())
-	row := rowByID(t, rows, "trust.roots")
+	row := rowByID(t, rows, "config.load")
 	if row.Status != statusFail || !strings.Contains(row.Detail, "the home directory") {
-		t.Fatalf("trust.roots = %+v, want a fail naming the home directory", row)
+		t.Fatalf("config.load = %+v, want a fail naming the home directory", row)
+	}
+	if strings.Contains(row.Detail, home) {
+		t.Errorf("config.load detail %q carries the absolute home path %q", row.Detail, home)
+	}
+	if row := rowByID(t, rows, "trust.roots"); row.Status != statusSkip || !strings.Contains(row.Summary, "config.load") {
+		t.Fatalf("trust.roots = %+v, want a skip that waits on config.load", row)
 	}
 
 	rows = runChecks(context.Background(), func() doctorEnv {
@@ -219,6 +227,9 @@ func TestDoctorReportsATrustRootThatIsHome(t *testing.T) {
 		e.Offline = true
 		return e
 	}())
+	if row := rowByID(t, rows, "config.load"); row.Status != statusWarn {
+		t.Fatalf("config.load for a valid root = %+v, want the single-token warning", row)
+	}
 	if row := rowByID(t, rows, "trust.roots"); row.Status != statusPass {
 		t.Fatalf("trust.roots for a valid root = %+v, want a pass", row)
 	}
