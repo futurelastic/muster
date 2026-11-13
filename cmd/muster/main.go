@@ -194,9 +194,14 @@
 //	                       full-featured client (§6, defect D6).
 //	FLEET_TRUST_ROOTS      comma-separated list of absolute directories.
 //	                       #47: every repository and worktree root under
-//	                       one of these has the runtime's own folder-trust
-//	                       question pre-answered, so no session under it —
-//	                       whoever started it — ever meets that screen.
+//	                       one of these, within the periodic sweep's depth
+//	                       bound, has the runtime's own folder-trust
+//	                       question pre-answered, so no session there —
+//	                       whoever started it — meets that screen. A plain
+//	                       folder, or a repository deeper than the bound,
+//	                       is answered only once this service has created
+//	                       a session in it. A root can never be the home
+//	                       directory or /: the start refuses one (#469).
 //	                       #211: the same roots pre-answer its second boot
 //	                       question, "allow external imports", which a
 //	                       directory raises when its instruction files
@@ -629,9 +634,11 @@ func main() {
 			opts = append(opts, tmux.WithCredentialPath(filepath.Join(home, ".claude.json")))
 		}
 		// #47: pre-answer the runtime's folder-trust question — and, since
-		// #211, its external-imports question — for every
-		// session under a configured root, whoever started it — see
-		// internal/trustseed and tmux.WithTrustSeed. Off by default, the
+		// #211, its external-imports question — under a configured root: for
+		// every session in a repository or worktree within the sweep's depth
+		// bound, whoever started it, and for a plain folder or a deeper
+		// repository only once a session is created there through this
+		// service. See internal/trustseed and tmux.WithTrustSeed. Off by default, the
 		// same way every feature above it is: no roots configured means no
 		// state file is ever opened.
 		//

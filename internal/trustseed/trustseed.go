@@ -29,7 +29,16 @@
 // hasClaudeMdExternalIncludesWarningShown) for the second. This package
 // writes those keys ahead of time, under a machine-local,
 // operator-configured set of roots — so neither question gets asked in the
-// first place, for any session, whoever started it. It is the same shape the
+// first place. How far that reaches depends on which path writes the key. The
+// periodic sweep (SeedAll) writes it for every repository and worktree it
+// finds within its depth bound, so a session there never meets either
+// question, whoever started it. A directory in no repository, and a repository
+// nested deeper than the bound, are not reached by the sweep: SeedPath writes
+// their key only when this service creates a session there, and only for that
+// directory, so a session started there any other way beforehand still meets
+// the questions. A directory outside every root is never written, and a root
+// can never be the home directory or the filesystem root (RootRefusal): the
+// service refuses to start on one. It is the same shape the
 // consent table already commits to on create, extended from one request to a
 // standing policy: the operator, not this service, is the party saying which
 // directories are theirs, once, in the machine's own configuration.

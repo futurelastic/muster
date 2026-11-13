@@ -74,9 +74,16 @@ type fileConfig struct {
 	} `json:"peers"`
 
 	// TrustRoots are the directories under which #47's trust seeding runs:
-	// a session under one of these never meets the runtime's folder-trust
-	// question — nor, since #211, its "allow external imports" question —
-	// whoever started it. One list covers both: it is the operator's one
+	// the runtime's folder-trust question — and, since #211, its "allow
+	// external imports" question — is answered ahead of time for a session
+	// under one of these. What is covered depends on what the directory is.
+	// A repository or worktree within the sweep's depth bound is answered
+	// for every session, whoever started it. A plain folder (no .git at or
+	// above it), or a repository deeper than the bound, is answered only
+	// from the moment the service has created a session in it, and then
+	// only that folder. A root can never be the home directory or "/"
+	// (spelled any way, or through a symlink): the start refuses one (#469).
+	// One list covers both questions: it is the operator's one
 	// statement of which directories are theirs. A list alongside Principals for the
 	// same reason Peers is one — an operator edits and diffs a file, not a
 	// delimiter-separated string — and, like the rest of this file, it
