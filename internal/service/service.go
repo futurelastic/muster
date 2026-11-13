@@ -1495,6 +1495,12 @@ func (s *Service) resolveSessionDriver(ctx context.Context, req fleet.Request, m
 // one" outcome as ErrNoSuchSession, leaving inconclusive to mean only what
 // #60 built it to mean.
 //
+// A driver that holds the id in its own record (driver.RecordHolder) is a
+// holder even when State fails (muster #473): its runtime is the thing that is
+// broken, and "inconclusive" would send the caller away from the one driver
+// that knows the session — most visibly for a close, which is the way a broken
+// session is removed.
+//
 // This is read from the returned sentinel rather than from
 // fleet.DriverCapabilities, and that is a real gap rather than a
 // preference: DriverCapabilities has no field for "this driver can never
@@ -1530,7 +1536,16 @@ func (s *Service) probeHolders(ctx context.Context, req fleet.Request, local map
 			// have never had one of. Belongs to neither set, same as the
 			// case above and for the same reason.
 		default:
-			inconclusive[rt] = d
+			// muster #473: a driver that holds the id in its own record is the holder
+			// even when the read of the session failed — the runtime of a session
+			// this driver started is the thing that is broken, and "could not be
+			// confirmed" would send the caller away from the one driver that knows
+			// the session. A driver that cannot say stays inconclusive.
+			if h, ok := d.(driver.RecordHolder); ok && h.Holds(id) {
+				holders[rt] = d
+			} else {
+				inconclusive[rt] = d
+			}
 		}
 	}
 	return holders, inconclusive

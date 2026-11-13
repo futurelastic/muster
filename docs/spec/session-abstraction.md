@@ -915,6 +915,7 @@ into one:
 ```
 Ack {
   accepted : boolean
+  note?    : string     // prose, never parsed (§2.3); absent on an ordinary answer
 }
 ```
 
@@ -923,6 +924,15 @@ Accepted). Confirmation of what actually happened arrives later as a state
 change on the event stream (§4), never as this call's return value. An `Ack`
 carrying a status of its own would be a driver promising synchronous
 completion it may not be able to deliver, which §5.6 forbids.
+
+`note` is the one thing besides `accepted` an `Ack` may say, and it is not a
+status. A `close` of a session whose runtime could not be asked — it answered
+with an error of its own, or not at all — still goes ahead where the driver holds
+the session's record, because the session is the driver's own process and the
+runtime's read is only a confirmation of what the driver already knows; `note`
+then says, in prose, that the runtime's own confirmation was not available and
+why. It is a statement about what the driver could not do, never a claim about
+the session, and a caller never branches on it (muster #473).
 
 > Origin: Appendix A, F2.
 

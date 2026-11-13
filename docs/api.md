@@ -1874,6 +1874,14 @@ confirmation is the session's `state.controlChannel` changing, delivered as a
 Both express intent and return `202`. Confirmation arrives on the event stream,
 not in the response.
 
+A `DELETE` of a session whose own runtime cannot be asked (its server answers with an
+error, or not at all) still succeeds where this service holds the session's record:
+the process is stopped and the record dropped, and the `202` body says so in an extra
+`note` — `{"accepted": true, "note": "the runtime's own confirmation was not available (…)"}`.
+`note` is absent on an ordinary close; read it, never parse it. A session the runtime
+says does not exist is `404`. Without `?runtime=` the id is resolved to the runtime
+whose own record holds it, even when that runtime cannot be read.
+
 ---
 
 ## The session object
