@@ -415,6 +415,7 @@ func (d *Driver) startServerIn(ctx context.Context, spec fleet.SessionSpec, exis
 	}
 	if plan != nil {
 		srv.sandbox = plan.state()
+		noteWorkdir(srv, plan, string(spec.Cwd))
 	}
 	srv.credential = cred.kind
 	srv.dir = dir
@@ -686,10 +687,12 @@ func (d *Driver) readState(ctx context.Context, ref fleet.SessionRef) (fleet.Ses
 	statuses, err := d.statusOf(ctx, srv)
 	if err != nil {
 		// §5.7, applied at the single-session grain: the read failed, so
-		// this is an error — never a synthesized idle. Propagated as-is,
+		// this is an error — never a synthesized idle. Propagated with its kind,
 		// which the HTTP layer maps to 504/401 (writeDriverError adopts
-		// a *fleet.Error's Kind verbatim), never a 200 carrying "idle".
-		return fleet.SessionState{}, err
+		// a *fleet.Error's Kind verbatim), never a 200 carrying "idle". When the
+		// runtime refused because its working directory moved (muster #474), the
+		// message says so; the kind does not change.
+		return fleet.SessionState{}, d.explainReadFailure(srv, err)
 	}
 	ws, present := statuses[ref.ID]
 	d.observeStatus(srv, ref.ID, present, ws) // muster #458
@@ -738,7 +741,7 @@ func (d *Driver) readState(ctx context.Context, ref fleet.SessionRef) (fleet.Ses
 			return fleet.InferredState(fleet.StatusDead,
 				"session was previously observed and no longer exists on the runtime", nil), nil
 		default:
-			return fleet.SessionState{}, err
+			return fleet.SessionState{}, d.explainReadFailure(srv, err) // muster #474
 		}
 	}
 	// Merged into the entry as it is now, not written back from the copy read above:
@@ -1084,6 +1087,10 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 	type statusRead struct {
 		statuses statusMap
 		err      error
+		// moved is why the runtime's refusal may be its own sandbox denying a working
+		// directory that has since moved (muster #474); empty when it is not, and
+		// only ever worked out for a read that failed.
+		moved string
 		// ids are the sessions of the server this listing is about (muster #426).
 		ids []string
 	}
@@ -1108,6 +1115,9 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 		go func(srv *server, r *statusRead) {
 			defer wg.Done()
 			r.statuses, r.err = d.statusOf(ctx, srv)
+			if r.err != nil && answeredWithAnError(r.err) {
+				r.moved = d.cwdMoved(srv) // muster #474: one path resolution, next to a failed request
+			}
 			if r.err == nil && filter.ID == "" {
 				d.readFinishedTurns(ctx, srv, r.ids, r.statuses)
 			}
@@ -1138,8 +1148,13 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 				firstErr = r.err
 			}
 			sourceStatus = fleet.SourceDegraded
-			st = fleet.UnknownState(fleet.ConfidenceObserved,
-				fmt.Sprintf("session identity is known but its status could not be read: %v", r.err))
+			evidence := fmt.Sprintf("session identity is known but its status could not be read: %v", r.err)
+			if r.moved != "" {
+				// muster #474: the runtime's own text is a bare 500; the cause is
+				// the driver's to name, and the runtime's text stays beside it.
+				evidence = fmt.Sprintf("%s (its status read failed: %v)", r.moved, r.err)
+			}
+			st = fleet.UnknownState(fleet.ConfidenceObserved, evidence)
 		default:
 			live = true
 			ws, present := r.statuses[id]

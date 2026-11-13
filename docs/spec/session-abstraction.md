@@ -249,6 +249,14 @@ Either way the session finds the directory it should use in `MUSTER_PACKAGE_CACH
   service or by its caller — executes code the session chose: a sandbox escape. This service never
   runs git on a session's working directory. A caller extracting the result (a diff, artifacts) must
   do it inside the same profile, or with every exec-capable setting overridden.
+- *The working directory is resolved when the session's process starts, not again.* Where the
+  host matches a profile against paths, moving the directory afterwards — renaming a parent folder
+  and leaving a link at the old name — puts the name the process still uses outside what the
+  profile grants, and the session's runtime then refuses every request. Such a session is listed
+  `unknown`, and a read of it fails, with evidence that names the path the profile was planned for
+  and the path the directory resolves to now; one whose directory no longer resolves says so. Every
+  start plans the profile again from where the directory is now, so the service starting again over
+  its records repairs a session that has one, and closing it and creating it again repairs any (muster #474).
 - *Setting up the working directory is the caller's job, and it comes first.* A test loop that diffs
   against the repository's trunk needs the trunk reference to exist before the session starts (a
   clone fetched at one commit has none, and diff-based gates refuse to run); it cannot be fetched
