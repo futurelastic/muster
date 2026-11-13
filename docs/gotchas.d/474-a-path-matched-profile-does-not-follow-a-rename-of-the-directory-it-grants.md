@@ -32,7 +32,10 @@ first ten minutes, starting the minute the folder was renamed. Nothing said why.
 - Every start already plans again from where the directory is now (a relaunch, a
   revive after a park, the service starting over its records), so a restart is the
   repair. The Linux mechanism makes each grant by opening the directory, so its grant
-  follows the rename and there is nothing to report there.
+  follows the rename and there is nothing to report there. Windows has no sandbox
+  mechanism, and it refuses to rename a directory a running process has as its
+  working directory, so the failure cannot arise there; the tests that rename under
+  a live session skip on it.
 
 ## Not done, on purpose
 

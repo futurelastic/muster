@@ -3,9 +3,11 @@ package opencode
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -84,6 +86,20 @@ func hasPath(list []string, want string) bool {
 	return false
 }
 
+// quoted is a path as the driver's messages print it: %q, which doubles the
+// backslashes of a Windows path.
+func quoted(p string) string { return fmt.Sprintf("%q", p) }
+
+// requireRenameableWorkdir skips where a directory cannot be renamed while a
+// process has it as its working directory, which is the case these tests set up:
+// Windows refuses the rename, so the failure they are about cannot arise there.
+func requireRenameableWorkdir(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not rename a directory a running process has as its working directory")
+	}
+}
+
 // noted is the server a start leaves for a session planned for cwd.
 func noted(t *testing.T, d *Driver, cwd string) *server {
 	t.Helper()
@@ -154,7 +170,7 @@ func TestCwdMoved_ReportsAMoveBehindASymlink(t *testing.T) {
 	m.link(t)
 
 	cause := d.cwdMoved(srv)
-	for _, want := range []string{"moved", planned, newReal, "create it again"} {
+	for _, want := range []string{"moved", quoted(planned), quoted(newReal), "create it again"} {
 		if !strings.Contains(cause, want) {
 			t.Errorf("the cause %q does not say %q", cause, want)
 		}
@@ -203,7 +219,7 @@ func TestCwdMoved_AGoneDirectorySaysSoWithoutPromisingARestart(t *testing.T) {
 	m.rename(t) // and no link: the old name resolves to nothing
 
 	cause := d.cwdMoved(srv)
-	if !strings.Contains(cause, "no longer resolves") || !strings.Contains(cause, srv.cwdPlanned) {
+	if !strings.Contains(cause, "no longer resolves") || !strings.Contains(cause, quoted(srv.cwdPlanned)) {
 		t.Errorf("the cause does not say the directory is gone, and what the sandbox was planned for: %q", cause)
 	}
 	// A start would refuse a working directory that is not there.
@@ -275,6 +291,7 @@ func TestExplainReadFailure_KeepsTheKindAndNeverWrapsTwice(t *testing.T) {
 // enforced on every host.
 func movedAndBroken(t *testing.T) (d *Driver, healthy, broken fleet.Session, planned, newReal string) {
 	t.Helper()
+	requireRenameableWorkdir(t)
 	d, _ = newIsolatedDriver(t)
 	healthy = mustCreate(t, d, "ok", fleet.SessionSpec{})
 	m := newMoveable(t)
@@ -309,7 +326,7 @@ func TestList_AMovedWorkdirIsUnknownWithTheCause(t *testing.T) {
 					t.Errorf("the moved session is %q, want unknown", s.State.Status)
 				}
 				ev := s.State.Evidence
-				for _, want := range []string{"the working directory moved", planned, newReal, "500"} {
+				for _, want := range []string{"the working directory moved", quoted(planned), quoted(newReal), "500"} {
 					if !strings.Contains(ev, want) {
 						t.Errorf("the evidence %q does not say %q", ev, want)
 					}
@@ -344,7 +361,7 @@ func TestState_AMovedWorkdirFailsWithTheCause(t *testing.T) {
 	if fe.Kind != fleet.ErrorInvalid {
 		t.Errorf("the kind changed to %q; the cause is added to the message, not to the contract", fe.Kind)
 	}
-	for _, want := range []string{"the working directory moved", planned, "500"} {
+	for _, want := range []string{"the working directory moved", quoted(planned), "500"} {
 		if !strings.Contains(fe.Message, want) {
 			t.Errorf("the message %q does not say %q", fe.Message, want)
 		}
