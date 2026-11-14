@@ -321,6 +321,20 @@ func (d *Driver) invalidStart(err error) error {
 	return &fleet.Error{Kind: fleet.ErrorInvalid, Message: "create: " + err.Error(), Machine: d.machine}
 }
 
+// startFailure is what a failed startServer becomes on the wire. A runtime that
+// exited before it answered on every attempt is the machine failing to start it
+// now, not a request the caller got wrong, so it is unreachable and retryable
+// (muster #477); a client that reads a 400 as final would stop asking. The
+// message is startServer's own, which names the attempts and at most the error
+// name the runtime logged, never its text. Every other failure of the start
+// (the launcher's refusal, a spawn that did not happen) is returned as it was.
+func (d *Driver) startFailure(err error) error {
+	if !errors.Is(err, errExitedBeforeReady) {
+		return err
+	}
+	return &fleet.Error{Kind: fleet.ErrorUnreachable, Message: err.Error(), Machine: d.machine, Retryable: true}
+}
+
 // startServerIn is startSessionServer for a session that may already have its
 // directory (muster #282): a relaunch passes the directory the previous process
 // used, so the runtime finds its database there, and never removes it on failure
@@ -452,7 +466,7 @@ func (d *Driver) startServerIn(ctx context.Context, spec fleet.SessionSpec, exis
 	srv, err := startServer(ctx, d.bin, string(spec.Cwd), d.username, d.buildEnv(dir, extra), launch, args...)
 	if err != nil {
 		cleanup()
-		return nil, err
+		return nil, d.startFailure(err)
 	}
 	if spec.PermissionMode == fleet.PermissionModeBypass {
 		srv.permission = fleet.PermissionModeBypass
