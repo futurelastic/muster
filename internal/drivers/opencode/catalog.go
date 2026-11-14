@@ -492,7 +492,7 @@ func (d *Driver) settleModel(ctx context.Context, srv *server, model string, fir
 	for {
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, &driver.StepTimeout{Step: stepCatalog, Err: ctx.Err()}
 		case <-window.C:
 			return seen, nil
 		case <-tick.C:
@@ -500,7 +500,7 @@ func (d *Driver) settleModel(ctx context.Context, srv *server, model string, fir
 		answer, read, err := d.readCatalog(ctx, srv)
 		if err != nil {
 			if ctx.Err() != nil {
-				return nil, ctx.Err()
+				return nil, &driver.StepTimeout{Step: stepCatalog, Err: ctx.Err()}
 			}
 			return nil, err
 		}

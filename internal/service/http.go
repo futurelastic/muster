@@ -595,10 +595,14 @@ func writeDriverError(w http.ResponseWriter, machine fleet.MachineId, deadline t
 		writeError(w, &fleet.Error{Kind: fleet.ErrorConflict, Message: err.Error(), Machine: machine})
 	case isUnsupported(err):
 		writeError(w, &fleet.Error{Kind: fleet.ErrorUnsupported, Message: err.Error(), Machine: machine})
-	case isDeadlineExceeded(err):
+	case isDeadlineExceeded(err) || isCancelled(err):
+		// Time ran out, or the caller went away: nothing the caller asked for was
+		// refused, so it is never invalid (a 400 an operator's client reads as
+		// final) and it is retryable. The message says which budget ran out
+		// (muster #476).
 		writeError(w, &fleet.Error{
 			Kind:      fleet.ErrorUnreachable,
-			Message:   "no answer within " + deadline.String(),
+			Message:   outOfTimeMessage(err, deadline),
 			Machine:   machine,
 			Retryable: true,
 		})

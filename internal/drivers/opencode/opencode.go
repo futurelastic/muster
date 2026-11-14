@@ -204,16 +204,24 @@ const (
 	defaultBin        = "opencode"
 	defaultUsername   = "muster"
 	defaultDeadlineMs = 30000
-	readyTimeout      = 10 * time.Second
 	readyPollInterval = 100 * time.Millisecond
 
 	// How long a create waits for the runtime's model list to settle before it
 	// refuses a model the first answer did not list, and how often it asks again
 	// meanwhile (muster #384; catalog.go says why). With readyTimeout this stays
-	// well inside defaultDeadlineMs, so waiting here cannot be what ends a create.
+	// inside defaultDeadlineMs, so waiting here does not by itself end a create;
+	// what can is a slow start taking readiness, this wait and the sandbox
+	// measurement (which has a budget of its own) together past the deadline, and
+	// then the answer says which step it was in (muster #476).
 	defaultCatalogSettle = 8 * time.Second
 	defaultCatalogPoll   = 500 * time.Millisecond
 )
+
+// readyTimeout is how long one start attempt waits for the runtime to answer. It
+// is this driver's own budget, shorter than the default deadline, so a start that
+// is slow ends a create before the caller's deadline does; the error says so
+// (driver.StepTimeout, muster #476). A variable so a test can shorten it.
+var readyTimeout = 10 * time.Second
 
 // DefaultDeadlineMs is the deadline a driver built without WithDeadline
 // declares. It is exported so the service can describe a runtime that has no

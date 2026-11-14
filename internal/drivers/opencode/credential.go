@@ -9,6 +9,7 @@ import (
 
 	fleet "github.com/futurelastic/muster"
 	"github.com/futurelastic/muster/internal/credrule"
+	"github.com/futurelastic/muster/internal/driver"
 	"github.com/futurelastic/muster/internal/grant"
 )
 
@@ -142,6 +143,13 @@ func (d *Driver) planCredential(ctx context.Context, spec fleet.SessionSpec, env
 	var grantErr error
 	if d.grants != nil && rule != fleet.CredentialAPIKey {
 		access, grantErr = d.grants.Access(ctx)
+		if grantErr != nil && ctx.Err() != nil {
+			// muster #476: the renewal was cut short by the request's own deadline
+			// (or the caller leaving), so "no usable sign-in" would be untrue; the
+			// sign-in was never found wanting. That is time running out, not a
+			// refusal, and a retry gives the renewal its full time.
+			return credentialPlan{}, &driver.StepTimeout{Step: stepCredential, Err: ctx.Err()}
+		}
 		in.haveGrant = grantErr == nil
 		if grantErr != nil && !errors.Is(grantErr, grant.ErrSignedOut) {
 			d.say("opencode: this session was started without the openai sign-in: %v", grantErr)

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	fleet "github.com/futurelastic/muster"
+	"github.com/futurelastic/muster/internal/driver"
 	"github.com/futurelastic/muster/internal/privfs"
 	"github.com/futurelastic/muster/internal/procgroup"
 	"github.com/futurelastic/muster/internal/sandbox"
@@ -378,54 +379,18 @@ const startAttempts = 3
 func startServer(ctx context.Context, bin, workdir, username string, env []string, launch launchFunc, extraArgs ...string) (*server, error) {
 	var lastErr error
 	for attempt := 0; attempt < startAttempts; attempt++ {
-		port, err := freePort()
+		// Each attempt notes its own two phases, so a start that took three
+		// attempts shows three of each on the audit line (muster #476).
+		begun := time.Now()
+		s, wrap, err := spawnServer(bin, workdir, username, env, launch, extraArgs...)
+		driver.NotePhase(ctx, phaseStart, begun)
 		if err != nil {
 			return nil, err
 		}
-		cred, err := generateCredential()
-		if err != nil {
-			return nil, err
-		}
-		// The prefix is asked for per attempt: on Linux the one port a confined
-		// session may bind is this attempt's.
-		var wrap []string
-		if launch != nil {
-			wrap, err = launch(port)
-			if err != nil {
-				return nil, fmt.Errorf("opencode: preparing the sandbox: %w", err)
-			}
-		}
-		cmd := buildServeCmd(bin, workdir, port, username, cred, env, wrap, extraArgs...)
-		logs := newLogCapture()
-		cmd.Stderr = logs
-		// A tool the session ran can hold the stderr pipe open after the server
-		// itself is gone; without a bound, Wait would then not return and the
-		// process would read as still running.
-		cmd.WaitDelay = 2 * time.Second
-		if err := cmd.Start(); err != nil {
-			return nil, fmt.Errorf("opencode: starting server: %w", err)
-		}
-		// Attach before anything else can fail or wait: where the platform
-		// creates the child suspended it only runs once it is under control, and
-		// a failed Attach has already ended and reaped it.
-		group, err := procgroup.Attach(cmd)
-		if err != nil {
-			return nil, fmt.Errorf("opencode: starting server: %w", err)
-		}
-		p := &process{cmd: cmd, group: group, done: make(chan struct{})}
-		go func() {
-			_ = cmd.Wait()
-			close(p.done)
-		}()
-
-		s := &server{
-			baseURL:  fmt.Sprintf("http://127.0.0.1:%d", port),
-			username: username,
-			password: cred,
-			proc:     p,
-			logs:     logs,
-		}
-		err = waitReady(ctx, s.baseURL, username, cred, p.done)
+		p, logs := s.proc, s.logs
+		waiting := time.Now()
+		err = waitReady(ctx, s.baseURL, username, s.password, p.done)
+		driver.NotePhase(ctx, phaseReady, waiting)
 		if err == nil {
 			return s, nil
 		}
@@ -450,6 +415,61 @@ func startServer(ctx context.Context, bin, workdir, username string, env []strin
 		return nil, fmt.Errorf("opencode: server did not become ready: %w", err)
 	}
 	return nil, fmt.Errorf("opencode: server did not become ready after %d attempts: %w", startAttempts, lastErr)
+}
+
+// spawnServer is one start attempt up to the point the child is running and
+// under control: a free port, the sandbox's command prefix for that port, the
+// exec, and the attach. It returns the prefix too, because the caller needs it
+// to tell a launcher that refused from a runtime that died. Split out of
+// startServer so the whole of it can be timed as one phase (muster #476).
+func spawnServer(bin, workdir, username string, env []string, launch launchFunc, extraArgs ...string) (*server, []string, error) {
+	port, err := freePort()
+	if err != nil {
+		return nil, nil, err
+	}
+	cred, err := generateCredential()
+	if err != nil {
+		return nil, nil, err
+	}
+	// The prefix is asked for per attempt: on Linux the one port a confined
+	// session may bind is this attempt's.
+	var wrap []string
+	if launch != nil {
+		wrap, err = launch(port)
+		if err != nil {
+			return nil, nil, fmt.Errorf("opencode: preparing the sandbox: %w", err)
+		}
+	}
+	cmd := buildServeCmd(bin, workdir, port, username, cred, env, wrap, extraArgs...)
+	logs := newLogCapture()
+	cmd.Stderr = logs
+	// A tool the session ran can hold the stderr pipe open after the server
+	// itself is gone; without a bound, Wait would then not return and the
+	// process would read as still running.
+	cmd.WaitDelay = 2 * time.Second
+	if err := cmd.Start(); err != nil {
+		return nil, nil, fmt.Errorf("opencode: starting server: %w", err)
+	}
+	// Attach before anything else can fail or wait: where the platform
+	// creates the child suspended it only runs once it is under control, and
+	// a failed Attach has already ended and reaped it.
+	group, err := procgroup.Attach(cmd)
+	if err != nil {
+		return nil, nil, fmt.Errorf("opencode: starting server: %w", err)
+	}
+	p := &process{cmd: cmd, group: group, done: make(chan struct{})}
+	go func() {
+		_ = cmd.Wait()
+		close(p.done)
+	}()
+
+	return &server{
+		baseURL:  fmt.Sprintf("http://127.0.0.1:%d", port),
+		username: username,
+		password: cred,
+		proc:     p,
+		logs:     logs,
+	}, wrap, nil
 }
 
 // errExitedBeforeReady is waitReady's answer when the child died before it
@@ -506,13 +526,44 @@ func waitReady(ctx context.Context, baseURL, username, password string, exited <
 		}
 		select {
 		case <-cctx.Done():
-			return cctx.Err()
+			// Two different budgets end here, and the answer must say which
+			// (muster #476). The outer context still being live means it was this
+			// wait's own readyTimeout; otherwise it was the caller's deadline (or
+			// the caller going away) while the wait was running.
+			if oerr := ctx.Err(); oerr != nil {
+				return &driver.StepTimeout{Step: stepReady, Err: oerr}
+			}
+			return &driver.StepTimeout{Step: stepReady, Budget: readyTimeout, Err: cctx.Err()}
 		case <-exited:
 			return errExitedBeforeReady
 		case <-ticker.C:
 		}
 	}
 }
+
+// The steps of a create that can be ended by time, named for the message the
+// caller reads (driver.StepTimeout, muster #476).
+const (
+	stepReady      = "the wait for the runtime to become ready"
+	stepCatalog    = "the wait for the runtime's model catalog to settle"
+	stepCredential = "the renewal of this machine's sign-in"
+	stepMeasure    = "the measurement of whether the runtime starts under the sandbox"
+)
+
+// The phases an opencode create notes on the audit line, each as phase.<name>
+// (muster #476). They nest inside the generic `create` phase and are timed
+// whether the step succeeded or not, so a create that failed still says where
+// its time went. oc.start and oc.ready are noted once per start attempt.
+const (
+	phaseCredential = "oc.credential"
+	phaseDirs       = "oc.dirs"
+	phaseSandbox    = "oc.sandbox"
+	phaseMeasure    = "oc.measure"
+	phaseConfig     = "oc.config"
+	phaseStart      = "oc.start"
+	phaseReady      = "oc.ready"
+	phaseCatalog    = "oc.catalog"
+)
 
 // stop terminates the child and everything in its process group. Idempotent.
 //

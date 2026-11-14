@@ -178,6 +178,11 @@ func runFakeOpencode(args []string) {
 	if fileExists(".fake-fail-ready") {
 		os.Exit(3) // dies before it ever binds: the startup-failure case
 	}
+	if fileExists(".fake-slow-ready") {
+		// Alive but not yet answering: the slow-start case (muster #476). Bounded,
+		// so a test that forgets to stop it does not leave it running for ever.
+		time.Sleep(20 * time.Second)
+	}
 	configuredAgents, agentsListed := fakeSessionAgents(*printLogs)
 	user := os.Getenv("OPENCODE_SERVER_USERNAME")
 	pass := os.Getenv("OPENCODE_SERVER_PASSWORD")
