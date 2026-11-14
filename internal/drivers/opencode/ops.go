@@ -2,6 +2,7 @@ package opencode
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -119,7 +120,17 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 		// muster #456: the answer is the measured one, taken now if it is stale, so a
 		// runtime that cannot start under the policy is refused here, with the reason,
 		// and not by a start that fails.
-		if sup, why := d.sandboxCurrent(ctx, true); sup == nil {
+		measuring := time.Now()
+		sup, why := d.sandboxCurrent(ctx, true)
+		driver.NotePhase(ctx, phaseMeasure, measuring)
+		if sup == nil {
+			if ctx.Err() != nil {
+				// muster #476: the measurement was cut short by the request's own
+				// deadline (or the caller leaving). That is not the runtime being
+				// unable to start under the policy, so it is not a refusal, and a
+				// retry is the right answer.
+				return fleet.Session{}, &driver.StepTimeout{Step: stepMeasure, Err: ctx.Err()}
+			}
 			return fleet.Session{}, &fleet.Error{
 				Kind:    fleet.ErrorUnsupported,
 				Message: "create: this driver cannot enforce a sandbox: " + why + " (refusing rather than start the session unconfined)",
@@ -192,7 +203,10 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 	// allows would otherwise answer on whatever it has, so that is a refusal too —
 	// read for every create, with or without a model. Refused before any session
 	// exists, and the process started for it is torn down again.
-	if err := d.checkProviders(ctx, srv, spec.Model, spec.Cwd); err != nil {
+	cataloging := time.Now()
+	err = d.checkProviders(ctx, srv, spec.Model, spec.Cwd)
+	driver.NotePhase(ctx, phaseCatalog, cataloging)
+	if err != nil {
 		d.discardServer(srv)
 		return fleet.Session{}, err
 	}
@@ -288,6 +302,25 @@ func (d *Driver) startSessionServer(ctx context.Context, spec fleet.SessionSpec)
 	return d.startServerIn(ctx, spec, "", "")
 }
 
+// isCtxErr reports whether err is the request's context ending, by deadline or
+// by cancellation.
+func isCtxErr(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
+}
+
+// invalidStart is the refusal a failed step of a start becomes: invalid, with
+// the step's own words. A step that failed because the request's context ended
+// is not a refusal of anything the caller asked for (muster #476), so that error
+// is returned as it is, chain intact, and the service answers it as running out
+// of time, retryable, instead of as a 400 a client reads as final. None of the
+// steps it is used for takes a context today; this keeps it true if one does.
+func (d *Driver) invalidStart(err error) error {
+	if isCtxErr(err) {
+		return err
+	}
+	return &fleet.Error{Kind: fleet.ErrorInvalid, Message: "create: " + err.Error(), Machine: d.machine}
+}
+
 // startServerIn is startSessionServer for a session that may already have its
 // directory (muster #282): a relaunch passes the directory the previous process
 // used, so the runtime finds its database there, and never removes it on failure
@@ -303,7 +336,9 @@ func (d *Driver) startServerIn(ctx context.Context, spec fleet.SessionSpec, exis
 	// muster #458: which of the provider's two credentials this session runs on, and
 	// the other one taken out of its environment, decided before any directory or
 	// process exists so a refusal costs nothing.
+	crediting := time.Now()
 	cred, err := d.planCredential(ctx, spec, extra)
+	driver.NotePhase(ctx, phaseCredential, crediting)
 	if err != nil {
 		return nil, err
 	}
@@ -339,7 +374,9 @@ func (d *Driver) startServerIn(ctx context.Context, spec fleet.SessionSpec, exis
 	dir := existingDir
 	fresh := existingDir == ""
 	if fresh {
+		making := time.Now()
 		dir, err = sessionDirs(d.sessionRoot)
+		driver.NotePhase(ctx, phaseDirs, making)
 		if err != nil {
 			return nil, err
 		}
@@ -354,13 +391,15 @@ func (d *Driver) startServerIn(ctx context.Context, spec fleet.SessionSpec, exis
 	var plan *sandboxPlan
 	var launch launchFunc
 	if spec.Sandbox != nil {
+		planning := time.Now()
 		plan, err = d.planSandboxFor(ctx, spec, dir, priorCopy)
 		if err == nil {
 			launch, err = plan.launcher()
 			if err != nil {
-				err = &fleet.Error{Kind: fleet.ErrorInvalid, Message: "create: " + err.Error(), Machine: d.machine}
+				err = d.invalidStart(err)
 			}
 		}
+		driver.NotePhase(ctx, phaseSandbox, planning)
 		if err != nil {
 			cleanup()
 			return nil, err
@@ -382,9 +421,11 @@ func (d *Driver) startServerIn(ctx context.Context, spec fleet.SessionSpec, exis
 	// not fall back to the runtime's hosted provider — and is written again on a
 	// relaunch, so a changed operator setting applies from the next start. The
 	// operator's agents (muster #396) ride in the same file for the same reason.
+	configuring := time.Now()
 	if err := writeSessionConfig(dir, bypass, plan, d.providers, agents); err != nil {
+		driver.NotePhase(ctx, phaseConfig, configuring)
 		cleanup()
-		return nil, &fleet.Error{Kind: fleet.ErrorInvalid, Message: "create: " + err.Error(), Machine: d.machine}
+		return nil, d.invalidStart(err)
 	}
 	// muster #451: the machine's provider sign-in, as an access token only, before
 	// the server starts — the runtime decides at its start whether the provider is
@@ -393,14 +434,17 @@ func (d *Driver) startServerIn(ctx context.Context, spec fleet.SessionSpec, exis
 	// rule (or the default) put on the subscription gets it; any other loses an entry
 	// an earlier launch left.
 	if err := d.applyCredential(dir, cred); err != nil {
+		driver.NotePhase(ctx, phaseConfig, configuring)
 		cleanup()
-		return nil, &fleet.Error{Kind: fleet.ErrorInvalid, Message: "create: " + err.Error(), Machine: d.machine}
+		return nil, d.invalidStart(err)
 	}
 	// muster #420: the runtime's own log is owner-only before the runtime can write
 	// to it, on a relaunch as on a first start.
-	if err := privateRuntimeLog(dir); err != nil {
+	err = privateRuntimeLog(dir)
+	driver.NotePhase(ctx, phaseConfig, configuring)
+	if err != nil {
 		cleanup()
-		return nil, &fleet.Error{Kind: fleet.ErrorInvalid, Message: "create: " + err.Error(), Machine: d.machine}
+		return nil, d.invalidStart(err)
 	}
 	if bypass {
 		args = bypassArgs()

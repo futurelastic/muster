@@ -49,7 +49,7 @@ served, and the federated ones have been exercised peer to peer.
 | `not_found` | 404 | The machine answered, and there is no such session |
 | `conflict` | 409 | Idempotency key reused with a different body; a replayed key whose session has since ended (`reason: "replay-of-ended-session"`, §3.3); or a destructive request whose `startedAt` disagrees with the live session (§5.4) — the request is well formed, the caller's belief is stale |
 | `unsupported` | 501 | Driver lacks the capability (§4.3 of the model); or a runtime this machine's operator enabled has no working driver and no retry under way (`reason: "runtime-unavailable"`, §3.1); or, on macOS, a create that would start the terminal runtime's session server from a context other than `Background` (`reason: "unsafe_server_context"`, `retryable: false`, §3.1); or a create whose `posture` the resolved runtime cannot enforce (`reason: "posture-unenforceable"`, `retryable: false`, §3.2); or the record route on a machine whose operator refused it (`reason: "record-off"`, §3.2) — no grant would help |
-| `unreachable` | 504 | **The machine did not answer.** Nothing is known. Also a runtime that is enabled and still being retried (`reason: "runtime-unavailable"`, `retryable: true`, §3.1) |
+| `unreachable` | 504 | **The machine did not answer.** Nothing is known. Also a runtime that is enabled and still being retried (`reason: "runtime-unavailable"`, `retryable: true`, §3.1); and a call that ran out of time — the request's deadline, a step's own budget (the message names it, §3.3), or a caller that hung up — with `retryable: true`, **never `invalid`**: running out of time refuses nothing the caller asked for |
 
 **`not_found` and `unreachable` must never be conflated.** One means the fleet
 knows the session does not exist; the other means the fleet knows nothing at
@@ -1004,6 +1004,19 @@ source — is still in transit when the relay gives up, and the relay reports a
 machine that answered as one that did not. A relayed call whose context has a
 deadline always carries the header; a remaining budget too small to announce
 is sent as 1 ms rather than dropped, because no header means no bound at all.
+
+**The message names the budget that ended the call** (muster #476). Most calls
+are bounded only by the effective deadline, and the answer then reads `no answer
+within <deadline>`. A step that has a budget of its own shorter than the
+deadline — the wait for a runtime to become ready after it was started — can end
+a call first, and the answer then names that step and its budget (`... ran past
+its own budget of 10s (the request's deadline of 30s had not run out)`) instead
+of blaming the deadline; the operator looks at the step, not at the caller. A
+deadline that ended a call during a named step says which (`no answer within
+30s (the deadline ran out during ...)`), and a caller that hangs up before the
+answer is told so (`the request was cancelled ...`). All three are `unreachable`,
+504 and `retryable: true`: a client that treats a 400 as final must not meet one
+for a create that only needed more time.
 
 Absent the header, the driver's declared `deadlineMs` applies. There is no
 configuration in which a call has no deadline: measured against a stopped peer,
@@ -3463,7 +3476,20 @@ the only one, which is why the list has no `since=`.
   the driver), `create` (the driver's whole create — for a relayed one, the round
   trip to the peer), `state` (the first state read) and, where the driver reports
   it, `terminal` (starting the session in the terminal multiplexer, which is
-  **inside** `create`, so the two overlap and are not meant to be added). The fields
+  **inside** `create`, so the two overlap and are not meant to be added). A create
+  on the `opencode` runtime also names the steps of its own start, each
+  **inside** `create` and noted whether or not it succeeded, so a slow one can be
+  attributed: `oc.measure` (measuring whether the runtime starts under the
+  requested sandbox, only for a create that asks for one), `oc.credential`
+  (choosing, and where needed renewing, the sign-in), `oc.dirs` (the session's
+  own directories), `oc.sandbox` (planning the sandbox and its launcher, only when
+  one was asked for), `oc.config` (writing the session's configuration, sign-in
+  and log), `oc.start` (a free port, the launcher, the exec), `oc.ready` (the wait
+  for the runtime to answer) and `oc.catalog` (reading its model catalog,
+  including the wait for a model that is not listed yet). `oc.start` and
+  `oc.ready` come once per start attempt, so a start that took three attempts
+  prints three of each, and an `input` that restarts a parked session carries them
+  too. The fields
   are appended after `status=`, so a reader that stops there still reads the line;
   a refusal that ran nothing (`outcome=DENIED`) carries neither.
 
