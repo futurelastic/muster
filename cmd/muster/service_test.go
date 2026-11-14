@@ -28,11 +28,18 @@ type fakeManager struct {
 	goos       string
 	loaded     bool
 	active     bool
+	guiLoaded  bool // the unit's label is also (or only) loaded in gui/<uid>
+	loginInGUI bool // the login item has run at a login and is loaded in gui/<uid>
 	calls      []string
 	doctorEnv  []string
 	doctorArgs []string
 	doctorFail bool
 	failOn     string // a substring of a command line that fails
+	stubborn   bool   // a bootout of the gui/<uid> copy does not remove it
+	guiLeaves  bool   // the gui/<uid> copy would take its sessions with it when it stops
+	// a command made to fail by failOn still leaves the unit loaded: another loader
+	// (the login item) bootstrapped the same file first.
+	loadsOnFailure bool
 }
 
 func (f *fakeManager) run(_ context.Context, env []string, name string, args ...string) ([]byte, error) {
@@ -51,6 +58,9 @@ func (f *fakeManager) run(_ context.Context, env []string, name string, args ...
 		return []byte("muster test-build (abc)\n"), nil
 	}
 	if f.failOn != "" && strings.Contains(line, f.failOn) {
+		if f.loadsOnFailure {
+			f.loaded, f.active = true, true
+		}
 		return []byte("boom"), errors.New("exit status 1")
 	}
 	// Reads are not part of the sequence a test asserts on.
@@ -59,6 +69,20 @@ func (f *fakeManager) run(_ context.Context, env []string, name string, args ...
 		f.calls = append(f.calls, line)
 	}
 	switch {
+	case line == "launchctl print gui/501/com.futurelastic.muster.login":
+		if !f.loginInGUI {
+			return nil, errors.New("not found")
+		}
+		return []byte("state = not running\n"), nil
+	case line == "launchctl print gui/501/com.futurelastic.muster":
+		if !f.guiLoaded {
+			return nil, errors.New("not found")
+		}
+		props := "properties = runatload | abandon process group | inferred program"
+		if f.guiLeaves {
+			props = "properties = runatload | inferred program"
+		}
+		return []byte("com.futurelastic.muster = {\n\tstate = running\n\t" + props + "\n}\n"), nil
 	case strings.Contains(line, "launchctl print"):
 		if !f.loaded {
 			return nil, errors.New("not found")
@@ -67,8 +91,18 @@ func (f *fakeManager) run(_ context.Context, env []string, name string, args ...
 			return []byte("state = running\n"), nil
 		}
 		return []byte("state = waiting\n"), nil
-	case strings.Contains(line, "launchctl bootstrap"), strings.Contains(line, "enable --now"):
+	case strings.Contains(line, "launchctl bootstrap user/"):
+		// What launchd does: a label held in gui/<uid> refuses the same label in user/<uid>.
+		if f.guiLoaded {
+			return []byte("Bootstrap failed: 5: Input/output error"), errors.New("exit status 5")
+		}
 		f.loaded, f.active = true, true
+	case strings.Contains(line, "enable --now"):
+		f.loaded, f.active = true, true
+	case line == "launchctl bootout gui/501/com.futurelastic.muster.login":
+		f.loginInGUI = false
+	case line == "launchctl bootout gui/501/com.futurelastic.muster":
+		f.guiLoaded = f.stubborn
 	case strings.Contains(line, "launchctl bootout"), strings.Contains(line, "disable --now"):
 		f.loaded, f.active = false, false
 	case strings.Contains(line, "launchctl kickstart"), strings.Contains(line, "--user start"), strings.Contains(line, "--user restart"):
@@ -150,6 +184,7 @@ func newSvcFixture(t *testing.T, goos string) *svcFixture {
 		HTTP:     f.srv.Client(),
 		Out:      f.out, Err: f.errb,
 		HealthWait: 2 * time.Second, HealthPoll: 10 * time.Millisecond,
+		BootoutWait: 400 * time.Millisecond,
 	}
 	return f
 }

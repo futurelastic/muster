@@ -48,6 +48,17 @@ import (
 // (relay only matters once peers exist). A table that already exists is never
 // touched.
 //
+// # A reboot, and the domain the unit lives in (muster #480)
+//
+// On macOS the unit is a Background job loaded into user/<uid>. launchd restores
+// only gui/<uid> at a GUI login, so nothing loads a Background job after a reboot
+// there, and the usual hand fix (`launchctl load` from a desktop Terminal) lands
+// it in the wrong domain: a bootstrap into user/<uid> then fails while that copy
+// holds the label, and the session server it starts is in the desktop context.
+// Install therefore also writes a login item (renderLoginItemPlist) that does
+// the same bootstrap at every GUI login, and install, restore, status and uninstall
+// all know about a copy in gui/<uid>.
+//
 // # Restarting must not end the sessions
 //
 // The multiplexer server is started by this service, so under the managers'
@@ -58,6 +69,7 @@ import (
 
 const (
 	svcLabel       = "com.futurelastic.muster"
+	svcLoginLabel  = svcLabel + ".login"
 	svcUnitName    = "muster.service"
 	svcDefaultAddr = "127.0.0.1:9470"
 	svcPrincipal   = "supervisor"
@@ -67,6 +79,7 @@ func usageService() string {
 	return strings.Join([]string{
 		"usage: muster service install [--addr HOST:PORT] [--machine ID] [--tmux PATH] [--no-start]",
 		"       muster service status",
+		"       muster service restore",
 		"       muster service uninstall [--purge]",
 		"",
 		"Sets up this binary as a per-user service for the current user: launchd (Background",
@@ -81,6 +94,10 @@ func usageService() string {
 		"  --tmux     the multiplexer binary (default: the one found on PATH)",
 		"  --no-start write the files and run doctor; do not load or start the unit",
 		"  status     unit present, loaded, healthy, and which binary it runs; exits 1 unless all hold",
+		"  restore    put the installed unit back: load it into the Background domain (moving a copy out of",
+		"             gui/<uid> first), start it if it is stopped, check /v1/health; rewrites no unit or",
+		"             configuration. On macOS install also writes a login item that does the load at each",
+		"             GUI login, which is how the service comes back after a reboot",
 		"  uninstall  unload and remove the unit; configuration, tokens, state and the binary stay",
 		"  --purge    with uninstall: also delete them (the tokens go too)",
 		"",
@@ -111,6 +128,8 @@ type svcEnv struct {
 	// How long install waits for /v1/health, and how often it asks.
 	HealthWait time.Duration
 	HealthPoll time.Duration
+	// How long a launchd job is waited for after bootout; zero is ten seconds.
+	BootoutWait time.Duration
 }
 
 func defaultSvcEnv(out, errw io.Writer) (svcEnv, error) {
@@ -171,7 +190,7 @@ func runServiceWith(ctx context.Context, env svcEnv, args []string) int {
 	case "-h", "--help", "help":
 		fmt.Fprintln(env.Out, usageService())
 		return 0
-	case "install", "status", "uninstall":
+	case "install", "status", "restore", "uninstall":
 	default:
 		fmt.Fprintf(env.Err, "muster service: unknown command %q\n%s\n", args[0], usageService())
 		return 2
@@ -206,6 +225,8 @@ func runServiceWith(ctx context.Context, env svcEnv, args []string) int {
 		err = svcInstall(ctx, env, opts)
 	case "status":
 		err = svcStatus(ctx, env)
+	case "restore":
+		err = svcRestore(ctx, env)
 	case "uninstall":
 		err = svcUninstall(ctx, env, purge)
 	}
@@ -230,6 +251,7 @@ type svcPaths struct {
 	StateDir  string
 	Log       string // launchd only: the unit's stdout and stderr
 	Unit      string
+	LoginUnit string // launchd only: the login item that puts the unit back after a reboot
 }
 
 func svcLayout(goos, home string) (svcPaths, error) {
@@ -243,6 +265,7 @@ func svcLayout(goos, home string) (svcPaths, error) {
 	switch goos {
 	case "darwin":
 		p.Unit = filepath.Join(home, "Library", "LaunchAgents", svcLabel+".plist")
+		p.LoginUnit = filepath.Join(home, "Library", "LaunchAgents", svcLoginLabel+".plist")
 		p.Log = filepath.Join(p.StateDir, "muster.log")
 	case "linux":
 		p.Unit = filepath.Join(home, ".config", "systemd", "user", svcUnitName)
@@ -419,6 +442,45 @@ func renderLaunchdPlist(p svcPaths, s svcSettings) string {
 	return b.String()
 }
 
+// renderLoginItemPlist is the second launchd job `muster service install` writes
+// on macOS: the one that brings the service back after a reboot (muster #480).
+//
+// launchd restores only the gui/<uid> domain at a GUI login, and the unit is a
+// Background job that must never run there (a server started from the desktop
+// context moves an agent runtime's login into the Keychain). So nothing loads it
+// at login. This job has no LimitLoadToSessionType, which makes launchd load it
+// into gui/<uid> at login, and all it does is bootstrap the real unit into
+// user/<uid>, if it is not loaded there already. It has no KeepAlive: it runs once
+// per login and exits. A Mac with no GUI login has no gui/<uid>, so it never runs
+// there and costs nothing.
+//
+// It calls launchctl itself and not `muster service restore`, on purpose: after a
+// rollback the binary at p.Bin is the previous release's, which has no such
+// command, and a login item that depended on the binary's version would stop
+// working with it. A bootstrap from gui/<uid> into user/<uid> is measured to work
+// and to start the job in the Background context.
+func renderLoginItemPlist(p svcPaths) string {
+	x := xmlEscape
+	script := `uid=$(/usr/bin/id -u); /bin/launchctl print "user/$uid/` + svcLabel + `" >/dev/null 2>&1 || ` +
+		`exec /bin/launchctl bootstrap "user/$uid" ` + shQuote(p.Unit)
+	var b strings.Builder
+	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
+	b.WriteString(`<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">` + "\n")
+	b.WriteString("<!-- Written by `muster service install`: at a GUI login it puts the service back into the Background domain, as `muster service restore` does by hand. -->\n")
+	b.WriteString("<plist version=\"1.0\">\n<dict>\n")
+	b.WriteString("\t<key>Label</key>\n\t<string>" + svcLoginLabel + "</string>\n")
+	b.WriteString("\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>/bin/sh</string>\n\t\t<string>-c</string>\n\t\t<string>" + x(script) + "</string>\n\t</array>\n")
+	b.WriteString("\t<key>RunAtLoad</key>\n\t<true/>\n")
+	b.WriteString("\t<key>StandardOutPath</key>\n\t<string>" + x(p.Log) + "</string>\n")
+	b.WriteString("\t<key>StandardErrorPath</key>\n\t<string>" + x(p.Log) + "</string>\n")
+	b.WriteString("</dict>\n</plist>\n")
+	return b.String()
+}
+
+// shQuote quotes a word for /bin/sh: single quotes, with each embedded one closed,
+// escaped and reopened.
+func shQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+
 func xmlEscape(s string) string {
 	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(s)
 }
@@ -575,6 +637,11 @@ func (e svcEnv) load(ctx context.Context, p svcPaths) error {
 	switch e.GOOS {
 	case "darwin":
 		if out, err := e.run(ctx, "launchctl", "bootstrap", e.domain(), p.Unit); err != nil {
+			// The login item bootstraps this same file at a login. If it got there
+			// first, the unit is loaded from what is on disk now and the aim is met.
+			if e.state(ctx).Loaded {
+				return nil
+			}
 			return e.managerErr("launchctl bootstrap", out, err)
 		}
 	default:
@@ -585,18 +652,45 @@ func (e svcEnv) load(ctx context.Context, p svcPaths) error {
 	return nil
 }
 
+// guiDomain is the domain launchd restores at a GUI login. The unit must never
+// be loaded there (see renderLoginItemPlist), yet a copy can be: a unit written
+// without LimitLoadToSessionType, or one loaded by an older release.
+func (e svcEnv) guiDomain() string { return "gui/" + strconv.Itoa(e.UID) }
+
+// loadedIn reports whether launchd has a job of this label in the domain.
+func (e svcEnv) loadedIn(ctx context.Context, domain, label string) bool {
+	_, err := e.run(ctx, "launchctl", "print", domain+"/"+label)
+	return err == nil
+}
+
+// guiCopy reports whether the unit is loaded in gui/<uid> (macOS only). While it
+// is, a bootstrap into user/<uid> fails with an I/O error, and every session
+// server the copy starts is in the desktop context.
+func (e svcEnv) guiCopy(ctx context.Context) bool {
+	return e.GOOS == "darwin" && e.loadedIn(ctx, e.guiDomain(), svcLabel)
+}
+
+// bootout removes a launchd job from a domain and waits until it is gone.
+// bootout returns before the job is, and a bootstrap straight after it fails with
+// an I/O error. A job that is not there is not an error: the aim is "not loaded".
+func (e svcEnv) bootout(ctx context.Context, domain, label string) {
+	_, _ = e.run(ctx, "launchctl", "bootout", domain+"/"+label)
+	wait := e.BootoutWait
+	if wait == 0 {
+		wait = 10 * time.Second
+	}
+	deadline := time.Now().Add(wait)
+	for e.loadedIn(ctx, domain, label) && time.Now().Before(deadline) {
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
 // unload stops the unit and forgets it. Failure of an unloaded unit to unload
 // is not an error: the aim is "not loaded".
 func (e svcEnv) unload(ctx context.Context) {
 	switch e.GOOS {
 	case "darwin":
-		_, _ = e.run(ctx, "launchctl", "bootout", e.domain()+"/"+svcLabel)
-		// bootout returns before the job is gone, and a bootstrap straight
-		// after it fails with an I/O error.
-		deadline := time.Now().Add(10 * time.Second)
-		for e.state(ctx).Loaded && time.Now().Before(deadline) {
-			time.Sleep(200 * time.Millisecond)
-		}
+		e.bootout(ctx, e.domain(), svcLabel)
 	default:
 		_, _ = e.run(ctx, "systemctl", "--user", "disable", "--now", svcUnitName)
 	}
@@ -628,6 +722,90 @@ func (e svcEnv) restart(ctx context.Context, p svcPaths) error {
 		}
 		return nil
 	}
+}
+
+// evictGuiCopy removes a copy of the unit loaded in gui/<uid> and reports whether it
+// did (macOS; a no-op elsewhere or when there is none).
+//
+// It refuses a copy whose loaded job does not abandon its process group. Booting
+// out a job that does not takes everything it started with it, and the session
+// server is one of those: the move would end every session on the machine, which
+// this service never does on purpose (the unit asks launchd to leave them alone).
+// A copy like that comes from a unit this release did not write, so what it carries
+// is read from the loaded job (`launchctl print`), and a job whose properties cannot
+// be read is refused the same way. The refusal names the command that does it, for
+// the person who accepts what it ends.
+func (e svcEnv) evictGuiCopy(ctx context.Context) (moved bool, err error) {
+	if !e.guiCopy(ctx) {
+		return false, nil
+	}
+	target := e.guiDomain() + "/" + svcLabel
+	if !e.guiCopyAbandonsProcessGroup(ctx) {
+		return false, fmt.Errorf("the unit is loaded in %s as a job that does not leave its processes alone when it stops, "+
+			"so moving it would end every session on this machine. Nothing was changed. When that is acceptable, "+
+			"run `launchctl bootout %s`, then run this again", e.guiDomain(), target)
+	}
+	e.bootout(ctx, e.guiDomain(), svcLabel)
+	if e.guiCopy(ctx) {
+		return false, fmt.Errorf("the unit is loaded in %s and launchctl bootout did not remove it: run `launchctl bootout %s` and try again", e.guiDomain(), target)
+	}
+	return true, nil
+}
+
+// guiCopyAbandonsProcessGroup reads the loaded job's properties line, which names
+// "abandon process group" when the plist it was loaded from asked for it.
+func (e svcEnv) guiCopyAbandonsProcessGroup(ctx context.Context) bool {
+	out, err := e.run(ctx, "launchctl", "print", e.guiDomain()+"/"+svcLabel)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if t := strings.TrimSpace(line); strings.HasPrefix(t, "properties =") {
+			return strings.Contains(t, "abandon process group")
+		}
+	}
+	return false
+}
+
+// bringUp makes the unit loaded in the Background manager and running, doing
+// only what is needed and saying each step on rep. restart says the unit or the
+// binary changed, so a loaded service must be reloaded to read the change. Install
+// and restore share it, so a recovery and an update take the same path.
+//
+// A copy loaded in gui/<uid> is moved first (macOS): while it holds the label a
+// bootstrap into user/<uid> fails with an I/O error, which is how an update once
+// ended in "did not come up healthy" and a rollback (muster #480).
+func (e svcEnv) bringUp(ctx context.Context, p svcPaths, restart bool, rep *svcReport) error {
+	moved, err := e.evictGuiCopy(ctx)
+	if err != nil {
+		return err
+	}
+	if moved {
+		rep.line("domain", true, "moved out of "+e.guiDomain()+" into "+e.domain())
+		fmt.Fprintf(e.Out, "  note      a copy in %s makes the Background load fail, and the session server it started "+
+			"is in the desktop context: that server is not restarted (it would end its sessions); "+
+			"GET /v1/health shows its serverContext\n", e.guiDomain())
+	}
+	switch st := e.state(ctx); {
+	case !st.Loaded:
+		if err := e.load(ctx, p); err != nil {
+			return err
+		}
+		rep.line("service", true, "started")
+	case restart:
+		if err := e.restart(ctx, p); err != nil {
+			return err
+		}
+		rep.line("service", true, "restarted")
+	case !st.Active:
+		if err := e.start(ctx); err != nil {
+			return err
+		}
+		rep.line("service", true, "started")
+	default:
+		rep.line("service", false, "running")
+	}
+	return nil
 }
 
 // ---- files -------------------------------------------------------------
@@ -839,6 +1017,16 @@ func svcInstall(ctx context.Context, e svcEnv, o svcInstallOpts) error {
 		return fmt.Errorf("doctor reported a failure, so the service was not started (the unit and files stay; fix the failing row and run this again)")
 	}
 
+	// After doctor, so a unit doctor rejected is not one the next login starts.
+	// Written, never loaded here: launchd reads it at the next GUI login.
+	if e.GOOS == "darwin" {
+		loginChanged, err := writeIfChanged(p.LoginUnit, renderLoginItemPlist(p))
+		if err != nil {
+			return fmt.Errorf("writing the login item: %w", err)
+		}
+		rep.line("login", loginChanged, p.LoginUnit)
+	}
+
 	if o.NoStart {
 		fmt.Fprintf(e.Out, "--no-start: the unit is written and not loaded.\n")
 		return nil
@@ -852,24 +1040,8 @@ func svcInstall(ctx context.Context, e svcEnv, o svcInstallOpts) error {
 			return e.managerErr("systemctl --user daemon-reload", out, err)
 		}
 	}
-	switch st := e.state(ctx); {
-	case !st.Loaded:
-		if err := e.load(ctx, p); err != nil {
-			return err
-		}
-		rep.line("service", true, "started")
-	case unitChanged || binChanged:
-		if err := e.restart(ctx, p); err != nil {
-			return err
-		}
-		rep.line("service", true, "restarted")
-	case !st.Active:
-		if err := e.start(ctx); err != nil {
-			return err
-		}
-		rep.line("service", true, "started")
-	default:
-		rep.line("service", false, "running")
+	if err := e.bringUp(ctx, p, unitChanged || binChanged, rep); err != nil {
+		return err
 	}
 
 	token := readToken(p)
@@ -902,6 +1074,10 @@ func (e svcEnv) printNext(p svcPaths, s svcSettings) {
 	fmt.Fprintf(e.Out, "\nA client authenticates with the token in %s.\n", p.Token)
 	if e.GOOS == "linux" {
 		fmt.Fprintf(e.Out, "To keep the service running while nobody is logged in, and start it at boot: loginctl enable-linger\n")
+	}
+	if e.GOOS == "darwin" {
+		fmt.Fprintf(e.Out, "After a reboot, a login item (%s) puts the service back into the Background domain at the next GUI login.\n"+
+			"If it is ever not running, `muster service restore` does the same by hand; never `launchctl load` it.\n", filepath.Base(p.LoginUnit))
 	}
 	fmt.Fprintf(e.Out, "Peers, inbox delivery and tmux 3.7+ are not set up here: docs/install.md steps 6, 7 and 8 continue from this point.\n")
 }
@@ -1017,6 +1193,47 @@ func (e svcEnv) waitHealthy(ctx context.Context, addr, token string) (string, er
 	}
 }
 
+// ---- restore -----------------------------------------------------------
+
+// svcRestore puts an installed unit back where it belongs and checks it came up:
+// the recovery command, and what the login item runs at every GUI login (muster
+// #480). It writes no file, so it is safe to run at any time and as often as you
+// like: a unit that is already loaded in the Background domain and running is
+// reported and left alone.
+func svcRestore(ctx context.Context, e svcEnv) error {
+	p, err := svcLayout(e.GOOS, e.Home)
+	if err != nil {
+		return err
+	}
+	raw, err := os.ReadFile(p.Unit)
+	if err != nil {
+		return fmt.Errorf("muster is not installed as a service here (no %s): muster service install", p.Unit)
+	}
+	s, _ := parseUnit(e.GOOS, string(raw))
+	addr := firstNonEmpty(s.Addr, svcDefaultAddr)
+	rep := &svcReport{w: e.Out}
+	fmt.Fprintf(e.Out, "muster service restore (%s, %s)\n", e.GOOS, addr)
+	// A unit edited by hand since the manager last read it would otherwise be started
+	// as it was (the documented way to add a variable is to edit the unit).
+	if e.GOOS == "linux" {
+		if out, err := e.run(ctx, "systemctl", "--user", "daemon-reload"); err != nil {
+			return e.managerErr("systemctl --user daemon-reload", out, err)
+		}
+	}
+	if err := e.bringUp(ctx, p, false, rep); err != nil {
+		return err
+	}
+	h, herr := e.waitHealthy(ctx, addr, readToken(p))
+	if herr != nil {
+		return fmt.Errorf("the service did not become healthy: %v%s", herr, e.logHint(p))
+	}
+	fmt.Fprintf(e.Out, "  health    ok         http://%s/v1/health%s\n", addr, h)
+	if rep.changes == 0 {
+		fmt.Fprintf(e.Out, "\nNothing to change: muster is loaded, running and healthy.\n")
+	}
+	return nil
+}
+
 // ---- status ------------------------------------------------------------
 
 func svcStatus(ctx context.Context, e svcEnv) error {
@@ -1056,6 +1273,20 @@ func svcStatus(ctx context.Context, e svcEnv) error {
 	st := e.state(ctx)
 	row("loaded", st.Loaded, e.GOOS)
 	row("running", st.Active, "")
+	if e.GOOS == "darwin" {
+		switch {
+		case e.guiCopy(ctx):
+			row("domain", false, "loaded in "+e.guiDomain()+", not "+e.domain()+": the next update fails and its sessions run in the desktop context; "+
+				"`muster service restore` moves it")
+		case st.Loaded:
+			row("domain", true, e.domain()+" (Background)")
+		}
+		if _, err := os.Stat(p.LoginUnit); err != nil {
+			row("login", false, "no login item at "+p.LoginUnit+": after a reboot on a Mac with a GUI login nothing loads the service; muster service install writes it")
+		} else {
+			row("login", true, "restores the service at a GUI login: "+p.LoginUnit)
+		}
+	}
 	d, herr := e.probeHealth(ctx, s.Addr, readToken(p))
 	if herr != nil {
 		row("health", false, "http://"+s.Addr+"/v1/health: "+herr.Error())
@@ -1077,8 +1308,31 @@ func svcUninstall(ctx context.Context, e svcEnv, purge bool) error {
 	}
 	_, statErr := os.Stat(p.Unit)
 	present := statErr == nil
+	// Before anything is removed: a copy that cannot be removed safely stops the
+	// uninstall with the files still in place, not half of it done.
+	moved, err := e.evictGuiCopy(ctx)
+	if err != nil {
+		return err
+	}
+	if moved {
+		fmt.Fprintf(e.Out, "domain    removed    the copy loaded in %s\n", e.guiDomain())
+	}
 	if present || e.state(ctx).Loaded {
 		e.unload(ctx)
+	}
+	if e.GOOS == "darwin" {
+		// The login item is loaded in gui/<uid> once launchd has run it at a login,
+		// and it would put the service back at the next one if it stayed.
+		if e.loadedIn(ctx, e.guiDomain(), svcLoginLabel) {
+			e.bootout(ctx, e.guiDomain(), svcLoginLabel)
+		}
+		if err := os.Remove(p.LoginUnit); err == nil {
+			fmt.Fprintf(e.Out, "login     removed    %s\n", p.LoginUnit)
+		} else if errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(e.Out, "login     absent     %s\n", p.LoginUnit)
+		} else {
+			return err
+		}
 	}
 	if present {
 		if err := os.Remove(p.Unit); err != nil {

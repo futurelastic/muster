@@ -53,12 +53,28 @@ lint)
 	[ "$(plutil -extract LimitLoadToSessionType raw "$plist")" = "Background" ] || fail "LimitLoadToSessionType is not Background"
 	[ "$(plutil -extract ProgramArguments.1 raw "$plist")" = "serve" ] || fail "the unit does not run 'serve'"
 	[ "$(plutil -extract EnvironmentVariables.FLEET_ADDR raw "$plist")" = "$addr" ] || fail "FLEET_ADDR not written"
+	# The login item (muster #480) is what brings the unit back after a reboot on a Mac
+	# with a GUI login. Assert its shape, not just that the XML parses: it must be loaded
+	# into gui/<uid> at login (so NO session-type limit), run once (so no KeepAlive), and
+	# bootstrap the unit into user/<uid>.
+	login="$HOME/Library/LaunchAgents/com.futurelastic.muster.login.plist"
+	step "the login item"
+	[ -f "$login" ] || fail "no login item at $login"
+	plutil -lint "$login"
+	[ "$(plutil -extract Label raw "$login")" = "com.futurelastic.muster.login" ] || fail "the login item has the wrong label"
+	[ "$(plutil -extract RunAtLoad raw "$login")" = "true" ] || fail "the login item does not run at load"
+	if plutil -extract LimitLoadToSessionType raw "$login" >/dev/null 2>&1; then fail "the login item has a session-type limit, so launchd would not load it into gui/<uid>"; fi
+	if plutil -extract KeepAlive raw "$login" >/dev/null 2>&1; then fail "the login item is kept alive; it must run once per login"; fi
+	cmdline="$(plutil -extract ProgramArguments.2 raw "$login")"
+	case "$cmdline" in *'launchctl bootstrap "user/$uid"'*"$plist"*) ;; *) fail "the login item does not bootstrap the unit into user/<uid>: $cmdline" ;; esac
 	step "second install changes nothing"
 	"$bin" service install --no-start --addr "$addr" --tmux "$tmux_bin" | tee /tmp/e2e-service.out
 	grep -q 'unit      unchanged' /tmp/e2e-service.out || fail "the second run rewrote the unit"
-	step "uninstall --purge"
+	grep -q 'login     unchanged' /tmp/e2e-service.out || fail "the second run rewrote the login item"
+	step "uninstall --purge removes the login item too"
 	"$bin" service uninstall --purge
 	[ ! -e "$plist" ] || fail "the plist survived uninstall"
+	[ ! -e "$login" ] || fail "the login item survived uninstall, and would put the service back at the next login"
 	echo; echo "OK"
 	;;
 full)

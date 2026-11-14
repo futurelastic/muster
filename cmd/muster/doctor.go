@@ -449,6 +449,12 @@ func runChecks(ctx context.Context, env doctorEnv) []doctorRow {
 		c.add(row)
 	}
 
+	// --- which launchd domain the service is in (macOS only) -----------------------
+	// A copy in gui/<uid> breaks the next update; see doctor_servicedomain.go.
+	if d, ok := doctorServiceDomain(); ok {
+		c.add(judgeServiceDomain(d)) // add turns it into a skip row when --skip names it
+	}
+
 	// --- grants -------------------------------------------------------------
 	supervisorSet := supervisorGrants()
 	allowMut := getenv("FLEET_ALLOW_MUTATIONS") == "1"
