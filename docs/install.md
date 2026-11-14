@@ -69,9 +69,47 @@ and restarts the service when it exits.
 - **Linux, no one logged in.** A user service runs while its user has a session.
   To have it run at boot, `loginctl enable-linger` (the command prints this; it
   does not change the account's setting).
+- **macOS, a reboot, and a Mac with a screen login (muster #480).** launchd restores
+  only the `gui/<uid>` domain at a GUI login, and the unit is a Background job that
+  must not run there, so on such a Mac nothing loads it after a reboot. `install`
+  therefore also writes a second launchd job, `com.futurelastic.muster.login`, in
+  `~/Library/LaunchAgents`, once `doctor` has passed. It has no
+  `LimitLoadToSessionType`, so launchd loads it into `gui/<uid>` at the login; it
+  runs one `sh` line that bootstraps the real unit into `user/<uid>` unless it is
+  already loaded there, and exits (no `KeepAlive`). It calls `launchctl` itself, not
+  `muster`, so a rollback to an older binary does not break it. `install` writes it
+  and does not load it (launchd reads it at the next login; `--no-start` writes it
+  too), `status` has a `login` row for it, and `uninstall` removes it. Three limits:
+  the service comes back at the **first GUI login** after a reboot, so a Mac that
+  boots to a login window (FileVault) stays down until someone logs in, and one
+  nobody ever logs into at the screen is not covered by this job at all; macOS
+  shows a "Background Items Added" notice for a new launch agent, and switching the
+  item off in System Settings, Login Items & Extensions, turns the survival off with
+  nothing in `status` to say so; and an update that runs in the second around a
+  login can lose its bootstrap to the login item's, which `install` treats as met when
+  the unit is then loaded.
+- **`muster service restore`.** The same load by hand, for a service that is not
+  running: it loads the installed unit into `user/<uid>` if it is not loaded,
+  starts it if it is stopped, checks `/v1/health`, and rewrites no unit or
+  configuration (on Linux it first reloads the manager's view of the unit, so a
+  unit you edited is the one that starts). Use it instead of `launchctl load`: a
+  copy loaded from a desktop Terminal lands in `gui/<uid>`, and there it holds the
+  label, so the next `service install` (an update) is refused with an I/O error
+  from `launchctl bootstrap`, and the session server it starts runs in the desktop
+  context, where an agent runtime's login can move into the Keychain. `install` and
+  `restore` move a copy that is already in `gui/<uid>` (a `domain` line says so);
+  `status` names it in a `domain` row (exit 1) and `doctor` in the row
+  `service.domain` (a `warn`). **The move is refused when it would end sessions.**
+  Booting out a job that does not abandon its process group takes the session
+  server with it, and the loaded job says whether it does (`launchctl print`,
+  `properties`): for one that does not, `install`, `restore` and `uninstall` change
+  nothing and print the `launchctl bootout` command for whoever accepts what it
+  ends. The session server a moved copy started is not restarted either;
+  `GET /v1/health` shows its `serverContext`.
 
 ```sh
 muster service status        # unit present, loaded, running, healthy, which binary; exit 1 unless all hold
+muster service restore       # load it into the Background domain (macOS: moving a gui/<uid> copy out), start it, check health
 muster service uninstall     # unload and remove the unit; configuration, tokens, state and binary stay
 muster service uninstall --purge   # ...and delete them (the tokens go too)
 ```
@@ -384,7 +422,11 @@ order of this page and the order of its output are the same.
      prints nothing, still refuses every send;
    - on macOS, load the service into the user's **Background** launchd domain
      (`launchctl bootstrap user/$(id -u) …`, with `LimitLoadToSessionType=Background`
-     in the plist), not `gui/<uid>` and not from a Terminal window. Every session
+     in the plist), not `gui/<uid>` and not from a Terminal window. launchd does not
+     restore that domain's jobs at a GUI login, so by hand also write the login item
+     [the short way](#the-short-way-muster-service-install) describes (a job with no
+     `LimitLoadToSessionType` that bootstraps the unit into `user/<uid>` at login) and
+     recover with `muster service restore`, never `launchctl load`. Every session
      inherits the security session of the process that started the session server;
      one started from the desktop (Aqua) context can move an agent runtime's saved
      login into the login Keychain, which a Background session cannot read. The

@@ -28,6 +28,9 @@ func TestMain(m *testing.M) {
 	// The generic doctor tests run on whatever machine this is; whether it has a
 	// scheduled task of the service's name is not what they are about.
 	doctorServiceTask = func(func(string) string) (doctorRow, bool) { return doctorRow{}, false }
+	// Nor which launchd domain it is loaded in: service.domain is tested on its own
+	// with answers it is handed.
+	doctorServiceDomain = func() (serviceDomains, bool) { return serviceDomains{}, false }
 	// Likewise which tmux, if any, the machine has: the runtime.tmux-version row
 	// is tested on its own with versions it is handed.
 	doctorTmuxVersion = func(context.Context, string) (string, error) { return "tmux 3.7a", nil }
