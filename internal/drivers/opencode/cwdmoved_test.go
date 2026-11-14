@@ -361,6 +361,11 @@ func TestState_AMovedWorkdirFailsWithTheCause(t *testing.T) {
 	if fe.Kind != fleet.ErrorInvalid {
 		t.Errorf("the kind changed to %q; the cause is added to the message, not to the contract", fe.Kind)
 	}
+	// The runtime's 500 is retryable on its own (muster #477); a moved directory is
+	// not transient, so naming the cause takes that back.
+	if fe.Retryable {
+		t.Error("a moved working directory was marked retryable: asking again fails the same way")
+	}
 	for _, want := range []string{"the working directory moved", quoted(planned), "500"} {
 		if !strings.Contains(fe.Message, want) {
 			t.Errorf("the message %q does not say %q", fe.Message, want)

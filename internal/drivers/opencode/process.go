@@ -414,6 +414,11 @@ func startServer(ctx context.Context, bin, workdir, username string, env []strin
 		}
 		return nil, fmt.Errorf("opencode: server did not become ready: %w", err)
 	}
+	// The one return that wraps errExitedBeforeReady: every attempt ended with the
+	// runtime gone before it answered. The driver's startFailure reads that to
+	// answer it as a start the machine could not do now, not as invalid (muster
+	// #477); a refusal by the launcher and a readiness timeout return above
+	// without it, and keep their own answers.
 	return nil, fmt.Errorf("opencode: server did not become ready after %d attempts: %w", startAttempts, lastErr)
 }
 

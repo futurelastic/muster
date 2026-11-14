@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	fleet "github.com/futurelastic/muster"
 )
@@ -208,7 +209,23 @@ func (d *Driver) do(ctx context.Context, srv *server, method, path string, body,
 			Message: fmt.Sprintf("opencode: %s %s: no such session", method, path),
 			Machine: d.machine,
 		}
+	case resp.StatusCode >= 500:
+		// The runtime failed on this request. That is not something the caller
+		// got wrong, and a client that reads a 400 as final stops retrying a
+		// create that only met a busy host (muster #477): it is unreachable and
+		// retryable, the same answer a transport failure gets, because in both
+		// the machine could not do it now. The body is not read: a runtime's own
+		// text can carry a directory or an address, and the path is cut at its
+		// query for the same reason (a create's names the working directory).
+		return &runtimeFailure{status: resp.StatusCode, err: &fleet.Error{
+			Kind:      fleet.ErrorUnreachable,
+			Message:   fmt.Sprintf("opencode: %s %s: the runtime answered %d", method, pathOnly(path), resp.StatusCode),
+			Machine:   d.machine,
+			Retryable: true,
+		}}
 	case resp.StatusCode >= 400:
+		// A 4xx is the runtime refusing what it was asked: the one place its own
+		// words are the useful answer, so they stay.
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return &fleet.Error{
 			Kind:    fleet.ErrorInvalid,
@@ -225,6 +242,38 @@ func (d *Driver) do(ctx context.Context, srv *server, method, path string, body,
 	return nil
 }
 
+// runtimeFailure is the error do returns when the runtime ANSWERED with a status
+// of 500 or above (muster #477). On the wire it is a plain unreachable,
+// retryable *fleet.Error (Unwrap returns it, so errors.As and the service's
+// adoption of a typed error see exactly that), but inside the driver it is not a
+// transport failure and must not be read as one:
+//
+//   - isUnreachable means "nothing answered", and the optional reads that treat
+//     it as fatal (the catalog, the agent list, the configured model) tolerate
+//     every other failure as "this driver could not tell". A 5xx on one of them
+//     is the second kind, as it was when it was an invalid error. It is a
+//     different Go type from *fleet.Error on purpose, so isUnreachable's type
+//     assertion does not match it.
+//   - sourceStateFor reads it as degraded, not unreachable: the runtime answered,
+//     and is broken.
+//   - answeredWithAnError counts it: a runtime that fails every request because
+//     its directory moved (muster #474) fails them with a 5xx.
+type runtimeFailure struct {
+	status int
+	err    *fleet.Error
+}
+
+func (e *runtimeFailure) Error() string { return e.err.Error() }
+func (e *runtimeFailure) Unwrap() error { return e.err }
+
+// pathOnly is path without its query string.
+func pathOnly(path string) string {
+	if i := strings.IndexByte(path, '?'); i >= 0 {
+		return path[:i]
+	}
+	return path
+}
+
 // isNotFound reports whether err is the ErrorNotFound this driver's own do
 // produces for a 404 — the signal ops.go uses to decide between
 // fleet.ErrNoSuchSession and fleet.InferredState(fleet.StatusDead, ...)
@@ -235,7 +284,8 @@ func isNotFound(err error) bool {
 }
 
 // isUnreachable reports whether err is the ErrorUnreachable do produces for a
-// transport failure — nothing answered.
+// transport failure — nothing answered. A runtime that answered with a 5xx is
+// unreachable on the wire but is NOT this: see runtimeFailure.
 func isUnreachable(err error) bool {
 	fe, ok := err.(*fleet.Error)
 	return ok && fe.Kind == fleet.ErrorUnreachable

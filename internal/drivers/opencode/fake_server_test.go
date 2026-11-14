@@ -44,6 +44,10 @@ type fakeServer struct {
 	// before answering — a read that is in flight while the test does something
 	// else (muster #419).
 	statusHold chan struct{}
+	// createStatus, when set, makes POST /session answer that status with a body
+	// that names a directory and an address, as a runtime's own error text can
+	// (muster #477).
+	createStatus int
 	// messagesDown, when true, makes GET /session/{id}/message fail as a transport
 	// error: a runtime that answered the status read and not the message read
 	// (muster #426).
@@ -278,6 +282,12 @@ func (f *fakeServer) handleCreate(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewDecoder(r.Body).Decode(&body)
 
 	f.mu.Lock()
+	if status := f.createStatus; status != 0 {
+		f.mu.Unlock()
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, runtimeErrorBody)
+		return
+	}
 	f.next++
 	id := fmt.Sprintf("ses_fake%03d", f.next)
 	title := "New session"

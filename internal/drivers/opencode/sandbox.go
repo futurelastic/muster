@@ -504,6 +504,10 @@ func (d *Driver) cwdMoved(srv *server) string {
 // like — as opposed to no answer at all, or a credential problem. Only the first
 // is worth explaining by a moved directory.
 func answeredWithAnError(err error) bool {
+	var rf *runtimeFailure
+	if errors.As(err, &rf) {
+		return true
+	}
 	var fe *fleet.Error
 	return errors.As(err, &fe) && fe.Kind == fleet.ErrorInvalid
 }
@@ -527,5 +531,15 @@ func (d *Driver) explainReadFailure(srv *server, err error) error {
 	}
 	out := *fe
 	out.Message = cause + " (" + fe.Message + ")"
+	// A runtime answer of 5xx is otherwise retryable (muster #477), and a moved
+	// directory is not transient: asking again fails the same way until the
+	// service relaunches the runtime. With the cause known the failure keeps the
+	// shape it had before that change (muster #474) rather than telling a client
+	// to retry what cannot succeed.
+	var rf *runtimeFailure
+	if errors.As(err, &rf) {
+		out.Kind = fleet.ErrorInvalid
+		out.Retryable = false
+	}
 	return &out
 }
