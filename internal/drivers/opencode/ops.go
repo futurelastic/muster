@@ -326,9 +326,29 @@ func (d *Driver) invalidStart(err error) error {
 // now, not a request the caller got wrong, so it is unreachable and retryable
 // (muster #477); a client that reads a 400 as final would stop asking. The
 // message is startServer's own, which names the attempts and at most the error
-// name the runtime logged, never its text. Every other failure of the start
-// (the launcher's refusal, a spawn that did not happen) is returned as it was.
+// name the runtime logged, never its text.
+//
+// A start that failed before the runtime ran (a port, a credential, the sandbox
+// prefix, the exec, the attach: a spawnError) is answered the same way, and for
+// the same reason, by its cause (muster #479). Unreachable and retryable is the
+// default, since the usual causes (no process, memory, descriptor or port to spare)
+// pass; a cause that lasts until somebody acts on the machine (the executable is
+// missing, or may not be run) is unsupported and not retryable, the shape a
+// runtime with no working driver has, and not invalid either: nothing in the
+// request was wrong. The message is a fixed sentence for the step and the cause,
+// never the cause's own text, which names the runtime's path.
+//
+// Every other failure of the start (the launcher's refusal, a readiness budget) is
+// returned as it was.
 func (d *Driver) startFailure(err error) error {
+	var se *spawnError
+	if errors.As(err, &se) {
+		msg := "create: the runtime could not be started: " + se.step + " failed: " + se.cause()
+		if se.lasting() {
+			return &fleet.Error{Kind: fleet.ErrorUnsupported, Message: msg + "; asking again will not help until the machine is put right", Machine: d.machine}
+		}
+		return &fleet.Error{Kind: fleet.ErrorUnreachable, Message: msg + "; ask again", Machine: d.machine, Retryable: true}
+	}
 	if !errors.Is(err, errExitedBeforeReady) {
 		return err
 	}

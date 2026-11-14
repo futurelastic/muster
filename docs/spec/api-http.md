@@ -48,8 +48,8 @@ served, and the federated ones have been exercised peer to peer.
 | `unauthorized` | 401 / 403 | Caller not permitted for this verb on this machine; or a principal pinned to this machine that named another (`reason: "local-only"`, §5) — no grant would help |
 | `not_found` | 404 | The machine answered, and there is no such session |
 | `conflict` | 409 | Idempotency key reused with a different body; a replayed key whose session has since ended (`reason: "replay-of-ended-session"`, §3.3); or a destructive request whose `startedAt` disagrees with the live session (§5.4) — the request is well formed, the caller's belief is stale |
-| `unsupported` | 501 | Driver lacks the capability (§4.3 of the model); or a runtime this machine's operator enabled has no working driver and no retry under way (`reason: "runtime-unavailable"`, §3.1); or, on macOS, a create that would start the terminal runtime's session server from a context other than `Background` (`reason: "unsafe_server_context"`, `retryable: false`, §3.1); or a create whose `posture` the resolved runtime cannot enforce (`reason: "posture-unenforceable"`, `retryable: false`, §3.2); or the record route on a machine whose operator refused it (`reason: "record-off"`, §3.2) — no grant would help |
-| `unreachable` | 504 | **The machine did not answer.** Nothing is known. Also a runtime that is enabled and still being retried (`reason: "runtime-unavailable"`, `retryable: true`, §3.1); and a call that ran out of time — the request's deadline, a step's own budget (the message names it, §3.3), or a caller that hung up — with `retryable: true`, **never `invalid`**: running out of time refuses nothing the caller asked for. Likewise a runtime that **failed** on this machine without refusing anything: one that exited before it answered on every start attempt, or that answered a request with a 5xx — `retryable: true`, never `invalid` (the machine could not do it now; a client that treats a 400 as final stops asking). The message names the status or the attempts, and never the runtime's own text, a directory or an address |
+| `unsupported` | 501 | Driver lacks the capability (§4.3 of the model); or a runtime this machine's operator enabled has no working driver and no retry under way (`reason: "runtime-unavailable"`, §3.1); or, on macOS, a create that would start the terminal runtime's session server from a context other than `Background` (`reason: "unsafe_server_context"`, `retryable: false`, §3.1); or a create whose `posture` the resolved runtime cannot enforce (`reason: "posture-unenforceable"`, `retryable: false`, §3.2); or the record route on a machine whose operator refused it (`reason: "record-off"`, §3.2) — no grant would help; or a create whose runtime could not be started because its executable (or the sandbox launcher, or the directory it starts in) is missing or may not be run on this machine (`retryable: false`, §3.3) — nothing in the request was wrong, and it stays so until the machine is put right |
+| `unreachable` | 504 | **The machine did not answer.** Nothing is known. Also a runtime that is enabled and still being retried (`reason: "runtime-unavailable"`, `retryable: true`, §3.1); and a call that ran out of time — the request's deadline, a step's own budget (the message names it, §3.3), or a caller that hung up — with `retryable: true`, **never `invalid`**: running out of time refuses nothing the caller asked for. Likewise a runtime that **failed** on this machine without refusing anything: one that exited before it answered on every start attempt, that answered a request with a 5xx, or that could not be started at all for want of a process, memory, descriptor, port or sandbox prefix — `retryable: true`, never `invalid` (the machine could not do it now; a client that treats a 400 as final stops asking). The message names the status, the attempts or the step that failed, and never the runtime's own text, its path, a directory or an address |
 
 **`not_found` and `unreachable` must never be conflated.** One means the fleet
 knows the session does not exist; the other means the fleet knows nothing at
@@ -1029,6 +1029,25 @@ runtime's words. The message of the 5xx names the method, the path without its
 query and the status; the runtime's body is not repeated, and the path's query
 (which names a create's working directory) is cut. A launcher that declined to
 start the runtime keeps its own answer: the same start refuses the same way.
+
+A create that fails before the runtime ever runs is answered the same way
+(muster #479): there was no port or credential to be had, the sandbox's command
+prefix did not build on that attempt, the exec did not happen, or the child
+could not be put under control. None of those is a request the caller got wrong,
+so none is `invalid`. The usual causes pass (no process, memory or descriptor to
+spare), so the answer is `unreachable`, 504 and `retryable: true`. The one cause
+that lasts is the exec reporting that the executable, the sandbox launcher or the
+directory it starts in is missing, or that the executable may not be run; that is
+`unsupported`, 501 and `retryable: false`, the shape a runtime with no working
+driver has, and it carries no `reason`. An exec that fails for a cause not listed
+here is answered as the first: asking again costs a client one bounded retry,
+where a failure wrongly called final makes it stop asking. The sandbox prefix is
+never one that lasts: a plan that cannot be written down is refused as `invalid`
+before any process exists, so the same plan failing to render later is not about
+the request. The message names the step that failed and, in fixed words, why
+(`create: the runtime could not be started: starting the process failed: the
+machine had no process or memory to spare; ask again`); it never carries the
+runtime's path or the exec's own wording.
 
 Absent the header, the driver's declared `deadlineMs` applies. There is no
 configuration in which a call has no deadline: measured against a stopped peer,

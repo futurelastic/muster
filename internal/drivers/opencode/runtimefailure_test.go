@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -196,13 +199,13 @@ func TestStartFailure_ARuntimeThatKeepsDyingIsUnreachableAndRetryable(t *testing
 
 // Everything else a start can end with keeps the answer it had: a launcher that
 // refused (the same start refuses the same way), a readiness budget that ran out
-// (already a deadline), a spawn that never happened.
+// (already a deadline), an error no step of the start claims.
 func TestStartFailure_OtherFailuresAreReturnedAsTheyWere(t *testing.T) {
 	d := newTestDriver(t, newFakeServer(t))
 	for name, err := range map[string]error{
-		"a launcher refusal":  fmt.Errorf("opencode: %w: no namespaces", errLauncherRefused),
-		"a readiness budget":  fmt.Errorf("opencode: server did not become ready: %w", &driver.StepTimeout{Step: stepReady, Budget: time.Second, Err: context.DeadlineExceeded}),
-		"a spawn that failed": fmt.Errorf("opencode: starting server: %w", os.ErrPermission),
+		"a launcher refusal": fmt.Errorf("opencode: %w: no namespaces", errLauncherRefused),
+		"a readiness budget": fmt.Errorf("opencode: server did not become ready: %w", &driver.StepTimeout{Step: stepReady, Budget: time.Second, Err: context.DeadlineExceeded}),
+		"an unclaimed error": fmt.Errorf("opencode: something no step of the start claims: %w", os.ErrPermission),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if got := d.startFailure(err); got != err {
@@ -237,5 +240,177 @@ func TestCreate_ARuntimeThatKeepsDyingIsRetryable(t *testing.T) {
 	}
 	if !strings.Contains(fe.Message, "after 3 attempts") {
 		t.Errorf("message %q does not say the start was given up on", fe.Message)
+	}
+}
+
+// ---- a start that failed before the runtime ran (muster #479) ------------------
+
+// What a failed spawn leaks if it is copied into an answer: the runtime's path
+// and os/exec's own wording.
+const spawnSecretPath = "/opt/secret-place/opencode"
+
+// asExec is how os/exec reports a fork that failed with errno.
+func asExec(errno error) error {
+	return fmt.Errorf("opencode: starting server: %w", &os.PathError{Op: "fork/exec", Path: spawnSecretPath, Err: errno})
+}
+
+// A start that fails before the runtime ever ran refuses nothing the caller
+// asked, so it is never `invalid`. The usual causes (no process, memory,
+// descriptor or port to spare, a sandbox prefix that would not build now) pass,
+// so they are unreachable and retryable; only the exec saying the executable is
+// missing or may not be run is a cause that lasts, and that is unsupported and
+// not retryable. No message carries the runtime's path or os/exec's wording.
+func TestStartFailure_ASpawnThatFailedIsNeverInvalid(t *testing.T) {
+	d := newTestDriver(t, newFakeServer(t))
+	cases := []struct {
+		name     string
+		step     string
+		err      error
+		kind     fleet.ErrorKind
+		retry    bool
+		contains string
+	}{
+		{"a port that could not be chosen", spawnStepPort, fmt.Errorf("opencode: choosing a port: %w", syscall.EMFILE), fleet.ErrorUnreachable, true, "no file descriptor to spare"},
+		{"a credential that could not be made", spawnStepCredential, errors.New("opencode: generating a credential: entropy"), fleet.ErrorUnreachable, true, "could not do it now"},
+		{"a sandbox prefix that would not build", spawnStepSandbox, errors.New("opencode: preparing the sandbox: policy refused"), fleet.ErrorUnreachable, true, "could not do it now"},
+		// The prefix was rendered once already, before any process existed, so
+		// a failure here is never one that lasts, whatever it wraps.
+		{"a sandbox prefix failing on a missing file", spawnStepSandbox, fmt.Errorf("opencode: preparing the sandbox: %w", &os.PathError{Op: "open", Path: spawnSecretPath, Err: syscall.ENOENT}), fleet.ErrorUnreachable, true, "could not do it now"},
+		{"a fork with no process to spare", spawnStepStart, asExec(syscall.EAGAIN), fleet.ErrorUnreachable, true, "no process or memory to spare"},
+		{"a fork with no memory", spawnStepStart, asExec(syscall.ENOMEM), fleet.ErrorUnreachable, true, "no process or memory to spare"},
+		{"an exec with no descriptor", spawnStepStart, asExec(syscall.EMFILE), fleet.ErrorUnreachable, true, "no file descriptor to spare"},
+		{"an exec with the system's table full", spawnStepStart, asExec(syscall.ENFILE), fleet.ErrorUnreachable, true, "no file descriptor to spare"},
+		{"an executable being replaced", spawnStepStart, asExec(syscall.ETXTBSY), fleet.ErrorUnreachable, true, "could not do it now"},
+		{"a cause nobody recognised", spawnStepStart, asExec(syscall.EIO), fleet.ErrorUnreachable, true, "could not do it now"},
+		{"a child that could not be put under control", spawnStepAttach, errors.New("procgroup: creating the job object: access"), fleet.ErrorUnreachable, true, "could not do it now"},
+		{"an executable that is missing", spawnStepStart, asExec(syscall.ENOENT), fleet.ErrorUnsupported, false, "is missing"},
+		{"an executable not found on the path", spawnStepStart, fmt.Errorf("opencode: starting server: %w", &exec.Error{Name: "opencode", Err: exec.ErrNotFound}), fleet.ErrorUnsupported, false, "is missing"},
+		{"a path through a file", spawnStepStart, asExec(syscall.ENOTDIR), fleet.ErrorUnsupported, false, "is missing"},
+		{"an executable that may not be run", spawnStepStart, asExec(syscall.EACCES), fleet.ErrorUnsupported, false, "may not be run here"},
+		{"an executable the system cannot execute", spawnStepStart, asExec(syscall.ENOEXEC), fleet.ErrorUnsupported, false, "may not be run here"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// What startServer hands back: the marked failure of one attempt.
+			got := d.startFailure(spawnFailed(tc.step, tc.err))
+			var fe *fleet.Error
+			if !errors.As(got, &fe) {
+				t.Fatalf("startFailure = %v, want a *fleet.Error", got)
+			}
+			if fe.Kind != tc.kind || fe.Retryable != tc.retry || fe.Machine != "test-machine" {
+				t.Errorf("kind %q retryable %v machine %q, want %q, %v, this machine", fe.Kind, fe.Retryable, fe.Machine, tc.kind, tc.retry)
+			}
+			if fe.Kind == fleet.ErrorInvalid {
+				t.Error("a start that never ran the runtime was answered as a mistake in the request")
+			}
+			if !strings.Contains(fe.Message, tc.step) || !strings.Contains(fe.Message, tc.contains) {
+				t.Errorf("message %q does not say the step %q and %q", fe.Message, tc.step, tc.contains)
+			}
+			for _, leak := range []string{spawnSecretPath, "fork/exec", "opencode:", "secret-place", "no such file", "permission denied"} {
+				if strings.Contains(fe.Message, leak) {
+					t.Errorf("message %q carries %q", fe.Message, leak)
+				}
+			}
+		})
+	}
+}
+
+// The marker survives the way startServer returns it, and the cause chain behind
+// it stays reachable, so a caller that asks errors.Is still gets its answer.
+func TestSpawnError_KeepsItsCauseAndItsOwnText(t *testing.T) {
+	cause := asExec(syscall.ENOENT)
+	err := fmt.Errorf("wrapped: %w", spawnFailed(spawnStepStart, cause))
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Error("the cause is not reachable through the marker")
+	}
+	if !strings.Contains(spawnFailed(spawnStepStart, cause).Error(), spawnSecretPath) {
+		t.Error("the marker's own text is no longer the cause's, which is what a log is for")
+	}
+}
+
+// The real spawn, not a hand-made error: a binary that is not there and one that
+// may not be run are the two lasting causes, and each comes back from
+// spawnServer marked so that startFailure answers it unsupported.
+func TestSpawnServer_AMissingOrNonExecutableRuntimeIsUnsupported(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the stand-in runtime is a file mode")
+	}
+	d := newTestDriver(t, newFakeServer(t))
+	dir := t.TempDir()
+	notExecutable := filepath.Join(dir, "opencode-not-executable")
+	if err := os.WriteFile(notExecutable, []byte("#!/bin/sh\nexit 0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for name, bin := range map[string]string{
+		"missing":        filepath.Join(dir, "opencode-missing"),
+		"not executable": notExecutable,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, _, err := spawnServer(bin, dir, "muster", nil, nil)
+			if err == nil {
+				t.Fatal("spawnServer started a runtime that cannot be run")
+			}
+			got := d.startFailure(err)
+			var fe *fleet.Error
+			if !errors.As(got, &fe) || fe.Kind != fleet.ErrorUnsupported || fe.Retryable {
+				t.Fatalf("startFailure = %v, want unsupported and not retryable", got)
+			}
+			for _, leak := range []string{dir, "opencode-missing", "opencode-not-executable", "fork/exec"} {
+				if strings.Contains(fe.Message, leak) {
+					t.Errorf("message %q carries %q", fe.Message, leak)
+				}
+			}
+		})
+	}
+}
+
+// A sandbox prefix that fails to build on an attempt is retryable, and it fails
+// before any process exists.
+func TestSpawnServer_ASandboxPrefixThatFailsIsRetryable(t *testing.T) {
+	d := newTestDriver(t, newFakeServer(t))
+	launch := func(int) ([]string, error) { return nil, errors.New("the launcher is gone") }
+	_, _, err := spawnServer(stubShell(t), t.TempDir(), "muster", nil, launch)
+	if err == nil {
+		t.Fatal("spawnServer started under a prefix that failed to build")
+	}
+	var fe *fleet.Error
+	got := d.startFailure(err)
+	if !errors.As(got, &fe) || fe.Kind != fleet.ErrorUnreachable || !fe.Retryable {
+		t.Fatalf("startFailure = %v, want unreachable and retryable", got)
+	}
+	if strings.Contains(fe.Message, "the launcher is gone") {
+		t.Errorf("message %q carries the cause's own text", fe.Message)
+	}
+}
+
+// End to end: a create whose runtime cannot be exec'd reaches the caller as
+// unsupported and not retryable (it was `invalid`, a mistake in the request).
+func TestCreate_ARuntimeThatCannotBeRunIsUnsupported(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the stand-in runtime is a shell script")
+	}
+	bin := filepath.Join(t.TempDir(), "opencode")
+	script := "#!/bin/sh\n[ \"$1\" = --version ] && { echo 1.0.0; exit 0; }\nexit 3\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	d, _ := newIsolatedDriver(t, WithBinary(bin))
+	// It answered the startup probe; now it is gone, as a binary replaced or
+	// removed under a running service is.
+	if err := os.Remove(bin); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	_, err := d.Create(ctx, testReq, "gone", fleet.SessionSpec{Cwd: fleet.AbsolutePath(t.TempDir())})
+	var fe *fleet.Error
+	if !errors.As(err, &fe) {
+		t.Fatalf("Create = %v, want a *fleet.Error", err)
+	}
+	if fe.Kind != fleet.ErrorUnsupported || fe.Retryable {
+		t.Errorf("kind %q retryable %v, want unsupported and not retryable", fe.Kind, fe.Retryable)
+	}
+	if strings.Contains(fe.Message, bin) || strings.Contains(fe.Message, "fork/exec") {
+		t.Errorf("message %q carries the runtime's path or os/exec's wording", fe.Message)
 	}
 }
