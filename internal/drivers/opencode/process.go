@@ -427,14 +427,18 @@ func startServer(ctx context.Context, bin, workdir, username string, env []strin
 // exec, and the attach. It returns the prefix too, because the caller needs it
 // to tell a launcher that refused from a runtime that died. Split out of
 // startServer so the whole of it can be timed as one phase (muster #476).
+//
+// Every failure it returns is a spawnError naming its step: the runtime never
+// ran, so none of them is a request the caller got wrong, and the driver's
+// startFailure answers each by its cause (muster #479).
 func spawnServer(bin, workdir, username string, env []string, launch launchFunc, extraArgs ...string) (*server, []string, error) {
 	port, err := freePort()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, spawnFailed(spawnStepPort, err)
 	}
 	cred, err := generateCredential()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, spawnFailed(spawnStepCredential, err)
 	}
 	// The prefix is asked for per attempt: on Linux the one port a confined
 	// session may bind is this attempt's.
@@ -442,7 +446,7 @@ func spawnServer(bin, workdir, username string, env []string, launch launchFunc,
 	if launch != nil {
 		wrap, err = launch(port)
 		if err != nil {
-			return nil, nil, fmt.Errorf("opencode: preparing the sandbox: %w", err)
+			return nil, nil, spawnFailed(spawnStepSandbox, fmt.Errorf("opencode: preparing the sandbox: %w", err))
 		}
 	}
 	cmd := buildServeCmd(bin, workdir, port, username, cred, env, wrap, extraArgs...)
@@ -453,14 +457,14 @@ func spawnServer(bin, workdir, username string, env []string, launch launchFunc,
 	// process would read as still running.
 	cmd.WaitDelay = 2 * time.Second
 	if err := cmd.Start(); err != nil {
-		return nil, nil, fmt.Errorf("opencode: starting server: %w", err)
+		return nil, nil, spawnFailed(spawnStepStart, fmt.Errorf("opencode: starting server: %w", err))
 	}
 	// Attach before anything else can fail or wait: where the platform
 	// creates the child suspended it only runs once it is under control, and
 	// a failed Attach has already ended and reaped it.
 	group, err := procgroup.Attach(cmd)
 	if err != nil {
-		return nil, nil, fmt.Errorf("opencode: starting server: %w", err)
+		return nil, nil, spawnFailed(spawnStepAttach, fmt.Errorf("opencode: starting server: %w", err))
 	}
 	p := &process{cmd: cmd, group: group, done: make(chan struct{})}
 	go func() {
