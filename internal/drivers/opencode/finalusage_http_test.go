@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	fleet "github.com/futurelastic/muster"
@@ -25,7 +26,10 @@ func TestFinalUsage_ACloseOverHTTPLeavesTheFiguresInTheClosedListAcrossARestart(
 	d := newTestDriver(t, f)
 	dir := t.TempDir()
 
-	serve := func() (*httptest.Server, func(method, path string, body any) (int, []byte)) {
+	// serve starts a service over the state directory, as a process start does. stop
+	// ends it and releases its files — a restart is a stop and a serve, and a
+	// platform that cannot remove a directory holding an open file needs the stop.
+	serve := func() (call func(method, path string, body any) (int, []byte), stop func()) {
 		st, err := state.Open(dir)
 		if err != nil {
 			t.Fatal(err)
@@ -38,8 +42,15 @@ func TestFinalUsage_ACloseOverHTTPLeavesTheFiguresInTheClosedListAcrossARestart(
 			t.Fatal(err)
 		}
 		srv := httptest.NewServer(service.NewMux(svc, service.Config{Token: token, AllowLocalMutations: true}))
-		t.Cleanup(srv.Close)
-		return srv, func(method, path string, body any) (int, []byte) {
+		var once sync.Once
+		stop = func() {
+			once.Do(func() {
+				srv.Close()
+				_ = svc.Close()
+			})
+		}
+		t.Cleanup(stop)
+		return func(method, path string, body any) (int, []byte) {
 			t.Helper()
 			var rdr io.Reader
 			if body != nil {
@@ -59,10 +70,10 @@ func TestFinalUsage_ACloseOverHTTPLeavesTheFiguresInTheClosedListAcrossARestart(
 			defer resp.Body.Close()
 			raw, _ := io.ReadAll(resp.Body)
 			return resp.StatusCode, raw
-		}
+		}, stop
 	}
 
-	_, call := serve()
+	call, stop := serve()
 	code, raw := call(http.MethodPost, "/v1/machines/test-machine/sessions", map[string]any{"cwd": "/work/x"})
 	if code != http.StatusCreated {
 		t.Fatalf("create: %d %s", code, raw)
@@ -115,6 +126,8 @@ func TestFinalUsage_ACloseOverHTTPLeavesTheFiguresInTheClosedListAcrossARestart(
 			t.Errorf("%s: content on the closed list: %s", when, raw)
 		}
 	}
-	_, call = serve() // the first service is left to the cleanup; this is the one after the restart
+	check(call, "before a restart")
+	stop()
+	call, _ = serve()
 	check(call, "after a restart")
 }
