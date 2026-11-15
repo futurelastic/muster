@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -24,11 +25,18 @@ func TestFinalUsage_ACloseOverHTTPLeavesTheFiguresInTheClosedListAcrossARestart(
 	const token = "t485"
 	f := newFakeServer(t)
 	d := newTestDriver(t, f)
-	dir := t.TempDir()
+	// Not t.TempDir: a service keeps its input-audit log open until the process
+	// ends and has no call that releases it, and a platform that cannot remove a
+	// directory holding an open file would fail the test on cleanup, not on what it
+	// checks. The directory is removed best effort.
+	dir, err := os.MkdirTemp("", "muster485-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 
 	// serve starts a service over the state directory, as a process start does. stop
-	// ends it and releases its files — a restart is a stop and a serve, and a
-	// platform that cannot remove a directory holding an open file needs the stop.
+	// ends it, the way a graceful shutdown does: a restart is a stop and a serve.
 	serve := func() (call func(method, path string, body any) (int, []byte), stop func()) {
 		st, err := state.Open(dir)
 		if err != nil {
