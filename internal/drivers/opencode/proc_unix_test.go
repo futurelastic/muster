@@ -34,8 +34,8 @@ func detachedStray() *exec.Cmd {
 }
 
 // platformSessionEnv are the variables a session also receives on this
-// platform, beyond the ones every platform scopes.
-var platformSessionEnv []string
+// platform, beyond the ones every platform scopes. TMPPREFIX is zsh's (#484).
+var platformSessionEnv = []string{"TMPPREFIX"}
 
 // absToolsDir is an absolute directory outside any home, for a runtime path.
 func absToolsDir() string { return "/opt/tools/bin" }

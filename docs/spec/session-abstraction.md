@@ -209,6 +209,12 @@ directory (§4.3, `isolatesEnvironment`); writes to the shared system temporary 
 denied, because concurrent sessions would otherwise share a writable directory — a cross-session
 side channel.
 
+**On macOS the toolchain behind `git` is reachable** (muster #484). `git` there is a shim that loads
+its toolchain from the developer directory the host selected, and a versioned Xcode app is outside
+the system directories the profile reads. The driver therefore either points the session at the
+Command Line Tools (`DEVELOPER_DIR`, §4.3) or adds the selected directory to the reads; a create
+cannot name that variable.
+
 **The profile replaces a harness's own sandbox; it never nests inside it.** A macOS profile cannot be
 applied from inside another (`Operation not permitted`), so a harness that ships its own sandbox
 fails closed under this one and refuses every shell command. A driver whose runtime has one must
@@ -2411,9 +2417,21 @@ service's. A create that carries `isolateEnvironment: true` against a `false` dr
   `/opt/homebrew/bin` on darwin), after any directories the operator allow-listed (never one under the
   service user's home);
 - `LANG`, copied from the service only when it is set;
-- `HOME`, `TMPDIR`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` and `XDG_CACHE_HOME`, all
-  inside a directory owned by that one session and removed with it, so opencode reads no shared user
-  configuration and keeps no database shared across sessions;
+- `HOME`, `TMPDIR`, `TMPPREFIX`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` and
+  `XDG_CACHE_HOME`, all inside a directory owned by that one session and removed with it, so opencode
+  reads no shared user configuration and keeps no database shared across sessions. `TMPPREFIX` (every
+  platform but Windows) is where zsh writes a here-document's temporary file; its default is a shared
+  system directory the sandbox does not let a session write, so without it `cmd <<EOF` fails there
+  (muster #484);
+- `DEVELOPER_DIR`, on macOS only, and only for a session started under a sandbox profile whose host
+  selected a developer directory the profile does not read: the Command Line Tools directory, when
+  it is installed with a `git` in it. The `git` on macOS is a shim that loads its toolchain from the
+  selected developer directory, so under the profile it fails (`xcrun: error: unable to load
+  libxcrun`) whenever that is a versioned Xcode app. Where the tools are not installed, the selected
+  directory is added to the session's read-only grants instead, and the sandbox state reports it
+  like any other grant. A session that needs the full Xcode toolchain is not served by either: it is
+  given the smaller one. On macOS the name is owned whether or not the driver sets it for a given
+  session, so what a session finds does not depend on which Xcode the host happens to have selected;
 - `OPENCODE_DISABLE_CLAUDE_CODE=1`, because by default opencode loads the user's Claude Code
   instructions and skills;
 - this machine's `sessionEnv` entries that apply, then the create's `env` (a variable name may be

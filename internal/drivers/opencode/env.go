@@ -28,11 +28,15 @@ import (
 //     service user's home: a shim there is not readable once a sandbox (#281)
 //     confines the home, and the tool silently falls back to a different one.
 //   - LANG, copied from the service's own environment only when it is set.
-//   - HOME, TMPDIR, XDG_CONFIG_HOME, XDG_DATA_HOME, XDG_STATE_HOME and
-//     XDG_CACHE_HOME, all inside a directory owned by this one session. opencode
+//   - HOME, TMPDIR, TMPPREFIX (unix only: where zsh writes a here-document),
+//     XDG_CONFIG_HOME, XDG_DATA_HOME, XDG_STATE_HOME and XDG_CACHE_HOME, all
+//     inside a directory owned by this one session. opencode
 //     otherwise reads a shared user config (permissions, providers) and keeps a
 //     session database shared across sessions; scoped, closing a session
 //     destroys what it knew.
+//   - DEVELOPER_DIR, on macOS and only for a sandboxed session whose host selected a
+//     developer directory the profile cannot read (muster #484): the Command Line
+//     Tools, so that the `git` shim finds a toolchain it may open.
 //   - OPENCODE_DISABLE_CLAUDE_CODE=1: by default opencode loads the user's
 //     Claude Code instructions and skills, which a session that asked for a
 //     clean environment did not ask for.
