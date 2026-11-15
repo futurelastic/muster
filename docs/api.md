@@ -533,6 +533,14 @@ was known — plus:
   captured, and `screenPath` names a file on THAT machine holding the pane's
   last lines — never the text itself, which is never served over this API.
   `exit` is absent for every other `closedBy`.
+- `usage` (#485) — what the session had spent when it ended, as its runtime
+  reported it: `input`, `output`, `cacheRead`, `cacheWrite`, `reasoning` and `cost`
+  when the runtime reports them, `credential`, the `provider` and `model` of the
+  newest request, `source` and `asOf`. The same sum over every request that
+  `usage` on a live session carries, read once more at the end and kept, because
+  the runtime's own record goes with the session's directory. Its start and end
+  are the record's `startedAt` and `closedAt`. Absent means no figure was read,
+  never zero — and it is also on `session.closed` as `finalUsage`.
 
 A rename is not an end. A peer on a build that predates the route shows up in
 `sources` as `degraded`, so a fleet read is `complete: false` rather than

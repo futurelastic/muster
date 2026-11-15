@@ -491,7 +491,7 @@ func TestQuota_AClosedSessionDoesNotHoldAnEpisodeOpen(t *testing.T) {
 	if d.liveQuota() == nil {
 		t.Fatal("no quota state to close")
 	}
-	d.forgetUsage(a.ID) // what a session's end calls
+	d.forgetUsage(a.ID, "") // what a session's end calls
 	if q := d.liveQuota(); q != nil {
 		t.Fatalf("quota = %+v after the only refused session ended", q)
 	}

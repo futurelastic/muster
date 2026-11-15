@@ -106,6 +106,14 @@ const (
 type SessionStatePayload struct {
 	Ref   SessionRef   `json:"ref"`
 	State SessionState `json:"state"`
+
+	// FinalUsage is what the session had spent when it ended (muster #485):
+	// the same figures ClosedSession.Usage keeps, delivered on the feed so a
+	// consumer summing spend off the stream does not wait for a listing. Set
+	// only on session.closed, and only when the driver read a figure; absent
+	// is "not known", never zero. A separate key from State.Usage on purpose:
+	// that block is a live sample, and this one is the last word.
+	FinalUsage *ClosedUsage `json:"finalUsage,omitempty"`
 }
 
 // SessionLabelsPayload is session.labels' payload (muster #153): the

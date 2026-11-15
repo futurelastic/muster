@@ -804,6 +804,12 @@ func (s *Service) listSessions(ctx context.Context, req fleet.Request, scope Sco
 		// Closed-session records (#179) take the same rule: only a complete
 		// answer may end anything by absence, but every answer is a
 		// sighting, and a captured exit ends something outright.
+		// muster #485: the same drain for a session whose driver kept its final
+		// usage as it removed it. Before observe, so the figure is waiting when
+		// the end is recorded — by absence or by exit.
+		if fr, ok := d.(driver.FinalUsageReporter); ok {
+			s.history.stashFinal(rt, fr.DrainFinalUsage())
+		}
 		s.history.observe(rt, its, complete, listedAt, exits)
 		for i := range its {
 			its[i].Labels = s.labels.get(rt, its[i].ID, its[i].StartedAt)

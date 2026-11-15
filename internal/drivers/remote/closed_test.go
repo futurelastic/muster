@@ -114,3 +114,58 @@ func TestFederatedClosedSessionsFromAnOlderPeerAreNotEmpty(t *testing.T) {
 	}
 	t.Fatalf("the peer contributed no SourceStatus; sources=%+v", got.Sources())
 }
+
+// usageClosableDriver is closableDriver that also keeps a figure for a session
+// it removes, as a driver capable of it does (muster #485).
+type usageClosableDriver struct {
+	closableDriver
+	kept []driver.CapturedUsage
+}
+
+func (d *usageClosableDriver) Close(ctx context.Context, req fleet.Request, ref fleet.SessionRef) (fleet.Ack, error) {
+	d.mu.Lock()
+	d.kept = append(d.kept, driver.CapturedUsage{ID: ref.ID, Usage: fleet.ClosedUsage{
+		Input: 311, Output: 42, Provider: "p", Model: "m", Source: fleet.ConfidenceObserved,
+		AsOf: time.Date(2026, 1, 1, 0, 0, 9, 0, time.UTC),
+	}})
+	d.mu.Unlock()
+	return d.closableDriver.Close(ctx, req, ref)
+}
+
+func (d *usageClosableDriver) DrainFinalUsage() []driver.CapturedUsage {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := d.kept
+	d.kept = nil
+	return out
+}
+
+// The final figure a peer kept travels in its closed record: a fleet-scoped read
+// returns it, with nothing in the remote driver that had to learn the field.
+func TestFederatedClosedSessionsCarryThePeersFinalUsage(t *testing.T) {
+	const token = "federation-token"
+	started := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	d := &usageClosableDriver{closableDriver: closableDriver{Driver: stub.Driver{DeadlineMs: 2000}, sessions: map[string]fleet.Session{
+		"work": {SessionRef: fleet.SessionRef{Machine: "peerbox", ID: "work"}, Cwd: "/w", StartedAt: &started,
+			State: fleet.ObservedState(fleet.StatusIdle, "fixture", nil)},
+	}}}
+	base := peerService(t, "peerbox", "fake", d, token, true)
+	rd := New("peerbox", base, WithDeadline(2*time.Second))
+	svcA := homeService(t, "homebox", "peerbox", rd)
+
+	if _, err := rd.Close(context.Background(), fleetCaller(token), fleet.SessionRef{Machine: "peerbox", ID: "work"}); err != nil {
+		t.Fatalf("closing on the peer: %v", err)
+	}
+	got, err := svcA.ListClosedSessions(context.Background(), fleetCaller(token), service.ScopeFleet, time.Time{}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Items()) != 1 {
+		t.Fatalf("want the peer's one closed session, got %+v", got.Items())
+	}
+	u := got.Items()[0].Usage
+	if u == nil || u.Input != 311 || u.Output != 42 || u.Provider != "p" || u.Model != "m" ||
+		!u.AsOf.Equal(time.Date(2026, 1, 1, 0, 0, 9, 0, time.UTC)) {
+		t.Fatalf("usage = %+v, want the figure the peer kept", u)
+	}
+}

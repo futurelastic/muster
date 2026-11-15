@@ -66,6 +66,78 @@ type ClosedSession struct {
 	// session's own process exiting, in the same pass that removed the
 	// session (muster #235). Absent for every other ClosureKind.
 	Exit *SessionExit `json:"exit,omitempty"`
+
+	// Usage is what the session had spent when it ended, as its runtime
+	// reported it (muster #485): the final cumulative figures, kept because
+	// the runtime's own record of them goes with the session's directory when
+	// it closes, and a caller that wants spend per session, per day or per
+	// task can otherwise only sample sessions while they live. Absent when no
+	// figure was ever read — a driver that reports none, a session that ended
+	// before any request was recorded — which is "not known", never zero.
+	// The session's start and end are the record's own StartedAt and ClosedAt.
+	Usage *ClosedUsage `json:"usage,omitempty"`
+}
+
+// ClosedUsage is a session's final cumulative usage, as its runtime reported
+// it, kept after the session ended (muster #485). It is the same account
+// Usage gives while the session lives — the SUM over every request, the
+// runtime's own cost in the unit it used, nothing priced here, absent meaning
+// "not known" rather than zero — read once more at the end, plus the two facts
+// a live block leaves to a separate field: which provider and model the last
+// request ran on.
+//
+// # Figures only
+//
+// Tokens, a cost, a provider name, a model name and a timestamp. Nothing the
+// session said or did: the record of that is content, readable only under its
+// own grant, and is exactly what is gone by the time this is read.
+//
+// # Provider and model are the newest request's
+//
+// A session that changed model part-way has earlier spend on others. The
+// cumulative figures are not split by model; Provider and Model say where the
+// newest request ran, so a consumer attributing the whole figure to one model
+// knows it is attributing to the last one.
+type ClosedUsage struct {
+	Input      int64    `json:"input"`
+	Output     int64    `json:"output"`
+	CacheRead  int64    `json:"cacheRead"`
+	CacheWrite int64    `json:"cacheWrite"`
+	Reasoning  *int64   `json:"reasoning,omitempty"`
+	Cost       *float64 `json:"cost,omitempty"`
+
+	// Credential is which account the figures were spent on (Usage.Credential,
+	// muster #458), with the same meaning: the credential this service gave the
+	// session, named only while the newest request ran on that provider.
+	Credential CredentialKind `json:"credential,omitempty"`
+
+	// Provider and Model are the provider and model the newest request that
+	// reported usage ran on, as the runtime resolved them. Absent when the
+	// runtime named none.
+	Provider string `json:"provider,omitempty"`
+	Model    string `json:"model,omitempty"`
+
+	// Source says how the driver learned the figures, as Usage.Source does.
+	Source Confidence `json:"source"`
+
+	// AsOf is the moment of the runtime's own newest entry counted in these
+	// figures — not the time the session closed or the time this was read. A
+	// session closed long after its last request has an AsOf long before its
+	// ClosedAt.
+	AsOf Timestamp `json:"asOf"`
+}
+
+// Figures returns the arithmetic form of u's cumulative figures.
+func (u ClosedUsage) Figures() UsageFigures {
+	return UsageFigures{u.Input, u.Output, u.CacheRead, u.CacheWrite, u.Reasoning, u.Cost}
+}
+
+// NewClosedUsage builds the final block from summed figures.
+func NewClosedUsage(f UsageFigures, source Confidence, asOf Timestamp) *ClosedUsage {
+	return &ClosedUsage{
+		Input: f.Input, Output: f.Output, CacheRead: f.CacheRead, CacheWrite: f.CacheWrite,
+		Reasoning: f.Reasoning, Cost: f.Cost, Source: source, AsOf: asOf,
+	}
 }
 
 // SessionExit is what a driver captured about a session's own process

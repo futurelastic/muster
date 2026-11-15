@@ -2102,6 +2102,13 @@ func handleClose(svc *Service) http.HandlerFunc {
 		}
 		if via != resolvedPeer {
 			svc.labels.remove(resolvedRuntime, id)
+			// muster #485: the figure the driver kept as it removed the session, taken
+			// before the record is written. Everything drained is stashed, not only
+			// this id's: another session the runtime removed a moment ago has its
+			// figure waiting too, and its tombstone is written by a later listing.
+			if fr, ok := d.(driver.FinalUsageReporter); ok {
+				svc.history.stashFinal(resolvedRuntime, fr.DrainFinalUsage())
+			}
 			svc.history.closedByRequest(resolvedRuntime, id)
 		}
 		writeJSON(w, http.StatusAccepted, ack)

@@ -890,8 +890,8 @@ persisted event window: the record carries only the metadata the live record
 already carried as last seen (`machine`, `id`, `name`, `runtime`, `cwd`,
 `startedAt`, `agent` when a sighting reported one, and `conversation` when it
 was known), never content, plus
-`lastSeenAt`, `closedAt`, `closedBy`, `evidence`, and — only for
-`closedBy: "exit"` — `exit` (#235, below).
+`lastSeenAt`, `closedAt`, `closedBy`, `evidence`, `usage` when the runtime reported
+any (#485, below), and — only for `closedBy: "exit"` — `exit` (#235, below).
 
 `closedBy` separates observation from inference (session-abstraction.md §5.2):
 
@@ -913,6 +913,25 @@ was known), never content, plus
   runtime printed, and putting it on the API is a data-exposure surface this
   route deliberately does not open). `exit` is absent for every other
   `closedBy`.
+
+`usage` (muster #485) is what the session had spent when it ended, as its runtime
+reported it — the figures `state.usage` carries while it lives, read once more at the
+end and kept, because the runtime's own record of them goes with the session's
+directory when it closes:
+`{"input":311,"output":42,"cacheRead":3013,"cacheWrite":60,"reasoning":12,"cost":0.76,
+"credential":"subscription","provider":"…","model":"…","source":"observed","asOf":"…"}`.
+The figures are the **sum over every request**, never the last one's; `reasoning` and
+`cost` are present only when the runtime reports them, and nothing is priced here.
+`provider` and `model` are those of the newest request that reported usage — a session
+that changed model part-way has earlier spend on others, and the figures are not split
+by model. `asOf` is the moment of the runtime's own newest entry counted, not the time
+the session ended. The session's start and end are the record's own `startedAt` and
+`closedAt`, with the exactness `closedBy` gives. Figures only, never content.
+**Absent means no figure was read, never zero**: a driver that reports none, a session
+that ended before any request was recorded, or one whose process was already gone and
+whose usage had not been read since the service started. It is kept with the record
+for the same retention period and survives a restart of the service. A peer built
+before the field sends no key, and a relay passes the record through untouched.
 
 A session missing under its old id while exactly one newly-seen session of the
 same runtime carries its `startedAt` is a **rename**, not an end; with more than
@@ -2600,7 +2619,9 @@ consumer summing cost keeps the two apart. It is named only while the session's 
 request ran on that provider; absent means the service chose none or the request was
 elsewhere, never unknown. A peer built before the field
 sends no key, and a relay passes the block through untouched. A change in any
-figure fires `session.state` (§4); it never changes `status`.
+figure fires `session.state` (§4); it never changes `status`. When the session ends,
+its last figures are kept in its closed record (`GET /v1/sessions/closed`, §3.2) and
+sent once more as `finalUsage` on `session.closed`.
 
 `state.scratch` — when present — is how much the session's scratch directory
 holds (muster #419, #431): `{"bytes":49200000000,"areas":{"tmp":11300000000,"home":21400000000,"xdg":16500000000},"asOf":"…","partial":true}`.
@@ -3082,7 +3103,7 @@ resumption needs no client code. The server honours that header when no
 |---|---|
 | `session.created` | full session |
 | `session.state` | ref + `SessionState` — fired on any **material** change, not only a change of `status` |
-| `session.closed` | ref + final state |
+| `session.closed` | ref + final state, plus `finalUsage` (muster #485) when the driver read a figure: the same object as a closed record's `usage`, so a consumer summing spend off the feed does not wait for a listing. It is a separate key from `state.usage` on purpose — that block is a live sample, this is the last word — and is absent, never zero, when nothing was read |
 | `session.renamed` | `{ "machine", "from", "to", "startedAt"?, "corroboration" }` — a session's **id** changed (session-abstraction.md §3's `rename`); a subscriber filtering by id must re-key on `to` or it silently stops matching a session that is still alive |
 | `session.labels` | `{ "ref", "startedAt"?, "labels" }` — a session's labels changed, or a create carried some; `labels` is the **whole** map after the change, never the patch (muster #153). A driver's own `session.created` can be observed before a create's labels are stored and carry `{}`; this event is the guarantee |
 | `session.record` | `{ "ref", "startedAt"?, "cursor" }` — a session's **record** grew (muster #444). A reference and the cursor `GET …/record` would answer as `next` at that moment; **never content**, and these are the only keys |

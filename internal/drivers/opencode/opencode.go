@@ -340,6 +340,12 @@ type Driver struct {
 	usageMu    sync.Mutex
 	usageMemos map[string]*usageMemo
 
+	// finals are the figures kept of sessions this driver removed, waiting for
+	// the service to drain them into its closed-session record (muster #485);
+	// finalMu guards the list. See usage.go.
+	finalMu sync.Mutex
+	finals  []driver.CapturedUsage
+
 	// sweepStop ends the goroutine that repeats the sweep of directories no record
 	// names, sweepDone is closed when it has (orphans.go; muster #419). dirSweepEvery
 	// and dirScan are test seams: the interval, and the listing of running servers.
@@ -971,7 +977,13 @@ func (d *Driver) forgetSeen(id string) {
 	delete(d.seen, id)
 	d.mu.Unlock()
 	d.forgetIdle(gone.srv, id) // muster #419
-	d.forgetUsage(id)
+	var cred fleet.CredentialKind
+	if gone.srv != nil {
+		// The seen entry is already deleted, so credentialOf(id) would say "": the
+		// figure kept below names the account its session ran on (muster #485).
+		cred = gone.srv.credential
+	}
+	d.forgetUsage(id, cred)
 	d.dropLifeLock(id) // muster #421
 	if d.store != nil {
 		// Only ever called once the runtime confirmed the session is gone, which is

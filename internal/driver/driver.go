@@ -386,6 +386,37 @@ type ExitReporter interface {
 	DrainExits() []CapturedExit
 }
 
+// CapturedUsage is what a FinalUsageReporter driver kept of one session's usage
+// at the moment it removed the session (muster #485). ID is the driver's own
+// session id; the caller already knows which runtime it asked.
+type CapturedUsage struct {
+	ID    string
+	Usage fleet.ClosedUsage
+}
+
+// FinalUsageReporter is an OPTIONAL capability: a LOCAL driver that reads what
+// a session spent from a record that goes away with the session, and so must
+// say it before it goes (muster #485). Peer drivers never implement it — a peer
+// keeps its own closed-session records, which arrive carrying the figures
+// through ClosedLister.
+//
+// It follows ExitReporter's shape for the same reason: the driver alone sees
+// the moment of removal, and the service writes the closed-session record. The
+// service drains it right after a close it relayed was accepted, and right
+// after List, so a session removed any other way (the runtime deleted it, its
+// process went away) is tombstoned with its figures in the same pass that
+// notices it is gone.
+//
+// A driver reports a session only when it has a figure: no figure is not a
+// zero figure, so a session that never reported usage is simply not in the
+// drain.
+type FinalUsageReporter interface {
+	// DrainFinalUsage returns every figure kept since the last drain and
+	// forgets them — each call answers "since I last asked". A driver with
+	// nothing new returns nil.
+	DrainFinalUsage() []CapturedUsage
+}
+
 // SubscribeFilter narrows which events a subscription receives (§3, §5.5).
 //
 // # Granularity is a cost parameter, not a convenience

@@ -400,8 +400,9 @@ func (d *Driver) closeUnlaunched(req fleet.Request, ref fleet.SessionRef, prior 
 		Machine: d.machine,
 		Kind:    fleet.EventSessionClosed,
 		Payload: fleet.SessionStatePayload{
-			Ref:   fleet.SessionRef{Machine: d.machine, ID: ref.ID, Name: prior.name},
-			State: fleet.InferredState(fleet.StatusDead, "the session was closed", nil),
+			Ref:        fleet.SessionRef{Machine: d.machine, ID: ref.ID, Name: prior.name},
+			State:      fleet.InferredState(fleet.StatusDead, "the session was closed", nil),
+			FinalUsage: d.finalFor(ref.ID),
 		},
 	})
 	return fleet.Ack{Accepted: true}, nil

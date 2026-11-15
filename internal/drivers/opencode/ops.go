@@ -1004,6 +1004,10 @@ func (d *Driver) Close(ctx context.Context, req fleet.Request, ref fleet.Session
 		d.discardServer(srv)
 		return fleet.Ack{Accepted: true, Note: unconfirmedNote(unconfirmed)}, nil
 	}
+	// muster #485: the runtime's record of what the session spent goes with it, so
+	// the figure is read one last time while the record is still there. It is kept
+	// when forgetSeen drops the memory below.
+	d.readFinalUsage(ctx, srv, ref.ID)
 	if err := d.do(ctx, srv, "DELETE", "/session/"+url.PathEscape(ref.ID), nil, nil); err != nil {
 		switch {
 		case isNotFound(err):

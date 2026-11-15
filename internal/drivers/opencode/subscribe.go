@@ -547,7 +547,7 @@ func (s *subscription) handle(srv *server, ev busEvent) {
 			Machine: s.d.machine,
 			Kind:    fleet.EventSessionClosed,
 			Payload: fleet.SessionStatePayload{Ref: ref, State: fleet.InferredState(fleet.StatusDead,
-				"the runtime reported the session deleted", nil)},
+				"the runtime reported the session deleted", nil), FinalUsage: s.d.finalFor(id)},
 		})
 	}
 }
@@ -839,7 +839,7 @@ func (d *Driver) announceClosed(srv *server, known knownSession, ref fleet.Sessi
 		Machine: d.machine,
 		Kind:    fleet.EventSessionClosed,
 		Payload: fleet.SessionStatePayload{Ref: ref, State: fleet.InferredState(fleet.StatusDead,
-			"the session was closed", nil)},
+			"the session was closed", nil), FinalUsage: d.finalFor(ref.ID)},
 	})
 }
 
@@ -858,11 +858,17 @@ func (d *Driver) announceProcessGone(srv *server) {
 			continue
 		}
 		ref := fleet.SessionRef{Machine: d.machine, ID: id, Name: info.name}
+		// The process has exited, so nothing more is spent: what is remembered is
+		// the figure, though the session stays listed until someone closes it.
+		var cred fleet.CredentialKind
+		if info.srv != nil {
+			cred = info.srv.credential
+		}
 		d.publish(info, ref, fleet.Event{
 			Machine: d.machine,
 			Kind:    fleet.EventSessionClosed,
 			Payload: fleet.SessionStatePayload{Ref: ref, State: fleet.InferredState(fleet.StatusDead,
-				"the session's runtime process has exited", nil)},
+				"the session's runtime process has exited", nil), FinalUsage: d.finalOfLive(id, cred)},
 		})
 	}
 }
