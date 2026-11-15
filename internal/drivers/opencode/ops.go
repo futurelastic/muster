@@ -438,6 +438,12 @@ func (d *Driver) startServerIn(ctx context.Context, spec fleet.SessionSpec, exis
 			cleanup()
 			return nil, err
 		}
+		// muster #484: where the toolchain behind `git` is, when the one the host
+		// selected is not readable. Set here, with the other variables the plan
+		// decides, and owned so a create cannot name it.
+		if plan.developerDir != "" {
+			extra[envKey(developerDirEnv)] = plan.developerDir
+		}
 		if plan.cache != nil {
 			extra[packageCacheEnv] = string(plan.cache.Path)
 			// muster #432: each manager reads its own directory of the copy.

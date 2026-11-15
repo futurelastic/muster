@@ -75,6 +75,10 @@ type sandboxPlan struct {
 	// made, and so the path the profile grants for it (muster #474). A session
 	// keeps it so a later read can tell that the directory is no longer there.
 	cwd string
+	// developerDir is the value of DEVELOPER_DIR the session is given, empty when
+	// it is given none (muster #484): the Command Line Tools directory, when the
+	// directory the host selected is one the profile does not read.
+	developerDir string
 }
 
 // shared is the plan as the shared package renders it.
@@ -241,6 +245,19 @@ func (d *Driver) planSandboxFor(ctx context.Context, spec fleet.SessionSpec, ses
 			// dst is inside the session directory already granted writable.
 		}
 		plan.cache = st
+	}
+
+	if !linux {
+		// muster #484: the toolchain shim behind `git` must be able to read the
+		// developer directory it resolves. Either the session is pointed at a
+		// directory the profile already reads, or the selected one is added to the
+		// reads — and so to the report, which is what is enforced.
+		selected, clt := developerToolchain()
+		env, grant := developerAccess(selected, clt, append(append([]string(nil), read...), write...))
+		plan.developerDir = env
+		if grant != "" {
+			read = append(read, grant)
+		}
 	}
 
 	if linux {
