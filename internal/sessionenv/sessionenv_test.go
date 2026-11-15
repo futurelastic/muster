@@ -530,3 +530,131 @@ func TestProvisionGivesEachRuntimeItsOwnValueForASharedName(t *testing.T) {
 		t.Errorf("beta session with its own file missing = %v, want ErrorUnsupported", err)
 	}
 }
+
+// muster #487: an optional entry may be absent, and the create goes on without
+// it. A file that does not exist is the legitimate reason and stays quiet; a file
+// that is there and unusable is an operator mistake and is reported.
+func TestProvisionReportsAnOptionalFileThatIsThereButUnusable(t *testing.T) {
+	unreadable := t.TempDir() // a directory: present, and not a file the service can read as a value
+	cases := []struct {
+		name       string
+		file       string
+		wantReason string
+	}{
+		{"an interior newline", writeValue(t, "a\nb"), "newline"},
+		{"a pretty-printed JSON value", writeValue(t, "{\n  \"agent\": {}\n}\n"), "newline"},
+		{"a NUL", writeValue(t, "a\x00b"), "NUL"},
+		{"an empty file", writeValue(t, ""), "empty"},
+		{"nothing but a newline", writeValue(t, "\n"), "empty"},
+		{"a path that is a directory", unreadable, ""}, // the OS words this; only "named, path-free" is asserted
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			entries := []Entry{{Name: "OPTIONAL_VAR", FromFile: tc.file}}
+			env, notices, err := ProvisionReport(entries, fleet.SessionSpec{}, "m", "rt", "", nil)
+			if err != nil {
+				t.Fatalf("an optional entry must never refuse the create, got %v", err)
+			}
+			if _, set := env["OPTIONAL_VAR"]; set {
+				t.Fatalf("the unusable file's value reached the session: %v", env)
+			}
+			if len(notices) != 1 || notices[0].Name != "OPTIONAL_VAR" {
+				t.Fatalf("notices = %+v, want exactly one naming OPTIONAL_VAR", notices)
+			}
+			if !strings.Contains(notices[0].Reason, tc.wantReason) {
+				t.Errorf("reason %q does not say %q", notices[0].Reason, tc.wantReason)
+			}
+			line := notices[0].String()
+			if !strings.Contains(line, "OPTIONAL_VAR") || !strings.Contains(line, notices[0].Reason) {
+				t.Errorf("the log line %q must name the entry and the reason", line)
+			}
+			if strings.Contains(line, tc.file) || strings.Contains(notices[0].Reason, tc.file) {
+				t.Errorf("a notice carries the file's path: %q / %q", line, notices[0].Reason)
+			}
+			// Provision is the same answer without the list, for a caller with nowhere to say it.
+			plain, perr := Provision(entries, fleet.SessionSpec{}, "m", "rt", "", nil)
+			if perr != nil || len(plain) != 0 {
+				t.Errorf("Provision = %v, %v; want the same omission", plain, perr)
+			}
+		})
+	}
+}
+
+func TestProvisionStaysQuietForAnAbsentOptionalFile(t *testing.T) {
+	gone := filepath.Join(t.TempDir(), "never-written")
+	env, notices, err := ProvisionReport([]Entry{{Name: "OPTIONAL_VAR", FromFile: gone}},
+		fleet.SessionSpec{}, "m", "rt", "", nil)
+	if err != nil || len(env) != 0 {
+		t.Fatalf("absent optional file = %v, %v; want an omission, no error", env, err)
+	}
+	if len(notices) != 0 {
+		t.Fatalf("an absent file is legitimate and must not be reported: %+v", notices)
+	}
+}
+
+// A notice never carries the value: a pretty-printed file is a credential file as
+// often as not, and the log line is the one place it would outlive the create.
+func TestProvisionNoticeNeverCarriesTheValue(t *testing.T) {
+	const secret = "sk-very-secret"
+	file := writeValue(t, secret+"\nsecond-line")
+	_, notices, _ := ProvisionReport([]Entry{{Name: "K", FromFile: file}}, fleet.SessionSpec{}, "m", "rt", "", nil)
+	if len(notices) != 1 {
+		t.Fatalf("notices = %+v", notices)
+	}
+	if got := notices[0].String(); strings.Contains(got, secret) || strings.Contains(got, "second-line") {
+		t.Fatalf("the log line carries the file's content: %q", got)
+	}
+}
+
+func TestProvisionReportOnlySpeaksWhenTheSessionStartsWithoutTheVariable(t *testing.T) {
+	bad := writeValue(t, "a\nb")
+	opt := []Entry{{Name: "K", FromFile: bad}}
+
+	// The caller supplied its own value, so the session has the variable.
+	_, notices, _ := ProvisionReport(opt, fleet.SessionSpec{Env: map[string]string{"K": "mine"}}, "m", "rt", "", nil)
+	if len(notices) != 0 {
+		t.Errorf("a caller's own value wins; nothing was left out: %+v", notices)
+	}
+	// Out of scope: never met.
+	scoped := []Entry{{Name: "K", FromFile: bad, AppliesTo: Scope{Agents: []string{"sid"}}}}
+	if _, notices, _ := ProvisionReport(scoped, fleet.SessionSpec{Agent: "alex"}, "m", "rt", "", nil); len(notices) != 0 {
+		t.Errorf("an entry outside the session's scope is not reported: %+v", notices)
+	}
+	// Skipped by the driver: never read.
+	if _, notices, _ := ProvisionReport(opt, fleet.SessionSpec{}, "m", "rt", "", func(string) bool { return true }); len(notices) != 0 {
+		t.Errorf("a skipped entry is not reported: %+v", notices)
+	}
+	// A required entry is already loud: it refuses, and there is no notice beside it.
+	req := []Entry{{Name: "K", FromFile: bad, Required: true}}
+	if _, notices, err := ProvisionReport(req, fleet.SessionSpec{}, "m", "rt", "", nil); err == nil || len(notices) != 0 {
+		t.Errorf("a required entry with an unusable file = %+v, %v; want the refusal and no notice", notices, err)
+	}
+	// A session-identity entry has no file to be unusable.
+	idEntry := []Entry{{Name: "K", FromSession: SessionID}}
+	if _, notices, _ := ProvisionReport(idEntry, fleet.SessionSpec{}, "m", "rt", "", nil); len(notices) != 0 {
+		t.Errorf("a fromSession entry with no id is not a file problem: %+v", notices)
+	}
+	// One line per entry, each naming its own variable.
+	two := []Entry{{Name: "A", FromFile: bad}, {Name: "B", FromFile: writeValue(t, "")}}
+	_, notices, _ = ProvisionReport(two, fleet.SessionSpec{}, "m", "rt", "", nil)
+	if len(notices) != 2 || notices[0].Name != "A" || notices[1].Name != "B" {
+		t.Errorf("notices = %+v, want one each for A and B in entry order", notices)
+	}
+}
+
+// CheckFile is what the doctor asks, and it answers from the same function a
+// create's own report does.
+func TestCheckFileAgreesWithProvision(t *testing.T) {
+	if st, _ := CheckFile(writeValue(t, "fine\n")); st != FileUsable {
+		t.Errorf("a one-line file = %v, want FileUsable", st)
+	}
+	if st, reason := CheckFile(filepath.Join(t.TempDir(), "gone")); st != FileAbsent || reason != "" {
+		t.Errorf("a missing file = %v %q, want FileAbsent with no reason", st, reason)
+	}
+	for name, content := range map[string]string{"newline": "a\nb", "NUL": "a\x00b", "empty": ""} {
+		st, reason := CheckFile(writeValue(t, content))
+		if st != FileUnusable || !strings.Contains(reason, name) {
+			t.Errorf("%s: CheckFile = %v %q, want FileUnusable naming it", name, st, reason)
+		}
+	}
+}

@@ -242,7 +242,13 @@ func (d *Driver) sessionEnvFor(spec fleet.SessionSpec) (map[string]string, error
 	if err := checkOwnedEnv(spec.Env); err != nil {
 		return nil, invalid(err)
 	}
-	merged, err := sessionenv.Provision(d.sessionEnv, spec, d.machine, d.runtime, "", nil)
+	merged, notices, err := sessionenv.ProvisionReport(d.sessionEnv, spec, d.machine, d.runtime, "", nil)
+	// An optional entry whose file is there but unusable is left out of the
+	// session; saying so on every create is what keeps it from being found by its
+	// downstream symptom instead (muster #487).
+	for _, n := range notices {
+		d.say("opencode: create: %s", n)
+	}
 	if err != nil {
 		if _, typed := err.(*fleet.Error); typed {
 			return nil, err

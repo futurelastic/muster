@@ -258,6 +258,14 @@ const (
 	counterRouteGuardLateConfirmed     = "route.guard.late_confirmed"
 	counterModuleLedgerEntryWritten    = "module.unconfirmed_ledger_written"
 
+	// counterSessionEnvOptionalUnusable counts every create that started a session
+	// without an optional sessionEnv variable because its fromFile is present but
+	// unusable (muster #487). A file that does not exist is not counted: that is the
+	// legitimate way for an optional entry to be absent. The same fact is a log line
+	// per create and a muster doctor warning; this is the number a health read can
+	// compare across time.
+	counterSessionEnvOptionalUnusable = "session_env.optional_unusable"
+
 	// The number #150's decision reads. attest_checked counts every call
 	// that reached attestation; attest_body_lookalike counts those whose
 	// body the current rule refuses, WHETHER OR NOT the class was also

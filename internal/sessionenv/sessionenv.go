@@ -35,6 +35,7 @@ package sessionenv
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -140,7 +141,9 @@ type Entry struct {
 	// Required here only decides whether a caller-supplied value is refused.
 	FromSession string
 	// Required makes a missing, unreadable or empty FromFile refuse the
-	// create rather than silently omit the variable. Per entry rather than a
+	// create rather than omit the variable. An entry that is not required is
+	// omitted without a word only when its file does not exist; a file that is
+	// there and unusable is reported (see ProvisionReport). Per entry rather than a
 	// machine-wide switch, because both answers are legitimate for different
 	// variables on the same machine.
 	Required bool
@@ -331,11 +334,48 @@ func ValidName(name string) bool {
 //     unreadable, or empty. No correction to the request fixes it, so it is a
 //     typed *fleet.Error with Kind ErrorUnsupported (501), and the message
 //     addresses the operator, not the caller.
+//
+// # An optional entry whose file is present but unusable is reported, not hidden
+//
+// An optional entry is allowed to be absent. A file that does not exist is the
+// ordinary reason, and stays quiet. A file that is there and unusable — an empty
+// one, one with an interior newline or a NUL, one the service cannot read — is an
+// operator mistake that otherwise surfaces only as a downstream symptom, because
+// the create goes ahead without the variable (muster #487). ProvisionReport
+// returns one Notice for each, and every driver that provisions must say so;
+// Provision drops the list and is for a caller that has nowhere to say it.
 func Provision(entries []Entry, spec fleet.SessionSpec, machine fleet.MachineId, runtime fleet.RuntimeId, sessionID string, skip func(name string) bool) (map[string]string, error) {
+	env, _, err := ProvisionReport(entries, spec, machine, runtime, sessionID, skip)
+	return env, err
+}
+
+// Notice is one optional fromFile entry that Provision left out although its
+// file is there (muster #487). It carries the variable's name and a reason that
+// names neither the file's path nor its value: both are safe to log and to show
+// in the doctor.
+type Notice struct {
+	// Name is the variable the session started without.
+	Name string
+	// Reason says what is wrong with the file, in a form that holds no path and
+	// none of the value.
+	Reason string
+}
+
+// String is the one log line a create writes for the notice.
+func (n Notice) String() string {
+	return fmt.Sprintf("sessionEnv %s is optional and its fromFile is unusable (%s): the session starts without it; "+
+		"a fromFile value must be one line", n.Name, n.Reason)
+}
+
+// ProvisionReport is Provision plus the notices an operator needs to hear: the
+// optional fromFile entries skipped because their file is present but unusable.
+// A file that does not exist is not one; see Provision.
+func ProvisionReport(entries []Entry, spec fleet.SessionSpec, machine fleet.MachineId, runtime fleet.RuntimeId, sessionID string, skip func(name string) bool) (map[string]string, []Notice, error) {
 	if len(entries) == 0 {
-		return spec.Env, nil
+		return spec.Env, nil, nil
 	}
 
+	var notices []Notice
 	var merged map[string]string
 	for _, entry := range entries {
 		if !entry.AppliesTo.Matches(runtime, spec) {
@@ -350,7 +390,7 @@ func Provision(entries []Entry, spec fleet.SessionSpec, machine fleet.MachineId,
 		// A required entry refuses ANY caller-supplied value for this name,
 		// before the configured file is read and without ever comparing.
 		if entry.Required && callerSet {
-			return nil, fmt.Errorf(
+			return nil, nil, fmt.Errorf(
 				"create: env %s is required on this machine and must be omitted from the "+
 					"request; this machine provides its own value for it",
 				entry.Name)
@@ -367,9 +407,20 @@ func Provision(entries []Entry, spec fleet.SessionSpec, machine fleet.MachineId,
 		}
 		if err != nil {
 			if !entry.Required {
-				continue // legitimate: not required, silently absent (§94)
+				// Not required, so the create goes on without the variable (§94). A
+				// file that does not exist is the legitimate way to be absent and
+				// stays quiet; a file that is there and unusable is reported
+				// (muster #487). Nothing is said when the caller supplied its own
+				// value: the session has the variable, and "the session starts
+				// without it" would not be true.
+				if entry.FromFile != "" && !callerSet {
+					if absent, reason := fileProblem(err); !absent {
+						notices = append(notices, Notice{Name: entry.Name, Reason: reason})
+					}
+				}
+				continue
 			}
-			return nil, &fleet.Error{
+			return nil, nil, &fleet.Error{
 				Kind: fleet.ErrorUnsupported,
 				Message: fmt.Sprintf(
 					"create: sessionEnv %q is required on this machine but could not be "+
@@ -396,9 +447,9 @@ func Provision(entries []Entry, spec fleet.SessionSpec, machine fleet.MachineId,
 	}
 
 	if merged == nil {
-		return spec.Env, nil
+		return spec.Env, notices, nil
 	}
-	return merged, nil
+	return merged, notices, nil
 }
 
 // sessionValue is a FromSession entry's value. Validated shape-wise at startup,
@@ -473,4 +524,47 @@ func readFile(path string) (string, error) {
 		return "", errors.New("value contains a newline or NUL, which the staging format cannot carry")
 	}
 	return value, nil
+}
+
+// fileProblem classifies what readFile returned. absent is a file that does not
+// exist — the legitimate way for an optional entry to have no value. Anything
+// else is a file that is there and unusable, and reason says why without the
+// path (an *fs.PathError spells it) or the value, so it is safe in a log line
+// and in the doctor. Provision and CheckFile both ask this one function, so what
+// a create reports and what the doctor reports cannot drift apart.
+func fileProblem(err error) (absent bool, reason string) {
+	if errors.Is(err, fs.ErrNotExist) {
+		return true, ""
+	}
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		return false, pe.Err.Error()
+	}
+	return false, err.Error()
+}
+
+// FileState is what CheckFile found at one entry's fromFile.
+type FileState int
+
+const (
+	// FileUsable: the file holds a value Provision would use.
+	FileUsable FileState = iota
+	// FileAbsent: no such file. Legitimate for an optional entry.
+	FileAbsent
+	// FileUnusable: the file is there and Provision would refuse its value.
+	FileUnusable
+)
+
+// CheckFile reads path the way Provision does and says what it found, for the
+// doctor (muster #487). reason is set for FileUnusable only and holds neither
+// the path nor the value. It reads the file but never returns its content.
+func CheckFile(path string) (FileState, string) {
+	_, err := readFile(path)
+	if err == nil {
+		return FileUsable, ""
+	}
+	if absent, reason := fileProblem(err); !absent {
+		return FileUnusable, reason
+	}
+	return FileAbsent, ""
 }

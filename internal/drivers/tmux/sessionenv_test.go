@@ -600,3 +600,52 @@ func TestSessionIdentityEntryRefusesACallerValueWhenRequired(t *testing.T) {
 		t.Fatal("a caller-supplied value for a required session-identity entry was accepted")
 	}
 }
+
+// muster #487: an optional entry whose file is there but unusable is left out of
+// the session, and every create says so — one line naming the variable and the
+// reason, and a count a health read can compare. A file that does not exist is
+// the legitimate way to be absent and says nothing.
+func TestOptionalEntryWithAnUnusableFileIsLoggedOnEveryCreate(t *testing.T) {
+	dir := t.TempDir()
+	bad := filepath.Join(dir, "pretty-printed")
+	writeFile(t, bad, "{\n  \"agent\": {}\n}\n")
+	gone := filepath.Join(dir, "never-written")
+	good := filepath.Join(dir, "good")
+	writeFile(t, good, "fine")
+
+	buf := captureLog(t)
+	d := New("testbox", WithSessionEnv([]SessionEnvEntry{
+		{Name: "BAD_VAR", FromFile: bad},
+		{Name: "GONE_VAR", FromFile: gone},
+		{Name: "GOOD_VAR", FromFile: good},
+	}))
+	for i := 0; i < 2; i++ {
+		got, err := d.provisionSessionEnv(fleet.SessionSpec{Cwd: "/work/x"}, "")
+		if err != nil {
+			t.Fatalf("an optional entry must not refuse the create: %v", err)
+		}
+		if _, set := got["BAD_VAR"]; set {
+			t.Errorf("the unusable file's value reached the session: %v", got)
+		}
+		if got["GOOD_VAR"] != "fine" {
+			t.Errorf("GOOD_VAR = %q; one bad entry must not cost a good one", got["GOOD_VAR"])
+		}
+	}
+
+	out := buf.String()
+	if n := strings.Count(out, "BAD_VAR"); n != 2 {
+		t.Errorf("BAD_VAR was named %d time(s) in the log over two creates, want one line each:\n%s", n, out)
+	}
+	if !strings.Contains(out, "newline") {
+		t.Errorf("the log line does not give the reason:\n%s", out)
+	}
+	if strings.Contains(out, "GONE_VAR") || strings.Contains(out, "GOOD_VAR") {
+		t.Errorf("an absent file or a usable one was logged:\n%s", out)
+	}
+	if strings.Contains(out, bad) || strings.Contains(out, "agent") {
+		t.Errorf("the log line carries the file's path or content:\n%s", out)
+	}
+	if got := d.Counters()[counterSessionEnvOptionalUnusable]; got != 2 {
+		t.Errorf("%s = %d, want 2", counterSessionEnvOptionalUnusable, got)
+	}
+}

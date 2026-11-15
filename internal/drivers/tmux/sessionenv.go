@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"fmt"
+	"log"
 
 	fleet "github.com/futurelastic/muster"
 	"github.com/futurelastic/muster/internal/delivery"
@@ -94,11 +95,19 @@ func (d *Driver) provisionSessionEnv(spec fleet.SessionSpec, sessionID string) (
 		return spec.Env, nil
 	}
 	reservedPrefixes := d.ReservedEnvPrefixes()
-	return sessionenv.Provision(d.sessionEnv, spec, d.machine, d.runtime, sessionID, func(name string) bool {
+	env, notices, err := sessionenv.ProvisionReport(d.sessionEnv, spec, d.machine, d.runtime, sessionID, func(name string) bool {
 		if delivery.HasReservedPrefix(name, reservedPrefixes) {
 			d.counters.incr("module.session_env_dropped")
 			return true
 		}
 		return false
 	})
+	// An optional entry whose file is there but unusable is left out of the
+	// session; saying so on every create is what keeps it from being found by its
+	// downstream symptom instead (muster #487).
+	for _, n := range notices {
+		d.counters.incr(counterSessionEnvOptionalUnusable)
+		log.Printf("tmux: create: %s", n)
+	}
+	return env, err
 }
