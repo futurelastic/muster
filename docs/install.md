@@ -671,7 +671,8 @@ own configuration carries under that name: one definition per agent.
   file, or an `agent` entry in the project's `opencode.json`, overrides each field
   it sets, and leaves the operator's `model`, `temperature` and the rest in force
   where it sets nothing. An inline `OPENCODE_CONFIG_CONTENT` (a `sessionEnv` entry
-  can still supply one) ranks above both, also field by field; one that carries no
+  can still supply one, from a one-line file: a file with an interior newline is
+  [reported and left out](session-identity.md#a-fromfile-value-is-one-line), not read) ranks above both, also field by field; one that carries no
   `agent` entry leaves these agents alone. This is how opencode 1.18 merges, measured
   with an isolated home; the driver's gated integration test
   (`FLEET_OPENCODE_INTEGRATION=1`) pins it. Naming a built-in agent (`build`, `plan`)

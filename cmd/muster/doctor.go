@@ -347,6 +347,13 @@ func runChecks(ctx context.Context, env doctorEnv) []doctorRow {
 		c.add(row)
 	}
 
+	// --- sessionEnv files (muster #487) ------------------------------------
+	// After config because the entries come from it. No row on a machine with no
+	// optional file entry, so a report from one is unchanged.
+	if row, ok := checkSessionEnvFiles(cfg); ok {
+		c.add(row)
+	}
+
 	// --- machine id and peers ---------------------------------------------
 	self := fleet.MachineId(getenv("FLEET_MACHINE"))
 	peers, peerErr := doctorPeers(getenv, cfg)

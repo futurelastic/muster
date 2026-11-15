@@ -46,7 +46,7 @@ A list under `sessionEnv` in the same JSON file `principals`, `peers`,
 | `name` | The variable a session's process will see. Same shape rule every env name in this project follows: letters, digits, underscore, not starting with a digit. |
 | `fromFile` | An absolute path this machine reads **fresh on every create** — see "Restart enables it; rotation needs nothing" below. "Absolute" follows the host's own rule: a leading `/` on Unix; a drive or UNC path on Windows (`C:\\ProgramData\\…\\token` once JSON-escaped). A relative path is refused on every host. |
 | `fromSession` | The other source: the created session's own identity, `"ref"` (`<machine>/<id>`) or `"id"` (the bare id). Exactly one of `fromFile` / `fromSession` per entry — see "Exporting the session's own identity" below. |
-| `required` | Fail closed (`true`) or silently omit (`false`) when the file cannot be read. Per entry, not machine-wide — see "Fail-closed, per entry". |
+| `required` | Fail closed (`true`) or omit the variable (`false`) when the file cannot be used. An omission is quiet only when the file does not exist; a file that is there and unusable is reported — see "A `fromFile` value is one line". Per entry, not machine-wide — see "Fail-closed, per entry". |
 | `appliesTo` | Optional. `runtimes`, `agents` and/or `markers`: `runtimes` is matched against the runtime the session is created on, `agents` / `markers` against `SessionSpec.Agent` / `SessionSpec.Marker`. Absent or all-empty matches every session on every runtime the machine registers — see "Scoping: `appliesTo`". |
 
 Nothing here is optional to *validate*: every entry is checked once, at daemon
@@ -102,13 +102,56 @@ machine for different variables. An identity credential almost certainly wants
 
 - `required: true`, file unusable → the create refuses (see "Two different
   refusals" below for which wire answer).
-- `required: false`, file unusable → the variable is silently omitted, exactly
-  as if the entry were not declared for this session at all.
+- `required: false`, file does not exist → the variable is omitted, exactly as
+  if the entry were not declared for this session at all. Nothing is said: an
+  optional file is allowed to be absent.
+- `required: false`, file there but unusable → the variable is omitted and the
+  create goes on, **and it is reported** — see "A `fromFile` value is one line".
 
 Silent omission is not on the table for a required entry, because it is
 indistinguishable from success at creation time and only becomes visible as an
 action taken under the wrong identity later, somewhere else — the same failure
-shape this whole feature exists to close.
+shape this whole feature exists to close. It is not on the table for an optional
+entry whose file is there either: the create succeeds without the variable, so
+the first sign would be a symptom somewhere downstream, hours later.
+
+## A `fromFile` value is one line
+
+A `fromFile` value is one line: not empty, with no interior newline and no NUL.
+Trailing newlines are trimmed, so a file written by `echo` is fine. The
+session's environment is staged in a line-oriented format that cannot carry a
+value spanning lines without inventing a second variable, so a longer value is
+refused at the file, before it reaches a session. JSON that has been
+pretty-printed is the usual way to break this: the JSON is valid, and the file
+is not a usable value.
+
+What each kind of entry does with an unusable file:
+
+| Entry | File does not exist | File is there but unusable (empty, interior newline or NUL, unreadable) |
+|---|---|---|
+| `required: true` | the create is refused | the create is refused |
+| `required: false` | the variable is omitted, quietly | the variable is omitted and **reported** |
+
+For an optional entry the report is, together:
+
+- **One log line per create** naming the variable and the reason — never the
+  file's path or any of its content: `sessionEnv NAME is optional and its
+  fromFile is unusable (value contains a newline or NUL, …): the session starts
+  without it`. It is written by whichever runtime started the session, and
+  nothing is written when the caller supplied its own value for the variable,
+  because then the session has it.
+- **A `muster doctor` warning**, row `sessionenv.files`, naming the variable and
+  the reason. It reads the files before any create, so the mistake is found when
+  the file is written. A warning does not change the exit code: the service
+  starts and creates go on. The row is left out on a machine with no optional
+  `fromFile` entry, and a file that does not exist passes.
+- **A counter**, `session_env.optional_unusable`, under the terminal runtime's
+  entry in `counters` on `GET /v1/health` (it resets at restart; read it against
+  `startedAt`).
+
+A value that is naturally several lines does not belong in `sessionEnv`. For
+opencode agents, `opencode.agents` names a file that holds the operator's agent
+definitions as ordinary multi-line JSON; see [Install](install.md#agents-every-opencode-session-on-this-machine-receives).
 
 ## Precedence against the caller
 
@@ -422,7 +465,11 @@ Checklist for enabling an entry on a machine:
 4. For a `required` entry, point `fromFile` at a path that does not exist and
    confirm the create refuses as `unsupported`, not as a hang or a
    healthy-looking session.
-5. Rotate the file's contents with no restart and confirm the *next* session
+5. For an optional entry, put a value with an interior newline in the file and
+   confirm the log line, the `sessionenv.files` row of `muster doctor`, and the
+   session starting without the variable; then delete the file and confirm all
+   three go quiet.
+6. Rotate the file's contents with no restart and confirm the *next* session
    created picks up the new value — the property that motivated reading it
    fresh rather than caching it at startup.
 
