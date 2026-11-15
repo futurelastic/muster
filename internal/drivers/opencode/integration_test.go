@@ -119,6 +119,12 @@ func TestIntegration_CreateAndCloseARealSession(t *testing.T) {
 	if _, err := d.Close(ctx, fleet.RequestFrom(fleet.Caller{}), fleet.SessionRef{ID: ref.ID}); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
+	// muster #485: the read a close makes of the session's usage reached the real
+	// message endpoint and came back empty. A session that never ran a turn has no
+	// figure — absent, not a zero block — and the close was not held up by asking.
+	if got := d.DrainFinalUsage(); got != nil {
+		t.Errorf("a session that never ran a turn kept a final figure: %+v", got)
+	}
 }
 
 // muster #437 against a real server, spending nothing: a session created with a

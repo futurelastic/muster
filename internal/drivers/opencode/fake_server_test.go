@@ -458,6 +458,10 @@ func (f *fakeServer) handleDelete(w http.ResponseWriter, r *http.Request) {
 	_, ok := f.sessions[id]
 	delete(f.sessions, id)
 	delete(f.statuses, id)
+	// The runtime's record of a session goes with it (muster #419, #485): nothing
+	// read after a delete finds the messages, so a figure that survives one was
+	// read before it.
+	delete(f.messages, id)
 	f.mu.Unlock()
 	if !ok {
 		w.WriteHeader(http.StatusNotFound)

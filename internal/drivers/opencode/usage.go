@@ -8,6 +8,7 @@ import (
 	"time"
 
 	fleet "github.com/futurelastic/muster"
+	"github.com/futurelastic/muster/internal/driver"
 	"github.com/futurelastic/muster/internal/grant"
 )
 
@@ -55,6 +56,7 @@ type usageMsg struct {
 	has       bool // the message reported any usage at all
 	at        time.Time
 	provider  string // the provider the message ran on, as the runtime resolved it (muster #458)
+	model     string // the model it ran on, likewise (muster #485)
 }
 
 // usageMemo is the remembered history of one session.
@@ -144,6 +146,7 @@ func usageOfMessage(w wireMessage) usageMsg {
 		assistant: w.Info.Role == "assistant",
 		finished:  w.Info.Time.Completed > 0,
 		provider:  w.Info.ProviderID,
+		model:     w.Info.ModelID,
 	}
 	switch {
 	case w.Info.Time.Completed > 0:
@@ -296,10 +299,135 @@ func (m *usageMemo) stamp(u *fleet.Usage, kind fleet.CredentialKind) *fleet.Usag
 	return u
 }
 
-// forgetUsage drops a session's remembered history once the session is gone.
-func (d *Driver) forgetUsage(id string) {
+// forgetUsage ends a session's remembered history once the session is gone, and
+// keeps its last figure for the service first (muster #485). The runtime's own
+// record goes with the session's directory, so this memory is the last place the
+// figure exists: it is turned into a final figure and put where DrainFinalUsage
+// finds it, and only then dropped. cred is the credential the session ran on,
+// passed in because the session's own entry is already gone from the cache.
+func (d *Driver) forgetUsage(id string, cred fleet.CredentialKind) {
 	d.usageMu.Lock()
+	m := d.usageMemos[id]
 	delete(d.usageMemos, id)
 	d.usageMu.Unlock()
+	if m != nil {
+		m.mu.Lock()
+		final := m.final(cred)
+		m.mu.Unlock()
+		if final != nil {
+			d.keepFinalUsage(id, *final)
+		}
+	}
 	d.forgetRefused(id) // muster #458: a closed session holds no episode open
+}
+
+// final is the session's usage as a closed record keeps it: the cumulative
+// figures the live block carries, and the provider and model of the newest
+// request that reported any. nil when no message reported usage — "not known",
+// never a zero block. Called with m.mu held.
+func (m *usageMemo) final(kind fleet.CredentialKind) *fleet.ClosedUsage {
+	u := m.stamp(m.snapshot(true), kind)
+	if u == nil {
+		return nil
+	}
+	c := fleet.NewClosedUsage(u.Figures(), u.Source, u.AsOf)
+	c.Credential = u.Credential
+	for i := len(m.msgs) - 1; i >= 0; i-- {
+		if m.msgs[i].has {
+			c.Provider, c.Model = m.msgs[i].provider, m.msgs[i].model
+			break
+		}
+	}
+	return c
+}
+
+// maxFinals bounds the figures waiting to be drained. The service drains on every
+// local listing and after every close it relays, so a working service never gets
+// near it; it exists so a driver nobody drains cannot grow without limit. The
+// oldest figure goes first.
+const maxFinals = 256
+
+// keepFinalUsage queues one removed session's figure for DrainFinalUsage.
+func (d *Driver) keepFinalUsage(id string, u fleet.ClosedUsage) {
+	d.finalMu.Lock()
+	defer d.finalMu.Unlock()
+	d.finals = append(d.finals, driver.CapturedUsage{ID: id, Usage: u})
+	if over := len(d.finals) - maxFinals; over > 0 {
+		d.finals = append([]driver.CapturedUsage(nil), d.finals[over:]...)
+	}
+}
+
+// finalFor is the figure kept for a session that was just removed, without
+// taking it off the queue: the session.closed event carries it, and the service
+// still drains the same figure into the closed record. nil when none was kept.
+func (d *Driver) finalFor(id string) *fleet.ClosedUsage {
+	d.finalMu.Lock()
+	defer d.finalMu.Unlock()
+	for i := len(d.finals) - 1; i >= 0; i-- {
+		if d.finals[i].ID == id {
+			u := d.finals[i].Usage
+			return &u
+		}
+	}
+	return nil
+}
+
+// finalOfLive is the figure a session that is still known has right now — what
+// its process exiting would leave behind — read from memory with no request made.
+// nil when nothing has been read.
+func (d *Driver) finalOfLive(id string, cred fleet.CredentialKind) *fleet.ClosedUsage {
+	d.usageMu.Lock()
+	m := d.usageMemos[id]
+	d.usageMu.Unlock()
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.have {
+		return nil
+	}
+	return m.final(cred)
+}
+
+// DrainFinalUsage implements driver.FinalUsageReporter (muster #485): every
+// figure kept for a removed session since the last drain, forgotten the moment it
+// is returned so nothing is reported twice.
+func (d *Driver) DrainFinalUsage() []driver.CapturedUsage {
+	d.finalMu.Lock()
+	defer d.finalMu.Unlock()
+	if len(d.finals) == 0 {
+		return nil
+	}
+	out := d.finals
+	d.finals = nil
+	return out
+}
+
+var _ driver.FinalUsageReporter = (*Driver)(nil)
+
+// finalUsageBudget bounds the one read Close makes of a session's usage before
+// it removes the session (muster #485). The read exists so a request that landed
+// after the last listing is in the figure, and so a service that has not read
+// the session since it started still has one; it must never be able to starve the
+// removal it precedes, so it gets its own short budget, further capped at a third
+// of what is left of the close's own.
+const finalUsageBudget = 5 * time.Second
+
+// readFinalUsage refreshes a live session's remembered usage just before it is
+// removed. Best effort: usageOf answers the figure it already had when the read
+// fails, so a slow or broken runtime costs freshness, never the close.
+func (d *Driver) readFinalUsage(ctx context.Context, srv *server, id string) {
+	budget := finalUsageBudget
+	if dl, ok := ctx.Deadline(); ok {
+		if left := time.Until(dl) / 3; left < budget {
+			budget = left
+		}
+	}
+	if budget <= 0 {
+		return
+	}
+	rctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	d.usageOf(rctx, srv, id, true)
 }

@@ -164,6 +164,11 @@ type historyStore struct {
 	// could only cost a scan, but a MISSING one would leave a premature
 	// tombstone standing, so the rule is rebuild, never patch.
 	closeKeys map[tombKey]struct{}
+	// pending holds the final usage a driver kept for a session it removed, until
+	// the tombstone for that session is written and takes it (muster #485). In
+	// memory only: it spans one request (a close) or one listing (an absence or
+	// an exit), and the tombstone that takes it is what persists.
+	pending map[labelKey]pendingFinal
 	// scanned counts the tombstones withdrawLocked has examined. It exists so a
 	// test can measure what the index removes; nothing reads it in production.
 	scanned   int64
@@ -172,6 +177,19 @@ type historyStore struct {
 	savedAt   time.Time
 	now       func() time.Time
 }
+
+// pendingFinal is one driver-kept figure waiting for its tombstone, and when it
+// was stashed.
+type pendingFinal struct {
+	usage fleet.ClosedUsage
+	at    time.Time
+}
+
+// pendingFinalTTL is how long a figure waits for a tombstone that never comes
+// (a close the service did not record, a rename that carried the session on) before
+// it is dropped. Far longer than the one listing a real figure waits for; short
+// enough that nothing accumulates.
+const pendingFinalTTL = time.Hour
 
 // tombKey identifies the one run a ClosedByClose tombstone describes: the same
 // runtime, id and start instant withdrawLocked matches on. The instant is
@@ -504,6 +522,47 @@ func (h *historyStore) launchFor(rt fleet.RuntimeId, conversation string) (launc
 	return *l, true
 }
 
+// stashFinal keeps the final usage a local driver reported for sessions it
+// removed, for the tombstone that is about to be written for each (muster #485).
+// It is called before the listing or the close is folded in, so the figure is
+// there when the end is recorded, whichever of the three ways the end is learned.
+func (h *historyStore) stashFinal(rt fleet.RuntimeId, finals []driver.CapturedUsage) {
+	if len(finals) == 0 {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	now := h.now()
+	if h.pending == nil {
+		h.pending = map[labelKey]pendingFinal{}
+	}
+	for k, p := range h.pending {
+		if now.Sub(p.at) > pendingFinalTTL {
+			delete(h.pending, k)
+		}
+	}
+	for _, f := range finals {
+		if f.ID == "" {
+			continue
+		}
+		h.pending[labelKey{rt, f.ID}] = pendingFinal{usage: f.Usage, at: now}
+	}
+}
+
+// takeFinalLocked returns the figure stashed for a session being tombstoned, and
+// forgets it. nil when its driver kept none — the record then carries no usage,
+// which says "not known".
+func (h *historyStore) takeFinalLocked(rt fleet.RuntimeId, id string) *fleet.ClosedUsage {
+	k := labelKey{rt, id}
+	p, ok := h.pending[k]
+	if !ok {
+		return nil
+	}
+	delete(h.pending, k)
+	u := p.usage
+	return &u
+}
+
 func (h *historyStore) tombstoneLocked(r *seenRecord, at time.Time, by fleet.ClosureKind, evidence string) {
 	name := r.Name
 	if name == "" {
@@ -520,6 +579,7 @@ func (h *historyStore) tombstoneLocked(r *seenRecord, at time.Time, by fleet.Clo
 		ClosedAt:     at,
 		ClosedBy:     by,
 		Evidence:     evidence,
+		Usage:        h.takeFinalLocked(r.Runtime, r.ID),
 	})
 	h.closedChangedLocked()
 }
@@ -548,6 +608,7 @@ func (h *historyStore) tombstoneExitLocked(r *seenRecord, e driver.CapturedExit)
 		ClosedBy:     fleet.ClosedByExit,
 		Evidence:     fmt.Sprintf("captured its own exit status (%d) before removing the session", exit.Status),
 		Exit:         &exit,
+		Usage:        h.takeFinalLocked(r.Runtime, r.ID),
 	})
 	h.closedChangedLocked()
 }
