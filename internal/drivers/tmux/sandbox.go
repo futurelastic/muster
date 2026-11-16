@@ -453,7 +453,7 @@ func (d *Driver) planSandbox(spec fleet.SessionSpec, prog, configDir string, lay
 	// the profile exists to remove.
 	check := func(field string, p fleet.AbsolutePath) (string, error) {
 		r := sandbox.ResolvePath(string(p))
-		if home != "" && sandbox.CoversOrIs(r, home) {
+		if home != "" && sandbox.CoversHome(r, home) {
 			return "", invalid("%s: %q is, or contains, the service user's home directory; grant the specific directory a session needs", field, string(p))
 		}
 		if linux {
@@ -468,7 +468,7 @@ func (d *Driver) planSandbox(spec fleet.SessionSpec, prog, configDir string, lay
 	if info, err := os.Stat(cwd); err != nil || !info.IsDir() {
 		return nil, invalid("cwd %q is not a directory that exists, which a sandboxed session needs to be started in", string(spec.Cwd))
 	}
-	if home != "" && sandbox.CoversOrIs(cwd, home) {
+	if home != "" && sandbox.CoversHome(cwd, home) {
 		return nil, invalid("cwd %q is, or contains, the service user's home directory, which a sandboxed session would then write to", string(spec.Cwd))
 	}
 

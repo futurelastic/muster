@@ -184,8 +184,9 @@ directory and the session's private directory (which holds its `TMPDIR`), and a 
 Everything else is denied, and the caller can only *add* paths — the allow-lists that keep the
 runtime working are carried in the driver and no create can widen them. A path must be absolute and
 clean; a grant that is, or contains, the service user's home directory is refused `invalid`
-(it would put back exactly what the profile removes), as is a writable grant on a shared temporary
-directory. The shape of a malformed request is a `400` on any machine.
+(it would put back exactly what the profile removes) however the path is spelled — through a
+symlink, or in another letter case on a volume that ignores case — as is a writable grant on a
+shared temporary directory. The shape of a malformed request is a `400` on any machine.
 
 **What "denied" means is three classes, together** — because each is a way out of the other two,
 and a platform that cannot deny all three does not offer the capability (§4.3) rather than a weaker

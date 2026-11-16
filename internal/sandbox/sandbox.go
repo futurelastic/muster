@@ -142,7 +142,9 @@ func ResolvePath(p string) string {
 }
 
 // CoversOrIs reports whether granting root would include path (root equals path
-// or is an ancestor).
+// or is an ancestor). It compares the spellings it is given, byte for byte; a
+// guard on the service user's home needs CoversHome, which asks the same of the
+// directories themselves.
 func CoversOrIs(root, path string) bool {
 	return path == root || strings.HasPrefix(path, root+string(filepath.Separator))
 }
@@ -158,7 +160,7 @@ func InstallRoots(bin, home string) []string {
 	roots := []string{dir}
 	if filepath.Base(dir) == "bin" {
 		parent := filepath.Dir(dir)
-		if home == "" || !CoversOrIs(parent, home) {
+		if home == "" || !CoversHome(parent, home) {
 			roots = append(roots, parent)
 		}
 	}

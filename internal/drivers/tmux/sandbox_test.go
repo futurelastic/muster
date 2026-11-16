@@ -675,6 +675,52 @@ func TestSandboxedCreateRefusals(t *testing.T) {
 	}
 }
 
+// muster #488: the home guard asks which directory a path names, not how it was
+// spelled. On a case-insensitive volume an upper-cased home is the home, and the
+// profile matches paths in either case, so the spelling must not buy a grant.
+func TestSandboxedCreateRefusesTheHomeInAnyLetterCase(t *testing.T) {
+	e := newSandboxEnv(t)
+	if _, err := os.Stat(strings.ToUpper(e.home)); err != nil {
+		t.Skip("this volume is case-sensitive: an upper-cased home is another path")
+	}
+	cases := []struct {
+		name string
+		spec *fleet.SandboxSpec
+		cwd  string
+	}{
+		{"a read grant on the home in capitals", &fleet.SandboxSpec{ReadPaths: []fleet.AbsolutePath{fleet.AbsolutePath(strings.ToUpper(e.home))}}, ""},
+		{"a write grant on the home in capitals", &fleet.SandboxSpec{WritePaths: []fleet.AbsolutePath{fleet.AbsolutePath(strings.ToUpper(e.home))}}, ""},
+		{"a read grant on an ancestor of the home in capitals", &fleet.SandboxSpec{ReadPaths: []fleet.AbsolutePath{fleet.AbsolutePath(strings.ToUpper(filepath.Dir(e.home)))}}, ""},
+		{"a write grant on an ancestor of the home in capitals", &fleet.SandboxSpec{WritePaths: []fleet.AbsolutePath{fleet.AbsolutePath(strings.ToUpper(filepath.Dir(e.home)))}}, ""},
+		{"a working directory that is the home in capitals", &fleet.SandboxSpec{}, strings.ToUpper(e.home)},
+	}
+	for _, c := range cases {
+		cwd := c.cwd
+		if cwd == "" {
+			cwd = e.cwd
+		}
+		before := countCalls(e.f, "new-session")
+		_, err := e.d.Create(context.Background(), testCaller, "k-"+c.name, fleet.SessionSpec{
+			Machine: "testbox", Cwd: fleet.AbsolutePath(cwd), Name: "delta", Sandbox: c.spec,
+		})
+		var fe *fleet.Error
+		if !errors.As(err, &fe) || fe.Kind != fleet.ErrorInvalid || !strings.Contains(fe.Message, "is, or contains, the service user's home directory") {
+			t.Errorf("%s: Create = %v, want an invalid refusal naming the home directory", c.name, err)
+		}
+		if countCalls(e.f, "new-session") != before {
+			t.Errorf("%s: a refused create started a session", c.name)
+		}
+	}
+	// The exact-case spelling of a directory under the home is still a grant.
+	sub := filepath.Join(e.home, "project")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.create("k-under-home", "gamma", &fleet.SandboxSpec{ReadPaths: []fleet.AbsolutePath{fleet.AbsolutePath(sub)}}); err != nil {
+		t.Errorf("a grant under the home was refused: %v", err)
+	}
+}
+
 func TestSandboxedCreateThatFailsToStartRemovesItsPrivateDirectory(t *testing.T) {
 	e := newSandboxEnv(t)
 	e.f.failCreate = true
