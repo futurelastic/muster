@@ -56,10 +56,24 @@ and restarts the service when it exits.
   `LC_*`) decides what a session's tools can print. Add them to the unit by hand
   and every later run, an update included, writes them back; without this an update
   would turn the runtime off. Every `FLEET_*` name and `LANG` / `LC_*` is kept, and
-  nothing else is: a variable of any other name is not carried. `FLEET_STATE_DIR`
+  nothing else is, except `PATH` on macOS (next item): a variable of any other name
+  is not carried. `FLEET_STATE_DIR`
   and `FLEET_CONFIG` are the layout's: a different value in the unit is reset, and
   the run says so. The run prints the names it kept (never the values), and
   `muster service status` lists the same names in an `env` row.
+- **macOS: the unit's `PATH` stays, and has a default (muster #483).** launchd gives
+  a job `/usr/bin:/bin:/usr/sbin:/sbin` and nothing else, so a tool a session or a
+  delivery module looks up on `PATH` (anything under `~/.local/bin`, where the
+  Library and the module installer put binaries) is not found, and nothing says so.
+  A `PATH` already in the plist is kept as it is, value for value, by every later
+  run, an update included. A plist with none (a first install, or one an earlier
+  release wrote) gets `~/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`,
+  `~` being the installing user's home. The run prints the `PATH` it kept or wrote
+  (a `PATH` names directories, so unlike a carried variable its value is shown),
+  `doctor` runs under it, and `muster service status` shows it in a `path` row; it
+  is the unit's `PATH`, so a service started before an edit shows the new value
+  until it restarts. A systemd unit is given none: `systemd --user` supplies the
+  service's `PATH`, and one in the unit would override it.
 - **Loopback only.** `--addr` takes a loopback `HOST:PORT` with a fixed port; any
   other address is refused. Putting the service on a network interface is step 3
   of the manual procedure.

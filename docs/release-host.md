@@ -20,7 +20,7 @@ binary names the release it was asked for, and then runs the **new binary's** `m
 is the install: it copies itself to `~/.local/bin/muster`, creates what is missing, restarts the user service when
 the binary or the unit changed, runs `muster doctor` under the unit's environment and waits for `/v1/health`. A
 machine that has muster keeps its address, machine id, tokens and state, and every `FLEET_*` and `LANG` / `LC_*`
-variable an operator added to the unit; it gets a new binary under the same unit.
+variable an operator added to the unit (on macOS, its `PATH` too); it gets a new binary under the same unit.
 
 If the new version does not come up healthy, the copy of the previous binary the installer kept runs its own
 `service install`, which puts it back; the installer exits 1 either way so a caller never mistakes the failed

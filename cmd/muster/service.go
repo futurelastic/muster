@@ -104,6 +104,9 @@ func usageService() string {
 		"install keeps every other FLEET_* variable and every LANG / LC_* variable the unit already",
 		"has, so a runtime switched on by the environment survives an update; status lists their",
 		"names. FLEET_STATE_DIR and FLEET_CONFIG are the layout's: a different value is reset, said aloud.",
+		"On macOS install keeps the unit's PATH too, and writes one when there is none (~/.local/bin,",
+		"then the usual system directories): launchd's own default has neither, and a tool a session",
+		"or a module looks up on PATH would not be found. status shows it.",
 		"",
 		"Peers, inbox delivery and Windows are not covered: docs/install.md continues there.",
 	}, "\n")
@@ -285,6 +288,11 @@ type svcSettings struct {
 	Machine string
 	Addr    string
 	Tmux    string
+	// Path is the unit's PATH, macOS only (muster #483): launchd gives a job
+	// /usr/bin:/bin:/usr/sbin:/sbin and nothing else, so an operator who set one
+	// must not lose it to an update, and a unit with none gets the default. Empty
+	// means the unit sets none, which is what a systemd unit always reads as here.
+	Path    string
 	Carried [][2]string // name, value; sorted by name; never one of install's own
 }
 
@@ -298,13 +306,28 @@ func svcVars(p svcPaths, s svcSettings) [][2]string {
 		{"FLEET_CONFIG", p.Config},
 		{"FLEET_TMUX_BIN", s.Tmux},
 	}
+	if s.Path != "" {
+		vars = append(vars, [2]string{"PATH", s.Path})
+	}
 	return append(vars, s.Carried...)
+}
+
+// launchdDefaultPath is what launchd gives a job whose unit sets no PATH.
+const launchdDefaultPath = "/usr/bin:/bin:/usr/sbin:/sbin"
+
+// defaultUnitPath is the PATH a macOS unit gets when it has none: the directories
+// the Library and a module installer put binaries in (~/.local/bin) first, then the
+// Homebrew and local ones findTmux already searches, then launchd's own.
+func defaultUnitPath(home string) string {
+	return strings.Join([]string{filepath.Join(home, ".local", "bin"), "/opt/homebrew/bin", "/usr/local/bin", launchdDefaultPath}, ":")
 }
 
 // carriedName reports whether a variable in an existing unit is one install
 // keeps: any FLEET_ variable (the service reads no other prefix) and the locale,
 // LANG and LC_*. Anything else in a hand-edited unit is not carried, and the
-// installed unit is the whole of what the service gets.
+// installed unit is the whole of what the service gets. PATH is not in this set on
+// purpose: on macOS it is its own setting (svcSettings.Path, muster #483), with a
+// default install writes when there is none, and a systemd unit has no PATH here.
 var reCarriedName = regexp.MustCompile(`^(?:FLEET_[A-Z0-9_]+|LANG|LC_[A-Z_]+)$`)
 
 // carriedVars picks, from the variables a unit sets, the ones install keeps:
@@ -420,7 +443,7 @@ func renderLaunchdPlist(p svcPaths, s svcSettings) string {
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
 	b.WriteString(`<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">` + "\n")
-	b.WriteString("<!-- Written by `muster service install`; the next run rewrites it and keeps any other FLEET_*, LANG or LC_* variable set here. -->\n")
+	b.WriteString("<!-- Written by `muster service install`; the next run rewrites it and keeps the PATH and any other FLEET_*, LANG or LC_* variable set here. -->\n")
 	b.WriteString("<plist version=\"1.0\">\n<dict>\n")
 	b.WriteString("\t<key>Label</key>\n\t<string>" + svcLabel + "</string>\n")
 	b.WriteString("\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>" + x(p.Bin) + "</string>\n\t\t<string>serve</string>\n\t</array>\n")
@@ -488,7 +511,7 @@ func xmlEscape(s string) string {
 var (
 	reSystemdEnv = regexp.MustCompile(`(?m)^Environment=(.*?)\r?$`)
 	reSystemdExe = regexp.MustCompile(`(?m)^ExecStart="((?:[^"\\]|\\.)*)"`)
-	rePlistVar   = regexp.MustCompile(`<key>(FLEET_[A-Z0-9_]+|LANG|LC_[A-Z_]+)</key>\s*<string>([^<]*)</string>`)
+	rePlistVar   = regexp.MustCompile(`<key>(FLEET_[A-Z0-9_]+|LANG|LC_[A-Z_]+|PATH)</key>\s*<string>([^<]*)</string>`)
 	rePlistExe   = regexp.MustCompile(`(?s)<key>ProgramArguments</key>\s*<array>\s*<string>([^<]*)</string>`)
 )
 
@@ -549,8 +572,8 @@ func systemdWords(s string) []string {
 }
 
 // parseUnitVars reads back the carried-name variables and the binary path from
-// a unit. Only the names install writes or keeps are read (reCarriedName), so
-// the answer is never a stand-in for the unit's whole environment.
+// a unit. Only the names install writes or keeps are read (reCarriedName, and on
+// macOS PATH), so the answer is never a stand-in for the unit's whole environment.
 func parseUnitVars(goos, text string) (vars map[string]string, bin string) {
 	vars = map[string]string{}
 	switch goos {
@@ -585,7 +608,7 @@ func parseUnitVars(goos, text string) (vars map[string]string, bin string) {
 // settingsFrom is what the variables a unit sets say about the three values a
 // flag can choose, and which others are to be kept (muster #447).
 func settingsFrom(vars map[string]string) svcSettings {
-	return svcSettings{Machine: vars["FLEET_MACHINE"], Addr: vars["FLEET_ADDR"], Tmux: vars["FLEET_TMUX_BIN"], Carried: carriedVars(vars)}
+	return svcSettings{Machine: vars["FLEET_MACHINE"], Addr: vars["FLEET_ADDR"], Tmux: vars["FLEET_TMUX_BIN"], Path: vars["PATH"], Carried: carriedVars(vars)}
 }
 
 // parseUnit reads back the settings and the binary path from a unit this
@@ -927,6 +950,17 @@ func svcInstall(ctx context.Context, e svcEnv, o svcInstallOpts) error {
 	if s.Machine == "" {
 		s.Machine = shortHost(e.Hostname)
 	}
+	// PATH (muster #483), macOS only: kept as the operator set it, and a unit that
+	// has none (a first install, or one an earlier release wrote) gets the default.
+	// A systemd unit is left alone: the user manager supplies a service's PATH and a
+	// drop-in carries an operator's, and one written into the unit would override both.
+	pathKept := false
+	if e.GOOS == "darwin" {
+		s.Path, pathKept = cur.Path, cur.Path != ""
+		if s.Path == "" {
+			s.Path = defaultUnitPath(e.Home)
+		}
+	}
 	if err := checkLoopbackAddr(s.Addr); err != nil {
 		return err
 	}
@@ -1004,6 +1038,14 @@ func svcInstall(ctx context.Context, e svcEnv, o svcInstallOpts) error {
 	rep.line("unit", unitChanged, p.Unit)
 	if len(s.Carried) > 0 {
 		fmt.Fprintf(e.Out, "  carried   %d variable(s) kept from the unit: %s\n", len(s.Carried), carriedNames(s.Carried))
+	}
+	if e.GOOS == "darwin" {
+		// A PATH names directories, not a secret: unlike the carried variables, its value is printed.
+		if pathKept {
+			fmt.Fprintf(e.Out, "  path      kept from the unit: %s\n", s.Path)
+		} else {
+			fmt.Fprintf(e.Out, "  path      the unit set none; wrote the default: %s\n", s.Path)
+		}
 	}
 
 	// doctor, as the unit will run: its environment and nothing else.
@@ -1263,6 +1305,16 @@ func svcStatus(ctx context.Context, e svcEnv) error {
 		row("env", true, "kept from the unit across installs: "+carriedNames(s.Carried))
 	} else {
 		row("env", true, "nothing beyond what install writes")
+	}
+	if e.GOOS == "darwin" {
+		// What the unit says, not what a running job was started with: a unit edited
+		// after the last restart reads differently here until the service restarts.
+		if s.Path != "" {
+			row("path", true, s.Path)
+		} else {
+			row("path", true, "the unit sets none, so launchd's default applies ("+launchdDefaultPath+") and a tool in "+
+				filepath.Join(e.Home, ".local", "bin")+" is not found on PATH: muster service install writes one")
+		}
 	}
 	ver := "cannot run it"
 	if out, err := e.Run(ctx, nil, bin, "--version"); err == nil {
