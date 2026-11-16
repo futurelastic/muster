@@ -228,6 +228,52 @@ func TestPlanRefusesGrantsThatWouldPutTheHomeBack(t *testing.T) {
 	}
 }
 
+// muster #488: the home guard asks which directory a path names, not how it was
+// spelled. On a case-insensitive volume an upper-cased home is the home, and the
+// profile matches paths in either case, so the spelling must not buy a grant.
+func TestPlanRefusesTheHomeInAnyLetterCase(t *testing.T) {
+	skipOnWindows(t, "the sandbox profile is macOS-only and built from POSIX paths")
+	base := t.TempDir()
+	if r, err := filepath.EvalSymlinks(base); err == nil {
+		base = r
+	}
+	home := filepath.Join(base, "home")
+	if err := os.MkdirAll(filepath.Join(home, "project"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(strings.ToUpper(home)); err != nil {
+		t.Skip("this volume is case-sensitive: an upper-cased home is another path")
+	}
+	t.Setenv("HOME", home)
+	d, _ := newIsolatedDriver(t)
+	cwd := t.TempDir()
+	capitals := func(p string) fleet.AbsolutePath { return fleet.AbsolutePath(strings.ToUpper(p)) }
+	for _, c := range []struct {
+		name string
+		cwd  string
+		spec fleet.SandboxSpec
+	}{
+		{"a read grant on the home", cwd, fleet.SandboxSpec{ReadPaths: []fleet.AbsolutePath{capitals(home)}}},
+		{"a write grant on the home", cwd, fleet.SandboxSpec{WritePaths: []fleet.AbsolutePath{capitals(home)}}},
+		{"a read grant on an ancestor of the home", cwd, fleet.SandboxSpec{ReadPaths: []fleet.AbsolutePath{capitals(base)}}},
+		{"a write grant on an ancestor of the home", cwd, fleet.SandboxSpec{WritePaths: []fleet.AbsolutePath{capitals(base)}}},
+		{"a package cache on the home", cwd, fleet.SandboxSpec{PackageCache: &fleet.SandboxPackageCache{Path: capitals(home)}}},
+		{"a working directory that is the home", strings.ToUpper(home), fleet.SandboxSpec{}},
+	} {
+		spec := c.spec
+		_, err := d.planSandbox(fleet.SessionSpec{Cwd: fleet.AbsolutePath(c.cwd), Sandbox: &spec}, t.TempDir())
+		var fe *fleet.Error
+		if !errors.As(err, &fe) || fe.Kind != fleet.ErrorInvalid || !strings.Contains(fe.Message, "is, or contains, the service user's home directory") {
+			t.Errorf("%s: want an invalid refusal naming the home directory, got %v", c.name, err)
+		}
+	}
+	// The exact-case spelling of a directory under the home is still a grant.
+	sub := fleet.AbsolutePath(filepath.Join(home, "project"))
+	if _, err := d.planSandbox(fleet.SessionSpec{Cwd: fleet.AbsolutePath(cwd), Sandbox: &fleet.SandboxSpec{ReadPaths: []fleet.AbsolutePath{sub}}}, t.TempDir()); err != nil {
+		t.Errorf("a grant under the home was refused: %v", err)
+	}
+}
+
 func TestPlanDefaultsAreTheWorkdirAndThePrivateDirOnly(t *testing.T) {
 	d, _ := newIsolatedDriver(t)
 	cwd, dir := t.TempDir(), t.TempDir()

@@ -96,9 +96,10 @@ func (p *sandboxPlan) state() *fleet.SandboxState {
 	return st
 }
 
-// resolvePath, coversOrIs, installRoots and dedupe are the shared package's.
+// resolvePath, coversOrIs, coversHome, installRoots and dedupe are the shared package's.
 func resolvePath(p string) string            { return sandbox.ResolvePath(p) }
 func coversOrIs(root, path string) bool      { return sandbox.CoversOrIs(root, path) }
+func coversHome(root, home string) bool      { return sandbox.CoversHome(root, home) }
 func installRoots(bin, home string) []string { return sandbox.InstallRoots(bin, home) }
 func dedupe(in []string) []string            { return sandbox.Dedupe(in) }
 
@@ -139,7 +140,7 @@ func (d *Driver) planSandboxFor(ctx context.Context, spec fleet.SessionSpec, ses
 	// the profile exists to remove.
 	check := func(field string, p fleet.AbsolutePath) (string, error) {
 		r := resolvePath(string(p))
-		if home != "" && coversOrIs(r, home) {
+		if home != "" && coversHome(r, home) {
 			return "", invalid("%s: %q is, or contains, the service user's home directory; grant the specific directory a session needs", field, string(p))
 		}
 		// A Linux grant is made by opening the path, so a path that is not there
@@ -157,7 +158,7 @@ func (d *Driver) planSandboxFor(ctx context.Context, spec fleet.SessionSpec, ses
 	if info, err := os.Stat(cwd); err != nil || !info.IsDir() {
 		return nil, invalid("cwd %q is not a directory that exists, which a sandboxed session needs to be started in", string(spec.Cwd))
 	}
-	if home != "" && coversOrIs(cwd, home) {
+	if home != "" && coversHome(cwd, home) {
 		return nil, invalid("cwd %q is, or contains, the service user's home directory, which a sandboxed session would then write to", string(spec.Cwd))
 	}
 
