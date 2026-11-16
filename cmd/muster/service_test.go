@@ -5,12 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"html"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -827,5 +829,249 @@ func TestServiceInstallKeptRuntimeStillServes(t *testing.T) {
 				t.Errorf("/v1/runtimes does not list opencode after an update that kept its variables: %+v", body.Items)
 			}
 		})
+	}
+}
+
+// ---- muster #483: macOS install keeps the unit's PATH ------------------------
+
+// plistPath reads the PATH a plist sets and how many PATH keys it has.
+func plistPath(unit string) (value string, keys int) {
+	re := regexp.MustCompile(`<key>PATH</key>\s*<string>([^<]*)</string>`)
+	ms := re.FindAllStringSubmatch(unit, -1)
+	if len(ms) == 0 {
+		return "", 0
+	}
+	return html.UnescapeString(ms[0][1]), len(ms)
+}
+
+// setUnitPath rewrites the unit's PATH to a value, the way an operator editing the
+// plist would: the key stays where install put it.
+func setUnitPath(t *testing.T, f *svcFixture, value string) {
+	t.Helper()
+	raw, err := os.ReadFile(f.p.Unit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, keys := plistPath(string(raw))
+	if keys != 1 {
+		t.Fatalf("the unit has %d PATH keys, want 1:\n%s", keys, raw)
+	}
+	out := strings.Replace(string(raw), "<string>"+xmlEscape(old)+"</string>", "<string>"+xmlEscape(value)+"</string>", 1)
+	if out == string(raw) {
+		t.Fatalf("no PATH value to replace in:\n%s", raw)
+	}
+	if err := os.WriteFile(f.p.Unit, []byte(out), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// dropUnitPath removes the PATH key, as a unit an earlier release wrote has none.
+func dropUnitPath(t *testing.T, f *svcFixture) {
+	t.Helper()
+	raw, err := os.ReadFile(f.p.Unit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	re := regexp.MustCompile(`\t\t<key>PATH</key>\n\t\t<string>[^<]*</string>\n`)
+	if !re.Match(raw) {
+		t.Fatalf("the unit has no PATH to drop:\n%s", raw)
+	}
+	if err := os.WriteFile(f.p.Unit, re.ReplaceAll(raw, nil), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A first install on macOS writes a PATH that has the installing user's
+// ~/.local/bin, then Homebrew's and the system directories, and writes it once.
+// A second install changes nothing. doctor runs under it, as the unit will.
+func TestServiceInstallWritesADefaultPathOnMacOS(t *testing.T) {
+	f := newSvcFixture(t, "darwin")
+	if code := f.install(t); code != 0 {
+		t.Fatalf("install: %d\n%s%s", code, f.out, f.errb)
+	}
+	raw, _ := os.ReadFile(f.p.Unit)
+	got, keys := plistPath(string(raw))
+	if keys != 1 {
+		t.Fatalf("the unit has %d PATH keys, want 1:\n%s", keys, raw)
+	}
+	dirs := strings.Split(got, ":")
+	if want := filepath.Join(f.env.Home, ".local", "bin"); dirs[0] != want {
+		t.Errorf("PATH starts with %q, want %q: %s", dirs[0], want, got)
+	}
+	for _, d := range []string{"/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"} {
+		if !contains(dirs, d) {
+			t.Errorf("the default PATH lacks %s: %s", d, got)
+		}
+	}
+	if !strings.Contains(f.out.String(), "path      the unit set none; wrote the default: "+got) {
+		t.Errorf("install did not say it wrote the default:\n%s", f.out)
+	}
+	if !contains(f.mgr.doctorEnv, "PATH="+got) {
+		t.Errorf("doctor did not run under the unit's PATH: %v", f.mgr.doctorEnv)
+	}
+
+	if code := f.run(t, "install"); code != 0 || !strings.Contains(f.out.String(), "Nothing to change") {
+		t.Fatalf("a second install: %d\n%s%s", code, f.out, f.errb)
+	}
+	again, _ := os.ReadFile(f.p.Unit)
+	if !bytes.Equal(raw, again) {
+		t.Errorf("a second install rewrote the unit:\n%s\n--- then ---\n%s", raw, again)
+	}
+}
+
+// The ask of #483: a PATH the operator set survives the update, byte for byte, and
+// install says so. The value has the characters an XML escape and a carried value
+// have to get through, and the update runs with no flags and then with one.
+func TestServiceInstallKeepsAnOperatorPathByteForByte(t *testing.T) {
+	f := newSvcFixture(t, "darwin")
+	if code := f.install(t, "--machine", "first"); code != 0 {
+		t.Fatalf("install: %d\n%s%s", code, f.out, f.errb)
+	}
+	custom := `/Users/op/bin:/opt/my tools/bin:/x&y/<z>:/usr/bin:/bin`
+	setUnitPath(t, f, custom)
+	before, _ := os.ReadFile(f.p.Unit)
+
+	if code := f.run(t, "install"); code != 0 {
+		t.Fatalf("update: %d\n%s%s", code, f.out, f.errb)
+	}
+	after, _ := os.ReadFile(f.p.Unit)
+	if !bytes.Equal(before, after) {
+		t.Errorf("the update changed a unit whose PATH was the operator's:\n%s\n--- then ---\n%s", before, after)
+	}
+	if got, keys := plistPath(string(after)); got != custom || keys != 1 {
+		t.Errorf("PATH is %q (%d keys), want %q once", got, keys, custom)
+	}
+	if !strings.Contains(f.out.String(), "path      kept from the unit: "+custom) || !strings.Contains(f.out.String(), "unit      unchanged") {
+		t.Errorf("install did not say it kept the PATH and changed nothing:\n%s", f.out)
+	}
+	if !contains(f.mgr.doctorEnv, "PATH="+custom) {
+		t.Errorf("doctor did not run under the operator's PATH: %v", f.mgr.doctorEnv)
+	}
+
+	// A flag changes what it sets and nothing else.
+	if code := f.run(t, "install", "--machine", "second"); code != 0 {
+		t.Fatalf("flagged: %d\n%s%s", code, f.out, f.errb)
+	}
+	flagged, _ := os.ReadFile(f.p.Unit)
+	if got, keys := plistPath(string(flagged)); got != custom || keys != 1 {
+		t.Errorf("a flag took the PATH with it: %q (%d keys)\n%s", got, keys, flagged)
+	}
+	if !strings.Contains(string(flagged), "second") {
+		t.Errorf("--machine did not win:\n%s", flagged)
+	}
+}
+
+// A PATH the operator put somewhere else in the plist (a hand-edited file puts a
+// key where it likes) is found, kept, and written once in install's own place.
+func TestServiceInstallKeepsAPathWhereverTheOperatorPutIt(t *testing.T) {
+	f := newSvcFixture(t, "darwin")
+	if code := f.install(t); code != 0 {
+		t.Fatalf("install: %d\n%s%s", code, f.out, f.errb)
+	}
+	dropUnitPath(t, f)
+	custom := "/Users/op/bin:/usr/bin"
+	addToUnit(t, f, operatorVar{"PATH", custom}, operatorVar{"FLEET_INBOX_INDEX", "/var/inbox"})
+	if code := f.run(t, "install"); code != 0 {
+		t.Fatalf("update: %d\n%s%s", code, f.out, f.errb)
+	}
+	unit, _ := os.ReadFile(f.p.Unit)
+	if got, keys := plistPath(string(unit)); got != custom || keys != 1 {
+		t.Errorf("PATH is %q (%d keys), want %q once:\n%s", got, keys, custom, unit)
+	}
+	if !strings.Contains(string(unit), "FLEET_INBOX_INDEX") {
+		t.Errorf("a carried variable was lost beside the PATH:\n%s", unit)
+	}
+	if strings.Contains(f.out.String(), "carried   2 variable(s)") || strings.Contains(f.out.String(), "kept from the unit: FLEET_INBOX_INDEX, PATH") {
+		t.Errorf("PATH is reported among the carried names (it has its own line):\n%s", f.out)
+	}
+}
+
+// A unit an earlier release wrote has no PATH: the update gives it the default,
+// which is what puts ~/.local/bin back on a service that lost it. An empty PATH
+// reads as none.
+func TestServiceInstallGivesAUnitWithoutAPathTheDefault(t *testing.T) {
+	f := newSvcFixture(t, "darwin")
+	if code := f.install(t); code != 0 {
+		t.Fatalf("install: %d\n%s%s", code, f.out, f.errb)
+	}
+	want, _ := plistPath(readUnitText(t, f.p.Unit))
+	for name, edit := range map[string]func(){
+		"no PATH key":   func() { dropUnitPath(t, f) },
+		"an empty PATH": func() { setUnitPath(t, f, "") },
+	} {
+		edit()
+		if code := f.run(t, "install"); code != 0 {
+			t.Fatalf("%s: update: %d\n%s%s", name, code, f.out, f.errb)
+		}
+		got, keys := plistPath(readUnitText(t, f.p.Unit))
+		if got != want || keys != 1 {
+			t.Errorf("%s: PATH is %q (%d keys), want the default %q once", name, got, keys, want)
+		}
+		if !strings.Contains(f.out.String(), "unit      changed") || !strings.Contains(f.out.String(), "wrote the default") {
+			t.Errorf("%s: install did not say it wrote the default:\n%s", name, f.out)
+		}
+	}
+}
+
+func readUnitText(t *testing.T, path string) string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
+
+// A systemd unit is not given a PATH: the user manager supplies the service's own,
+// and one written into the unit would override it.
+func TestServiceInstallWritesNoPathOnLinux(t *testing.T) {
+	f := newSvcFixture(t, "linux")
+	if code := f.install(t); code != 0 {
+		t.Fatalf("install: %d\n%s%s", code, f.out, f.errb)
+	}
+	unit := readUnitText(t, f.p.Unit)
+	if strings.Contains(unit, "PATH") {
+		t.Errorf("the systemd unit sets a PATH:\n%s", unit)
+	}
+	for _, kv := range f.mgr.doctorEnv {
+		if strings.HasPrefix(kv, "PATH=") {
+			t.Errorf("doctor ran under a PATH on Linux: %v", f.mgr.doctorEnv)
+		}
+	}
+	if strings.Contains(f.out.String(), "path      ") {
+		t.Errorf("install reported a PATH on Linux:\n%s", f.out)
+	}
+	if code := f.run(t, "status"); code != 0 || strings.Contains(f.out.String(), "path ") {
+		t.Errorf("status on Linux: exit %d\n%s", code, f.out)
+	}
+}
+
+// status shows the PATH the unit sets, so a service that lost it or never had one
+// is visible; a unit with none is said to have none, and is not a failure.
+func TestServiceStatusShowsThePath(t *testing.T) {
+	f := newSvcFixture(t, "darwin")
+	if code := f.install(t); code != 0 {
+		t.Fatalf("install: %d\n%s%s", code, f.out, f.errb)
+	}
+	custom := "/Users/op/bin:/usr/bin"
+	setUnitPath(t, f, custom)
+	if code := f.run(t, "status"); code != 0 || !strings.Contains(f.out.String(), "path      ok       "+custom) {
+		t.Errorf("status with a PATH: exit %d\n%s", code, f.out)
+	}
+	dropUnitPath(t, f)
+	code := f.run(t, "status")
+	if code != 0 || !strings.Contains(f.out.String(), "the unit sets none, so launchd's default applies ("+launchdDefaultPath+")") ||
+		!strings.Contains(f.out.String(), filepath.Join(f.env.Home, ".local", "bin")) {
+		t.Errorf("status without a PATH: exit %d\n%s", code, f.out)
+	}
+}
+
+// The plist and the settings round-trip a PATH with the characters XML escapes.
+func TestLaunchdPlistRoundTripsAPath(t *testing.T) {
+	p := svcPaths{Bin: "/b/muster", ConfigDir: "/c", Config: "/c/config.json", StateDir: "/s", Log: "/s/l.log"}
+	s := svcSettings{Machine: "m", Addr: "127.0.0.1:1", Tmux: "/t/tmux", Path: `/h o/.local/bin:/a&b:/<x>:/usr/bin`, Carried: [][2]string{{"LANG", "en_US.UTF-8"}}}
+	got, bin := parseUnit("darwin", renderLaunchdPlist(p, s))
+	if !reflect.DeepEqual(got, s) || bin != p.Bin {
+		t.Errorf("parsed %+v %q, want %+v %q", got, bin, s, p.Bin)
 	}
 }

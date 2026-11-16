@@ -71,6 +71,23 @@ lint)
 	"$bin" service install --no-start --addr "$addr" --tmux "$tmux_bin" | tee /tmp/e2e-service.out
 	grep -q 'unit      unchanged' /tmp/e2e-service.out || fail "the second run rewrote the unit"
 	grep -q 'login     unchanged' /tmp/e2e-service.out || fail "the second run rewrote the login item"
+	# PATH (muster #483). launchd gives a job /usr/bin:/bin:/usr/sbin:/sbin and nothing else,
+	# so a unit with none starts a service that cannot find a tool in ~/.local/bin, and an
+	# update that dropped an operator's PATH did the same without a word. Assert both halves
+	# on the plist that was written: the fresh one starts with $HOME/.local/bin, and one an
+	# operator edited keeps its PATH, value for value, through an update.
+	step "PATH: a fresh install has ~/.local/bin first; an operator's PATH survives an update"
+	fresh_path="$(plutil -extract EnvironmentVariables.PATH raw "$plist")" || fail "the fresh unit has no PATH"
+	case "$fresh_path" in "$HOME/.local/bin":*) ;; *) fail "the fresh PATH does not start with \$HOME/.local/bin: $fresh_path" ;; esac
+	custom_path="$HOME/operator-bin:/opt/my tools/bin:/usr/bin:/bin"
+	plutil -replace EnvironmentVariables.PATH -string "$custom_path" "$plist"
+	"$bin" service install --no-start --addr "$addr" --tmux "$tmux_bin" | tee /tmp/e2e-service.out
+	[ "$(plutil -extract EnvironmentVariables.PATH raw "$plist")" = "$custom_path" ] || fail "an update changed the operator's PATH"
+	grep -q 'path      kept from the unit' /tmp/e2e-service.out || fail "install did not say it kept the PATH"
+	plutil -lint "$plist"
+	# status reads the same unit; no job is loaded here, so its exit code is not the point.
+	"$bin" service status | tee /tmp/e2e-service.out || true
+	grep -qF "$custom_path" /tmp/e2e-service.out || fail "status does not show the unit's PATH"
 	step "uninstall --purge removes the login item too"
 	"$bin" service uninstall --purge
 	[ ! -e "$plist" ] || fail "the plist survived uninstall"
