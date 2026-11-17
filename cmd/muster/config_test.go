@@ -631,6 +631,27 @@ func TestConfigCanGrantDebug(t *testing.T) {
 	}
 }
 
+// And the credentials grant (muster #498), which is the one an operator writes
+// down by hand and nothing else supplies.
+func TestConfigCanGrantCredentials(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	body := `{"principals": [{"name": "op", "token": "tok", "grants": ["credentials"]}]}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps, err := cfg.principals()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ps) != 1 || !ps[0].Allows(service.GrantCredentials) {
+		t.Errorf("principals = %+v, want op holding credentials", ps)
+	}
+}
+
 // muster #441: refuseRecordReads is off unless the file says true, and an absent
 // key must not read as on.
 func TestLoadConfigReadsRefuseRecordReads(t *testing.T) {

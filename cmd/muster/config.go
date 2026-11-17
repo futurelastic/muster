@@ -124,6 +124,10 @@ type fileConfig struct {
 	// machine, not about the fleet. Adding or changing an entry — the
 	// declaration — needs the same restart TrustRoots and DefaultRuntime
 	// do; rotating the file an existing entry points at needs nothing.
+	//
+	// What a client links over the credentials routes (muster #498) is NOT an entry
+	// here and never edits this file: the service keeps it in its own state and reads
+	// it beside these entries, and an entry here for the same variable always wins.
 	SessionEnv []struct {
 		Name     string `json:"name"`
 		FromFile string `json:"fromFile,omitempty"`

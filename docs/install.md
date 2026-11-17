@@ -868,6 +868,15 @@ that. So the operator chooses, in the file `FLEET_CONFIG` names:
   entry and the stored sign-in, with their state: a key file that is missing or
   unusable reads `degraded` with a reason that names the variable and never the file.
   A client reads it instead of running the runtime's own programs.
+- **A client can link and unlink these over HTTP** (#498), with the `credentials` grant
+  (`muster principal grant <name> credentials`; nothing implies it, and a signed machine
+  list that names it is refused). An API key linked that way is written owner-only under
+  `<state dir>/linked/<runtime>/` and supplied to sessions beside your `sessionEnv`
+  entries; it is not a config entry, so it needs no restart and your file is never
+  rewritten. **Your declaration always wins**: a variable you declared is refused (409),
+  and one you declare later shadows a linked key. The subscription sign-in is the same
+  device flow as `muster grant login`, as a start and a poll. Needs the state directory;
+  without one the routes answer 501. `docs/api.md` and `docs/spec/api-http.md` §3.1.3.
 - The declaration is read at start and changing it needs a restart, like `sessionEnv`;
   a reload that changes it is refused whole.
 

@@ -387,7 +387,7 @@ session.
 RuntimeCredential {
   provider : string                                    // the runtime's own id for the provider ("openai")
   kind     : "api-key" | "subscription"                // the way in, as `usage.credential` names it (#458)
-  source   : "operator-env" | "grant" | "engine-store" // open on read
+  source   : "operator-env" | "grant" | "linked" | "engine-store" // open on read
   state    : "usable" | "signed-out" | "revoked" | "degraded"   // open on read
   reason?  : string                                    // one sentence for a person; present unless state is "usable"
 }
@@ -413,6 +413,11 @@ RuntimeCredential {
   which of the two it is for a create — and a key file the service can read reads
   `usable`. Two variables for one provider (the names the runtime accepts for it) are
   one row, and it reads the better of the two.
+- `source: "linked"` is an API key a client linked through the credentials routes
+  (§3.1.3, muster #498): the service wrote it into its own state and supplies it to a
+  session itself, so a client may unlink it. A key the operator declared is
+  `operator-env` and a client cannot remove it. A linked key whose file went missing or
+  unusable reads `degraded`, and its reason says to link it again.
 - `source: "grant"` is the subscription sign-in this service stores and renews (muster
   #451), `kind: "subscription"`. Its `state` is the grant's own, with `ok` read as
   `usable`, and its `reason` is the grant's.
@@ -785,6 +790,92 @@ The credential travels as an `Authorization` header like every other request,
 which a bare `go tool pprof <url>` cannot send. Fetch the file with the header,
 then open it: `curl -H "Authorization: Bearer …" -o cpu.pb.gz
 "$BASE/v1/debug/pprof/profile?seconds=30"`, then `go tool pprof cpu.pb.gz`.
+
+### 3.1.3 The credentials routes
+
+Link and unlink a runtime's provider credentials (muster #498). The service is the one
+party that starts the runtime, so it is the one that writes the credentials it starts it
+with; the view that says what exists is `credentials` on a runtime row (§3.1, #497), and
+this is its write side. A client stores what people choose and asks here to make a
+credential exist; it never runs the runtime's own programs or this service's command line
+on the machine.
+
+Every route is under `/v1/runtimes/{runtime}/credentials/{provider}/…`, needs the
+**`credentials`** grant (§5), and is **local**: the path names no machine, so it is never
+relayed to a peer — a peer's credentials are changed on that peer, by a principal that
+holds the grant there. `{runtime}` is a runtime id this machine has (`GET /v1/runtimes`),
+`{provider}` the runtime's own id for the provider.
+
+| Method | Path under `…/credentials/{provider}/` | Does |
+|---|---|---|
+| `PUT` | `api-key` | Store the key; replaces a key linked before (this is also how one is rotated) |
+| `DELETE` | `api-key` | Remove a linked key |
+| `POST` | `subscription/login` | Start the subscription sign-in; answers the address and code to show a person |
+| `GET` | `subscription/login/{id}` | Where that attempt stands |
+| `DELETE` | `subscription` | Forget the stored sign-in |
+
+**`PUT …/api-key`** takes `{"value": "<the key>"}` and nothing else, at most 8 KiB, and
+answers the `RuntimeCredential` row the view now shows (`source: "linked"`). The value is
+one printable token of 1 to 4096 characters with no space or line break (one trailing
+newline is dropped). The service writes it owner-only into its own state and supplies it
+to sessions as the variable the runtime reads for that provider; it is read fresh at each
+create, so a second `PUT` is in the next session with nothing to restart. **The value is
+passed once and is never logged, echoed or readable back**: no response, error or audit
+line carries it, a malformed body is refused with a fixed sentence that quotes nothing,
+and the view says only that a key exists and whether it works. Sessions already running
+keep the key they started with; the change reaches the next create.
+
+- The provider must be one the service knows the variable of (the same short table the
+  view uses, §3.1); any other is `400 invalid` naming the supported providers. A provider
+  that has several accepted variable names is linked under one of them.
+- **A provider the machine's policy does not permit is refused** (`400 invalid`): a
+  linked key makes a provider usable, it never allows it, and a key for a provider no
+  session may use would be invisible in the view.
+- **The operator's declaration wins.** A variable the operator declared in `sessionEnv`
+  for this runtime is refused (`409 conflict`) — change that entry in the config instead.
+  A declaration added after a key was linked shadows it: the view shows the operator's
+  credential, and `DELETE` still removes the linked file.
+- A machine with no state directory, or a runtime this service did not start (shared
+  mode), or one that does not take credentials through the service (the terminal runtime),
+  answers `501 unsupported`.
+
+**`DELETE …/api-key`** answers `{provider, kind, removed}` and is idempotent: nothing
+linked is `removed: false`, not an error. It removes a *linked* key only.
+
+**The subscription sign-in** (`openai` only; any other provider is `400 invalid`) is the
+`muster grant login` device flow as a start and a poll, because a person takes minutes to
+approve:
+
+```
+POST …/subscription/login  →  200
+{ "id": "…", "state": "pending", "url": "https://…/codex/device", "code": "ABCD-1234", "expiresAt": "…" }
+
+GET  …/subscription/login/{id}  →  200
+{ "id": "…", "state": "pending" | "approved" | "expired" | "failed", "url"?, "code"?, "expiresAt"?, "reason"? }
+```
+
+`url` and `code` are what to show a person (open the address on any device, type the
+code, approve); they are present only while `state` is `pending`. One attempt is pending
+at a time: a second `POST` returns the one already waiting rather than a second code.
+Approval stores the sign-in, and the `credentials` row reads `usable` at once; the
+service's renewal picks it up within half a minute and live sessions get the new access
+token then, exactly as after `muster grant login`. `expired` is nobody approving within
+15 minutes; `failed` carries a `reason` sentence with no token in it. Only the latest
+attempt is kept, and a restart forgets a pending one: its id answers `404 not_found` and
+the client starts again. No answer here ever carries a token.
+
+**`DELETE …/subscription`** forgets the stored sign-in, answers `{provider, kind,
+removed}`, and is idempotent. Sessions already running keep the access token they hold
+until it lapses.
+
+An attempt's code is what signs this machine in to whichever account approves it, so
+**reading an attempt needs the grant too**, not only starting one.
+
+**The audit line** for every request on these routes — permitted, refused for the grant,
+or refused by the driver — is
+`audit: actor=… verb=credentials route=… target=<machine>/<runtime> provider=… kind=… action=link|unlink|login-start|login-status|sign-out outcome=…`.
+It names what was done and to which provider and kind, and never a value, a code or an
+attempt id.
 
 ### 3.2 Sessions
 
@@ -3462,7 +3553,7 @@ the only one, which is why the list has no `since=`.
   development.
 - Permissions are **per verb, per machine**. `list` and `state` may be granted
   broadly; `create`, `input`, `interrupt`, `close`, `rename`, `discard`, `keys`,
-  `label`, `remote-control`, `push-list`, `debug`, `record` and `acting-person` are granted per peer and default to denied. That default is deliberate
+  `label`, `remote-control`, `push-list`, `debug`, `record`, `credentials` and `acting-person` are granted per peer and default to denied. That default is deliberate
   and applies to a fresh deployment as much as an established one — no grant is
   implied by anything else, including a runtime advertising the capability the
   grant gates (§3, `keys`; muster #68).
@@ -3506,6 +3597,21 @@ the only one, which is why the list has no `since=`.
   it: a list that names it is refused whole, because whether this machine can be
   profiled, and by whom, is a local decision. A grant alone is not enough: the
   machine's operator must also switch the endpoint on, and it is off by default.
+- **`credentials` changes which credentials this machine's runtime runs on** (muster #498,
+  `…/runtimes/{runtime}/credentials/…`, §3.1.3). A holder can link an API key (which
+  travels in a request body, so reach the service only over a channel you trust: loopback
+  or a TLS-terminating front, as for every bearer token), start or read a subscription
+  sign-in attempt, and remove either — and so decides which provider account this
+  machine's sessions bill. It changes no session and never returns a credential. Its own
+  grant, not a rider on `create` or `keys`: who may change this machine's engine
+  credentials is a local decision, the same shape as `push-list` and `debug`. Denied by
+  default like every grant, not implied by anything — not `read`, `send` or `relay`, not
+  the legacy all-verbs flags (a machine with no principal table refuses every request,
+  nobody can hold it), and not the set `muster service install` enrols the local service
+  principal with — and a signed machine list cannot give it: a list that names it is
+  refused whole. It is not relayed to a peer. Linking a credential makes a provider
+  usable; it never allows it (the provider policy still decides). Seeing which credentials
+  exist stays `read`.
 - **`record` reads a session's whole record** (muster #441,
   `GET …/{id}/record`, §3.2). It is the widest read this API has: a record carries
   whatever the session did and was told — file bodies and command output once tool

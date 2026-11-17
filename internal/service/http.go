@@ -118,6 +118,13 @@ func NewMux(svc *Service, cfg Config) *http.ServeMux {
 	mux.HandleFunc("GET /v1/whoami", withAuth(svc, cfg, handleWhoAmI(svc, cfg)))
 	mux.HandleFunc("GET /v1/machines", withAuth(svc, cfg, reading(handleMachines(svc))))
 	mux.HandleFunc("GET /v1/runtimes", withAuth(svc, cfg, reading(handleRuntimes(svc))))
+	// The credentials routes (muster #498). Their own grant, checked by the gate and
+	// not by mutating(); local to this machine, never relayed.
+	mux.HandleFunc("PUT /v1/runtimes/{runtime}/credentials/{provider}/api-key", withAuth(svc, cfg, credentialsGate(svc, handleLinkKey(svc))))
+	mux.HandleFunc("DELETE /v1/runtimes/{runtime}/credentials/{provider}/api-key", withAuth(svc, cfg, credentialsGate(svc, handleUnlinkKey(svc))))
+	mux.HandleFunc("POST /v1/runtimes/{runtime}/credentials/{provider}/subscription/login", withAuth(svc, cfg, credentialsGate(svc, handleLoginStart(svc))))
+	mux.HandleFunc("GET /v1/runtimes/{runtime}/credentials/{provider}/subscription/login/{id}", withAuth(svc, cfg, credentialsGate(svc, handleLoginStatus(svc))))
+	mux.HandleFunc("DELETE /v1/runtimes/{runtime}/credentials/{provider}/subscription", withAuth(svc, cfg, credentialsGate(svc, handleSignOut(svc))))
 	// A read in every sense but the verb: it carries a body and changes nothing,
 	// so it needs only the read grant (grantForVerb, #344).
 	mux.HandleFunc("POST /v1/posture/dry-run", withAuth(svc, cfg, reading(handlePostureDryRun(svc))))

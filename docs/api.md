@@ -22,7 +22,7 @@ open.
 **Grants.** With a principal table configured, each caller is a named identity
 with its own credential and its own list of grants: `read`, `create`, `send`,
 `interrupt`, `close`, `rename`, `discard`, `keys`, `label`, `remote-control`, `relay`,
-`push-list`, `debug`, `record`.
+`push-list`, `debug`, `record`, `credentials`.
 Every grant defaults to denied. ⚠️ `record` reads a session's **whole record**, and
 nothing implies it — see `GET …/record` below. ⚠️ `keys` is the one that can **escalate** a session (it delivers
 `BTab`, which cycles the permission mode — see `POST …/keys` below), so grant it
@@ -155,6 +155,8 @@ every configured peer, exactly one hop — peers never recurse.
 | `DELETE` | `/v1/machines/{machine}/sessions/{id}` | Destroy the session | `close` | yes |
 | `GET` | `/v1/machine-list` | The owner-signed machine list this machine has in force, byte for byte | `read` | this machine only |
 | `PUT` | `/v1/machine-list` | Hand this machine a newer signed machine list; it is written and put in force live | `push-list` | this machine only |
+| `PUT` · `DELETE` | `/v1/runtimes/{runtime}/credentials/{provider}/api-key` | Link (store, or rotate) · unlink a provider API key for a runtime; the value is passed once and never readable back | `credentials` | this machine only |
+| `POST` · `GET` · `DELETE` | `/v1/runtimes/{runtime}/credentials/{provider}/subscription/login` · `…/login/{id}` · `…/subscription` | Start the ChatGPT sign-in (the address and code to show a person) · poll it · sign out | `credentials` | this machine only |
 | `GET` | `/v1/debug/pprof/` · `…/{name}` | Profile this service's own process (CPU, trace, heap, goroutines); off unless the machine's config switches it on | `debug` | this machine only |
 
 ⚠️ = the specification requires `read`; the implementation does not check it yet.
@@ -407,6 +409,20 @@ sign-in does not allow it. The key is absent where nobody reported (the terminal
 an `unavailable` row, every peer's row) and **absent never means none held**; `state` and
 `source` are open sets, so treat a state you do not know as not usable. `grants` stays as
 it is. See `docs/spec/api-http.md`.
+
+**Link and unlink a runtime's credentials** (#498) over `/v1/runtimes/{runtime}/credentials/{provider}/…`,
+behind the **`credentials`** grant, which nothing implies (not `read`, not the legacy
+all-verbs flags, not what `muster service install` enrols, and a signed machine list that
+names it is refused whole). `PUT …/api-key` with `{"value": "…"}` stores an API key owner-only
+in the service's state and supplies it to the next sessions; the response is the
+`credentials` row it now shows (`source: "linked"`), and **the value is never logged,
+echoed or readable back**. `DELETE …/api-key` unlinks it. `POST …/subscription/login`
+starts the device sign-in and answers `{id, state: "pending", url, code, expiresAt}` to
+show a person; `GET …/subscription/login/{id}` polls it (`pending`, `approved`,
+`expired`, `failed`); `DELETE …/subscription` signs out. A variable the operator declared
+in `sessionEnv` is refused with 409 (the config decides), and a provider the machine's
+policy does not permit with 400 (a credential makes a provider usable, never allowed).
+Local to the machine: never relayed. See `docs/spec/api-http.md` §3.1.3.
 
 A runtime the operator enabled is listed **even when it has no working driver**
 (#297). Its row has `status: "unavailable"`, a `cause` (`not-installed`,

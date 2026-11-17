@@ -83,6 +83,19 @@ func (s *Store) Replace(g Grant) (Grant, error) {
 	return out, err
 }
 
+// SignIn stores toks, the tokens a device-code sign-in returned, as a new sign-in
+// made at now. It is the one place a finished sign-in becomes a stored grant, so
+// the command line and the service's HTTP route save one identically.
+func (s *Store) SignIn(toks Tokens, now time.Time) (Grant, error) {
+	return s.Replace(Grant{
+		Refresh:      toks.Refresh,
+		Access:       toks.Access,
+		ExpiresAtMs:  now.Add(toks.ExpiresIn).UnixMilli(),
+		AccountID:    toks.AccountID,
+		SignedInAtMs: now.UnixMilli(),
+	})
+}
+
 // Update applies fn to the stored grant and saves it, but only if the stored
 // generation is still gen. It reports false, saving nothing, when a sign-in
 // landed in the meantime or the grant is gone: whoever asked is working from a

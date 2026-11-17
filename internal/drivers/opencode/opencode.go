@@ -280,6 +280,12 @@ type Driver struct {
 	sessionEnv  []sessionenv.Entry
 	sessionRoot string
 	runtimePath []string
+	// linked is the variables clients linked over the credentials routes (muster
+	// #498), read next to sessionEnv at every create; logins runs a subscription
+	// sign-in over them. Both nil when this machine has nowhere to keep them.
+	// See credmanage.go.
+	linked *sessionenv.Linked
+	logins LoginManager
 
 	// providerIDs is the operator's allow-list (WithProviders), providers the
 	// policy built from it in New (muster #293). Empty means the default: the
@@ -489,6 +495,17 @@ func WithBinary(bin string) Option { return func(d *Driver) { d.bin = bin } }
 func WithSessionEnv(entries []sessionenv.Entry) Option {
 	return func(d *Driver) { d.sessionEnv = entries }
 }
+
+// WithLinkedEnv gives the driver the store of variables clients linked over the
+// credentials routes (muster #498). Its entries reach a session exactly as a
+// declared sessionEnv entry does, except that a variable the operator declares for
+// this runtime always wins over a linked one. Nil, the default, leaves the driver
+// with declared entries alone and the credentials routes unsupported.
+func WithLinkedEnv(l *sessionenv.Linked) Option { return func(d *Driver) { d.linked = l } }
+
+// WithLogins gives the driver the means to run a subscription sign-in as a
+// start-and-poll pair (muster #498). Nil leaves the sign-in routes unsupported.
+func WithLogins(m LoginManager) Option { return func(d *Driver) { d.logins = m } }
 
 // WithSessionRoot sets the directory session-scoped directories are made in.
 // Empty (the default) uses the OS temp directory.
