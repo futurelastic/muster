@@ -860,7 +860,7 @@ relayed in, whatever grants the caller holds — answers `501 unsupported` with
 caller without it learns nothing about how the machine is configured. On a machine
 with no principal table it is the only lever.
 
-**Audit.** Every read writes one line, `audit: content-read actor=… route=… target=<machine>/<id> entries=<n> outcome=… status=… took=<ms>[ reason=record-off]`
+**Audit.** Every read writes one line, `audit: content-read actor=… route=… target=<machine>/<id> entries=<n> outcome=… status=… took=<ms>[ reason=record-off]` — or, for any other refusal, `kind=<kind> reason="<message>"` after `took=` (#416)
 — who, which session, how many entries, never the content, a cursor or a model.
 It is a different event from the state reads' lines and from `turns`' `read-turns`,
 so `grep 'audit: content-read'` selects exactly the record reads. A relayed read

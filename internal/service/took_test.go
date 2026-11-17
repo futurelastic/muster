@@ -171,14 +171,17 @@ func TestEveryMutatingVerbCarriesTookButOnlyMeasuredPhases(t *testing.T) {
 	}
 }
 
-func TestDeniedLinesAreUnchanged(t *testing.T) {
+// A denial ran nothing, so its line carries no duration. It now ends with the kind
+// and reason of the refusal (muster #416); TestADeniedLineSaysWhichGrantIsMissing
+// reads those, and this one holds the part that must not change.
+func TestDeniedLinesCarryNoDuration(t *testing.T) {
 	logs := captureAuditLog(t)
 	srv := createServer(t, &stub.Driver{DeadlineMs: 1000})
 
 	// worker holds no close grant.
 	call(t, srv, http.MethodDelete, "/v1/machines/testbox/sessions/s1", "tok")
 	line := auditLine(t, logs.String(), "close")
-	if !strings.HasSuffix(line, "outcome=DENIED") {
+	if !strings.Contains(line, "outcome=DENIED") || strings.Contains(line, "took=") {
 		t.Errorf("a denial ran nothing, so it carries no duration: %s", line)
 	}
 }

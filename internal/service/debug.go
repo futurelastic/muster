@@ -89,29 +89,31 @@ func debugGate(svc *Service, cfg Config, next http.HandlerFunc) http.HandlerFunc
 			return
 		}
 		if !p.Allows(GrantDebug) {
-			logDenied(p, GrantDebug, svc.Self(), r)
-			writeError(w, &fleet.Error{
+			denied := &fleet.Error{
 				Kind: fleet.ErrorUnauthorized, Machine: svc.Self(),
 				Message: "principal " + p.Name + " does not hold the debug grant (§6). " +
 					"Every grant defaults to denied, on a fresh deployment as much as an " +
 					"established one — this is expected until an operator adds debug " +
 					"to this principal's grants, not a bug.",
-			})
+			}
+			logDenied(p, GrantDebug, svc.Self(), r, denied)
+			writeError(w, denied)
 			return
 		}
 		if !cfg.Profiling {
-			logDenied(p, GrantDebug, svc.Self(), r)
-			writeError(w, &fleet.Error{
+			denied := &fleet.Error{
 				Kind: fleet.ErrorUnsupported, Machine: svc.Self(),
 				Message: "this machine does not offer the profiling endpoint: it is off unless the " +
 					"operator sets \"profilingEndpoint\": true in the config file and restarts (#450). " +
 					"The debug grant is held; the switch is what is missing.",
-			})
+			}
+			logDenied(p, GrantDebug, svc.Self(), r, denied)
+			writeError(w, denied)
 			return
 		}
 		aw := &auditWriter{ResponseWriter: w}
 		next(aw, r)
-		logMutation(p, GrantDebug, svc.Self(), r, aw.status)
+		logMutation(p, GrantDebug, svc.Self(), r, aw)
 	}
 }
 

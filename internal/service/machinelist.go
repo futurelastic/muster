@@ -96,19 +96,20 @@ func pushListGate(svc *Service, next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		if !p.Allows(GrantPushList) {
-			logDenied(p, GrantPushList, svc.Self(), r)
-			writeError(w, &fleet.Error{
+			denied := &fleet.Error{
 				Kind: fleet.ErrorUnauthorized, Machine: svc.Self(),
 				Message: "principal " + p.Name + " does not hold the push-list grant (§6). " +
 					"Every grant defaults to denied, on a fresh deployment as much as an " +
 					"established one — this is expected until an operator adds push-list " +
 					"to this principal's grants, not a bug.",
-			})
+			}
+			logDenied(p, GrantPushList, svc.Self(), r, denied)
+			writeError(w, denied)
 			return
 		}
 		aw := &auditWriter{ResponseWriter: w}
 		next(aw, r)
-		logMutation(p, GrantPushList, svc.Self(), r, aw.status)
+		logMutation(p, GrantPushList, svc.Self(), r, aw)
 	}
 }
 

@@ -48,15 +48,16 @@ func recordGate(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if p, ok := principalOf(r); ok && !p.Allows(GrantRecord) {
 			target := fleet.MachineId(r.PathValue("machine"))
-			logDenied(p, GrantRecord, target, r)
-			writeError(w, &fleet.Error{
+			denied := &fleet.Error{
 				Kind: fleet.ErrorUnauthorized,
 				Message: "principal " + p.Name + " does not hold the record grant (§6), which reading a session's " +
 					"record requires. It is its own grant: holding send, which guards turns, does not imply it, and " +
 					"nobody holds it by default. This is expected until an operator adds record to this " +
 					"principal's grants, not a bug.",
 				Machine: target,
-			})
+			}
+			logDenied(p, GrantRecord, target, r, denied)
+			writeError(w, denied)
 			return
 		}
 		next(w, r)
@@ -80,7 +81,7 @@ func handleRecord(svc *Service, refuse bool) http.HandlerFunc {
 		w = aw
 		entries := 0
 		reason := ""
-		defer func() { logContentRead(r, machine, id, entries, aw.status, reason) }()
+		defer func() { logContentRead(r, machine, id, entries, aw, reason) }()
 
 		if refuse {
 			reason = fleet.ReasonRecordOff

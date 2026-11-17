@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+	"unicode/utf8"
 
 	fleet "github.com/futurelastic/muster"
 	"github.com/futurelastic/muster/internal/driver"
@@ -54,7 +55,15 @@ func actorOf(p Principal, r *http.Request) string {
 type auditWriter struct {
 	http.ResponseWriter
 	status int
+	// refusal is the error the handler wrote, when it wrote one (muster #416).
+	// writeError notes it here; the audit line prints its kind and a bounded
+	// message, because the status alone says "refused" and never why.
+	refusal *errorNote
 }
+
+// noteError is how writeError tells the audit writer which error it is about to
+// send, so the line logged after the handler returns can carry it.
+func (w *auditWriter) noteError(e *fleet.Error) { w.refusal = noteOf(e) }
 
 func (w *auditWriter) WriteHeader(code int) {
 	w.status = code
@@ -66,6 +75,101 @@ func (w *auditWriter) Write(b []byte) (int, error) {
 		w.status = http.StatusOK
 	}
 	return w.ResponseWriter.Write(b)
+}
+
+// errorNoter is a response writer that wants to know which error was written to
+// it. writeError tells the first one it finds on the writer chain.
+type errorNoter interface{ noteError(*fleet.Error) }
+
+// noteError hands e to the audit writer on w's chain, if there is one. A writer
+// with no audit writer on it (the routes that log nothing) is left alone.
+func noteError(w http.ResponseWriter, e *fleet.Error) {
+	for w != nil {
+		if n, ok := w.(errorNoter); ok {
+			n.noteError(e)
+			return
+		}
+		u, ok := w.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			return
+		}
+		w = u.Unwrap()
+	}
+}
+
+// auditReasonMax bounds the message an audit line carries, in bytes, before it
+// is quoted: a refusal's message can be as long as the caller made it, and a log
+// line is not the place that is allowed to grow with it (muster #416).
+const auditReasonMax = 200
+
+// errorNote is what an audit line keeps of an error: a copy of its kind and
+// message, so a handler that goes on to change or reuse the error cannot change
+// a line that was about the one it sent.
+type errorNote struct {
+	kind    fleet.ErrorKind
+	message string
+}
+
+func noteOf(e *fleet.Error) *errorNote {
+	if e == nil {
+		return nil
+	}
+	return &errorNote{kind: e.Kind, message: e.Message}
+}
+
+// fields renders the tokens appended to an audit line whose request was answered
+// with an error: ` kind=<kind> reason="<message>"`, and nothing at all for a
+// request that was not (a nil note).
+//
+// The message is quoted, so a newline or a quote in it cannot end the line or
+// open a field of its own, and it is cut at auditReasonMax bytes on a rune
+// boundary with `...` in the place of what was dropped. The kind is a closed set
+// on this machine, but a relayed error carries whatever the peer sent, so a kind
+// that is not a plain token is quoted too. An error with no message prints no
+// reason rather than an empty one.
+//
+// The tokens come last on the line, after `took=` and any `phase.*`: a reader of
+// those fields stops before a free-text one, and `reason="..."` here is the
+// message the caller was shown, never the classifier a few lines carry as the
+// bare `reason=record-off` or `reason=local-only`.
+func (n *errorNote) fields() string {
+	if n == nil {
+		return ""
+	}
+	out := " kind=" + auditToken(string(n.kind))
+	if n.message != "" {
+		out += " reason=" + strconv.Quote(clipReason(n.message))
+	}
+	return out
+}
+
+// auditToken returns s as it stands when it is a plain token, else quoted.
+func auditToken(s string) string {
+	if s == "" {
+		return `""`
+	}
+	for _, c := range []byte(s) {
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_' || c == '.' {
+			continue
+		}
+		return strconv.Quote(s)
+	}
+	return s
+}
+
+// clipReason returns s unchanged when it fits in auditReasonMax bytes, else its
+// longest prefix that ends on a rune boundary, with `...` after it, the whole
+// being auditReasonMax bytes or fewer.
+func clipReason(s string) string {
+	if len(s) <= auditReasonMax {
+		return s
+	}
+	const mark = "..."
+	cut := auditReasonMax - len(mark)
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + mark
 }
 
 // outcomeOf names what happened in words an operator reads at speed.
@@ -173,24 +277,36 @@ func timingOf(r *http.Request) (*requestTiming, bool) {
 // for one verb would read as though the others had been measured and found
 // instant. phase.* is only what was actually measured; a verb with no phases
 // prints none rather than a zero.
-func logMutation(p Principal, g Grant, target fleet.MachineId, r *http.Request, status int) {
+//
+// # kind= and reason= (muster #416)
+//
+// A request answered with an error ends the line with ` kind=<kind>
+// reason="<message>"` — the error the caller was shown, its message cut at
+// auditReasonMax bytes (see errorNote.fields). A client refused hundreds of
+// times a day left only `outcome=refused status=400`, and the one place every
+// refusal passes through was the one that dropped the reason. They come after
+// took= and phase.*, so a reader of the line up to there is unaffected.
+func logMutation(p Principal, g Grant, target fleet.MachineId, r *http.Request, aw *auditWriter) {
 	if g == GrantRead {
 		return // reads are not mutations; logging them would drown the signal
 	}
 	line := fmt.Sprintf("audit: actor=%q verb=%s route=%s target=%s/%s outcome=%s status=%d",
-		actorOf(p, r), g, routeOf(r), target, r.PathValue("id"), outcomeOf(status), status)
+		actorOf(p, r), g, routeOf(r), target, r.PathValue("id"), outcomeOf(aw.status), aw.status)
 	if t, ok := timingOf(r); ok {
 		line += " took=" + strconv.FormatInt(driver.Millis(time.Since(t.start)), 10)
 		if f := t.phases.Fields(); f != "" {
 			line += " " + f
 		}
 	}
-	log.Print(line)
+	log.Print(line + aw.refusal.fields())
 }
 
-func logDenied(p Principal, g Grant, target fleet.MachineId, r *http.Request) {
-	log.Printf("audit: actor=%q verb=%s route=%s target=%s/%s outcome=DENIED",
-		actorOf(p, r), g, routeOf(r), target, r.PathValue("id"))
+// logDenied writes the audit line of a request refused for want of a grant, with
+// the error the caller is about to be sent: the denial already says which grant,
+// and now the line says so too (muster #416).
+func logDenied(p Principal, g Grant, target fleet.MachineId, r *http.Request, why *fleet.Error) {
+	log.Printf("audit: actor=%q verb=%s route=%s target=%s/%s outcome=DENIED%s",
+		actorOf(p, r), g, routeOf(r), target, r.PathValue("id"), noteOf(why).fields())
 }
 
 // logContentRead writes the audit line of a read of session content (muster #441:
@@ -210,9 +326,12 @@ func logDenied(p Principal, g Grant, target fleet.MachineId, r *http.Request) {
 // ("X via <entry machine>"), the same shape every relayed verb has.
 //
 // reason is set only for the operator's refusal (`record-off`), so the line says
-// why nothing was served. A refusal for a missing grant is logDenied's line, from
-// recordGate, which runs before this handler could write one.
-func logContentRead(r *http.Request, target fleet.MachineId, id string, entries, status int, reason string) {
+// why nothing was served. Any other error the handler answered with ends the line
+// with ` kind=<kind> reason="<message>"` the way a mutation's line does (muster
+// #416). A refusal for a missing grant is logDenied's line, from recordGate, which
+// runs before this handler could write one.
+func logContentRead(r *http.Request, target fleet.MachineId, id string, entries int, aw *auditWriter, reason string) {
+	status := aw.status
 	actor := callerFrom(r).Principal
 	if p, ok := principalOf(r); ok {
 		actor = actorOf(p, r)
@@ -230,6 +349,9 @@ func logContentRead(r *http.Request, target fleet.MachineId, id string, entries,
 	}
 	if reason != "" {
 		line += " reason=" + reason
+	} else {
+		// Any other refusal says why the same way a mutation's does (muster #416).
+		line += aw.refusal.fields()
 	}
 	log.Print(line)
 }

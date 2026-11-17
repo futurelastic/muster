@@ -3757,6 +3757,18 @@ the only one, which is why the list has no `since=`.
   too. The fields
   are appended after `status=`, so a reader that stops there still reads the line;
   a refusal that ran nothing (`outcome=DENIED`) carries neither.
+- **A request answered with an error says why** (muster #416). The line ends with
+  ` kind=<kind> reason="<message>"`: the error kind, and the message the caller was
+  shown, quoted and cut at 200 bytes (a cut one ends `...`). They come after
+  `took=` and any `phase.*`, so a reader of those is unaffected; an error with no
+  message prints no `reason`; a request that was not answered with an error
+  carries neither. A `DENIED` line carries them too, naming the principal and the
+  grant it lacks. The `turns`, `composer` and `record` read lines end the same way
+  (a `record-off` refusal keeps its bare `reason=record-off`). Two lines keep what
+  they had: a `DENIED` for a principal pinned to this machine says `reason=local-only`,
+  and a `verb=credentials` line already carries a `kind=` of its own, the
+  credential's. A client refused hundreds of times a day no longer has to rebuild
+  its request to learn why.
 
 ## 6. What this API deliberately lacks
 
