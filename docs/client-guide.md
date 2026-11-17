@@ -917,7 +917,8 @@ creation, naming the id and the closest valid ones; `false` means it is
 accepted and fails only at the first turn. To let a person **choose** a model
 instead of typing one, read the row's `models` (#400): with `source: "runtime"`
 offer `ids` as the choices (the create is still the authority, and the list is
-as old as `readAt`); with `declared` or `none`, offer the list if there is one
+as old as `readAt`; `stored: true` only says an earlier run of the service made that
+read, and changes nothing about how to offer it); with `declared` or `none`, offer the list if there is one
 but **keep accepting a typed value**, because the runtime has no catalogue to
 check it against. Treat a `source` you do not know as `none`. **A value that WOULD be
 mistaken for a flag is refused outright at creation** (`invalid`, naming the

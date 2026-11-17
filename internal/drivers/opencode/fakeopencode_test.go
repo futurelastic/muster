@@ -265,6 +265,14 @@ func runFakeOpencode(args []string) {
 				return
 			}
 			writeJSON(w, statusMap{})
+		case path == "/config/providers" && r.Method == http.MethodGet && fileExists(".fake-providers.json"):
+			// muster #496: the catalog the stand-in lists is whatever is in the marker file
+			// in its working directory, served as it stands, so a test can make one server
+			// say one thing and another say something else, and change it between starts.
+			// Without the file the stand-in answers 404, which is "could not tell".
+			raw, _ := os.ReadFile(".fake-providers.json")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write(raw)
 		case path == "/permission" && r.Method == http.MethodGet:
 			// muster #421: one tool-permission ask for the session while the marker is
 			// there; none otherwise.

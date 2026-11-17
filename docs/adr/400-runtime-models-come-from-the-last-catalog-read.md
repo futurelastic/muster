@@ -1,7 +1,7 @@
 # ADR: a runtime's model list is the last catalog read a create made, filtered by the one policy filter
 
 **Issue:** #400
-**Status:** decided
+**Status:** decided — in part superseded by #496: the list now survives a restart and the service reads the catalogue at start-up; see [`496-the-model-list-survives-a-restart.md`](496-the-model-list-survives-a-restart.md). The two items under *Rejected* that this changes are marked there.
 
 ## Context
 
@@ -25,7 +25,7 @@ from a cache.
   operator's policy" decision; the create-time check and the list both call it, and
   a test pins "the ids listed are exactly the ones a create accepts" across several
   policies.
-- **Before any create since start-up the source is `none`**, with no `readAt`. An
+- **Before anything has read a catalogue the source is `none`**, with no `readAt` (since #496: before a create, the start-up read, or the file an earlier run stored). An
   empty list with source `runtime` means something else: the runtime answered and
   listed nothing usable.
 - **`default` is set only when it is certain**: exactly one provider is listed, the
@@ -40,9 +40,9 @@ from a cache.
 
 ## Rejected
 
-- *A probe server* (start a throwaway runtime on a timer): a second fetch path, a
+- *A probe server* (start a throwaway runtime on a timer) — **reversed by #496 for one read at start-up, not a timer**: a second fetch path, a
   process to reap, and credentials that are nobody's.
-- *A persisted file*: a restart is exactly when the binary or the credentials change,
+- *A persisted file* — **reversed by #496**: a restart is exactly when the binary or the credentials change,
   and it would still need `readAt` to be read honestly.
 - *Expiring the list after a time*: a picker that vanishes on an idle machine is worse
   than a dated one, and the create stays the authority.

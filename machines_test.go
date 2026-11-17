@@ -116,3 +116,43 @@ func TestRuntimeModels_NoneHasNoNullAndNormalizedFixesLooseValues(t *testing.T) 
 		t.Errorf("a declared list with nil ids: %+v, want declared and []", got)
 	}
 }
+
+// muster #496: a list an earlier run of the service read is the same `runtime` list
+// with a marker. The marker is absent when false, so every client that predates it
+// is sent the bytes it always was, and present when true, so one that knows it can say
+// so. It is not a source of its own: an unknown source reads as none.
+func TestRuntimeModels_StoredIsAnAdditiveMarkerOnARuntimeList(t *testing.T) {
+	at := time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)
+	fresh := RuntimeModels{Source: ModelsFromRuntime, ReadAt: &at, IDs: []string{"a/b"}}
+	b, err := json.Marshal(fresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(b); got != `{"source":"runtime","readAt":"2026-11-04T09:00:00Z","ids":["a/b"],"default":null}` {
+		t.Errorf("a list read by this run = %s, want no stored key at all", got)
+	}
+
+	kept := fresh
+	kept.Stored = true
+	b, err = json.Marshal(kept)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(b); got != `{"source":"runtime","readAt":"2026-11-04T09:00:00Z","stored":true,"ids":["a/b"],"default":null}` {
+		t.Errorf("a stored list = %s", got)
+	}
+	var back RuntimeModels
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatal(err)
+	}
+	if !back.Stored || back.Source != ModelsFromRuntime || !back.ReadAt.Equal(at) {
+		t.Errorf("round trip = %+v, want source runtime, the original readAt and stored", back)
+	}
+	if got := kept.Normalized(); !got.Stored || got.Source != ModelsFromRuntime {
+		t.Errorf("Normalized dropped the marker from a runtime list: %+v", got)
+	}
+	// A list that is not from the runtime has nothing a restart could have kept.
+	if got := (RuntimeModels{Source: ModelsNone, Stored: true}).Normalized(); got.Stored {
+		t.Errorf("a none list kept the marker: %+v", got)
+	}
+}

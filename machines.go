@@ -273,6 +273,13 @@ type RuntimeModels struct {
 	// re-stamped. Present only for ModelsFromRuntime: a declared or empty list
 	// was not read from anything.
 	ReadAt *Timestamp `json:"readAt,omitempty"`
+	// Stored is true when this is the read an earlier run of the service made and
+	// kept, served until a fresh read replaces it (muster #496). It is an additive
+	// marker on a ModelsFromRuntime list — never a source of its own, because a
+	// client that does not know a source reads it as ModelsNone — and absent
+	// otherwise, so a client that has never heard of it reads the same list it
+	// always did. ReadAt is the original read's time, not the restart's.
+	Stored bool `json:"stored,omitempty"`
 	// IDs are the model ids a create may name, in the runtime's own spelling.
 	// Never null; empty when Source is ModelsNone.
 	IDs []string `json:"ids"`
