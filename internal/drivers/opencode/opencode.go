@@ -254,10 +254,24 @@ type Driver struct {
 
 	// lastCatalog is the latest usable answer a catalog read produced, kept so
 	// GET /v1/runtimes can list models without a request of its own (muster
-	// #400). Nil until the first create has read one. catMu guards it: creates
-	// run concurrently.
+	// #400). Nil until something has read one: a create, the start-up read, or the
+	// catalog an earlier run stored (muster #496). catMu guards it, and the file
+	// beside it: creates run concurrently.
 	catMu       sync.Mutex
 	lastCatalog *catalogSnapshot
+	// catalogFile is where every usable read is kept so a restart still has it;
+	// empty without a state directory. catalogWriteFailed remembers that the last
+	// write did not work, so the notice is made when that starts and stops, not on
+	// every read (catalogstore.go; muster #496).
+	catalogFile        string
+	catalogWriteFailed bool
+	// refreshCancel and refreshDone are the start-up read of the catalog: it ends
+	// with Shutdown, which waits for it (catalogstore.go; muster #496).
+	// noCatalogRefresh turns it off; only a test sets it, because the read starts a
+	// server of its own on a machine with no session to ask.
+	refreshCancel    context.CancelFunc
+	refreshDone      chan struct{}
+	noCatalogRefresh bool
 
 	// sessionEnv is this machine's declared identity for its sessions (#94);
 	// sessionRoot is where session-scoped directories are made (the OS temp
@@ -542,6 +556,19 @@ func withoutStartSweep() Option { return func(d *Driver) { d.noStartSweep = true
 func withoutStraySweep() Option { return func(d *Driver) { d.noStraySweep = true } }
 func withStraySweep() Option    { return func(d *Driver) { d.noStraySweep = false } }
 
+// withoutCatalogRefresh and withCatalogRefresh set noCatalogRefresh. Unexported: a
+// test seam. Most tests are about something else and would each start a server of
+// their own for a read they do not look at.
+func withoutCatalogRefresh() Option { return func(d *Driver) { d.noCatalogRefresh = true } }
+func withCatalogRefresh() Option    { return func(d *Driver) { d.noCatalogRefresh = false } }
+
+// withCatalogTiming sets how long a catalog read settles and how often it asks again
+// meanwhile (muster #384, #496). An option, not a field set after New, because the
+// start-up read is already running by the time New returns.
+func withCatalogTiming(settle, poll time.Duration) Option {
+	return func(d *Driver) { d.catalogSettle, d.catalogPoll = settle, poll }
+}
+
 // WithStateDir makes sessions survive a service restart (muster #282): one
 // record per session, and the sessions' scoped directories, live under dir. With
 // it SupportsResume is true; without it nothing is written and a restart forgets
@@ -702,6 +729,7 @@ func New(ctx context.Context, machine fleet.MachineId, opts ...Option) (*Driver,
 	if d.stateDir != "" {
 		storeDir, stateRoot := stateLayout(d.stateDir)
 		d.store = &recordStore{dir: storeDir}
+		d.catalogFile = catalogFileIn(d.stateDir)
 		if d.sessionRoot == "" {
 			// A session's database must outlive the service, so its directory
 			// cannot live under the temp directory (muster #282).
@@ -718,6 +746,9 @@ func New(ctx context.Context, machine fleet.MachineId, opts ...Option) (*Driver,
 	}
 	d.sandbox, d.sandboxWhy = sandboxSupport(false)
 	if d.store != nil {
+		// muster #496: the catalog an earlier run stored is the list served until a
+		// read of this run replaces it, so it is in place before anything else is.
+		d.loadStoredCatalog()
 		// muster #398: a server an earlier service left running is stopped BEFORE
 		// anything is resumed, whether or not a record still names it; at this point
 		// this driver holds no server, so every one found is not ours.
@@ -735,6 +766,9 @@ func New(ctx context.Context, machine fleet.MachineId, opts ...Option) (*Driver,
 		// muster #421: and the sessions that have nothing to do are parked, once
 		// every one that could be started again has been (above).
 		d.startIdleSweep()
+		// muster #496: and the model list a restart would otherwise leave at "none"
+		// is read again, from a server a relaunched session has or one of its own.
+		d.startCatalogRefresh()
 	} else if d.idleStop > 0 {
 		d.say("opencode: an idle stop was configured but there is no state directory, so a stopped session could not be " +
 			"started again; no session will be stopped")
@@ -765,7 +799,8 @@ func (d *Driver) Shutdown() error {
 	// Before the servers are paused: no sweep may be listing or removing
 	// directories while they are being stopped (muster #419).
 	d.stopDirSweep()
-	d.stopIdleSweep() // muster #421: a park in progress finishes first
+	d.stopIdleSweep()      // muster #421: a park in progress finishes first
+	d.stopCatalogRefresh() // muster #496: and so does the start-up read, with the server it may have started
 	d.endSubscriptions()
 	if d.grantCancel != nil {
 		d.grantCancel() // muster #451: no token renewal reaches a driver that is stopping

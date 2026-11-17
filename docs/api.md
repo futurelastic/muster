@@ -349,11 +349,16 @@ form can offer a picker instead of a free-text box. Every row has one:
   This is what the opencode runtime reports, and `ids` is exactly what a create
   on that machine would accept: the same read, and the same filter by the
   operator's provider policy, as the check a create runs — so it leaves out a
-  model the machine does not permit even when the runtime offers it. The list is
-  filled by the catalogue reads creates make, so a machine reports
-  `source: "none"` until its first create, and the list can lag a change of
-  credentials until the next one. `readAt` says how old it is. It is a hint for
-  a picker: **the create is the authority**.
+  model the machine does not permit even when the runtime offers it. The service
+  reads the catalogue when it starts and on every create, and keeps the last read in
+  its state directory, so a restart or an update does not empty the list: a machine
+  reports `source: "none"` only when nothing has ever been read there. The list can
+  lag a change of credentials until the next read. `readAt` says how old it is. It is
+  a hint for a picker: **the create is the authority**.
+- `"stored": true` — on a `source: "runtime"` list, the read is one an earlier run of
+  the service made and this run has not replaced yet (#496); `readAt` is that read's
+  time, not the restart's. Offer `ids` exactly as you would a fresh list. Absent
+  means this run read it. The list is still filtered by the policy in force now.
 - `source: "declared"` — the runtime has no catalogue to ask, so the operator's
   configuration (`models` in the config file, keyed by runtime id), or the
   aliases the runtime documents (`opus`, `sonnet`, `haiku` for Claude Code), name

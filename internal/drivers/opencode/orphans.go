@@ -170,7 +170,7 @@ func OrphanServers(stateDir string) (pids []int, uninspected int, err error) {
 // stateLayout is where a state directory keeps the driver's records and the
 // session-scoped directories its servers run in.
 func stateLayout(stateDir string) (storeDir, sessionRoot string) {
-	base := filepath.Join(stateDir, "opencode")
+	base := stateBase(stateDir)
 	return filepath.Join(base, "sessions"), filepath.Join(base, "dirs")
 }
 

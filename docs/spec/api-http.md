@@ -195,6 +195,7 @@ GET /v1/runtimes
                                   "packageManagers": ["cargo", "go", "npm"] },  package-cache seed may use (#432)
                      "models": { "source": "runtime",           ← "runtime" | "declared" | "none" (#400)
                                  "readAt": "...",                ← only when "runtime"
+                                 "stored": true,                 ← only when an earlier run read it (#496)
                                  "ids": ["deepseek/deepseek-flash"],
                                  "default": null },
                      "grants": [ { "provider": "openai",        ← a provider sign-in this machine holds (#451);
@@ -283,6 +284,7 @@ client can offer a picker instead of a free-text box.
 RuntimeModels {
   source   : "runtime" | "declared" | "none"
   readAt?  : Timestamp           // only for "runtime": when the runtime last answered with this list
+  stored?  : true                // only for "runtime", and only when an earlier run of the service read it (#496)
   ids      : string[]            // the runtime's own spelling; [] (never null) when source is "none"
   default  : string | null       // what the runtime uses when a create names no model, if known
 }
@@ -297,8 +299,24 @@ RuntimeModels {
 - `declared` — the runtime has no catalogue to ask, so the operator's
   configuration, or the aliases the runtime documents, name these. A value
   outside the list may still work, and **a client must still accept one**.
-- `none` — this runtime cannot say, or has not yet (nothing has been read since
-  the service started). `ids` is `[]`. A client keeps free text.
+- `stored` — present, and `true`, on a `runtime` list that **an earlier run of the
+  service read and this one has not yet replaced** (#496). The service keeps each
+  catalogue it reads and serves it again after a restart, so an update does not put
+  the row back to `none` until somebody creates a session. It is a marker on the
+  list, never a source of its own: a client that does not know it reads the same
+  `runtime` list it always did, which is the point — a new `source` value would read
+  as `none` to every client that predates it. `readAt` is the original read's, not
+  the restart's, so the age a client shows is true. The ids are filtered by the
+  provider policy **in force now**, so a policy narrowed across the restart narrows
+  the stored list. The service reads the catalogue again once it is up (from a
+  running session's server, else from one short-lived server it starts for the
+  purpose, with no prompt and no spend), and that read — or any create's — replaces
+  the stored list and takes the marker off. A start-up read that lists no models does
+  not replace a list that had some; the create is the authority, and refuses a model
+  the runtime no longer has. A stored file that cannot be used is read as `none`,
+  never as an error.
+- `none` — this runtime cannot say, or has not yet (nothing has been read, and
+  nothing is stored from an earlier run). `ids` is `[]`. A client keeps free text.
 - **The set of `source` values is open on read:** a client must treat one it
   does not know as `none`. A row from a build that predates the field has no
   `models` at all, and that reads as `none`, never as "no model works".

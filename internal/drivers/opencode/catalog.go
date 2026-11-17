@@ -41,9 +41,14 @@ type catalogAnswer struct {
 // driver makes no request of its own to build it, so there is one read of the
 // catalog and one filter over it, and the list cannot disagree with what a
 // create accepts.
+//
+// stored is true for the snapshot an earlier run of the service kept and this one
+// loaded at start-up (muster #496; catalogstore.go). It is never true of a read
+// this process made, so the first fresh read replaces it and takes the marker off.
 type catalogSnapshot struct {
 	answer catalogAnswer
 	readAt time.Time
+	stored bool
 }
 
 // modelCatalog is the runtime's answer flattened to "provider/model" ids, the
@@ -169,6 +174,21 @@ const (
 // A server that does not answer at all is an error, because the create would
 // fail on it anyway.
 func (d *Driver) readCatalog(ctx context.Context, srv *server) (ans catalogAnswer, read catalogRead, err error) {
+	ans, read, err = d.fetchCatalog(ctx, srv)
+	if read != catalogUnknown {
+		// Every usable answer is the freshest the machine has, so it is what the
+		// runtime list reports (muster #400) — including each re-read in the
+		// settle window below, which is why the snapshot is the latest answer and
+		// never the union of several.
+		d.noteCatalog(ans)
+	}
+	return ans, read, err
+}
+
+// fetchCatalog is the one request for the runtime's catalog and what it came to,
+// without recording it: readCatalog records every usable answer, and the start-up
+// read (catalogstore.go) records the ones it chooses to.
+func (d *Driver) fetchCatalog(ctx context.Context, srv *server) (ans catalogAnswer, read catalogRead, err error) {
 	var wire wireProviders
 	if err := d.do(ctx, srv, "GET", "/config/providers", nil, &wire); err != nil {
 		if isUnreachable(err) {
@@ -186,18 +206,14 @@ func (d *Driver) readCatalog(ctx context.Context, srv *server) (ans catalogAnswe
 	}
 	sort.Strings(ans.ids)
 	ans.defaults = wire.Default
-	// Every usable answer is the freshest the machine has, so it is what the
-	// runtime list reports (muster #400) — including each re-read in the
-	// settle window below, which is why the snapshot is the latest answer and
-	// never the union of several.
-	d.noteCatalog(ans)
 	if len(ans.ids) == 0 {
 		return ans, catalogEmpty, nil
 	}
 	return ans, catalogListed, nil
 }
 
-// noteCatalog records ans as the latest usable answer.
+// noteCatalog records ans as the latest usable answer, and keeps it in the state
+// directory so a restart still has it (muster #496).
 func (d *Driver) noteCatalog(ans catalogAnswer) {
 	snap := &catalogSnapshot{answer: catalogAnswer{
 		ids:      append(modelCatalog(nil), ans.ids...),
@@ -208,16 +224,22 @@ func (d *Driver) noteCatalog(ans catalogAnswer) {
 	}
 	d.catMu.Lock()
 	defer d.catMu.Unlock()
-	if d.lastCatalog != nil && snap.readAt.Before(d.lastCatalog.readAt) {
+	// A stored read is replaced by any fresh one: its time is another run's clock,
+	// and one that is ahead of this one must not hold the list for ever.
+	if d.lastCatalog != nil && !d.lastCatalog.stored && snap.readAt.Before(d.lastCatalog.readAt) {
 		return
 	}
 	d.lastCatalog = snap
+	d.persistCatalog(snap)
 }
 
 // Models is the list GET /v1/runtimes reports for this runtime (muster #400):
 // the ids a create on this machine would accept, from the last catalog read.
-// Before any create has read one there is nothing to report, and that is
-// "none", not an empty list the runtime vouched for.
+// Before anything has read one — no create yet, and nothing stored by an earlier
+// run — there is nothing to report, and that is "none", not an empty list the
+// runtime vouched for. A list an earlier run stored is reported as what it was
+// (source "runtime", its own readAt) with stored set, until a read replaces it
+// (muster #496).
 //
 // It is built by within, the same filter checkProviders and settleModel use, so
 // the list is exactly the catalog entries the operator's provider policy leaves
@@ -234,6 +256,7 @@ func (d *Driver) Models() fleet.RuntimeModels {
 	m := fleet.RuntimeModels{
 		Source: fleet.ModelsFromRuntime,
 		ReadAt: &readAt,
+		Stored: snap.stored,
 		IDs:    []string(ids),
 	}
 	if def := snap.answer.soleDefault(ids); def != "" {

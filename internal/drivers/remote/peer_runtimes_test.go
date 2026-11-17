@@ -36,7 +36,7 @@ func twoRuntimes() map[string]any {
 	def := "deepseek/deepseek-flash"
 	return peerRuntimesBody(
 		availableRuntime("opencode", fleet.DriverCapabilities{DeadlineMs: 5000, SupportsResume: true},
-			&fleet.RuntimeModels{Source: fleet.ModelsFromRuntime, ReadAt: &readAt,
+			&fleet.RuntimeModels{Source: fleet.ModelsFromRuntime, ReadAt: &readAt, Stored: true,
 				IDs: []string{"deepseek/deepseek-flash", "deepseek/deepseek-v4-pro"}, Default: &def}),
 		availableRuntime("claude-code-tmux", fleet.DriverCapabilities{DeadlineMs: 5000, DeliversRawKeys: true},
 			&fleet.RuntimeModels{Source: fleet.ModelsDeclared, IDs: []string{"opus", "sonnet"}}),
@@ -75,6 +75,12 @@ func TestPeerRuntimesAPeerWithTwoRuntimesYieldsTwoEntriesEachWithItsOwn(t *testi
 	}
 	if oc.Models.ReadAt == nil || !oc.Models.ReadAt.Equal(time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)) {
 		t.Errorf("opencode readAt = %v, want the peer's passed through", oc.Models.ReadAt)
+	}
+	// muster #496: the peer's marker that its list was read by an earlier run is its fact,
+	// and travels with the list it describes.
+	if !oc.Models.Stored || cc.Models.Stored {
+		t.Errorf("stored: opencode %v, claude-code-tmux %v; want the peer's marker passed through, only on the list it was set on",
+			oc.Models.Stored, cc.Models.Stored)
 	}
 
 	// The single-value accessors answer for the first available row in the peer's
