@@ -316,6 +316,190 @@ func hubFile(f *svcFixture) string {
 	return filepath.Join(filepath.Dir(f.p.Unit), name)
 }
 
+// muster #493: a plain install beside a unit an operator made does not write the
+// standard unit next to it. It says which unit it found and the command that takes
+// it over, and changes nothing.
+func TestPlainInstallBesideAnOperatorUnitNamesAdopt(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		for _, standardThere := range []bool{false, true} {
+			name := goos + "/no standard unit"
+			if standardThere {
+				name = goos + "/standard unit already beside it"
+			}
+			t.Run(name, func(t *testing.T) {
+				f := newSvcFixture(t, goos)
+				if standardThere {
+					// the second muster an earlier update made, then disabled
+					if code := f.install(t); code != 0 {
+						t.Fatalf("install: %d\n%s%s", code, f.out, f.errb)
+					}
+					f.mgr.loaded, f.mgr.active = false, false
+				}
+				old := f.writeHubUnit(t, f.hubAddr())
+				before := snapshotTree(t, f.env.Home)
+				f.mgr.reset()
+
+				code := f.run(t, "install", "--tmux", f.tmux)
+				if code != 1 {
+					t.Fatalf("a plain install beside %s exited %d, want 1\n%s%s", f.hubName(), code, f.out, f.errb)
+				}
+				errText := f.errb.String()
+				for _, want := range []string{f.hubName(), old, f.hubAddr(), "muster service install --adopt " + f.hubName(), "Nothing was changed"} {
+					if !strings.Contains(errText, want) {
+						t.Errorf("the refusal does not say %q:\n%s", want, errText)
+					}
+				}
+				if f.out.Len() != 0 {
+					t.Errorf("install reported work before refusing:\n%s", f.out)
+				}
+				// Nothing was written or run: the home is as it was, and the service
+				// manager was not asked to change anything.
+				after := snapshotTree(t, f.env.Home)
+				for path, was := range before {
+					if got, ok := after[path]; !ok || got != was {
+						t.Errorf("%s changed or went away", path)
+					}
+				}
+				for path := range after {
+					if _, ok := before[path]; !ok {
+						t.Errorf("%s was written", path)
+					}
+				}
+				if !f.mgr.other.loaded || !f.mgr.other.active {
+					t.Errorf("the operator's unit was stopped: %+v", f.mgr.other)
+				}
+				for _, c := range f.mgr.sequence() {
+					for _, verb := range []string{"bootout", "bootstrap", "enable", "disable", "kickstart", "restart", "start", "stop", "load"} {
+						if strings.Contains(c, " "+verb+" ") || strings.HasSuffix(c, " "+verb) {
+							t.Errorf("a refused install still ran %q", c)
+						}
+					}
+				}
+
+				// Running the command it names is the way out.
+				if code := f.run(t, "install", "--tmux", f.tmux, "--adopt", f.hubName()); code != 0 {
+					t.Fatalf("install --adopt after the refusal: %d\n%s%s", code, f.out, f.errb)
+				}
+				if !strings.Contains(readUnitText(t, f.p.Unit), f.hubAddr()) {
+					t.Errorf("the adopted unit's address was not taken over")
+				}
+			})
+		}
+	}
+}
+
+// snapshotTree is every file under root with what it holds, and every directory.
+func snapshotTree(t *testing.T, root string) map[string]string {
+	t.Helper()
+	got := map[string]string{}
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			got[path] = "<dir>"
+			return nil
+		}
+		b, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		got[path] = string(b)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
+func TestPlainInstallIgnoresUnitsThatAreNotMuster(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			f := newSvcFixture(t, goos)
+			dir := filepath.Dir(f.p.Unit)
+			if err := os.MkdirAll(filepath.Join(dir, "muster.service.d"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			// A unit that sets no FLEET_ADDR is not a muster; a file the manager
+			// does not read as a unit is not one either.
+			suffix, body := ".service", "[Service]\nExecStart=/usr/bin/true\nEnvironment=\"FLEET_ADDX=1\"\n"
+			if goos == "darwin" {
+				suffix = ".plist"
+				body = "<plist><dict><key>Label</key><string>org.example.other</string></dict></plist>\n"
+			}
+			for name, text := range map[string]string{
+				"other" + suffix:               body,
+				"notes.txt":                    "FLEET_ADDR=10.0.0.1:9470\n",
+				"muster-hub" + suffix + ".bak": "FLEET_ADDR=10.0.0.1:9470\n",
+			} {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(text), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if code := f.install(t); code != 0 {
+				t.Fatalf("install beside units that are not muster: %d\n%s%s", code, f.out, f.errb)
+			}
+			if _, err := os.Stat(f.p.Unit); err != nil {
+				t.Errorf("the standard unit was not written: %v", err)
+			}
+		})
+	}
+}
+
+func TestPlainInstallNamesEveryOperatorUnit(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			f := newSvcFixture(t, goos)
+			f.writeHubUnit(t, f.hubAddr())
+			dir := filepath.Dir(f.p.Unit)
+			second := "muster-edge.service"
+			text := "[Service]\nExecStart=/opt/edge/muster serve\nEnvironment=\"FLEET_ADDR=10.8.0.13:9470\"\n"
+			wantName := second
+			if goos == "darwin" {
+				second = "edge-muster.plist"
+				wantName = "org.example.edge muster"
+				text = "<plist><dict><key>Label</key><string>org.example.edge muster</string><key>EnvironmentVariables</key><dict>" +
+					"<key>FLEET_ADDR</key><string>10.8.0.13:9470</string></dict></dict></plist>\n"
+			}
+			if err := os.WriteFile(filepath.Join(dir, second), []byte(text), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if code := f.run(t, "install", "--tmux", f.tmux); code != 1 {
+				t.Fatalf("exit %d, want 1\n%s%s", code, f.out, f.errb)
+			}
+			errText := f.errb.String()
+			for _, want := range []string{
+				"--adopt " + f.hubName(),
+				// a name a shell would split is quoted in the command it suggests
+				"--adopt " + adoptArg(wantName),
+				"10.8.0.13:9470",
+			} {
+				if !strings.Contains(errText, want) {
+					t.Errorf("the refusal does not say %q:\n%s", want, errText)
+				}
+			}
+			if goos == "darwin" && !strings.Contains(errText, "--adopt 'org.example.edge muster'") {
+				t.Errorf("a label with a space is not quoted:\n%s", errText)
+			}
+		})
+	}
+}
+
+func TestAdoptArg(t *testing.T) {
+	for in, want := range map[string]string{
+		"org.example.hub-muster": "org.example.hub-muster",
+		"muster-hub.service":     "muster-hub.service",
+		"a b":                    "'a b'",
+		"it's":                   `'it'\''s'`,
+		"$(x)":                   "'$(x)'",
+	} {
+		if got := adoptArg(in); got != want {
+			t.Errorf("adoptArg(%q) = %s, want %s", in, got, want)
+		}
+	}
+}
+
 func TestAdoptKeepsTheStandardUnitsHealthAnswerable(t *testing.T) {
 	// A standard unit already sits beside the operator's (the second muster an update
 	// once made, then disabled): the adopted settings are written over it.

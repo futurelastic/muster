@@ -95,7 +95,8 @@ func usageService() string {
 		"             (never 0.0.0.0). A rerun keeps an address the unit already has; the service always adds loopback",
 		"  --adopt    take over the unit UNIT (a launchd label or a systemd unit name, or the path of its file) that",
 		"             already runs muster here: its address and every FLEET_*, LANG, LC_* variable move into the",
-		"             standard unit and the old one is stopped and put away, so no second muster is left beside it",
+		"             standard unit and the old one is stopped and put away, so no second muster is left beside it;",
+		"             without it, install refuses while another unit that sets FLEET_ADDR sits beside the standard one",
 		"  --machine  this machine's id (default: the short hostname)",
 		"  --tmux     the multiplexer binary (default: the one found on PATH)",
 		"  --no-start write the files and run doctor; do not load or start the unit",
@@ -1036,6 +1037,14 @@ func svcInstall(ctx context.Context, e svcEnv, o svcInstallOpts) error {
 			if _, err := os.Stat(p.Unit); err == nil {
 				notes = append(notes, fmt.Sprintf("%s exists too: its settings are not read, the adopted unit's are written over it", p.Unit))
 			}
+		}
+	}
+	if o.Adopt == "" {
+		// A unit an operator made, beside the one this command writes, would be a
+		// second muster on the same state (muster #493): say so before anything is
+		// changed, and name the command that takes it over.
+		if others := e.otherMusterUnits(p); len(others) > 0 {
+			return errOtherMusterUnit(others)
 		}
 	}
 	if adopted == nil {
