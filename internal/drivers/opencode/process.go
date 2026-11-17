@@ -217,6 +217,12 @@ type server struct {
 	// straySweep is whether the teardown looks for them: set by the driver that
 	// tracks the server, so a server nobody tracks looks for none.
 	straySweep bool
+	// deferRemoval is whether the teardown sets the directory aside and has it
+	// deleted in the background (privfs.Discard, muster #436) instead of deleting it
+	// before it returns. Set by the driver, and only where a state directory will
+	// finish the job after a restart: a driver without one has nobody to find a
+	// directory left half-deleted, so it deletes in full.
+	deferRemoval bool
 
 	once       sync.Once
 	onTeardown func(*server)
@@ -243,7 +249,11 @@ func (s *server) stop(keepPersisted bool) {
 			s.strayStopped, s.strayLeft = stopStraysIn(s.dir)
 		}
 		if s.dir != "" && !(keepPersisted && s.persisted.Load()) {
-			_ = privfs.RemoveAll(s.dir)
+			if s.deferRemoval {
+				_ = privfs.Discard(s.dir)
+			} else {
+				_ = privfs.RemoveAll(s.dir)
+			}
 		}
 		if s.onTeardown != nil {
 			s.onTeardown(s)

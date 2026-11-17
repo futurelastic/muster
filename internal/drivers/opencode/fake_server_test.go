@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/futurelastic/muster/internal/privfs"
 )
 
 // fakeServer is a minimal stand-in for opencode's HTTP API, scripted
@@ -709,6 +711,7 @@ func newDriverWithOptions(t *testing.T, f *fakeServer, extra ...Option) (*Driver
 	}, extra...)
 	d, err := New(context.Background(), "test-machine", opts...)
 	if d != nil {
+		t.Cleanup(func() { privfs.WaitDiscards(30 * time.Second) }) // muster #436: see newStateDriver
 		// A model refusal waits out the runtime's settle window (muster #384); a
 		// test that expects one should not spend seconds on it.
 		d.catalogSettle, d.catalogPoll = 100*time.Millisecond, 5*time.Millisecond

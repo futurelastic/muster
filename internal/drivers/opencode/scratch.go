@@ -9,6 +9,7 @@ import (
 	"time"
 
 	fleet "github.com/futurelastic/muster"
+	"github.com/futurelastic/muster/internal/lowprio"
 )
 
 // What a session's scratch directory holds (muster #419, #431).
@@ -51,6 +52,27 @@ import (
 // would run one walker each, all at the same moment); and a session is not walked
 // again until scratchRefresh after its last walk ended. Only the isolated driver
 // reports it; in shared mode there is no directory of the driver's own to measure.
+//
+// # What a walk costs the machine (muster #436)
+//
+// "Bounded" was a bound on one walk, and the whole-directory walk is the very thing
+// that made it expensive: one machine's sessions held Go module caches of several
+// hundred thousand entries each, and thirty of them every ten minutes was minutes of
+// lstat calls, each an event for the system's file watchers. The caches stay in the
+// figure — they are what #431 found the number to be made of — so the walk is made
+// cheaper by doing it less, never by looking at less:
+//
+//   - A session whose process has exited does not grow: it has a directory because
+//     it has not been closed yet, and nothing writes there. A complete walk that began
+//     after the exit is its final figure and is not repeated. (A process the session
+//     started outside the server's group can still write; Close stops those, #405,
+//     and the figure says when it was taken.) A walk that hit its bound is a lower
+//     bound and is never final, because the next one may get further.
+//   - A walk that took W is not repeated for scratchDuty*W, whatever scratchRefresh
+//     says, so a tree that takes three minutes is walked at most once an hour and the
+//     walker's share of the machine stays near 1/scratchDuty of a core however many
+//     sessions there are. W is the walk's own time, not the time it waited for a place.
+//   - It runs on a thread at background priority (package lowprio).
 const (
 	// scratchRefresh is how old a figure may get before a read starts a new walk.
 	scratchRefresh = 10 * time.Minute
@@ -61,6 +83,8 @@ const (
 	scratchMaxWalk    = 3 * time.Minute
 	// scratchMaxWalks is how many walks may run at once across the driver.
 	scratchMaxWalks = 2
+	// scratchDuty is how many times its own length a walk waits before it is repeated.
+	scratchDuty = 20
 )
 
 // The areas of a session's directory a figure is split into. They are the
@@ -81,6 +105,8 @@ type scratchLimits struct {
 	maxWalk    time.Duration
 	// maxWalks is how many walks may run at once across the driver.
 	maxWalks int
+	// duty is scratchDuty.
+	duty int
 	// inline makes a read wait for its walk instead of starting it in the
 	// background, so a test sees the figure on the read that asked for it.
 	inline bool
@@ -105,6 +131,9 @@ func (l scratchLimits) normalized() scratchLimits {
 	if l.maxWalks <= 0 {
 		l.maxWalks = scratchMaxWalks
 	}
+	if l.duty <= 0 {
+		l.duty = scratchDuty
+	}
 	if l.walkDir == nil {
 		l.walkDir = filepath.WalkDir
 	}
@@ -119,6 +148,12 @@ type scratchMemo struct {
 	areas   map[string]int64
 	partial bool
 	running bool
+	// wait is how long after at the figure is good for: the refresh, or longer when
+	// the walk was slow. Zero until there is a figure.
+	wait time.Duration
+	// final is set when the figure is of a session that had already exited when its
+	// walk began and was complete: nothing is going to change it.
+	final bool
 }
 
 // scratchFigure is the result of one walk: the bytes found in each area, and whether
@@ -149,12 +184,15 @@ func (d *Driver) walkGate() chan struct{} {
 }
 
 // measureQueued is measureScratch, after waiting for one of the driver's walk places.
-// The walk's own time bound starts when it does, not when it was asked for.
-func (d *Driver) measureQueued(dir string, lim scratchLimits) (scratchFigure, bool) {
+// The walk's own time bound starts when it does, not when it was asked for, and so
+// does the length it reports: took is the walk's, with none of the wait.
+func (d *Driver) measureQueued(dir string, lim scratchLimits) (fig scratchFigure, ok bool, took time.Duration) {
 	gate := d.walkGate()
 	gate <- struct{}{}
 	defer func() { <-gate }()
-	return measureScratch(dir, lim)
+	began := d.now()
+	fig, ok = measureScratch(dir, lim)
+	return fig, ok, d.now().Sub(began)
 }
 
 // scratchOf is the figure State and List attach for srv: the last walk's, with a
@@ -170,7 +208,7 @@ func (d *Driver) scratchOf(srv *server) *fleet.ScratchUsage {
 	now := d.now()
 
 	m.mu.Lock()
-	stale := !m.have || now.Sub(m.at) >= lim.refresh
+	stale := !m.have || (!m.final && now.Sub(m.at) >= max(m.wait, lim.refresh))
 	start := stale && !m.running
 	if start {
 		m.running = true
@@ -178,15 +216,20 @@ func (d *Driver) scratchOf(srv *server) *fleet.ScratchUsage {
 	m.mu.Unlock()
 
 	if start {
+		// Read before the walk, not after: a process that exits while its directory
+		// is being walked may have written to it after the walk passed.
+		exitedAtStart := srv.proc.exited()
 		walk := func() {
-			fig, ok := d.measureQueued(srv.dir, lim)
+			fig, ok, took := d.measureQueued(srv.dir, lim)
 			m.mu.Lock()
 			if ok {
 				m.have, m.at, m.areas, m.partial = true, d.now(), fig.areas, fig.partial
+				m.wait = max(lim.refresh, time.Duration(lim.duty)*took)
+				m.final = exitedAtStart && !fig.partial
 			} else {
 				// The directory is gone (closed, or swept): an earlier figure is no
 				// longer a fact about anything, and absent is what that means.
-				m.have, m.areas, m.partial = false, nil, false
+				m.have, m.areas, m.partial, m.wait, m.final = false, nil, false, 0, false
 			}
 			m.running = false
 			m.mu.Unlock()
@@ -194,7 +237,7 @@ func (d *Driver) scratchOf(srv *server) *fleet.ScratchUsage {
 		if lim.inline {
 			walk()
 		} else {
-			go walk()
+			lowprio.Go(walk)
 		}
 	}
 

@@ -674,14 +674,17 @@ Stall {
 > bounded, at most every few minutes, and never on the request path, so `asOf` says
 > when and a reader seeing a size that stopped moving can tell a quiet directory from
 > a reader that stopped reading. A walk is bounded so that it cannot cost the machine
-> more than it is worth — by the number of entries, by time, and by how many walks run
-> at once — and the bounds are well above what a session's directory has held, so a
-> large tree is measured in full. `partial` is true when the walk stopped at its
+> more than it is worth — by the number of entries, by time, by how many walks run
+> at once, and by how soon a long one is repeated — and the bounds are well above what
+> a session's directory has held, so a large tree is measured in full. A session whose
+> process has exited cannot grow its directory, so a complete walk taken after the exit
+> is its figure for good. `partial` is true when the walk stopped at its
 > bound or could not read part of the tree, so `bytes` and every area are then lower
 > bounds. **Absent means no figure** — the driver keeps no such directory for the
 > session, the directory is gone, or it has not measured it yet — **never zero**
 > (§5.7). Nothing is removed while the session lives, because a tool may be using the
-> files; closing the session removes the directory (the opencode driver). It is not a
+> files; closing the session removes the directory (the opencode driver): the path is
+> gone when the close returns, and what was in it is deleted afterwards. It is not a
 > material change: it moves with every file written, so a feed that fired on it would
 > storm. A poller reads it off the state.
 

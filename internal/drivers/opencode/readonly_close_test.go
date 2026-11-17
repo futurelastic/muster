@@ -81,6 +81,7 @@ func TestClose_AnUnknownSessionWhoseDirectoryHoldsReadOnlyFilesIsClosed(t *testi
 	if left := recordFiles(t, state); len(left) != 0 {
 		t.Errorf("records left after close: %v", left)
 	}
+	settleRemovals(t, state)
 }
 
 // A live session's close removes the directory too, and used to drop the same
@@ -103,6 +104,7 @@ func TestClose_ALiveSessionWhoseDirectoryHoldsReadOnlyFilesLeavesNoDirectory(t *
 	if _, err := os.Lstat(dir); !os.IsNotExist(err) {
 		t.Errorf("the session directory survived Close: %v", err)
 	}
+	settleRemovals(t, state)
 }
 
 // The start-up sweep logged the failure and skipped the directory on every
@@ -132,4 +134,5 @@ func TestOpen_RemovesARemnantDirectoryHoldingReadOnlyFiles(t *testing.T) {
 	if !logged.has("removed a session directory", "muster-opencode-31") {
 		t.Errorf("no log line says the directory was removed: %q", logged.all())
 	}
+	settleRemovals(t, state)
 }

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	fleet "github.com/futurelastic/muster"
+	"github.com/futurelastic/muster/internal/privfs"
 	"github.com/futurelastic/muster/internal/sessionenv"
 )
 
@@ -37,6 +38,9 @@ func newIsolatedDriver(t *testing.T, extra ...Option) (*Driver, string) {
 		t.Fatalf("New: %v", err)
 	}
 	t.Cleanup(func() { _ = d.Shutdown() })
+	// With a state directory a close deletes in the background (muster #436); this
+	// runs before the test's directories are removed, so the two do not race.
+	t.Cleanup(func() { privfs.WaitDiscards(30 * time.Second) })
 	return d, root
 }
 

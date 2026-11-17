@@ -352,6 +352,10 @@ func (d *Driver) sweepOrphanDirsWith(scan func(string) ([]serverProc, int, error
 	if d.noStartSweep || d.store == nil {
 		return
 	}
+	// Before the listing, and whatever it finds: a directory a close or a sweep set
+	// aside carries no session's data and holds no server, so none of the cautions
+	// below apply to finishing its deletion.
+	d.resumeDiscards()
 	dirs, unreadable, uninspected, err := orphanDirs(d.store.dir, d.sessionRoot, scan)
 	if err != nil {
 		if !errors.Is(err, ErrScanUnsupported) {
@@ -371,12 +375,33 @@ func (d *Driver) sweepOrphanDirsWith(scan func(string) ([]serverProc, int, error
 		if !o.removable(now) {
 			continue
 		}
-		if err := privfs.RemoveAll(filepath.Join(d.sessionRoot, o.name)); err != nil {
+		// Set aside and deleted in the background (muster #436): a start-up with
+		// many of these used to spend its time deleting them (#435).
+		if err := d.removeDir(filepath.Join(d.sessionRoot, o.name)); err != nil {
 			d.say("opencode: a session directory no record names could not be removed (%s): %v", o.name, err)
 			continue
 		}
 		d.say("opencode: removed a session directory no record names, no server holds and nothing has written to for %s (%s, %d KiB)",
 			now.Sub(o.newest).Round(time.Minute), o.name, (o.bytes+1023)/1024)
+	}
+}
+
+// resumeDiscards finishes the deletions a close or a sweep began and a stop or a crash
+// interrupted, and says so when an earlier deletion failed (muster #436). The directories
+// are the ones privfs.Discard set aside next to the session directories; they are
+// not session directories and the orphan listing below never sees them (scopedDirName).
+// It waits for no deletion.
+func (d *Driver) resumeDiscards() {
+	queued, failed, err := privfs.ResumeDiscards(d.sessionRoot)
+	if err != nil {
+		d.say("opencode: the directories set aside for removal could not be listed: %v", err)
+		return
+	}
+	if queued > 0 {
+		d.say("opencode: finishing the removal of session directories an earlier run set aside (%d)", queued)
+	}
+	for _, f := range failed {
+		d.say("opencode: a session directory set aside for removal could not be deleted (%s), will try again: %v", filepath.Base(f.Path), f.Err)
 	}
 }
 
