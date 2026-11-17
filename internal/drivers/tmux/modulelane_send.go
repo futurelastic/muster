@@ -435,6 +435,10 @@ func (d *Driver) sendViaModule(ctx context.Context, req fleet.Request, ref fleet
 	}
 	mod := extModule{d: d, h: h, name: name}
 	var tr moduleTrace
+	// #491: where the session's transcript ends BEFORE the write, so a later look
+	// can say the text never reached it (modulelane_release.go). Best effort: a
+	// session whose transcript cannot be located keeps the plain hold.
+	src, srcOK := d.laneTranscript(ctx, ref)
 	res, err := mod.deliver(ctx, delivery.Delivery{Req: req, Ref: ref, Text: labelled, Opts: opts}, &tr)
 	if err != nil {
 		d.counters.incr(delivery.CounterPrefix + name + ".error")
@@ -463,10 +467,14 @@ func (d *Driver) sendViaModule(ctx context.Context, req fleet.Request, ref fleet
 	delivery.Observe(d.counters.incr, name, res)
 	if res.Receipt.Outcome == fleet.OutcomeUnknown {
 		snap, _ := h.snapshot(ref.ID)
-		d.noteUnconfirmed(ref.ID, unconfirmedEntry{
+		entry := unconfirmedEntry{
 			Key: deliveryKey(text, opts.From), Cwd: snap.Cwd,
 			Module: name, LaneKey: tr.laneKey, SendID: tr.sendID, Partial: tr.lost,
-		})
+		}
+		if srcOK {
+			entry.TranscriptPath, entry.TranscriptOffset, entry.needle = src.path, src.offset, laneNeedle(text)
+		}
+		d.noteUnconfirmed(ref.ID, entry)
 	}
 	return res.Receipt.WithModule(name), true
 }
@@ -514,9 +522,13 @@ func (h *moduleHost) client(name string) *modclient.Client {
 // no wait: confirmed means the text arrived after all (answered as queued, the
 // same bar as a live confirmation, and not sent again); rejected means it did
 // not, and the send proceeds; anything else holds — nothing is written on
-// either path.
-func (d *Driver) answerFromModuleLedger(ctx context.Context, ref fleet.SessionRef, key string, e unconfirmedEntry) (fleet.DeliveryReceipt, bool) {
+// either path — unless the session's own transcript proves the write never
+// arrived (#491, modulelane_release.go), which lets the send proceed too.
+func (d *Driver) answerFromModuleLedger(ctx context.Context, req fleet.Request, ref fleet.SessionRef, key string, e unconfirmedEntry) (fleet.DeliveryReceipt, bool) {
 	held := func(why string) (fleet.DeliveryReceipt, bool) {
+		if d.releaseLaneHold(ctx, req, ref, key, e) {
+			return fleet.DeliveryReceipt{}, false
+		}
 		d.counters.incr(counterRouteGuardModuleUnconfirmed)
 		return fleet.DeliveryReceipt{
 			Outcome: fleet.OutcomeUnknown,
@@ -534,9 +546,9 @@ func (d *Driver) answerFromModuleLedger(ctx context.Context, ref fleet.SessionRe
 	if e.SendID == "" || e.LaneKey == "" {
 		return held("no send handle was kept for it")
 	}
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	askCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	r, err := c.Confirm(ctx, modclient.ConfirmArgs{LaneKey: e.LaneKey, SendID: e.SendID})
+	r, err := c.Confirm(askCtx, modclient.ConfirmArgs{LaneKey: e.LaneKey, SendID: e.SendID})
 	if err != nil {
 		return held("the module could not say: " + moduleErrorClass(err))
 	}
