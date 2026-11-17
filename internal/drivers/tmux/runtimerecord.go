@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	fleet "github.com/futurelastic/muster"
@@ -111,7 +112,8 @@ type apiErrorFact struct {
 	// order — never the reverse.
 	text string
 	// at is the refusal's own timestamp, as the runtime wrote it — not
-	// when this driver happened to read the file.
+	// when this driver happened to read the file. For a clean turn read by
+	// latestServedEntry it is that turn's timestamp, zero when it has none.
 	at time.Time
 }
 
@@ -139,11 +141,20 @@ type apiErrorRecordEntry struct {
 	Error             string `json:"error"`
 	Timestamp         string `json:"timestamp"`
 	Message           struct {
+		// Model is who wrote the entry: a model's name for an answer the
+		// account served, syntheticModel for text the runtime composed itself.
+		Model   string `json:"model"`
 		Content []struct {
 			Text string `json:"text"`
 		} `json:"content"`
 	} `json:"message"`
 }
+
+// syntheticModel is the model name the runtime writes on an assistant entry it
+// composed itself — its own report of a refusal, or a placeholder such as "no
+// response requested". Nothing served by the account wrote it, so it is no
+// evidence that the account answered anything.
+const syntheticModel = "<synthetic>"
 
 // latestAPIError reads the tail of one runtime record and reports what its
 // most recent assistant-role entry says.
@@ -206,6 +217,25 @@ func recordTail(path string) (lines []string, torn bool, ok bool) {
 }
 
 func latestAPIError(path string) (apiErrorFact, recordVerdict) {
+	return latestAssistantEntry(path, false)
+}
+
+// latestServedEntry is latestAPIError for the one question "did the account
+// serve a turn, and when" (#489): the newest assistant entry that is either a
+// refusal or a real model answer. An entry the runtime composed itself that is
+// not a refusal ("no response requested") says nothing either way, so it is
+// stepped over rather than read as a clean turn — one of those landing after a
+// refusal must not read as the account serving again.
+//
+// A recordCleanTurn from here carries the entry's own timestamp in fact.at,
+// zero when the entry has none or it cannot be parsed. A turn that cannot be
+// dated proves nothing about WHEN the account served, and every caller treats a
+// zero time as no proof.
+func latestServedEntry(path string) (apiErrorFact, recordVerdict) {
+	return latestAssistantEntry(path, true)
+}
+
+func latestAssistantEntry(path string, answersOnly bool) (apiErrorFact, recordVerdict) {
 	lines, _, ok := recordTail(path)
 	if !ok {
 		return apiErrorFact{}, recordUnavailable
@@ -225,13 +255,17 @@ func latestAPIError(path string) (apiErrorFact, recordVerdict) {
 		if entry.Type != "assistant" {
 			continue
 		}
+		if answersOnly && !entry.IsAPIErrorMessage && entry.Message.Model == syntheticModel {
+			continue
+		}
 		// The most recent assistant-role entry, whichever it is, answers
 		// the question. Stop here regardless of what it says — an OLDER
 		// assistant entry is history superseded by this one, exactly the
 		// replay hazard usageLimit and lastTurnFailed already guard
 		// against on the screen side.
 		if !entry.IsAPIErrorMessage {
-			return apiErrorFact{}, recordCleanTurn
+			at, _ := time.Parse(time.RFC3339Nano, entry.Timestamp)
+			return apiErrorFact{at: at}, recordCleanTurn
 		}
 		ts, err := time.Parse(time.RFC3339Nano, entry.Timestamp)
 		if err != nil {
@@ -485,6 +519,187 @@ func (d *Driver) recordFactFor(s fleet.Session) (apiErrorFact, recordVerdict) {
 	return latestAPIError(d.conversations.recordPath(string(s.Cwd), s.Conversation.ID))
 }
 
+// quotaRecordPath is where one session's runtime record lives, when this
+// listing resolved which conversation the session is.
+func (d *Driver) quotaRecordPath(s fleet.Session) (string, bool) {
+	if d.conversations == nil || s.Conversation == nil || !s.Conversation.Known {
+		return "", false
+	}
+	return d.conversations.recordPath(string(s.Cwd), s.Conversation.ID), true
+}
+
+// quotaEvidence settles, for one whole listing, what the evidence says about
+// the ACCOUNT (#489): the fact and verdict noteQuotaBlock takes, in place of
+// "whichever flagged session the loop met first".
+//
+// recordCleanTurn is returned when the account is shown to serve AFTER the
+// newest refusal there is evidence of, which is either of
+//
+//   - a session whose screen shows a limit notice but whose OWN newest turn
+//     in its record is one the account served — the notice is history, as
+//     #56 established; or
+//   - a turn served later than every refusal the machine shows evidence of:
+//     any session's record whose newest turn is a real answer, or a session
+//     this driver saw working (noteServed). A turn is positive proof the
+//     account serves; it needs no spinner caught on this read, and it does
+//     not need the session to be one whose screen happens to show a notice.
+//
+// "Evidence of a refusal" is, newest first wins: the block's own since; the
+// refusal any record dates (a rate_limit entry's own timestamp); and a limit
+// notice on a screen whose record dates nothing, which cannot be newer than
+// the moment this driver first saw that screen (screenSince). That last one
+// is what keeps an old notice, still sitting on an idle screen nobody has
+// typed into, from re-creating a block the account has outlived: its screen
+// has not changed since before the proof, so it is the old refusal. A NEW
+// refusal changes the screen, so it is dated after the proof and blocks.
+//
+// Before this the record half read only the FIRST session whose screen showed
+// a notice. With no notice on any screen, which is how a block outlives the
+// notices that announced it, nobody was read; with a refusal nobody ever
+// resumed listed first, it answered for every session after it; and a notice
+// left on an idle screen put the block back as soon as it cleared.
+//
+// recordAPIError is the first flagged session's refusal, which noteQuotaBlock
+// uses to date a block at the refusal itself; recordUnavailable is "no usable
+// record said anything", and the caller keeps its screen-derived fallback.
+//
+// The cost is paid only by a listing with something to settle: no block and no
+// notice on any screen reads nothing at all, and a block costs one stat per
+// session (recordProbe), not a read.
+func (d *Driver) quotaEvidence(sessions []fleet.Session) (apiErrorFact, recordVerdict) {
+	now := d.now()
+	q, observed := d.quotaBlock()
+	var flagged []int
+	for i := range sessions {
+		if sessions[i].State.Status == fleet.StatusQuotaBlocked {
+			flagged = append(flagged, i)
+		}
+	}
+	if q == nil && len(flagged) == 0 {
+		return apiErrorFact{}, recordUnavailable
+	}
+
+	var fact apiErrorFact
+	verdict := recordUnavailable
+	var undated []int // flagged sessions whose record dates no refusal
+	for _, i := range flagged {
+		path, ok := d.quotaRecordPath(sessions[i])
+		if !ok {
+			undated = append(undated, i)
+			continue
+		}
+		f, v := d.quotaProbe.latest(path)
+		switch {
+		case v == recordCleanTurn:
+			d.noteServed(f.at, now)
+			return f, v
+		case v == recordAPIError && verdict == recordUnavailable:
+			fact, verdict = f, v
+		}
+		if !(v == recordAPIError && f.category == "rate_limit") {
+			undated = append(undated, i)
+		}
+	}
+
+	// The time the account is known to have refused work at, which a turn must
+	// come after to prove it serves again. A refusal the record dates is that
+	// time — unless the block already carries a record-confirmed one that is
+	// later. With neither (a block first seen on a screen, no record to date
+	// it) it is the moment the block began being remembered, which nothing can
+	// precede and so cannot be disproved by a turn recorded before it.
+	var refusal time.Time
+	switch {
+	case verdict == recordAPIError && fact.category == "rate_limit" &&
+		(q == nil || !observed || fact.at.After(q.Since)):
+		refusal = fact.at
+	case q != nil:
+		refusal = q.Since
+	}
+	// A notice no record dates is newest-bounded by when its screen was first
+	// seen. A session this driver has never seen adds nothing it can claim.
+	for _, i := range undated {
+		if t := d.screenSince(sessions[i].ID); t.After(refusal) {
+			refusal = t
+		}
+	}
+	if refusal.IsZero() {
+		return fact, verdict
+	}
+
+	// Newest evidence wins. Every record on the machine is read (a stat each,
+	// recordProbe) for the newest refusal it dates and the newest turn it shows
+	// served; the account serves again exactly when the turn is the later of
+	// the two. A turn proved by an earlier listing stands, whichever sessions
+	// this one happens to show.
+	proof := d.servedAt()
+	live := make(map[string]bool, len(sessions))
+	paths := make([]string, 0, len(sessions))
+	for i := range sessions {
+		if path, ok := d.quotaRecordPath(sessions[i]); ok {
+			live[path] = true
+			paths = append(paths, path)
+		}
+	}
+	d.quotaProbe.keep(live)
+	for _, path := range paths {
+		f, v := d.quotaProbe.latest(path)
+		switch {
+		case v == recordAPIError && f.category == "rate_limit" && f.at.After(refusal):
+			refusal = f.at
+		case v == recordCleanTurn && f.at.After(proof) && !f.at.After(now):
+			// A turn dated after now is a record this machine's clock
+			// disagrees with; counting one would outrank every refusal
+			// recorded before the clock caught up.
+			proof = f.at
+		}
+	}
+	if proof.After(refusal) {
+		d.noteServed(proof, now)
+		return apiErrorFact{at: proof}, recordCleanTurn
+	}
+	return fact, verdict
+}
+
+// screenSince is when this driver first saw session id's screen showing what it
+// shows now (observation.digestSince): the latest a notice on it can have
+// appeared. Zero for a session never observed.
+func (d *Driver) screenSince(id string) time.Time {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	o, ok := d.observed[id]
+	if !ok {
+		return time.Time{}
+	}
+	if !o.digestSince.IsZero() {
+		return o.digestSince
+	}
+	return o.at
+}
+
+// noteServed remembers that the account was shown serving a turn at at: a
+// record's own timestamp, or the read at which a session was seen working.
+//
+// A turn dated after now is a record this machine's clock disagrees with, and
+// remembering one would outrank every refusal recorded before it caught up, for
+// good — so it is not remembered.
+func (d *Driver) noteServed(at, now time.Time) {
+	if at.After(now) {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if at.After(d.quotaServed) {
+		d.quotaServed = at
+	}
+}
+
+// servedAt is the newest turn any record has shown the account serving.
+func (d *Driver) servedAt() time.Time {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.quotaServed
+}
+
 // upgradeLastTurnFromRecord applies #56's LastTurn upgrade to a bare
 // SessionState that has no pre-resolved Conversation to reuse — State's own
 // shape, unlike List's Session. It performs its own conversation lookup,
@@ -520,4 +735,70 @@ func (d *Driver) upgradeLastTurnFromRecord(ctx context.Context, st fleet.Session
 		st.LastTurn = nil
 	}
 	return st
+}
+
+// recordProbe answers latestServedEntry for many records on every read, at the
+// price of a stat for each one whose record has not grown (#489).
+//
+// A machine whose account is blocked has to ask every session's record whether
+// the account serves again, on every listing, and a listing is taken after each
+// output burst. Reading each record's tail that often is the cost
+// recordTailBytes was sized to avoid for the few sessions the screen flags;
+// here it would be paid by all of them. The answer for a record can only change
+// when the record does, and the runtime only appends, so size and modification
+// time together name the answer already read.
+type recordProbe struct {
+	mu   sync.Mutex
+	seen map[string]probeRead
+
+	// read is the reader behind the memo; nil means latestServedEntry. A test
+	// sets it to count how often a record is really read.
+	read func(path string) (apiErrorFact, recordVerdict)
+}
+
+type probeRead struct {
+	size    int64
+	modTime time.Time
+	fact    apiErrorFact
+	verdict recordVerdict
+}
+
+// latest is latestServedEntry(path), re-read only when the record has changed
+// since the answer held for it. recordUnavailable whenever the record cannot be
+// statted: a missing record is never answered from memory.
+func (p *recordProbe) latest(path string) (apiErrorFact, recordVerdict) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return apiErrorFact{}, recordUnavailable
+	}
+	p.mu.Lock()
+	prior, ok := p.seen[path]
+	p.mu.Unlock()
+	if ok && prior.size == info.Size() && prior.modTime.Equal(info.ModTime()) {
+		return prior.fact, prior.verdict
+	}
+	read := p.read
+	if read == nil {
+		read = latestServedEntry
+	}
+	fact, verdict := read(path)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.seen == nil {
+		p.seen = map[string]probeRead{}
+	}
+	p.seen[path] = probeRead{size: info.Size(), modTime: info.ModTime(), fact: fact, verdict: verdict}
+	return fact, verdict
+}
+
+// keep drops every memo whose record is not in live, so the memo cannot
+// outgrow the fleet.
+func (p *recordProbe) keep(live map[string]bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for path := range p.seen {
+		if !live[path] {
+			delete(p.seen, path)
+		}
+	}
 }
