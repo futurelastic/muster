@@ -5,6 +5,7 @@ package privfs
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -179,6 +180,8 @@ func TestDiscard_SetsAsideADirectoryItsOwnerCannotWriteTo(t *testing.T) {
 	}
 	release := make(chan struct{})
 	reached := make(chan struct{}, 1)
+	releaseOnce := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseOnce)
 	d := newDiscarder(pacing{rate: 1, burst: 1, sleep: func(time.Duration) {
 		select {
 		case reached <- struct{}{}:
@@ -204,7 +207,7 @@ func TestDiscard_SetsAsideADirectoryItsOwnerCannotWriteTo(t *testing.T) {
 	if len(asideIn(t, parent)) != 1 {
 		t.Errorf("set aside = %v, want the one directory, still being deleted", asideIn(t, parent))
 	}
-	close(release)
+	releaseOnce()
 	settle(t, d)
 	if left := asideIn(t, parent); len(left) != 0 {
 		t.Errorf("left behind: %v", left)

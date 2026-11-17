@@ -375,23 +375,26 @@ func removeSlowly(path string, p *pacer) error {
 	}
 	// Opening a directory needs r and x, emptying it needs w.
 	_ = chmodAdd(path, fi, 0o700)
-	root, err := os.OpenRoot(path)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil
-		}
-		return err
-	}
-	defer root.Close()
 	// A process the session started and nothing stopped can write into the tree
 	// while it is deleted, which makes the last rmdir fail on an entry that was not
 	// there a moment ago. Emptying again is the answer, a few times at most.
 	for attempt := 1; ; attempt++ {
-		if err := emptyRoot(root, p); err != nil {
+		root, err := os.OpenRoot(path)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		err = emptyRoot(root, p)
+		// Closed before the directory itself is removed: Windows will not remove a
+		// directory something holds open, and the handle is ours.
+		root.Close()
+		if err != nil {
 			return err
 		}
 		p.tick()
-		err := os.Remove(path)
+		err = os.Remove(path)
 		if err == nil || errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}

@@ -86,6 +86,8 @@ func asideIn(t *testing.T, parent string) []string {
 func TestDiscard_FreesThePathAtOnceAndDeletesTheTreeAfterwards(t *testing.T) {
 	release := make(chan struct{})
 	reached := make(chan struct{}, 1)
+	releaseOnce := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseOnce) // a failed assertion must not leave the deleter blocked
 	d := newDiscarder(pacing{rate: 1, burst: 1, sleep: func(time.Duration) {
 		select {
 		case reached <- struct{}{}:
@@ -115,7 +117,7 @@ func TestDiscard_FreesThePathAtOnceAndDeletesTheTreeAfterwards(t *testing.T) {
 		t.Errorf("the name was not free to use again: %v", err)
 	}
 
-	close(release)
+	releaseOnce()
 	settle(t, d)
 	if left := asideIn(t, parent); len(left) != 0 {
 		t.Errorf("the set-aside directory was not deleted: %v", left)
@@ -243,6 +245,8 @@ func TestResumeDiscards_ADirectoryThatIsNotThereHasNothingToResume(t *testing.T)
 func TestDiscard_AnEntryAlreadyQueuedIsNotQueuedAgain(t *testing.T) {
 	release := make(chan struct{})
 	reached := make(chan struct{}, 1)
+	releaseOnce := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseOnce) // a failed assertion must not leave the deleter blocked
 	d := newDiscarder(pacing{rate: 1, burst: 1, sleep: func(time.Duration) {
 		select {
 		case reached <- struct{}{}:
@@ -262,7 +266,7 @@ func TestDiscard_AnEntryAlreadyQueuedIsNotQueuedAgain(t *testing.T) {
 			t.Fatalf("resume while the entry was being deleted = %d, %v, %v; want 0, none, nil", queued, failed, err)
 		}
 	}
-	close(release)
+	releaseOnce()
 	settle(t, d)
 	if left := asideIn(t, parent); len(left) != 0 {
 		t.Errorf("left behind: %v", left)
@@ -304,6 +308,8 @@ func TestDiscard_ManyCallersOneDeleter(t *testing.T) {
 func TestDiscard_ABacklogCallsInAHelper(t *testing.T) {
 	release := make(chan struct{})
 	reached := make(chan struct{}, 1)
+	releaseOnce := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseOnce) // a failed assertion must not leave the deleter blocked
 	d := newDiscarder(pacing{rate: 1, burst: 3, backlog: 2, sleep: func(time.Duration) {
 		select {
 		case reached <- struct{}{}:
@@ -335,7 +341,7 @@ func TestDiscard_ABacklogCallsInAHelper(t *testing.T) {
 		t.Fatalf("with the background deleter held, the set-aside directories are %v; want the helper to have deleted the three small ones and left the big one", left)
 	}
 
-	close(release)
+	releaseOnce()
 	settle(t, d)
 	if left := asideIn(t, parent); len(left) != 0 {
 		t.Errorf("left behind: %v", left)

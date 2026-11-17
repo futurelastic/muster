@@ -563,20 +563,20 @@ func TestScratch_AnExitedSessionsCompleteFigureIsFinal(t *testing.T) {
 // exited session's partial figure is not final.
 func TestScratch_APartialFigureIsNeverFinal(t *testing.T) {
 	clk := newStepClock()
-	wc := &walkCounter{clk: clk}
-	d, sess, dir := scratchSession(t, scratchLimits{inline: true, refresh: 10 * time.Minute, maxEntries: 2, walkDir: wc.walkDir}, withClock(clk.now))
+	d, sess, dir := scratchSession(t, scratchLimits{inline: true, refresh: 10 * time.Minute, maxEntries: 2}, withClock(clk.now))
 	writeScratch(t, dir, "a", 10)
 	writeScratch(t, dir, "b", 10)
 	writeScratch(t, dir, "c", 10)
 	exitSession(t, d, sess)
 
-	if got := stateScratch(t, d, sess); !got.Partial {
-		t.Fatalf("scratch = %+v, want a partial figure (the bound is 2 entries)", got)
+	first := stateScratch(t, d, sess)
+	if !first.Partial {
+		t.Fatalf("scratch = %+v, want a partial figure (the bound is 2 entries)", first)
 	}
 	clk.advance(11 * time.Minute)
-	stateScratch(t, d, sess)
-	if got := wc.walks(); got != 2 {
-		t.Errorf("%d walks after two reads an interval apart, want 2: a partial figure must not be final", got)
+	// A new walk stamps a new time; the figure of a walk that was final would keep the old one.
+	if second := stateScratch(t, d, sess); !second.AsOf.After(first.AsOf) {
+		t.Errorf("AsOf = %v after a refresh interval, was %v: a partial figure must not be final", second.AsOf, first.AsOf)
 	}
 }
 
