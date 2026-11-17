@@ -286,8 +286,7 @@ func mutating(svc *Service, cfg Config, next http.HandlerFunc) http.HandlerFunc 
 				need = GrantRelay
 			}
 			if !p.Allows(need) {
-				logDenied(p, need, target, r)
-				writeError(w, &fleet.Error{
+				denied := &fleet.Error{
 					Kind: fleet.ErrorUnauthorized,
 					Message: "principal " + p.Name + " does not hold the " +
 						string(need) + " grant (§6). Every grant defaults to " +
@@ -295,7 +294,9 @@ func mutating(svc *Service, cfg Config, next http.HandlerFunc) http.HandlerFunc 
 						"one — this is expected until an operator adds " +
 						string(need) + " to this principal's grants, not a bug.",
 					Machine: target,
-				})
+				}
+				logDenied(p, need, target, r, denied)
+				writeError(w, denied)
 				return
 			}
 			// Run first, then log what actually happened. Logging the
@@ -308,7 +309,7 @@ func mutating(svc *Service, cfg Config, next http.HandlerFunc) http.HandlerFunc 
 				defer gw.settle()
 				next(aw, r)
 			}()
-			logMutation(p, need, target, r, aw.status)
+			logMutation(p, need, target, r, aw)
 			return
 		}
 
@@ -419,15 +420,16 @@ func reading(next http.HandlerFunc) http.HandlerFunc {
 		}
 		if !p.Allows(GrantRead) {
 			target := fleet.MachineId(r.PathValue("machine"))
-			logDenied(p, GrantRead, target, r)
-			writeError(w, &fleet.Error{
+			denied := &fleet.Error{
 				Kind: fleet.ErrorUnauthorized,
 				Message: "principal " + p.Name + " does not hold the read grant (§6). " +
 					"Every grant defaults to denied, on a fresh deployment as much as an " +
 					"established one — this is expected until an operator adds read to " +
 					"this principal's grants, not a bug.",
 				Machine: target,
-			})
+			}
+			logDenied(p, GrantRead, target, r, denied)
+			writeError(w, denied)
 			return
 		}
 		next(w, r)
@@ -509,6 +511,9 @@ func bearerOf(r *http.Request) string {
 }
 
 func writeError(w http.ResponseWriter, e *fleet.Error) {
+	// The audit line of the request is written after the handler returns and
+	// would otherwise know only the status (muster #416).
+	noteError(w, e)
 	w.Header().Set("Fleet-Clock", time.Now().Format(time.RFC3339Nano))
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(e.Kind.DefaultHTTPStatus())

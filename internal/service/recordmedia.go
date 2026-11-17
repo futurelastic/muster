@@ -49,7 +49,7 @@ func handleRecordMedia(svc *Service, refuse bool) http.HandlerFunc {
 		w = aw
 		entries := 0
 		reason := ""
-		defer func() { logContentRead(r, machine, id, entries, aw.status, reason) }()
+		defer func() { logContentRead(r, machine, id, entries, aw, reason) }()
 
 		if refuse {
 			reason = fleet.ReasonRecordOff
