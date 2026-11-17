@@ -227,6 +227,13 @@ func machinePrincipals(doc machinelist.Document) ([]service.Principal, error) {
 			if gr == service.GrantDebug {
 				return nil, listGrantError{fmt.Sprintf("machine list: machine %q: a list cannot give %q; an operator grants it on this machine, in the config", m.ID, g)}
 			}
+			// And for credentials (muster #498): who may change which provider account
+			// this machine's sessions bill, or hand them a different key, is a local
+			// decision. A list that named it would let one owner-signed file widen that
+			// on every machine at once.
+			if gr == service.GrantCredentials {
+				return nil, listGrantError{fmt.Sprintf("machine list: machine %q: a list cannot give %q; an operator grants it on this machine, in the config", m.ID, g)}
+			}
 			grants = append(grants, gr)
 		}
 		k, err := peerkey.ParsePublicKey(m.PublicKey)

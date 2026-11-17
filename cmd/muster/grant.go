@@ -137,13 +137,7 @@ func grantLogin(store *grant.Store, client *grant.Client, now func() time.Time, 
 		return 1
 	}
 	t := now()
-	saved, err := store.Replace(grant.Grant{
-		Refresh:      toks.Refresh,
-		Access:       toks.Access,
-		ExpiresAtMs:  t.Add(toks.ExpiresIn).UnixMilli(),
-		AccountID:    toks.AccountID,
-		SignedInAtMs: t.UnixMilli(),
-	})
+	saved, err := store.SignIn(toks, t)
 	if err != nil {
 		fmt.Fprintln(stderr, "muster grant login:", err)
 		return 1

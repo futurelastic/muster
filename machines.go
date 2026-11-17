@@ -190,6 +190,12 @@ const (
 	SourceOperatorEnv CredentialSource = "operator-env"
 	// SourceGrant: the subscription sign-in the service itself stores and renews.
 	SourceGrant CredentialSource = "grant"
+	// SourceLinked: an API key a client linked through the credentials routes
+	// (muster #498). The service wrote the key file in its own state and wired the
+	// session variable itself, so a client may also unlink it; an operator-env or
+	// grant credential is not unlinked this way (operator-env is the operator's to
+	// remove, grant is signed out).
+	SourceLinked CredentialSource = "linked"
 	// SourceEngineStore: the engine's own credential store, where sessions really
 	// read it under this service's isolation. No runtime here reports it today:
 	// every session runs with a store of its own, so the engine's is never read.
@@ -365,3 +371,46 @@ func (m RuntimeModels) Normalized() RuntimeModels {
 // Available reports whether the row describes a runtime with a working
 // driver. An absent Status is available.
 func (r RuntimeInfo) Available() bool { return r.Status != RuntimeUnavailable }
+
+// CredentialLoginState is where a subscription sign-in started over HTTP stands
+// (muster #498). The set is open on read: a client must treat a state it does not
+// know as not finished.
+type CredentialLoginState string
+
+const (
+	// LoginPending: the code was issued and nobody has approved it yet.
+	LoginPending CredentialLoginState = "pending"
+	// LoginApproved: the person approved; the sign-in is stored and the runtime's
+	// credentials row now reads it.
+	LoginApproved CredentialLoginState = "approved"
+	// LoginExpired: nobody approved the code in time. Start again.
+	LoginExpired CredentialLoginState = "expired"
+	// LoginFailed: the provider refused the sign-in or could not be reached. Reason
+	// says which, in a sentence with no token in it.
+	LoginFailed CredentialLoginState = "failed"
+)
+
+// CredentialLogin is the answer of the sign-in routes: what to show a person, and
+// where it stands. It never carries a token. URL and Code are present only while
+// the login is pending.
+type CredentialLogin struct {
+	// ID names this attempt; poll it.
+	ID    string               `json:"id"`
+	State CredentialLoginState `json:"state"`
+	// URL is the address to open on any device, and Code what to type there.
+	URL  string `json:"url,omitempty"`
+	Code string `json:"code,omitempty"`
+	// ExpiresAt is when a pending code stops being accepted.
+	ExpiresAt *Timestamp `json:"expiresAt,omitempty"`
+	// Reason is one sentence for a person, present when State is failed or expired.
+	Reason string `json:"reason,omitempty"`
+}
+
+// CredentialRemoval is the answer of the unlink and sign-out routes (muster #498).
+type CredentialRemoval struct {
+	Provider string         `json:"provider"`
+	Kind     CredentialKind `json:"kind"`
+	// Removed is false when there was nothing of that kind to remove: the call is
+	// idempotent, so the caller learns which it was here rather than from an error.
+	Removed bool `json:"removed"`
+}

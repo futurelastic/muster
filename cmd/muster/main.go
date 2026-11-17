@@ -836,10 +836,18 @@ func main() {
 	// the only party that ever refreshes the sign-in; sessions get an access token.
 	stopGrant := func() {}
 	var grantRefresher *grant.Refresher
+	// muster #498: the sign-in's start-and-poll pair for the credentials routes, and the
+	// variables clients link over them. Both live under the state directory, so a
+	// machine with none has neither and those routes answer unsupported.
+	var grantLogins *grant.Logins
+	var linkedEnv *sessionenv.Linked
 	if stateDir := os.Getenv("FLEET_STATE_DIR"); stateDir != "" && getenv("FLEET_RUNTIME_OPENCODE", "") == "1" {
-		grantRefresher = grant.NewRefresher(grant.NewStore(stateDir), grant.NewClient(),
+		grantStore := grant.NewStore(stateDir)
+		grantRefresher = grant.NewRefresher(grantStore, grant.NewClient(),
 			grant.WithLogf(func(format string, args ...any) { log.Printf("muster: "+format, args...) }))
 		grantCtx, grantCancel := context.WithCancel(context.Background())
+		grantLogins = grant.NewLogins(grantCtx, grantStore, grant.NewClient())
+		linkedEnv = sessionenv.NewLinked(stateDir)
 		grantDone := make(chan struct{})
 		go func() {
 			defer close(grantDone)
@@ -899,6 +907,11 @@ func main() {
 				// machine's ChatGPT sign-in as an access token, and follow its renewals.
 				if grantRefresher != nil {
 					opts = append(opts, opencode.WithGrant(grantRefresher))
+				}
+				// muster #498: what the credentials routes link and sign in, reaching sessions
+				// beside the declared sessionEnv entries.
+				if linkedEnv != nil {
+					opts = append(opts, opencode.WithLinkedEnv(linkedEnv), opencode.WithLogins(grantLogins))
 				}
 				if attempt > 0 {
 					// The first try gates startup, so it is short. The retries

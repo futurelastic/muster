@@ -123,7 +123,8 @@ func credentialStateOfGrant(s fleet.GrantState) fleet.CredentialState {
 // the row says the better of the two: a provider is usable when any of them is.
 func (d *Driver) envCredentials() []fleet.RuntimeCredential {
 	byProvider := map[string]fleet.RuntimeCredential{}
-	for _, e := range d.sessionEnv {
+	entries, linked := d.effectiveSessionEnv()
+	for _, e := range entries {
 		provider, known := keyEnvProviders[envKey(e.Name)]
 		if !known || e.FromFile == "" || !e.AppliesTo.ReachesRuntime(d.runtime) || !d.providers.permits(provider) {
 			continue
@@ -134,9 +135,12 @@ func (d *Driver) envCredentials() []fleet.RuntimeCredential {
 			Source:   fleet.SourceOperatorEnv,
 			State:    fleet.CredentialUsable,
 		}
+		if linked[e.Name] {
+			row.Source = fleet.SourceLinked
+		}
 		if st, why := sessionenv.CheckFile(e.FromFile); st != sessionenv.FileUsable {
 			row.State = fleet.CredentialDegraded
-			row.Reason = keyFileReason(e, st, why)
+			row.Reason = keyFileReason(e, st, why, linked[e.Name])
 		}
 		if have, dup := byProvider[provider]; dup && have.State == fleet.CredentialUsable {
 			continue
@@ -151,9 +155,17 @@ func (d *Driver) envCredentials() []fleet.RuntimeCredential {
 }
 
 // keyFileReason says, in a sentence with no path and none of the value, why a
-// declared key file gives a session nothing. The variable's own name is safe and
-// is what the operator needs to find the entry.
-func keyFileReason(e sessionenv.Entry, st sessionenv.FileState, why string) string {
+// key file gives a session nothing. The variable's own name is safe and is what the
+// operator needs to find the entry. A linked key is not the operator's to repair:
+// it was put there through the credentials routes, so the sentence says to link it
+// again.
+func keyFileReason(e sessionenv.Entry, st sessionenv.FileState, why string, linked bool) string {
+	if linked {
+		if st == sessionenv.FileAbsent {
+			return "the key linked for " + e.Name + " is no longer stored; link it again"
+		}
+		return "the key linked for " + e.Name + " cannot be used: " + why + "; link it again"
+	}
 	var reason string
 	if st == sessionenv.FileAbsent {
 		reason = "the key file declared for " + e.Name + " does not exist"

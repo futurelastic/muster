@@ -1029,6 +1029,34 @@ type CredentialReporter interface {
 	Credentials() []fleet.RuntimeCredential
 }
 
+// CredentialManager is another OPTIONAL capability: a driver that can take and drop
+// the provider credentials its sessions are given says so (muster #498), for the
+// credentials routes. It is the write side of CredentialReporter's view: what it
+// links shows there at once.
+//
+// None of it may log, echo or return a credential. A key value passed to LinkKey
+// is written once and is not readable back; every answer is a name, a kind and a
+// state. Errors are *fleet.Error: invalid (a provider or kind that cannot be
+// linked, a value that is not a key, a provider the policy does not permit),
+// conflict (the operator declared the same variable), not_found (a sign-in attempt
+// this driver does not hold), unsupported (a driver mode or machine with nowhere to
+// store one). A driver without it answers the routes with unsupported.
+type CredentialManager interface {
+	// LinkKey stores value as the provider's API key, replacing a key linked
+	// before, and returns the credentials row it now shows.
+	LinkKey(provider string, value []byte) (fleet.RuntimeCredential, error)
+	// UnlinkKey removes a key linked through LinkKey. A key the operator declared is
+	// not this driver's to remove.
+	UnlinkKey(provider string) (fleet.CredentialRemoval, error)
+	// StartLogin begins the provider's subscription sign-in, or returns the one
+	// already waiting for approval.
+	StartLogin(provider string) (fleet.CredentialLogin, error)
+	// LoginStatus is where a sign-in attempt StartLogin issued stands.
+	LoginStatus(provider, id string) (fleet.CredentialLogin, error)
+	// SignOut forgets the stored subscription sign-in.
+	SignOut(provider string) (fleet.CredentialRemoval, error)
+}
+
 // CapabilityRefresher is a driver that can re-probe its peer on demand —
 // what GET /v1/machines?verify=1 asks for, instead of the cached cycle.
 type CapabilityRefresher interface {

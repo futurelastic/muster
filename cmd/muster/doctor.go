@@ -893,7 +893,11 @@ func supervisorGrants() []service.Grant {
 		// record (muster #441) is excluded because the owner ruled that nobody holds
 		// it by default: it reads a session's whole record, tool output included,
 		// and the service principal `service install` enrols must not hold it.
-		if g != service.GrantRelay && g != service.GrantLabel && g != service.GrantRemoteControl && g != service.GrantHumanRelay && g != service.GrantActingPerson && g != service.GrantPushList && g != service.GrantDebug && g != service.GrantRecord {
+		//
+		// credentials (muster #498) is excluded for the same stronger reason: it changes
+		// which provider account and key this machine's sessions run on, and the service
+		// principal `service install` enrols must not hold it by default.
+		if g != service.GrantRelay && g != service.GrantLabel && g != service.GrantRemoteControl && g != service.GrantHumanRelay && g != service.GrantActingPerson && g != service.GrantPushList && g != service.GrantDebug && g != service.GrantRecord && g != service.GrantCredentials {
 			out = append(out, g)
 		}
 	}

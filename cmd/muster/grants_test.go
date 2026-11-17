@@ -293,3 +293,17 @@ func TestSupervisorGrantsNeverIncludeRecord(t *testing.T) {
 		t.Fatal("record is not a grant this build can configure")
 	}
 }
+
+// muster #498: credentials decides which provider account and key this machine's
+// sessions run on, so the principal `muster service install` enrols must not hold
+// it, and an operator must still be able to grant it.
+func TestSupervisorGrantsNeverIncludeCredentials(t *testing.T) {
+	for _, g := range supervisorGrants() {
+		if g == service.GrantCredentials {
+			t.Fatalf("supervisorGrants includes %s: every new `service install` would grant it by default", g)
+		}
+	}
+	if !service.ValidGrant(service.GrantCredentials) {
+		t.Fatal("credentials is not a grant this build can configure")
+	}
+}

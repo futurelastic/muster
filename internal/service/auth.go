@@ -238,6 +238,30 @@ const (
 	// it by upgrading. The operator's second lock, whatever grants are held, is
 	// Config.RefuseRecord.
 	GrantRecord Grant = "record"
+	// GrantCredentials lets a principal link and unlink a runtime's provider
+	// credentials over HTTP (muster #498): an API key written into this service's
+	// state, the subscription sign-in's start, poll and sign-out. Every route under
+	// /v1/runtimes/{runtime}/credentials/ needs it, reading a pending sign-in
+	// attempt included (the code it shows signs this machine in to whichever
+	// account approves it). Seeing which credentials exist is not this grant: that
+	// is `credentials` on GET /v1/runtimes, which is `read`.
+	//
+	// ⚠️ It decides which provider account this machine's sessions bill and which
+	// key they run with, and the key travels in a request body. It changes no
+	// session, and never returns a credential: every answer is a name, a kind and a
+	// state. Its own grant, and not a rider on `create` or `keys`, because who may
+	// change this machine's engine credentials is a local decision, the same shape as
+	// `push-list` and `debug`.
+	//
+	// Not implied by anything: not by read, send or relay, not by the legacy
+	// single-token flags (a machine with no principal table refuses every request,
+	// nobody can hold it), not by `muster service install`'s set (see
+	// supervisorGrants), and not by a signed machine list — a list that names it is
+	// refused whole. Not relayed to a peer: the routes name no machine. Linking a
+	// credential makes a provider usable; it never allows it (the provider policy
+	// still decides). Absent means denied, like every other grant, so no existing
+	// principal gains it by upgrading.
+	GrantCredentials Grant = "credentials"
 )
 
 // Grants is every grant this service defines, in the order an operator would
@@ -255,6 +279,7 @@ func Grants() []Grant {
 		GrantRead, GrantCreate, GrantSend, GrantInterrupt,
 		GrantClose, GrantRename, GrantDiscard, GrantKeys, GrantLabel, GrantRemoteControl,
 		GrantRelay, GrantHumanRelay, GrantActingPerson, GrantPushList, GrantDebug, GrantRecord,
+		GrantCredentials,
 	}
 }
 
@@ -394,6 +419,13 @@ func grantForVerb(r *http.Request) Grant {
 		// route a principal needs a grant for answers the same question in one
 		// place (muster #441). The media route (muster #442) rides the same grant.
 		return GrantRecord
+	case isCredentialsPath(path):
+		// Not routed through reading() or mutating(): credentialsGate (credentialadmin.go)
+		// checks this grant itself, for every method on these routes — and before the
+		// DELETE case below, which would otherwise call an unlink a session close. Listed
+		// here so every route a principal needs a grant for answers the same question in
+		// one place (muster #498).
+		return GrantCredentials
 	case r.Method == http.MethodDelete:
 		return GrantClose
 	}
