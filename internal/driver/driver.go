@@ -1017,6 +1017,18 @@ type GrantReporter interface {
 	Grants() []fleet.RuntimeGrant
 }
 
+// CredentialReporter is another OPTIONAL capability, same shape: a driver that
+// knows which provider credentials its sessions can be given says so (muster
+// #497) — what is held, of which kind, from where, and whether it works — from
+// what it already holds. GET /v1/runtimes calls it for every local row, so an
+// implementation must be cheap, must make no request to the runtime or to a
+// provider, and must never carry a credential, a key file's path or a token. A
+// driver without it reports nothing, and that reads as "nobody said", never as
+// "none held".
+type CredentialReporter interface {
+	Credentials() []fleet.RuntimeCredential
+}
+
 // CapabilityRefresher is a driver that can re-probe its peer on demand —
 // what GET /v1/machines?verify=1 asks for, instead of the cached cycle.
 type CapabilityRefresher interface {

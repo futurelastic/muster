@@ -387,6 +387,22 @@ is the provider's own wording. It does not change the grant's `state` (a limited
 good sign-in), and sessions on an API key are not counted. `muster doctor` shows the same
 thing as a warning on `runtime.opencode.grant`.
 
+**`credentials` says which provider credentials this machine can give a session of
+the runtime** (#497): a list of `{provider, kind, source, state, reason?}`. `kind` is
+`api-key` or `subscription`, `source` is `operator-env` (a `sessionEnv` entry supplies the
+key) or `grant` (the stored sign-in), and `state` is `usable`, `signed-out`, `revoked` or
+`degraded`, with a `reason` sentence for anything but `usable`. It is **names and states
+only**: no key, token or file path, and the reason never names a path. The service is the
+party that starts the runtime and holds its keys, so a client asks here instead of running
+the runtime's own `auth list` from its own `PATH`, and checks a choice (a model, a
+provider) against it when it creates a session. It is answered with no request to the
+runtime, so it is the same with the runtime's program on no `PATH`. The provider policy
+applies as it does to `grants`: a provider the machine does not allow has no row, and a
+sign-in does not allow it. The key is absent where nobody reported (the terminal runtime,
+an `unavailable` row, every peer's row) and **absent never means none held**; `state` and
+`source` are open sets, so treat a state you do not know as not usable. `grants` stays as
+it is. See `docs/spec/api-http.md`.
+
 A runtime the operator enabled is listed **even when it has no working driver**
 (#297). Its row has `status: "unavailable"`, a `cause` (`not-installed`,
 `not-executable`, `probe-timeout`, `probe-failed` or `start-failed` — an open

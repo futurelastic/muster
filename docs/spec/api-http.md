@@ -201,7 +201,11 @@ GET /v1/runtimes
                                    "state": "ok",                 absent when none; this machine's own rows only
                                    "accessExpiresAt": "...",
                                    "refreshedAt": "...",
-                                   "quota": { "state": "limited", ... } } ] },   ← only while the provider refuses the sign-in (#458)
+                                   "quota": { "state": "limited", ... } } ],   ← only while the provider refuses the sign-in (#458)
+                     "credentials": [ { "provider": "openai",      ← which provider credentials this machine can give a
+                                        "kind": "api-key",            session (#497); absent when the runtime cannot say,
+                                        "source": "operator-env",     this machine's own rows only
+                                        "state": "usable" } ] },
                    { "machine": "...", "runtime": "...",         ← enabled, no working driver
                      "status": "unavailable",
                      "cause": "probe-timeout",
@@ -352,6 +356,70 @@ GrantQuota {
   still a good sign-in — and it is not the session-level `quota` block of a `quota_blocked`
   session, which is one session's own report. Sessions on an API key are not
   counted: their limits are per token and theirs alone.
+
+**`credentials` is which provider credentials this machine can give a session of the
+runtime** (muster #497). The service is the one party that starts the runtime and holds
+its key files, its sign-in and its provider policy, so it is the one that says; a client
+that wants to know whether a runtime can use a provider asks here and never runs the
+runtime's own programs, from its own `PATH` and its own home, to find out. A client
+stores what people choose and checks the choice against this list when it creates a
+session.
+
+```
+RuntimeCredential {
+  provider : string                                    // the runtime's own id for the provider ("openai")
+  kind     : "api-key" | "subscription"                // the way in, as `usage.credential` names it (#458)
+  source   : "operator-env" | "grant" | "engine-store" // open on read
+  state    : "usable" | "signed-out" | "revoked" | "degraded"   // open on read
+  reason?  : string                                    // one sentence for a person; present unless state is "usable"
+}
+```
+
+- **Names and states only.** A key, a token or the path of a key file never leaves the
+  service, and neither does a `reason`: it names the variable an operator declared
+  (`OPENAI_API_KEY`) and never the file behind it or any of its content.
+- **It is answered from what the service holds, with no request to the runtime or to a
+  provider**, like the rest of the row, so it is the same with the runtime's program off
+  every `PATH`. The one read it makes is of each declared key file, to say whether a
+  session created now would find a usable value there; it is read fresh, as a create
+  reads it, so a repaired or rotated file shows at the next listing.
+- `source: "operator-env"` is an entry the operator declared in `sessionEnv` (§5) that
+  supplies a provider's API key (`kind: "api-key"`). The variable is matched to a
+  provider by the runtime's own convention for the names it reads; a variable the
+  service does not know the provider of is **not listed**, never guessed, and one name
+  that several providers read (two providers share one name) is not listed either. An
+  entry whose `appliesTo` names other runtimes does not appear on this row; one that
+  narrows by agent or marker does, because the row is of the runtime and a session in
+  that scope gets the key. A key file that is missing, unreadable, empty or malformed
+  reads `degraded` with a reason, whether the entry is required or not — the reason says
+  which of the two it is for a create — and a key file the service can read reads
+  `usable`. Two variables for one provider (the names the runtime accepts for it) are
+  one row, and it reads the better of the two.
+- `source: "grant"` is the subscription sign-in this service stores and renews (muster
+  #451), `kind: "subscription"`. Its `state` is the grant's own, with `ok` read as
+  `usable`, and its `reason` is the grant's.
+- `source: "engine-store"` would be the runtime's own credential store, and it is
+  **listed only where sessions actually read it** under this service's isolation. The
+  opencode runtime's sessions each run with a data directory of their own, so the store
+  a person signed in to on this machine is under none of them and is never listed; a
+  runtime in shared mode (one this service did not start) lists no credentials at all.
+- **The provider policy applies exactly as it does to `grants`**: a credential for a
+  provider `FLEET_OPENCODE_PROVIDERS` does not allow is absent. A credential makes a
+  provider usable; it does not allow it.
+- **`grants` stays as it is**, for the clients that read it; `credentials` carries the
+  same sign-in as one more row (`source: "grant"`), alongside the API keys the `grants`
+  field never held, and the two agree about it. `grants` keeps what only a sign-in has
+  (`accessExpiresAt`, `refreshedAt`, `quota`).
+- **A listed credential is held, not necessarily the one a session gets.** When a
+  provider has both an API key and a sign-in, which a session runs on is the operator's
+  `providerCredentials` rule (#458); the listing says what exists and whether it works,
+  and `usage.credential` says what a session ran on.
+- **Absent never reads "none held".** The key is absent on a runtime that cannot say
+  (the terminal runtime reports none), on a machine with nothing configured, on an
+  `unavailable` row, and on every peer's row (a peer's credentials are that peer's to
+  say, asked of that machine). **The sets of `source` and `state` are open on read:** a
+  client treats a state it does not know as not usable, and a source it does not know as
+  one it cannot reason about.
 
 **A runtime the operator enabled is listed even when it has no working
 driver** (muster #297). It used to be omitted — a runtime whose version check

@@ -172,6 +172,61 @@ type RuntimeInfo struct {
 	// this machine's own rows. Absent says nobody reported, never "signed out" —
 	// a peer's row has none, and so does a runtime that holds no sign-in.
 	Grants []RuntimeGrant `json:"grants,omitempty"`
+	// Credentials is which provider credentials this machine holds for the runtime
+	// (muster #497): their kind, where they come from and whether they work —
+	// names and states, never a value. Present only on a runtime that can say and
+	// only on this machine's own rows; absent says nobody reported, never "none
+	// held". An empty list is not sent for the same reason.
+	Credentials []RuntimeCredential `json:"credentials,omitempty"`
+}
+
+// CredentialSource says where a credential the service holds comes from. The set
+// is open on read: a client must treat a source it does not know as one it cannot
+// reason about, and still read the state.
+type CredentialSource string
+
+const (
+	// SourceOperatorEnv: a sessionEnv entry the operator declared supplies it.
+	SourceOperatorEnv CredentialSource = "operator-env"
+	// SourceGrant: the subscription sign-in the service itself stores and renews.
+	SourceGrant CredentialSource = "grant"
+	// SourceEngineStore: the engine's own credential store, where sessions really
+	// read it under this service's isolation. No runtime here reports it today:
+	// every session runs with a store of its own, so the engine's is never read.
+	SourceEngineStore CredentialSource = "engine-store"
+)
+
+// CredentialState is whether a credential can be used. The set is open on read: a
+// client must treat a state it does not know as not usable.
+type CredentialState string
+
+const (
+	// CredentialUsable: a session created now gets a working credential.
+	CredentialUsable CredentialState = "usable"
+	// CredentialSignedOut: configured, but nothing is stored to use.
+	CredentialSignedOut CredentialState = "signed-out"
+	// CredentialRevoked: the provider refused it; a person must supply a new one.
+	CredentialRevoked CredentialState = "revoked"
+	// CredentialDegraded: declared, but the service cannot read a value from where
+	// the declaration points, or the last renewal failed for a reason that is not
+	// the credential's fault. It may still work for a while; Reason says why not.
+	CredentialDegraded CredentialState = "degraded"
+)
+
+// RuntimeCredential is one entry of RuntimeInfo.Credentials. It carries a name and
+// a state and never a credential, a key file's path or a token.
+type RuntimeCredential struct {
+	// Provider is the runtime's own id for the provider ("openai").
+	Provider string `json:"provider"`
+	// Kind is the way in: an API key or a plan sign-in.
+	Kind CredentialKind `json:"kind"`
+	// Source is where the service holds it from.
+	Source CredentialSource `json:"source"`
+	// State is whether it is usable now.
+	State CredentialState `json:"state"`
+	// Reason is one sentence for a person, present unless State is usable. It names
+	// no path and none of the value.
+	Reason string `json:"reason,omitempty"`
 }
 
 // GrantState is where a provider sign-in stands (muster #451). The set is open on

@@ -79,17 +79,8 @@ type Scope struct {
 // delivered for. A scope naming Runtimes never matches an empty runtime —
 // withheld rather than delivered when the runtime is not known.
 func (s Scope) Matches(runtime fleet.RuntimeId, spec fleet.SessionSpec) bool {
-	if len(s.Runtimes) > 0 {
-		found := false
-		for _, r := range s.Runtimes {
-			if runtime != "" && string(runtime) == r {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false
-		}
+	if !s.ReachesRuntime(runtime) {
+		return false
 	}
 	if len(s.Agents) == 0 && len(s.Markers) == 0 {
 		return true
@@ -101,6 +92,23 @@ func (s Scope) Matches(runtime fleet.RuntimeId, spec fleet.SessionSpec) bool {
 	}
 	for _, m := range s.Markers {
 		if spec.Marker == m {
+			return true
+		}
+	}
+	return false
+}
+
+// ReachesRuntime reports whether the scope lets a session on runtime carry the
+// entry at all, whatever the agent or marker: the Runtimes axis alone, which is
+// the part of the scope a per-runtime listing can answer (muster #497). The same
+// rule Matches applies first: a scope naming no runtime reaches every one, and a
+// scope naming some never reaches an empty runtime id.
+func (s Scope) ReachesRuntime(runtime fleet.RuntimeId) bool {
+	if len(s.Runtimes) == 0 {
+		return true
+	}
+	for _, r := range s.Runtimes {
+		if runtime != "" && string(runtime) == r {
 			return true
 		}
 	}
