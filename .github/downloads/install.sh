@@ -17,7 +17,9 @@
 #      ~/.local/bin/muster, creates the state directory and a principal table (never overwriting one), writes the
 #      user service's unit, runs `muster doctor` under the unit's environment, restarts the service when the binary
 #      or the unit changed, and waits for /v1/health. A machine that never had muster gets a new service; a machine
-#      that has one keeps its address, machine id and tmux path and gets the new binary under it;
+#      that has one keeps its address (a network address too, when the machine serves federation peers), machine id,
+#      tmux path and operator variables and gets the new binary under it. A machine that runs muster under a unit of
+#      its own (a label an operator made) is taken over once, by naming the unit in MUSTER_ADOPT; see below;
 #   5. runs `muster service status`, which exits 1 unless the unit is present, loaded, running and healthy.
 # If step 4 or 5 fails and there was an installed muster, it is put back: the saved copy runs its own
 # `service install`, which is the same command in the other direction. The exit status is 1 either way, so a
@@ -26,6 +28,12 @@
 #   DL_URL     the host's address, instead of the stamped one (another host, or a test)
 #   DL_TOKEN   a read token for a host that wants one; sent as a bearer header, never on a command line
 #   MUSTER_VERSION   X.Y.Z, when the version is not given as an argument
+#   MUSTER_ADOPT     the launchd label, systemd unit name, or file of a unit that already runs muster on this machine
+#                    under a name of its own. Used once: the first run passes it to `muster service install --adopt`,
+#                    which moves that unit's address and FLEET_*, LANG and LC_* variables into the standard unit and
+#                    stops and puts away the old one, so there is one muster, not two. Every later run is an ordinary
+#                    update and finds the standard unit; leaving the variable set is harmless (the command says the
+#                    unit was taken over earlier). A rollback never passes it: the previous binary does not know it.
 #
 # Needs curl (or wget, without a token), sha256sum or shasum, and tmux for the service (see docs/install.md).
 set -eu
@@ -114,8 +122,17 @@ if [ -x "$installed" ]; then
   previous=$("$tmp/previous" --version 2>&1 | head -n 1) || previous="the previous muster"
 fi
 
+# The new binary's own install; the one place MUSTER_ADOPT is passed (see the top).
+new_service_install() {
+  if [ -n "${MUSTER_ADOPT:-}" ]; then
+    "$tmp/$file" service install --adopt "$MUSTER_ADOPT"
+  else
+    "$tmp/$file" service install
+  fi
+}
+
 echo "installing muster v$version ($target)"
-if "$tmp/$file" service install && "$installed" service status; then
+if new_service_install && "$installed" service status; then
   echo "installed muster v$version ($target), service healthy"
   case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) echo "note: $HOME/.local/bin is not on your PATH" ;; esac
   exit 0

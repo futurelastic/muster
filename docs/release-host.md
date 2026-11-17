@@ -20,7 +20,17 @@ binary names the release it was asked for, and then runs the **new binary's** `m
 is the install: it copies itself to `~/.local/bin/muster`, creates what is missing, restarts the user service when
 the binary or the unit changed, runs `muster doctor` under the unit's environment and waits for `/v1/health`. A
 machine that has muster keeps its address, machine id, tokens and state, and every `FLEET_*` and `LANG` / `LC_*`
-variable an operator added to the unit (on macOS, its `PATH` too); it gets a new binary under the same unit.
+variable an operator added to the unit (on macOS, its `PATH` too); it gets a new binary under the same unit. A
+machine that serves federation peers keeps its network address the same way: an address the unit already lists is
+kept with no flag (`--serves-peers` is only for introducing one, see `install.md`).
+
+A machine that runs muster under a unit of its own (a label an operator made) is taken over once, so that an update
+does not write a second muster beside it: set `MUSTER_ADOPT` to that unit's launchd label, systemd unit name or file
+for the first run (`MUSTER_ADOPT=<label> sh install.sh`), which passes it to `muster service install --adopt`. The
+old unit's address and variables move into the standard unit and the old unit is stopped and put away. Every later
+run is an ordinary update; leaving the variable set does no harm. The rollback never passes it, and the previous
+binary cannot put such a machine back (it refuses a network address): a failure after the take-over ends in the
+installer's "could not put the previous version back" line, and the old unit's file is in `~/.local/state/muster/adopted/`.
 
 If the new version does not come up healthy, the copy of the previous binary the installer kept runs its own
 `service install`, which puts it back; the installer exits 1 either way so a caller never mistakes the failed

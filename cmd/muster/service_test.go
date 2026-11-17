@@ -42,6 +42,9 @@ type fakeManager struct {
 	// a command made to fail by failOn still leaves the unit loaded: another loader
 	// (the login item) bootstrapped the same file first.
 	loadsOnFailure bool
+	// a second unit, made by an operator under a label of its own, that --adopt
+	// takes over (muster #492)
+	other *fakeOtherUnit
 }
 
 func (f *fakeManager) run(_ context.Context, env []string, name string, args ...string) ([]byte, error) {
@@ -64,6 +67,14 @@ func (f *fakeManager) run(_ context.Context, env []string, name string, args ...
 			f.loaded, f.active = true, true
 		}
 		return []byte("boom"), errors.New("exit status 1")
+	}
+	if f.other != nil {
+		if out, err, ok := f.other.handle(line); ok {
+			if !strings.Contains(line, "launchctl print") && !strings.Contains(line, "is-active") && !strings.Contains(line, " show ") {
+				f.calls = append(f.calls, line)
+			}
+			return out, err
+		}
 	}
 	// Reads are not part of the sequence a test asserts on.
 	read := strings.Contains(line, "launchctl print") || strings.Contains(line, "is-enabled") || strings.Contains(line, "is-active")
