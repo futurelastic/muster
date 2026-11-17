@@ -119,6 +119,15 @@ and restarts the service when it exits.
   with `--no-start`. A second `--adopt` of the same unit is an ordinary install, so
   an updater may leave it set. The Library's installer passes it from
   `MUSTER_ADOPT` ([`release-host.md`](release-host.md)).
+
+  A plain `service install` (muster #493) does not write the standard unit beside
+  such a unit either. When the manager's unit directory holds a unit other than
+  the two this command writes that sets `FLEET_ADDR`, and `--adopt` was not given,
+  the run refuses before changing anything and prints each unit it found with the
+  command to run instead: `muster service install --adopt <label>`. Once the unit
+  is taken over (its file is in `adopted/`, out of that directory) a plain install
+  is ordinary again. With more than one such unit, adopt one at a time: the next
+  plain run names the one that is left.
 - **`doctor` fails, the service is not started.** The unit and files stay;
   fix the failing row and run it again. `--no-start` writes everything and runs
   `doctor` without loading or starting the unit.

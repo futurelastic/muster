@@ -177,6 +177,94 @@ func (e svcEnv) resolveAdopt(ctx context.Context, p svcPaths, arg string) (*svcA
 	return a, nil
 }
 
+// svcOtherUnit is a muster unit in the manager's directory that this command does
+// not write: one an operator made.
+type svcOtherUnit struct {
+	File string // the unit's file
+	Name string // its launchd label, or its systemd unit name: what --adopt takes
+	Addr string // the FLEET_ADDR it sets
+}
+
+// otherMusterUnits lists the units in the service manager's directory that run
+// muster and are not the ones this command writes (muster #493). The test is the one
+// --adopt applies to the unit it names: the unit sets FLEET_ADDR. A unit already taken
+// over is not here, because taking it over moved its file out of the directory.
+func (e svcEnv) otherMusterUnits(p svcPaths) []svcOtherUnit {
+	suffix := ".service"
+	if e.GOOS == "darwin" {
+		suffix = ".plist"
+	}
+	dir := filepath.Dir(p.Unit)
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var found []svcOtherUnit
+	for _, ent := range ents {
+		if ent.IsDir() || !strings.HasSuffix(ent.Name(), suffix) {
+			continue
+		}
+		file := filepath.Join(dir, ent.Name())
+		if file == p.Unit || file == p.LoginUnit || sameFile(file, p.Unit) {
+			continue
+		}
+		raw, rerr := os.ReadFile(file)
+		if rerr != nil {
+			continue
+		}
+		u := svcOtherUnit{File: file, Name: ent.Name()}
+		if e.GOOS == "darwin" {
+			u.Name = firstNonEmpty(plistLabel(string(raw)), strings.TrimSuffix(ent.Name(), suffix))
+		}
+		if u.Name == svcLabel || u.Name == svcLoginLabel || u.Name == svcUnitName {
+			continue
+		}
+		vars, _ := parseUnitVars(e.GOOS, string(raw))
+		addr, ok := vars["FLEET_ADDR"]
+		if !ok {
+			continue
+		}
+		u.Addr = addr
+		found = append(found, u)
+	}
+	return found
+}
+
+// errOtherMusterUnit is the refusal of a plain install beside a unit an operator
+// made: the standard unit written next to it would be a second muster on the same
+// state, which is the failure --adopt exists to prevent. It names each unit and the
+// command that takes it over.
+func errOtherMusterUnit(others []svcOtherUnit) error {
+	var b strings.Builder
+	if len(others) == 1 {
+		b.WriteString("this machine already runs muster under a unit of its own, and writing the standard unit beside it would start a second muster on the same state:\n")
+	} else {
+		b.WriteString("this machine already runs muster under units of its own, and writing the standard unit beside them would start a second muster on the same state:\n")
+	}
+	for _, u := range others {
+		fmt.Fprintf(&b, "  %s (%s, FLEET_ADDR=%s)\n", u.Name, u.File, u.Addr)
+	}
+	b.WriteString("Nothing was changed. To take it over and leave one unit, run:\n")
+	for _, u := range others {
+		fmt.Fprintf(&b, "  muster service install --adopt %s\n", adoptArg(u.Name))
+	}
+	if len(others) > 1 {
+		b.WriteString("one unit at a time: run it again for the next once the first is taken over")
+	}
+	return errors.New(strings.TrimRight(b.String(), "\n"))
+}
+
+// adoptArg is the unit's name as a shell word: bare when it is made of characters
+// a shell leaves alone, quoted otherwise.
+func adoptArg(name string) string {
+	if reShellSafe.MatchString(name) {
+		return name
+	}
+	return shQuote(name)
+}
+
+var reShellSafe = regexp.MustCompile(`^[A-Za-z0-9._@:+=/-]+$`)
+
 // keptAdopted finds the copy an earlier run kept of the unit arg names: by the
 // file name it would have had, or, on macOS, by the label inside.
 func (e svcEnv) keptAdopted(p svcPaths, arg, file string) string {

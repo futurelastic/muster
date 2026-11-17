@@ -31,6 +31,10 @@ old unit's address and variables move into the standard unit and the old unit is
 run is an ordinary update; leaving the variable set does no harm. The rollback never passes it, and the previous
 binary cannot put such a machine back (it refuses a network address): a failure after the take-over ends in the
 installer's "could not put the previous version back" line, and the old unit's file is in `~/.local/state/muster/adopted/`.
+Without `MUSTER_ADOPT`, such a machine's update is refused before anything changes (`muster service install` names the
+unit it found and `--adopt <label>`), and the installer ends as it does for any failed install; a previous binary
+older than that check has no such guard, so its rollback is only as safe as it is, which is one more reason to set
+`MUSTER_ADOPT` for the first update there.
 
 If the new version does not come up healthy, the copy of the previous binary the installer kept runs its own
 `service install`, which puts it back; the installer exits 1 either way so a caller never mistakes the failed
