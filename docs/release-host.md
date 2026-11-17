@@ -32,14 +32,18 @@ run is an ordinary update; leaving the variable set does no harm. The rollback n
 binary cannot put such a machine back (it refuses a network address): a failure after the take-over ends in the
 installer's "could not put the previous version back" line, and the old unit's file is in `~/.local/state/muster/adopted/`.
 Without `MUSTER_ADOPT`, such a machine's update is refused before anything changes (`muster service install` names the
-unit it found and `--adopt <label>`), and the installer ends as it does for any failed install; a previous binary
-older than that check has no such guard, so its rollback is only as safe as it is, which is one more reason to set
-`MUSTER_ADOPT` for the first update there.
+unit it found and `--adopt <label>`). That refusal exits 3, not 1, and the installer does not run the rollback on it:
+there is nothing to put back, and a previous binary older than the check would write the second muster the check
+exists to prevent. It prints that the machine was not changed and the previous version was not replaced, and exits 1,
+so a caller still sees that the version it asked for is not the one running. The update then waits for
+`MUSTER_ADOPT`; set it for the first update on such a machine.
 
 If the new version does not come up healthy, the copy of the previous binary the installer kept runs its own
 `service install`, which puts it back; the installer exits 1 either way so a caller never mistakes the failed
-version for the running one. A host that wants a token gets it from `DL_TOKEN`, sent as a header through curl's
-stdin, never as an argument. `DL_URL` points the installer at another host.
+version for the running one. The one failure it does not put back from is a refusal that changed nothing (status 3
+from `service install`, above): the previous version is still the one installed. A host that wants a token gets it
+from `DL_TOKEN`, sent as a header through curl's stdin, never as an argument. `DL_URL` points the installer at another
+host.
 
 ## How a final gets there
 
