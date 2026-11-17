@@ -24,6 +24,11 @@
 # If step 4 or 5 fails and there was an installed muster, it is put back: the saved copy runs its own
 # `service install`, which is the same command in the other direction. The exit status is 1 either way, so a
 # caller (an updater, a person) sees that the version it asked for is not the one running.
+# One failure of step 4 is not rolled back: `muster service install` exits 3 when it refused before it changed
+# anything (a unit of the operator's beside where the standard unit goes, a refused --adopt, no tmux). There is
+# nothing to undo, and the previous binary's own install could do harm (one older than that refusal writes the
+# second muster the refusal prevented) or report a failed rollback of nothing. The installer says the machine
+# was not changed and exits 1 with the previous version as it was.
 #
 #   DL_URL     the host's address, instead of the stamped one (another host, or a test)
 #   DL_TOKEN   a read token for a host that wants one; sent as a bearer header, never on a command line
@@ -43,6 +48,10 @@ HOST=${HOST%/}
 APP=muster
 
 fail() { echo "muster install: $*" >&2; exit 1; }
+
+# What `muster service install` exits with when it refused before changing anything: svcExitNothingChanged in
+# cmd/muster/service.go. A test holds the two numbers equal.
+REFUSED_UNCHANGED=3
 
 case $HOST in
   http://* | https://*) ;;
@@ -132,10 +141,22 @@ new_service_install() {
 }
 
 echo "installing muster v$version ($target)"
-if new_service_install && "$installed" service status; then
+new_status=0
+new_service_install || new_status=$?
+if [ "$new_status" = 0 ] && "$installed" service status; then
   echo "installed muster v$version ($target), service healthy"
   case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) echo "note: $HOME/.local/bin is not on your PATH" ;; esac
   exit 0
+fi
+
+# A refusal that changed nothing has nothing to put back (see the top).
+if [ "$new_status" = "$REFUSED_UNCHANGED" ]; then
+  if [ "$had_previous" = 1 ]; then
+    echo "muster install: v$version was not installed: the install refused before changing anything, so this machine is as it was and $previous was not replaced" >&2
+  else
+    echo "muster install: v$version was not installed: the install refused before changing anything, so this machine is as it was" >&2
+  fi
+  exit 1
 fi
 
 echo "muster install: v$version did not come up healthy." >&2

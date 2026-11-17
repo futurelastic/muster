@@ -608,6 +608,8 @@ service)
   install)
     echo "install v$V${3:+ $3}${4:+ $4}" >> "$HOME/calls.log"
     [ "$MODE" = install-fails ] && { echo "the service did not become healthy" >&2; exit 1; }
+    [ "$MODE" = install-refuses ] && { echo "this machine already runs muster under a unit of its own. Nothing was changed." >&2; exit 3; }
+    [ "$MODE" = install-exits-2 ] && { echo "a usage error" >&2; exit 2; }
     mkdir -p "$HOME/.local/bin"
     cp "$0" "$HOME/.local/bin/muster.tmp" && mv "$HOME/.local/bin/muster.tmp" "$HOME/.local/bin/muster"
     exit 0 ;;
@@ -826,6 +828,71 @@ func TestInstallPassesAnAdoptedUnitToTheNewBinaryOnly(t *testing.T) {
 	}
 	if got := d3.log(t); got != "install v0.5.0 --adopt hub\nstatus v0.5.0\ninstall v0.3.0" {
 		t.Errorf("calls:\n%s", got)
+	}
+}
+
+// muster #494: `service install` exits 3 when it refused before it changed anything. There is nothing to put back, and
+// the previous binary's own install is not safe to run then (one older than the refusal writes the second muster the
+// refusal prevented), so the installer neither runs it nor says a rollback failed.
+func TestInstallDoesNotRollBackARefusalThatChangedNothing(t *testing.T) {
+	site := serveRelease(t, "0.4.0", fakeMuster("0.4.0", "install-refuses"), "", "")
+
+	d := newDLInstall(t)
+	d.previous(t, "0.3.0")
+	out, code := d.run(t, map[string]string{"DL_URL": site.srv.URL}, "0.4.0")
+	if code != 1 {
+		t.Fatalf("a refused install must exit 1, got %d:\n%s", code, out)
+	}
+	if got := d.log(t); got != "install v0.4.0" {
+		t.Errorf("only the new binary's install may run, and no status check or put-back after it; calls:\n%s", got)
+	}
+	if v := d.installedVersion(t); v != "0.3.0" {
+		t.Errorf("the previous version must be as it was, installed %q:\n%s", v, out)
+	}
+	for _, want := range []string{"Nothing was changed", "muster v0.3.0 (abc1234, go1.23.0) was not replaced", "this machine is as it was"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output must say %q:\n%s", want, out)
+		}
+	}
+	for _, not := range []string{"putting back", "could not put the previous version back", "did not come up healthy", "installed and running again"} {
+		if strings.Contains(out, not) {
+			t.Errorf("a refusal that changed nothing must not report %q:\n%s", not, out)
+		}
+	}
+
+	// No previous version: the same, and nothing is installed.
+	d2 := newDLInstall(t)
+	out, code = d2.run(t, map[string]string{"DL_URL": site.srv.URL}, "0.4.0")
+	if code != 1 || d2.installedVersion(t) != "" || d2.log(t) != "install v0.4.0" || !strings.Contains(out, "this machine is as it was") {
+		t.Errorf("a refused first install (%d, installed %q, calls %q):\n%s", code, d2.installedVersion(t), d2.log(t), out)
+	}
+
+	// Another status is still a failure to put back from: only the refusal's own status skips the rollback.
+	bad := serveRelease(t, "0.5.0", fakeMuster("0.5.0", "install-exits-2"), "", "")
+	d3 := newDLInstall(t)
+	d3.previous(t, "0.3.0")
+	if out, code := d3.run(t, map[string]string{"DL_URL": bad.srv.URL}, "0.5.0"); code != 1 || d3.log(t) != "install v0.5.0\ninstall v0.3.0" {
+		t.Errorf("an install that failed otherwise keeps the rollback (%d, calls %q):\n%s", code, d3.log(t), out)
+	}
+}
+
+// The installer cannot import the Go constant, so the two numbers are held equal here: if one moves, the installer would
+// either roll back a refusal or skip the rollback of a failure.
+func TestInstallerAndServiceInstallAgreeOnTheRefusalStatus(t *testing.T) {
+	number := func(file, pattern string) string {
+		m := regexp.MustCompile(pattern).FindSubmatch(mustRead(t, file))
+		if m == nil {
+			t.Fatalf("%s: no match for %s", file, pattern)
+		}
+		return string(m[1])
+	}
+	goSide := number("cmd/muster/service.go", `(?m)^const svcExitNothingChanged = (\d+)\b`)
+	shSide := number(".github/downloads/install.sh", `(?m)^REFUSED_UNCHANGED=(\d+)\s*$`)
+	if goSide != shSide {
+		t.Errorf("service.go exits %s for a refusal that changed nothing, install.sh skips the rollback on %s", goSide, shSide)
+	}
+	if goSide == "75" || goSide == "1" || goSide == "2" || goSide == "0" {
+		t.Errorf("status %s already means something else (0 done, 1 failed, 2 usage, 75 busy)", goSide)
 	}
 }
 

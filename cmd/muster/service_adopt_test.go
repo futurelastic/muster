@@ -284,8 +284,8 @@ func TestAdoptRefusesBeforeChangingAnything(t *testing.T) {
 				}
 				f.mgr.reset()
 				code := f.run(t, append([]string{"install", "--tmux", f.tmux}, arg...)...)
-				if code != 1 || !strings.Contains(f.errb.String(), tc.want) {
-					t.Fatalf("exit %d, stderr %q, want %q", code, f.errb, tc.want)
+				if code != svcExitNothingChanged || !strings.Contains(f.errb.String(), tc.want) {
+					t.Fatalf("exit %d, stderr %q, want exit %d and %q", code, f.errb, svcExitNothingChanged, tc.want)
 				}
 				if f.mgr.other != nil && (!f.mgr.other.loaded || !f.mgr.other.active) {
 					t.Errorf("a refused --adopt stopped the operator's unit")
@@ -340,8 +340,8 @@ func TestPlainInstallBesideAnOperatorUnitNamesAdopt(t *testing.T) {
 				f.mgr.reset()
 
 				code := f.run(t, "install", "--tmux", f.tmux)
-				if code != 1 {
-					t.Fatalf("a plain install beside %s exited %d, want 1\n%s%s", f.hubName(), code, f.out, f.errb)
+				if code != svcExitNothingChanged {
+					t.Fatalf("a plain install beside %s exited %d, want %d\n%s%s", f.hubName(), code, svcExitNothingChanged, f.out, f.errb)
 				}
 				errText := f.errb.String()
 				for _, want := range []string{f.hubName(), old, f.hubAddr(), "muster service install --adopt " + f.hubName(), "Nothing was changed"} {
@@ -465,8 +465,8 @@ func TestPlainInstallNamesEveryOperatorUnit(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(dir, second), []byte(text), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			if code := f.run(t, "install", "--tmux", f.tmux); code != 1 {
-				t.Fatalf("exit %d, want 1\n%s%s", code, f.out, f.errb)
+			if code := f.run(t, "install", "--tmux", f.tmux); code != svcExitNothingChanged {
+				t.Fatalf("exit %d, want %d\n%s%s", code, svcExitNothingChanged, f.out, f.errb)
 			}
 			errText := f.errb.String()
 			for _, want := range []string{
@@ -526,7 +526,7 @@ func TestNonLoopbackAddressNeedsTheDeclarationOnADesk(t *testing.T) {
 			f := newSvcFixture(t, goos)
 			lan := f.hubAddr()
 			// A desk with no declaration: refused, and nothing is written.
-			if code := f.run(t, "install", "--tmux", f.tmux, "--addr", lan); code != 1 || !strings.Contains(f.errb.String(), "--serves-peers") {
+			if code := f.run(t, "install", "--tmux", f.tmux, "--addr", lan); code != svcExitNothingChanged || !strings.Contains(f.errb.String(), "--serves-peers") {
 				t.Fatalf("exit %d, stderr %q", code, f.errb)
 			}
 			if _, err := os.Stat(f.p.Unit); err == nil {
@@ -548,7 +548,7 @@ func TestNonLoopbackAddressNeedsTheDeclarationOnADesk(t *testing.T) {
 				t.Fatalf("the same address again: %d\n%s%s", code, f.out, f.errb)
 			}
 			other := strings.Replace(lan, "10.8.0.12", "10.9.0.12", 1)
-			if code := f.run(t, "install", "--tmux", f.tmux, "--addr", lan+","+other); code != 1 || !strings.Contains(f.errb.String(), other) {
+			if code := f.run(t, "install", "--tmux", f.tmux, "--addr", lan+","+other); code != svcExitNothingChanged || !strings.Contains(f.errb.String(), other) {
 				t.Fatalf("a new routable entry without the declaration: %d, %q", code, f.errb)
 			}
 			if code := f.run(t, "install", "--tmux", f.tmux, "--addr", lan+","+other, "--serves-peers"); code != 0 {
@@ -574,7 +574,7 @@ func TestServesPeersTakesASpecificAddressOnly(t *testing.T) {
 		{"10.8.0.12:0", "fixed port"},
 		{"10.8.0.12", "HOST:PORT"},
 	} {
-		if code := f.run(t, "install", "--tmux", f.tmux, "--addr", tc.addr, "--serves-peers"); code != 1 || !strings.Contains(f.errb.String(), tc.want) {
+		if code := f.run(t, "install", "--tmux", f.tmux, "--addr", tc.addr, "--serves-peers"); code != svcExitNothingChanged || !strings.Contains(f.errb.String(), tc.want) {
 			t.Errorf("--addr %s --serves-peers: exit %d, stderr %q, want %q", tc.addr, code, f.errb, tc.want)
 		}
 	}

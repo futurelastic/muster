@@ -115,6 +115,9 @@ func usageService() string {
 		"then the usual system directories): launchd's own default has neither, and a tool a session",
 		"or a module looks up on PATH would not be found. status shows it.",
 		"",
+		"install exits 0 when done, 3 when it refused before changing anything (the machine is as it was),",
+		"2 for a usage error and 1 for any other failure, which may have left something written.",
+		"",
 		"Peers, inbox delivery and Windows are not covered: docs/install.md continues there.",
 	}, "\n")
 }
@@ -244,10 +247,30 @@ func runServiceWith(ctx context.Context, env svcEnv, args []string) int {
 	}
 	if err != nil {
 		fmt.Fprintf(env.Err, "muster service %s: %v\n", args[0], err)
+		var unchanged *errNothingChanged
+		if errors.As(err, &unchanged) {
+			return svcExitNothingChanged
+		}
 		return 1
 	}
 	return 0
 }
+
+// svcExitNothingChanged is the status `service install` exits with when it refused
+// before it wrote or ran anything (muster #494): the machine is as it was, and the
+// version that was running still is. Every other failure of the command exits 1, and
+// may have left a file, a unit or a binary behind. It is not 2 (a usage error) and
+// not 75, which docs/install.md already uses for "busy".
+const svcExitNothingChanged = 3
+
+// errNothingChanged marks an error `service install` returned before its first
+// write, so that a caller can tell a refusal from a failure partway through. The
+// release installer is that caller: on the one it skips the rollback, because there
+// is nothing to put back and the previous binary's own install could do harm.
+type errNothingChanged struct{ err error }
+
+func (e *errNothingChanged) Error() string { return e.err.Error() }
+func (e *errNothingChanged) Unwrap() error { return e.err }
 
 type svcInstallOpts struct {
 	Addr, Machine, Tmux string
@@ -1004,7 +1027,18 @@ func (r *svcReport) line(what string, changed bool, detail string) {
 	fmt.Fprintf(r.w, "  %-9s %-10s %s\n", what, state, detail)
 }
 
-func svcInstall(ctx context.Context, e svcEnv, o svcInstallOpts) error {
+func svcInstall(ctx context.Context, e svcEnv, o svcInstallOpts) (err error) {
+	// Up to the line that installs the binary this command only reads: the layout,
+	// the unit files, the service manager's answers. An error before that line
+	// changed nothing, and says so to the caller with a status of its own (muster
+	// #494). The line is where that stops being true, so a write added above it
+	// belongs below it.
+	wrote := false
+	defer func() {
+		if err != nil && !wrote {
+			err = &errNothingChanged{err}
+		}
+	}()
 	p, err := svcLayout(e.GOOS, e.Home)
 	if err != nil {
 		return err
@@ -1103,6 +1137,7 @@ func svcInstall(ctx context.Context, e svcEnv, o svcInstallOpts) error {
 		fmt.Fprintf(e.Out, "  note      %s\n", n)
 	}
 
+	wrote = true // the first write: from here a failure may have left something behind
 	binChanged, err := installBinary(e.Exe, p.Bin)
 	if err != nil {
 		return fmt.Errorf("installing the binary: %w", err)
