@@ -2338,7 +2338,13 @@ the message and cannot say whether it landed answers `unknown`, and **the messag
 is not sent again on any path**: for `strandedRetention` (30 minutes), or until
 the module confirms it, every further send of the same text from the same sender
 to the same session is answered with the same `unknown`, exactly as for the
-inbox. A receipt naming `module` with no module name reads as absent.
+inbox. The hold also lets go (#491) when the session's own transcript proves the
+write never arrived: the module could not say, the write was whole, 15 seconds have
+passed since the module's wait ended, the session reads idle, `waiting_input` (not on
+a prompt) or `quota_blocked` — no turn is running — and the transcript from before the
+write holds the text in no entry. A resend then goes out as a first send. Any doubt
+keeps the hold, and a restart of the service forgets the text it would look for. A
+receipt naming `module` with no module name reads as absent.
 
 **A driver that delivers over a target session's own inbox instead of the
 terminal surface (muster #119) can additionally answer `delivered` |
