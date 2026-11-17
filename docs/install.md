@@ -863,6 +863,11 @@ that. So the operator chooses, in the file `FLEET_CONFIG` names:
   the rule applies to no session and nothing is stripped or written.
 - **Usage names the kind.** A session's `usage.credential` is `subscription` or
   `api-key` (`docs/api.md`), so spend on the two accounts is never added together.
+- **The credentials a machine holds are listed, without values.** `credentials` on
+  `GET /v1/runtimes` (#497) names each provider's API key supplied by a `sessionEnv`
+  entry and the stored sign-in, with their state: a key file that is missing or
+  unusable reads `degraded` with a reason that names the variable and never the file.
+  A client reads it instead of running the runtime's own programs.
 - The declaration is read at start and changing it needs a restart, like `sessionEnv`;
   a reload that changes it is refused whole.
 

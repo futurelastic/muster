@@ -658,3 +658,33 @@ func TestCheckFileAgreesWithProvision(t *testing.T) {
 		}
 	}
 }
+
+// muster #497: a per-runtime listing asks whether an entry reaches a runtime at
+// all, whatever the agent or marker, and must agree with Matches about it.
+func TestScope_ReachesRuntimeIsTheRuntimeAxisAlone(t *testing.T) {
+	cases := []struct {
+		name    string
+		scope   Scope
+		runtime fleet.RuntimeId
+		want    bool
+	}{
+		{"no axis reaches every runtime", Scope{}, "rt", true},
+		{"no axis reaches an unnamed runtime too", Scope{}, "", true},
+		{"a named runtime", Scope{Runtimes: []string{"rt"}}, "rt", true},
+		{"another runtime", Scope{Runtimes: []string{"other"}}, "rt", false},
+		{"an unnamed runtime is never reached by a runtime axis", Scope{Runtimes: []string{"rt"}}, "", false},
+		{"agents and markers narrow sessions, not the runtime", Scope{Agents: []string{"a"}, Markers: []string{"m"}}, "rt", true},
+		{"agents do not widen a runtime axis", Scope{Runtimes: []string{"other"}, Agents: []string{"a"}}, "rt", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.scope.ReachesRuntime(tc.runtime); got != tc.want {
+				t.Fatalf("ReachesRuntime = %v, want %v", got, tc.want)
+			}
+			// A session that matches the scope is always on a runtime it reaches.
+			if tc.scope.Matches(tc.runtime, fleet.SessionSpec{Agent: "a", Marker: "m"}) && !tc.scope.ReachesRuntime(tc.runtime) {
+				t.Fatal("Matches accepts a runtime ReachesRuntime refuses")
+			}
+		})
+	}
+}
