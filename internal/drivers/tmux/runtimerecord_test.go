@@ -306,3 +306,49 @@ func TestTurnsSinceOffset_MissingFileIsUnresolvable(t *testing.T) {
 		t.Fatal("expected ok=false for a record that does not exist")
 	}
 }
+
+// #489: latestServedEntry is latestAPIError for "did the account serve a turn,
+// and when". The one difference is an entry the runtime composed itself that is
+// not a refusal.
+const syntheticAssistantLine = `{"type":"assistant","timestamp":"2026-08-19T13:44:00.000Z","message":{"model":"<synthetic>","content":[{"type":"text","text":"No response requested."}]}}`
+
+func TestLatestServedEntry_CleanTurnCarriesItsOwnTime(t *testing.T) {
+	path := writeAPIErrorFixture(t, []string{rateLimitLine, cleanAssistantLine})
+	fact, verdict := latestServedEntry(path)
+	if verdict != recordCleanTurn {
+		t.Fatalf("verdict = %v, want recordCleanTurn", verdict)
+	}
+	if want := time.Date(2026, 8, 19, 13, 43, 0, 0, time.UTC); !fact.at.Equal(want) {
+		t.Fatalf("at = %v, want %v", fact.at, want)
+	}
+}
+
+func TestLatestServedEntry_AnEntryTheRuntimeComposedDoesNotSupersedeARefusal(t *testing.T) {
+	path := writeAPIErrorFixture(t, []string{rateLimitLine, syntheticAssistantLine})
+	if _, verdict := latestServedEntry(path); verdict != recordAPIError {
+		t.Fatalf("verdict = %v, want recordAPIError: a placeholder after a refusal is not the account serving", verdict)
+	}
+	// latestAPIError keeps reading it as the newest assistant entry, as it
+	// always has: the LastTurn upgrade is not what #489 changes.
+	if _, verdict := latestAPIError(path); verdict != recordCleanTurn {
+		t.Fatalf("latestAPIError verdict = %v, want recordCleanTurn (unchanged)", verdict)
+	}
+}
+
+func TestLatestServedEntry_OnlyPlaceholdersIsUnavailable(t *testing.T) {
+	path := writeAPIErrorFixture(t, []string{syntheticAssistantLine})
+	if _, verdict := latestServedEntry(path); verdict != recordUnavailable {
+		t.Fatalf("verdict = %v, want recordUnavailable", verdict)
+	}
+}
+
+func TestLatestServedEntry_UndatedCleanTurnHasNoTime(t *testing.T) {
+	path := writeAPIErrorFixture(t, []string{`{"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}`})
+	fact, verdict := latestServedEntry(path)
+	if verdict != recordCleanTurn {
+		t.Fatalf("verdict = %v, want recordCleanTurn", verdict)
+	}
+	if !fact.at.IsZero() {
+		t.Fatalf("at = %v, want the zero time: an undated turn proves nothing about when", fact.at)
+	}
+}

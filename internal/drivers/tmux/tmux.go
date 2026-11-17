@@ -445,6 +445,13 @@ type Driver struct {
 	// "how do we know this" note in this driver already lives in prose
 	// rather than in a new structured field.
 	quotaSinceObserved bool
+	// quotaServed is the newest time any session's runtime record showed the
+	// account serving a real turn, as this driver has read it (#489). A block
+	// or a refusal dated before it is history. Memory only: a restarted driver
+	// reads it back from the records on its first full listing.
+	quotaServed time.Time
+	// quotaProbe memoises that read per record (see recordProbe).
+	quotaProbe recordProbe
 
 	// stranded remembers, per session, text this driver delivered and could
 	// not confirm — the record a resume is checked against.
@@ -2417,16 +2424,12 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 	// fleet costs nothing extra here. recordUnavailable (the zero value of
 	// quotaVerdict when nothing resolves) means every downstream consumer
 	// keeps its existing screen-derived fallback unchanged.
-	var quotaRecord apiErrorFact
-	var quotaVerdict recordVerdict
 	for i := range sessions {
 		switch {
 		case sessions[i].State.Status == fleet.StatusQuotaBlocked:
-			if quotaVerdict == recordUnavailable {
-				if fact, verdict := d.recordFactFor(sessions[i]); verdict != recordUnavailable {
-					quotaRecord, quotaVerdict = fact, verdict
-				}
-			}
+			// What the record says about the account is settled once for the
+			// whole listing, by quotaEvidence below — not by whichever
+			// flagged session this loop meets first (#489).
 		case sessions[i].State.LastTurn != nil:
 			switch fact, verdict := d.recordFactFor(sessions[i]); verdict {
 			case recordAPIError:
@@ -2467,6 +2470,10 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 			}
 		}
 	}
+
+	// What the runtime's own records say about the account, settled once for
+	// the whole listing (#489): see quotaEvidence.
+	quotaRecord, quotaVerdict := d.quotaEvidence(sessions)
 
 	// A usage limit belongs to the ACCOUNT, not to whichever pane happened to
 	// print the notice, and it outlives that notice by days. Observe it once
@@ -6965,9 +6972,10 @@ func composerHoldsCollapsedPaste(painted string) bool {
 // promote the account INTO a block, never what clears one) and whether any
 // session was observed working (sawWorking).
 //
-// record and verdict are #56's structured source: the runtime's own record
-// for whichever session the current read found already reporting
-// quota_blocked, when one could be resolved. Three things follow from it —
+// record and verdict are #56's structured source: what the runtime's own
+// records say about the account, settled once per read by quotaEvidence (#489)
+// from the sessions the screen flagged and, while a block is in force, from
+// every session's record. Three things follow from it —
 //
 //   - recordAPIError with category "rate_limit" corrects Since to the
 //     refusal's own timestamp, and ResetHint to the record's own words,
@@ -6978,7 +6986,10 @@ func composerHoldsCollapsedPaste(painted string) bool {
 //     source that survives the notice scrolling off the one pane that
 //     showed it. It clears the block alongside sawWorking, never in place
 //     of it: a driver with no record store configured must keep exactly
-//     today's behaviour.
+//     today's behaviour. It is also what keeps a block from being
+//     promoted again by a notice that is still on some screen: quotaEvidence
+//     returns it whenever a turn was served after the refusal that notice
+//     announced.
 //   - recordUnavailable changes nothing here; the caller falls back to
 //     first-sighting semantics and says so in SessionState.Evidence
 //     (quotaBlockedState), never presenting one as the other.
