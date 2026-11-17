@@ -606,7 +606,7 @@ case "$1" in
 service)
   case "$2" in
   install)
-    echo "install v$V" >> "$HOME/calls.log"
+    echo "install v$V${3:+ $3}${4:+ $4}" >> "$HOME/calls.log"
     [ "$MODE" = install-fails ] && { echo "the service did not become healthy" >&2; exit 1; }
     mkdir -p "$HOME/.local/bin"
     cp "$0" "$HOME/.local/bin/muster.tmp" && mv "$HOME/.local/bin/muster.tmp" "$HOME/.local/bin/muster"
@@ -695,7 +695,7 @@ func (d *dlInstall) previous(t *testing.T, version string) {
 func (d *dlInstall) run(t *testing.T, env map[string]string, args ...string) (string, int) {
 	t.Helper()
 	cmd := exec.Command("sh", append([]string{".github/downloads/install.sh"}, args...)...)
-	cmd.Env = append(os.Environ(), "PATH="+d.bin+":"+os.Getenv("PATH"), "HOME="+d.home, "DL_URL=-", "DL_TOKEN=", "MUSTER_VERSION=")
+	cmd.Env = append(os.Environ(), "PATH="+d.bin+":"+os.Getenv("PATH"), "HOME="+d.home, "DL_URL=-", "DL_TOKEN=", "MUSTER_VERSION=", "MUSTER_ADOPT=")
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
@@ -793,6 +793,39 @@ func TestInstallPutsThePreviousVersionBackWhenTheNewOneDoesNotComeUp(t *testing.
 				t.Errorf("output must say what is running now:\n%s", out)
 			}
 		})
+	}
+}
+
+// muster #492: a machine that runs muster under a unit of its own is taken over by the new binary's
+// `service install --adopt`, once, when the updater names the unit. The rollback is the previous binary's plain
+// `service install`: it does not know the flag, and the unit is the standard one by then.
+func TestInstallPassesAnAdoptedUnitToTheNewBinaryOnly(t *testing.T) {
+	site := serveRelease(t, "0.4.0", fakeMuster("0.4.0", "ok"), "", "")
+	d := newDLInstall(t)
+	d.previous(t, "0.3.0")
+	out, code := d.run(t, map[string]string{"DL_URL": site.srv.URL, "MUSTER_ADOPT": "org.example.hub-muster"}, "0.4.0")
+	if code != 0 {
+		t.Fatalf("install failed (%d):\n%s", code, out)
+	}
+	if got := d.log(t); got != "install v0.4.0 --adopt org.example.hub-muster\nstatus v0.4.0" {
+		t.Errorf("calls:\n%s", got)
+	}
+
+	// Without the variable it is the plain command.
+	d2 := newDLInstall(t)
+	if out, code := d2.run(t, map[string]string{"DL_URL": site.srv.URL}, "0.4.0"); code != 0 || d2.log(t) != "install v0.4.0\nstatus v0.4.0" {
+		t.Errorf("without MUSTER_ADOPT (%d): %q\n%s", code, d2.log(t), out)
+	}
+
+	// A version that does not come up is rolled back with the plain command.
+	bad := serveRelease(t, "0.5.0", fakeMuster("0.5.0", "status-fails"), "", "")
+	d3 := newDLInstall(t)
+	d3.previous(t, "0.3.0")
+	if out, code := d3.run(t, map[string]string{"DL_URL": bad.srv.URL, "MUSTER_ADOPT": "hub"}, "0.5.0"); code != 1 {
+		t.Fatalf("a version that does not come up must exit 1, got %d:\n%s", code, out)
+	}
+	if got := d3.log(t); got != "install v0.5.0 --adopt hub\nstatus v0.5.0\ninstall v0.3.0" {
+		t.Errorf("calls:\n%s", got)
 	}
 }
 

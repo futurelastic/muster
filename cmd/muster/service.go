@@ -77,7 +77,7 @@ const (
 
 func usageService() string {
 	return strings.Join([]string{
-		"usage: muster service install [--addr HOST:PORT] [--machine ID] [--tmux PATH] [--no-start]",
+		"usage: muster service install [--addr HOST:PORT[,HOST:PORT...]] [--serves-peers] [--adopt UNIT] [--machine ID] [--tmux PATH] [--no-start]",
 		"       muster service status",
 		"       muster service restore",
 		"       muster service uninstall [--purge]",
@@ -89,7 +89,13 @@ func usageService() string {
 		"  install    copy the binary to ~/.local/bin, create the state directory and a principal",
 		"             table (never overwriting one), write the unit, run `doctor` under the unit's",
 		"             environment, load the unit and check /v1/health",
-		"  --addr     loopback listen address (default " + svcDefaultAddr + "); a non-loopback address is refused",
+		"  --addr     listen address, or a comma-separated list (default " + svcDefaultAddr + "); an address that is not",
+		"             loopback is refused unless --serves-peers declares it (or the unit already has it)",
+		"  --serves-peers  this machine serves federation peers: allow --addr to name a specific interface address",
+		"             (never 0.0.0.0). A rerun keeps an address the unit already has; the service always adds loopback",
+		"  --adopt    take over the unit UNIT (a launchd label or a systemd unit name, or the path of its file) that",
+		"             already runs muster here: its address and every FLEET_*, LANG, LC_* variable move into the",
+		"             standard unit and the old one is stopped and put away, so no second muster is left beside it",
 		"  --machine  this machine's id (default: the short hostname)",
 		"  --tmux     the multiplexer binary (default: the one found on PATH)",
 		"  --no-start write the files and run doctor; do not load or start the unit",
@@ -209,6 +215,8 @@ func runServiceWith(ctx context.Context, env svcEnv, args []string) int {
 		fs.StringVar(&opts.Machine, "machine", "", "")
 		fs.StringVar(&opts.Tmux, "tmux", "", "")
 		fs.BoolVar(&opts.NoStart, "no-start", false, "")
+		fs.BoolVar(&opts.ServesPeers, "serves-peers", false, "")
+		fs.StringVar(&opts.Adopt, "adopt", "", "")
 	case "uninstall":
 		fs.BoolVar(&purge, "purge", false, "")
 	}
@@ -243,6 +251,10 @@ func runServiceWith(ctx context.Context, env svcEnv, args []string) int {
 type svcInstallOpts struct {
 	Addr, Machine, Tmux string
 	NoStart             bool
+	// ServesPeers is the declaration that lets --addr name a non-loopback address
+	// (muster #492); Adopt names a unit already running muster, to take over.
+	ServesPeers bool
+	Adopt       string
 }
 
 // svcPaths is where everything lives for one user.
@@ -379,23 +391,86 @@ func shortHost(h string) string {
 	return "local"
 }
 
-// checkLoopbackAddr refuses anything but a loopback host with a fixed port:
-// a service that reads paths and starts processes is not put on a network by
-// a one-command install, and a peer is reached through the manual procedure.
-func checkLoopbackAddr(addr string) error {
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		return fmt.Errorf("--addr %q is not HOST:PORT: %v", addr, err)
+// checkListenAddr is the one place install decides what the unit may listen on.
+// FLEET_ADDR is a comma-separated list and the service reads each entry
+// (cmd/muster/listeners.go); install takes the same shape and judges every entry.
+//
+// A service that reads paths and starts processes is not put on a network by a
+// one-command install, so an entry that is not loopback is refused unless it is
+// declared: --serves-peers (a machine that serves federation peers, muster #492),
+// or the unit being replaced already lists that very entry, which means whoever
+// owns the machine put it there and a rerun or an update opens nothing new. An
+// entry that is allowed is still a specific interface address with a fixed port:
+// the service itself warns on a wildcard (a peer is told one specific address,
+// docs/multi-machine.md), and a hostname has no address to check.
+func checkListenAddr(addr string, known map[string]bool, servesPeers bool) error {
+	entries := splitList(addr)
+	if len(entries) == 0 {
+		return fmt.Errorf("--addr %q is not HOST:PORT", addr)
 	}
-	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
-		return fmt.Errorf("--addr %q: a fixed port from 1 to 65535 is needed (an ephemeral port has no stable health URL)", addr)
-	}
-	ip := net.ParseIP(host)
-	if ip == nil || !ip.IsLoopback() {
-		return fmt.Errorf("--addr %q is not a loopback address: this command installs a service reachable only from this machine; "+
-			"a service on a network interface is the manual procedure (docs/install.md, steps 3 and 6)", addr)
+	for _, a := range entries {
+		host, port, err := net.SplitHostPort(a)
+		if err != nil {
+			return fmt.Errorf("--addr %q is not HOST:PORT: %v", a, err)
+		}
+		if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+			return fmt.Errorf("--addr %q: a fixed port from 1 to 65535 is needed (an ephemeral port has no stable health URL)", a)
+		}
+		ip := net.ParseIP(host)
+		if ip != nil && ip.IsLoopback() {
+			continue
+		}
+		if known[a] || servesPeers {
+			if ip == nil || ip.IsUnspecified() {
+				return fmt.Errorf("--addr %q: a machine that serves peers names one specific interface address (a VPN or LAN address), not %q: "+
+					"the service binds exactly what it is given, and a peer is told one address that works (docs/multi-machine.md)", a, host)
+			}
+			continue
+		}
+		return fmt.Errorf("--addr %q is not a loopback address: this command installs a service reachable only from this machine. "+
+			"A machine that serves federation peers says so with --serves-peers (it then takes a specific interface address, "+
+			"and the service adds loopback beside it); a desk that does not stays on loopback", a)
 	}
 	return nil
+}
+
+// healthAddr is where install, restore and status ask /v1/health: an address the
+// service is certain to be listening on. The service always adds a loopback
+// listener on the port of the first routable entry (withLoopback), so a unit
+// listening on a network interface is asked on that port through loopback, and
+// stays answerable when the interface address is not on the machine yet (the
+// service waits for it). An entry that is loopback itself is used as it stands.
+func healthAddr(addr string) string {
+	port := ""
+	for _, a := range splitList(addr) {
+		host, p, err := net.SplitHostPort(a)
+		if err != nil {
+			continue
+		}
+		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+			return a
+		}
+		if port == "" && p != "" && p != "0" {
+			port = p
+		}
+	}
+	if port == "" {
+		return addr
+	}
+	return net.JoinHostPort("127.0.0.1", port)
+}
+
+// routableEntries are the entries of a FLEET_ADDR list that a peer can reach: the
+// ones that are not loopback.
+func routableEntries(addr string) []string {
+	var out []string
+	for _, a := range splitList(addr) {
+		host, _, err := net.SplitHostPort(a)
+		if ip := net.ParseIP(host); err != nil || ip == nil || !ip.IsLoopback() {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 func (e svcEnv) findTmux() (string, error) {
@@ -782,6 +857,11 @@ func (e svcEnv) guiCopyAbandonsProcessGroup(ctx context.Context) bool {
 	if err != nil {
 		return false
 	}
+	return abandonsProcessGroup(out)
+}
+
+// abandonsProcessGroup reads `launchctl print` output for a loaded job.
+func abandonsProcessGroup(out []byte) bool {
 	for _, line := range strings.Split(string(out), "\n") {
 		if t := strings.TrimSpace(line); strings.HasPrefix(t, "properties =") {
 			return strings.Contains(t, "abandon process group")
@@ -932,14 +1012,44 @@ func svcInstall(ctx context.Context, e svcEnv, o svcInstallOpts) error {
 	// What the unit says beyond those three is kept as it is (muster #447): an
 	// update runs this command, and a variable that switches a runtime on must
 	// not be gone when the service comes back.
+	//
+	// --adopt (muster #492) reads the unit it names in place of the standard one,
+	// and the rest is the same: it is the machine's own unit, taken over.
 	var cur svcSettings
 	var notes []string
-	if raw, err := os.ReadFile(p.Unit); err == nil {
+	var adopted *svcAdopted
+	var raw []byte
+	haveUnit := false
+	if o.Adopt != "" {
+		if o.NoStart {
+			return errors.New("--adopt stops the unit it takes over, which --no-start says not to do: use one or the other")
+		}
+		a, aerr := e.resolveAdopt(ctx, p, o.Adopt)
+		switch {
+		case errors.Is(aerr, errAlreadyAdopted):
+			notes = append(notes, aerr.Error()+": this run is an ordinary install")
+		case aerr != nil:
+			return aerr
+		default:
+			adopted = a
+			raw, haveUnit = []byte(a.Text), true
+			if _, err := os.Stat(p.Unit); err == nil {
+				notes = append(notes, fmt.Sprintf("%s exists too: its settings are not read, the adopted unit's are written over it", p.Unit))
+			}
+		}
+	}
+	if adopted == nil {
+		if b, err := os.ReadFile(p.Unit); err == nil {
+			raw, haveUnit = b, true
+		}
+	}
+	if haveUnit {
 		vars, _ := parseUnitVars(e.GOOS, string(raw))
 		cur = settingsFrom(vars)
 		// The state directory and the table are the layout's, not the unit's:
 		// install makes the key and the table where the layout says, and doctor
-		// reads them there. A different value in the unit is reset, said aloud.
+		// reads them there. A different value in the unit is reset, said aloud
+		// (an adopted unit with one was refused above).
 		for _, kv := range [][2]string{{"FLEET_CONFIG", p.Config}, {"FLEET_STATE_DIR", p.StateDir}} {
 			if got, ok := vars[kv[0]]; ok && got != kv[1] {
 				notes = append(notes, fmt.Sprintf("the unit sets %s=%s; install owns it and writes %s", kv[0], got, kv[1]))
@@ -961,7 +1071,13 @@ func svcInstall(ctx context.Context, e svcEnv, o svcInstallOpts) error {
 			s.Path = defaultUnitPath(e.Home)
 		}
 	}
-	if err := checkLoopbackAddr(s.Addr); err != nil {
+	// An address the unit being replaced already lists opens nothing new; one that
+	// only this run's flag names needs --serves-peers (muster #492).
+	known := map[string]bool{}
+	for _, a := range splitList(cur.Addr) {
+		known[a] = true
+	}
+	if err := checkListenAddr(s.Addr, known, o.ServesPeers); err != nil {
 		return err
 	}
 	if s.Tmux == "" {
@@ -1039,6 +1155,10 @@ func svcInstall(ctx context.Context, e svcEnv, o svcInstallOpts) error {
 	if len(s.Carried) > 0 {
 		fmt.Fprintf(e.Out, "  carried   %d variable(s) kept from the unit: %s\n", len(s.Carried), carriedNames(s.Carried))
 	}
+	if r := routableEntries(s.Addr); len(r) > 0 {
+		fmt.Fprintf(e.Out, "  listen    serves peers on %s (the service adds loopback on the same port; health is asked at http://%s/v1/health)\n",
+			strings.Join(r, ", "), healthAddr(s.Addr))
+	}
 	if e.GOOS == "darwin" {
 		// A PATH names directories, not a secret: unlike the carried variables, its value is printed.
 		if pathKept {
@@ -1077,7 +1197,14 @@ func svcInstall(ctx context.Context, e svcEnv, o svcInstallOpts) error {
 	// What is loaded is what the manager read when it last started the unit,
 	// so a changed unit or binary means a restart; an unchanged one that is
 	// registered but stopped means a start.
-	if e.GOOS == "linux" && unitChanged {
+	if adopted != nil {
+		// The standard unit is written and doctor passed; now the unit it replaces
+		// stops and goes, so that the address is free when the standard one loads.
+		if err := e.retireAdopted(ctx, p, adopted, rep); err != nil {
+			return err
+		}
+	}
+	if e.GOOS == "linux" && (unitChanged || adopted != nil) {
 		if out, err := e.run(ctx, "systemctl", "--user", "daemon-reload"); err != nil {
 			return e.managerErr("systemctl --user daemon-reload", out, err)
 		}
@@ -1086,12 +1213,15 @@ func svcInstall(ctx context.Context, e svcEnv, o svcInstallOpts) error {
 		return err
 	}
 
+	// Asked where the unit really listens (muster #492): a unit on a network
+	// interface answers on its loopback twin, which is always there.
 	token := readToken(p)
-	h, herr := e.waitHealthy(ctx, s.Addr, token)
+	probe := healthAddr(s.Addr)
+	h, herr := e.waitHealthy(ctx, probe, token)
 	if herr != nil {
-		return fmt.Errorf("the service did not become healthy: %v%s", herr, e.logHint(p))
+		return fmt.Errorf("the service did not become healthy at http://%s/v1/health: %v%s", probe, herr, e.logHint(p))
 	}
-	fmt.Fprintf(e.Out, "  health    ok         http://%s/v1/health%s\n", s.Addr, h)
+	fmt.Fprintf(e.Out, "  health    ok         http://%s/v1/health%s\n", probe, h)
 
 	if rep.changes == 0 {
 		fmt.Fprintf(e.Out, "\nNothing to change: muster is already installed, running and healthy.\n")
@@ -1253,6 +1383,7 @@ func svcRestore(ctx context.Context, e svcEnv) error {
 	}
 	s, _ := parseUnit(e.GOOS, string(raw))
 	addr := firstNonEmpty(s.Addr, svcDefaultAddr)
+	probe := healthAddr(addr)
 	rep := &svcReport{w: e.Out}
 	fmt.Fprintf(e.Out, "muster service restore (%s, %s)\n", e.GOOS, addr)
 	// A unit edited by hand since the manager last read it would otherwise be started
@@ -1265,11 +1396,11 @@ func svcRestore(ctx context.Context, e svcEnv) error {
 	if err := e.bringUp(ctx, p, false, rep); err != nil {
 		return err
 	}
-	h, herr := e.waitHealthy(ctx, addr, readToken(p))
+	h, herr := e.waitHealthy(ctx, probe, readToken(p))
 	if herr != nil {
-		return fmt.Errorf("the service did not become healthy: %v%s", herr, e.logHint(p))
+		return fmt.Errorf("the service did not become healthy at http://%s/v1/health: %v%s", probe, herr, e.logHint(p))
 	}
-	fmt.Fprintf(e.Out, "  health    ok         http://%s/v1/health%s\n", addr, h)
+	fmt.Fprintf(e.Out, "  health    ok         http://%s/v1/health%s\n", probe, h)
 	if rep.changes == 0 {
 		fmt.Fprintf(e.Out, "\nNothing to change: muster is loaded, running and healthy.\n")
 	}
@@ -1339,11 +1470,18 @@ func svcStatus(ctx context.Context, e svcEnv) error {
 			row("login", true, "restores the service at a GUI login: "+p.LoginUnit)
 		}
 	}
-	d, herr := e.probeHealth(ctx, s.Addr, readToken(p))
+	switch r := routableEntries(s.Addr); {
+	case len(r) > 0:
+		row("listen", true, "serves peers on "+strings.Join(r, ", ")+" (and loopback)")
+	case s.Addr != "":
+		row("listen", true, "loopback only: "+s.Addr)
+	}
+	probe := healthAddr(s.Addr)
+	d, herr := e.probeHealth(ctx, probe, readToken(p))
 	if herr != nil {
-		row("health", false, "http://"+s.Addr+"/v1/health: "+herr.Error())
+		row("health", false, "http://"+probe+"/v1/health: "+herr.Error())
 	} else {
-		row("health", true, "http://"+s.Addr+"/v1/health"+d)
+		row("health", true, "http://"+probe+"/v1/health"+d)
 	}
 	if !ok {
 		return errors.New("one or more checks did not pass")

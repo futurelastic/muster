@@ -74,9 +74,51 @@ and restarts the service when it exits.
   is the unit's `PATH`, so a service started before an edit shows the new value
   until it restarts. A systemd unit is given none: `systemd --user` supplies the
   service's `PATH`, and one in the unit would override it.
-- **Loopback only.** `--addr` takes a loopback `HOST:PORT` with a fixed port; any
-  other address is refused. Putting the service on a network interface is step 3
-  of the manual procedure.
+- **Loopback unless declared.** `--addr` takes a loopback `HOST:PORT` with a fixed
+  port, and a desk stays there: any other address is refused, so a one-command
+  install cannot put a service that reads paths and starts processes on a network
+  interface by accident. A machine that serves federation peers says so with
+  `--serves-peers` (next item).
+- **A machine that serves federation peers (muster #492).** `--addr` takes one
+  address or a comma-separated list, as `FLEET_ADDR` does, and an address that is
+  not loopback is accepted only when it is declared: `--serves-peers` on the run
+  that introduces it. It must be one specific interface address with a fixed port
+  (a VPN or LAN address, never `0.0.0.0`, never a hostname). The declaration is the
+  address in the unit: every later run, an update included, keeps an address the
+  unit already lists with no flag, and naming it again needs none; only an address
+  the unit does not have yet needs the flag. The service adds loopback on the same
+  port beside it, so the health check (`install`, `restore`, `status`) asks
+  `http://127.0.0.1:<port>/v1/health`, which answers even while the interface
+  address is not on the machine yet. The run prints a `listen` line and `status` a
+  `listen` row. Peers themselves (the table and the keys) are
+  [`multi-machine.md`](multi-machine.md).
+- **A unit that already runs muster (muster #492).** A machine whose muster runs
+  under a unit somebody made by hand (a label of its own, an address on a network
+  interface, the operator's variables) is taken over once:
+
+  ```sh
+  muster service install --adopt <label | unit name | path>
+  ```
+
+  The unit's address (a network address too: it is the unit's own), machine id,
+  multiplexer path and every `FLEET_*`, `LANG` and `LC_*` variable are read from it,
+  as they are from the standard unit, and written into the standard unit. Once
+  `doctor` has passed, the old unit is stopped and its file is moved into
+  `~/.local/state/muster/adopted/`, out of the manager's search path, so there is
+  one muster and the next login loads one. From then on the machine is an ordinary
+  one: an update is `service install` with no flags. What it does not do: the
+  operator's label is gone (the standard label replaces it); whatever the old unit
+  held beyond what install reads back is not written again (the kept file has it);
+  and a binary older than this feature cannot put such a machine back, because it
+  refuses the network address. Before anything changes it refuses when the unit has
+  no `FLEET_ADDR` (it is not a muster unit); when it sets `FLEET_STATE_DIR` or
+  `FLEET_CONFIG` to anything but the layout's (taking it over would start the
+  service on another table and state, so point it at the layout's first); when it
+  is running as a job that would take its sessions down when it stops (the rule of
+  the `gui/<uid>` move: the run prints the command for whoever accepts that); and
+  with `--no-start`. A second `--adopt` of the same unit is an ordinary install, so
+  an updater may leave it set. The Library's installer passes it from
+  `MUSTER_ADOPT` ([`release-host.md`](release-host.md)).
 - **`doctor` fails, the service is not started.** The unit and files stay;
   fix the failing row and run it again. `--no-start` writes everything and runs
   `doctor` without loading or starting the unit.
