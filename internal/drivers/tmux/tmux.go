@@ -3044,7 +3044,7 @@ func (d *Driver) send(ctx context.Context, req fleet.Request, ref fleet.SessionR
 	// write of this same text that could not be confirmed may already be in the
 	// receiver's hands: nothing is written on EITHER path, whatever the flags —
 	// a resumeIfStranded retry is a terminal operation and would paste it again.
-	if receipt, held := d.answerFromLedger(ctx, ref, deliveryKey(text, opts.From)); held {
+	if receipt, held := d.answerFromLedger(ctx, req, ref, deliveryKey(text, opts.From)); held {
 		return receipt, nil
 	}
 

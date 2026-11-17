@@ -74,6 +74,14 @@ type unconfirmedEntry struct {
 	Module  string `json:"module,omitempty"`
 	LaneKey string `json:"laneKey,omitempty"`
 	SendID  string `json:"sendId,omitempty"`
+
+	// needle is a normalised fingerprint of the text of a module-lane write, kept
+	// for the transcript look that can let its hold go (#491). It is deliberately
+	// unexported and so never persisted: this ledger holds digests, never a
+	// message, and an entry reloaded after a restart simply has none (no release).
+	// For a module entry TranscriptPath and TranscriptOffset above are the
+	// transcript's position taken before the lane write.
+	needle string
 }
 
 // deliveryKey identifies one delivery for the ledger. The text is the
@@ -232,7 +240,7 @@ func (d *Driver) sweepUnconfirmedLocked() bool {
 // longer matches describes a session that has since been replaced under the same
 // name, and gates nothing. If the multiplexer cannot be read the entry is
 // honoured — refusing a possible duplicate is the cheap side to be wrong on.
-func (d *Driver) answerFromLedger(ctx context.Context, ref fleet.SessionRef, key string) (fleet.DeliveryReceipt, bool) {
+func (d *Driver) answerFromLedger(ctx context.Context, req fleet.Request, ref fleet.SessionRef, key string) (fleet.DeliveryReceipt, bool) {
 	entry, ok := d.unconfirmedFor(ref.ID, key)
 	if !ok {
 		return fleet.DeliveryReceipt{}, false
@@ -247,7 +255,7 @@ func (d *Driver) answerFromLedger(ctx context.Context, ref fleet.SessionRef, key
 	if entry.Module != "" {
 		// #185: the earlier write went to a module's lane; the module, not a
 		// transcript this driver reads, is who can say whether it arrived.
-		return d.answerFromModuleLedger(ctx, ref, key, entry)
+		return d.answerFromModuleLedger(ctx, req, ref, key, entry)
 	}
 
 	if entry.TranscriptPath != "" {

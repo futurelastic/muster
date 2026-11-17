@@ -279,7 +279,10 @@ the inbox is the operator step that follows, and it has an order:
    - `route.guard.*` — follow-ups the ledger answered instead of sending again
      (`inbox_unconfirmed`), text kept out of the inbox because it was already
      stranded in the composer (`terminal_unconfirmed`), and earlier writes found
-     recorded after all (`late_confirmed`).
+     recorded after all (`late_confirmed`). On a module lane, `module_unconfirmed`
+     counts a follow-up held from an earlier write the module could not confirm, and
+     `module_released` one let go because the session's transcript proved the write
+     never arrived (#491): the ratio says how often that proof is available.
 
 The permission-mode class gate itself (#148) is **unchanged** by #184. Its
 re-check, the evidence it rested on and what would reopen it are recorded in
