@@ -845,6 +845,7 @@ func (d *Driver) trackServer(s *server) bool {
 		return false
 	}
 	s.straySweep = !d.noStraySweep
+	s.deferRemoval = d.store != nil // muster #436: see removeDir
 	s.onTeardown = func(s *server) {
 		d.mu.Lock()
 		delete(d.live, s)

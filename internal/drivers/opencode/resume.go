@@ -391,7 +391,7 @@ func (d *Driver) closeUnlaunched(req fleet.Request, ref fleet.SessionRef, prior 
 			stopped, left := stopStraysIn(prior.dir)
 			d.sayStrays("still running when their session was closed", stopped, left)
 		}
-		if err := privfs.RemoveAll(prior.dir); err != nil {
+		if err := d.removeDir(prior.dir); err != nil {
 			return fleet.Ack{}, fmt.Errorf("close: removing the session's directory: %w", err)
 		}
 	}
@@ -406,6 +406,22 @@ func (d *Driver) closeUnlaunched(req fleet.Request, ref fleet.SessionRef, prior 
 		},
 	})
 	return fleet.Ack{Accepted: true}, nil
+}
+
+// removeDir takes a session's directory away. With a state directory it is set aside
+// at once and deleted in the background at a pace the machine can bear (muster #436,
+// privfs.Discard): a package cache is hundreds of thousands of entries, and deleting
+// one in the caller's thread, at full speed, was most of what a close cost. What a
+// caller sees is the same — the path is gone when this returns, and an error comes
+// back where the directory could not be set aside or removed in full — except that
+// a deletion that fails later is reported by the next sweep instead of by the close
+// (see sweepOrphanDirsWith). Without a state directory nothing would finish a
+// half-deleted directory after a restart, so it is deleted before this returns.
+func (d *Driver) removeDir(dir string) error {
+	if d.store == nil {
+		return privfs.RemoveAll(dir)
+	}
+	return privfs.Discard(dir)
 }
 
 // ownsDir reports whether dir is a session directory this driver made: directly

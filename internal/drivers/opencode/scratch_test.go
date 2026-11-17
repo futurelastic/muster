@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -473,5 +474,138 @@ func TestClose_RemovesTheDirectoryTheScratchFigureWasMeasuredIn(t *testing.T) {
 	}
 	if _, err := os.Lstat(dir); !os.IsNotExist(err) {
 		t.Errorf("the directory the figure was measured in survived Close: %v", err)
+	}
+}
+
+// muster #436: what a walk costs the machine. A session's scratch directory is
+// walked often enough to keep the figure honest and no more often than the walk can
+// afford, and the caches stay in the figure.
+
+// walkCounter is a walkDir that counts the walks (one call for tmp/ per walk, which
+// is how scratchSession's tests know a walk happened) and can make each take a
+// stretch of the test's clock, so a slow walk is a fact of the test rather than of
+// the machine it runs on.
+type walkCounter struct {
+	mu   sync.Mutex
+	n    int
+	clk  *stepClock
+	slow time.Duration
+}
+
+func (w *walkCounter) walkDir(root string, fn fs.WalkDirFunc) error {
+	if filepath.Base(root) == "tmp" {
+		w.mu.Lock()
+		w.n++
+		w.mu.Unlock()
+		if w.slow > 0 {
+			w.clk.advance(w.slow)
+		}
+	}
+	return filepath.WalkDir(root, fn)
+}
+
+func (w *walkCounter) walks() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.n
+}
+
+// exitSession kills the session's server and waits for the process to be reaped.
+func exitSession(t *testing.T, d *Driver, sess fleet.Session) {
+	t.Helper()
+	known, _ := d.wasSeen(sess.ID)
+	_ = known.srv.proc.group.Kill()
+	select {
+	case <-known.srv.proc.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the process did not exit")
+	}
+}
+
+// A session whose process has exited has a directory nothing writes to. The first walk
+// that begins after the exit is its figure for good, and a read an hour later does not
+// start another; before the exit it is walked every refresh, as it always was.
+func TestScratch_AnExitedSessionsCompleteFigureIsFinal(t *testing.T) {
+	clk := newStepClock()
+	wc := &walkCounter{clk: clk}
+	d, sess, dir := scratchSession(t, scratchLimits{inline: true, refresh: 10 * time.Minute, walkDir: wc.walkDir}, withClock(clk.now))
+	read := func() *fleet.ScratchUsage { t.Helper(); return stateScratch(t, d, sess) }
+
+	writeScratch(t, dir, "one", 100)
+	read()
+	clk.advance(11 * time.Minute)
+	read()
+	if got := wc.walks(); got != 2 {
+		t.Fatalf("a live session was walked %d times in two refreshes, want 2", got)
+	}
+
+	exitSession(t, d, sess)
+	writeScratch(t, dir, "late", 900)
+	clk.advance(11 * time.Minute)
+	if got := read().Areas["tmp"]; got != 1000 {
+		t.Fatalf("the first read after the exit = %d bytes in tmp, want the 1000 that are there", got)
+	}
+	if got := wc.walks(); got != 3 {
+		t.Fatalf("the walk after the exit made %d walks in all, want 3", got)
+	}
+
+	writeScratch(t, dir, "after", 5000)
+	clk.advance(3 * time.Hour)
+	if got := read().Areas["tmp"]; got != 1000 {
+		t.Errorf("an exited session was walked again: %d bytes in tmp, want the final 1000", got)
+	}
+	if got := wc.walks(); got != 3 {
+		t.Errorf("an exited session was walked again: %d walks in all, want 3", got)
+	}
+}
+
+// A walk that hit its bound is a lower bound, and the next one may get further, so an
+// exited session's partial figure is not final.
+func TestScratch_APartialFigureIsNeverFinal(t *testing.T) {
+	clk := newStepClock()
+	d, sess, dir := scratchSession(t, scratchLimits{inline: true, refresh: 10 * time.Minute, maxEntries: 2}, withClock(clk.now))
+	writeScratch(t, dir, "a", 10)
+	writeScratch(t, dir, "b", 10)
+	writeScratch(t, dir, "c", 10)
+	exitSession(t, d, sess)
+
+	first := stateScratch(t, d, sess)
+	if !first.Partial {
+		t.Fatalf("scratch = %+v, want a partial figure (the bound is 2 entries)", first)
+	}
+	clk.advance(11 * time.Minute)
+	// A new walk stamps a new time; the figure of a walk that was final would keep the old one.
+	if second := stateScratch(t, d, sess); !second.AsOf.After(first.AsOf) {
+		t.Errorf("AsOf = %v after a refresh interval, was %v: a partial figure must not be final", second.AsOf, first.AsOf)
+	}
+}
+
+// A walk that took W is repeated no sooner than scratchDuty*W, so a slow one is
+// walked rarely and the walker's share of the machine does not depend on how many
+// sessions there are. Here each walk takes five minutes of the test's clock, which
+// puts the next one a hundred minutes on rather than ten.
+func TestScratch_ASlowWalkIsRepeatedLessOften(t *testing.T) {
+	clk := newStepClock()
+	wc := &walkCounter{clk: clk, slow: 5 * time.Minute}
+	d, sess, dir := scratchSession(t, scratchLimits{inline: true, refresh: 10 * time.Minute, walkDir: wc.walkDir}, withClock(clk.now))
+	writeScratch(t, dir, "a", 100)
+
+	read := func() int64 { t.Helper(); return stateScratch(t, d, sess).Areas["tmp"] }
+	read()
+	writeScratch(t, dir, "b", 900)
+	clk.advance(11 * time.Minute)
+	if got := read(); got != 100 {
+		t.Errorf("a five-minute walk was repeated after 11 minutes: %d bytes in tmp, want the old 100", got)
+	}
+	clk.advance(80 * time.Minute) // 91 minutes since the walk ended
+	if got := read(); got != 100 {
+		t.Errorf("a five-minute walk was repeated after 91 minutes: %d bytes, want the old 100", got)
+	}
+	clk.advance(10 * time.Minute) // 101
+	if got := read(); got != 1000 {
+		t.Errorf("a five-minute walk was not repeated after 101 minutes: %d bytes, want 1000", got)
+	}
+	if wc.walks() != 2 {
+		t.Errorf("%d walks, want 2", wc.walks())
 	}
 }

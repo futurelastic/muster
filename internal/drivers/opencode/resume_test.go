@@ -12,6 +12,7 @@ import (
 
 	fleet "github.com/futurelastic/muster"
 	"github.com/futurelastic/muster/internal/driver"
+	"github.com/futurelastic/muster/internal/privfs"
 )
 
 // muster #282: sessions are found again after the service restarts.
@@ -29,7 +30,27 @@ func newStateDriver(t *testing.T, stateDir string, extra ...Option) *Driver {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	// A close and a sweep over a state directory set a session's directory aside and
+	// have it deleted in the background (muster #436). Registered here, after the
+	// test made its state directory, so it runs before that directory's own removal
+	// and the two do not delete the same tree at once.
+	t.Cleanup(func() { privfs.WaitDiscards(30 * time.Second) })
 	return d
+}
+
+// settleRemovals waits for the deletion a close or a sweep set going in the background
+// (muster #436) and fails the test when it left anything in the state directory's
+// session root: a locked tree that was set aside and not deleted in full would
+// otherwise pass, the path having been free from the first moment.
+func settleRemovals(t *testing.T, state string) {
+	t.Helper()
+	if !privfs.WaitDiscards(30 * time.Second) {
+		t.Fatal("the background deletion did not finish")
+	}
+	_, root := stateLayout(state)
+	if entries, _ := os.ReadDir(root); len(entries) != 0 {
+		t.Errorf("the session root is not empty once the deletion has finished: %v", entries)
+	}
 }
 
 func listed(t *testing.T, d *Driver) map[string]fleet.Session {
@@ -183,9 +204,7 @@ func TestResume_CallerEnvIsNeverStoredAndTheSessionIsUnknown(t *testing.T) {
 	if len(recordFiles(t, state)) != 0 {
 		t.Error("the record outlived Close")
 	}
-	if left, _ := os.ReadDir(filepath.Join(state, "opencode", "dirs")); len(left) != 0 {
-		t.Errorf("the session directory outlived Close: %v", left)
-	}
+	settleRemovals(t, state) // the directory is deleted in the background (muster #436)
 	if _, ok := listed(t, d2)[sess.ID]; ok {
 		t.Error("the session is still listed after Close")
 	}

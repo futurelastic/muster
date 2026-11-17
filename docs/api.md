@@ -2066,11 +2066,16 @@ measured in the background, bounded, at most every few minutes — never on the 
 path — so `asOf` says when, and `partial: true` means the walk stopped at its bound
 or could not read part of the tree and `bytes` and the areas are lower bounds. The
 bound is well above what a session's directory has held, so a large tree is measured
-in full. **A dead session still has a figure** while its directory exists: the
-directory stays until the session is closed. **Absent means no figure** (no such
-directory, the directory is gone, or not measured yet), never zero. Nothing is removed
-while the session lives; closing it removes the directory. Not a material change: it
-moves with every file written, so it does not fire `session.state`.
+in full. **A walk costs the machine what it costs, so it is done less often when it is
+long** (#436): one that took a minute is not repeated for twenty, and `asOf` can be
+that old. **A dead session still has a figure** while its directory exists: the
+directory stays until the session is closed, and nothing writes to it, so a complete
+walk taken after the process exited is the figure for good. **Absent means no figure**
+(no such directory, the directory is gone, or not measured yet), never zero. Nothing is
+removed while the session lives; closing it removes the directory — out of the way
+when the close returns, its contents deleted in the background afterwards (#436), so
+the space follows a little later. Not a material change: it moves with every file
+written, so it does not fire `session.state`.
 
 **`lastTurn` in a listing** (#426) — on an `opencode` runtime a session whose newest
 turn ended on a provider error reads `idle` with `state.lastTurn: {"outcome": "failed",
