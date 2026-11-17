@@ -33,14 +33,15 @@ func revealing(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if p, ok := principalOf(r); ok && !p.Allows(GrantSend) {
 			target := fleet.MachineId(r.PathValue("machine"))
-			logDenied(p, GrantSend, target, r)
-			writeError(w, &fleet.Error{
+			denied := &fleet.Error{
 				Kind: fleet.ErrorUnauthorized,
 				Message: "principal " + p.Name + " does not hold the send grant (§6), which reading a session's " +
 					"turns requires: the same grant as delivering input. Every grant defaults to denied — " +
 					"this is expected until an operator adds send to this principal's grants, not a bug.",
 				Machine: target,
-			})
+			}
+			logDenied(p, GrantSend, target, r, denied)
+			writeError(w, denied)
 			return
 		}
 		next(w, r)
@@ -60,8 +61,8 @@ func handleTurns(svc *Service) http.HandlerFunc {
 		count := 0
 		pending := 0
 		defer func() {
-			log.Printf("audit: actor=%q verb=read-turns route=%s target=%s/%s turns=%d pending=%d outcome=%s status=%d",
-				callerFrom(r).Principal, routeOf(r), machine, id, count, pending, outcomeOf(aw.status), aw.status)
+			log.Printf("audit: actor=%q verb=read-turns route=%s target=%s/%s turns=%d pending=%d outcome=%s status=%d%s",
+				callerFrom(r).Principal, routeOf(r), machine, id, count, pending, outcomeOf(aw.status), aw.status, aw.refusal.fields())
 		}()
 
 		q := fleet.TurnsQuery{Since: query.Get("since")}
@@ -150,8 +151,8 @@ func handleComposer(svc *Service) http.HandlerFunc {
 		w = aw
 		chars := 0
 		defer func() {
-			log.Printf("audit: actor=%q verb=read-composer route=%s target=%s/%s chars=%d outcome=%s status=%d",
-				callerFrom(r).Principal, routeOf(r), machine, id, chars, outcomeOf(aw.status), aw.status)
+			log.Printf("audit: actor=%q verb=read-composer route=%s target=%s/%s chars=%d outcome=%s status=%d%s",
+				callerFrom(r).Principal, routeOf(r), machine, id, chars, outcomeOf(aw.status), aw.status, aw.refusal.fields())
 		}()
 
 		req := requestFrom(r)
