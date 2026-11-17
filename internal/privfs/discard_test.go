@@ -323,7 +323,10 @@ func TestDiscard_ABacklogCallsInAHelper(t *testing.T) {
 	}
 	<-reached // the background deleter has the big tree and is waiting on its pace
 
-	for i := 0; i < 3; i++ {
+	// Exactly the backlog: the second one queued calls the helper in, and the helper
+	// drains the queue to nothing. A third, queued after it had finished, would sit
+	// behind the held deleter on a machine where the helper is quick.
+	for i := 0; i < 2; i++ {
 		e := filepath.Join(parent, "e"+string(rune('0'+i)))
 		if err := MkdirAll(e); err != nil {
 			t.Fatal(err)
@@ -338,7 +341,7 @@ func TestDiscard_ABacklogCallsInAHelper(t *testing.T) {
 	}
 	left := asideIn(t, parent)
 	if len(left) != 1 || !strings.Contains(filepath.Base(left[0]), "session") {
-		t.Fatalf("with the background deleter held, the set-aside directories are %v; want the helper to have deleted the three small ones and left the big one", left)
+		t.Fatalf("with the background deleter held, the set-aside directories are %v; want the helper to have deleted the two small ones and left the big one", left)
 	}
 
 	releaseOnce()
