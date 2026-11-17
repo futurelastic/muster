@@ -352,14 +352,24 @@ starts recreating work that is already running.
 
 Two rules that will save you an incident:
 
-- **`quota_blocked` is an ACCOUNT fact, so it applies to sessions that look
-  perfectly idle.** The service remembers it from whichever session announced
-  it, keeps it across restarts, and clears it when any session is seen working
-  again, or when any session's own record shows the account served a real
-  turn after the refusal began. Once cleared it stays cleared: a limit notice
-  still on an idle screen that has not changed since the account was last
-  seen serving is the old refusal, not a new one, and does not bring the
-  block back. `state.quota.resetHint` carries the runtime's own words about when it
+- **`quota_blocked` is a CREDENTIAL fact, so it applies to sessions that look
+  perfectly idle — and only to the sessions on that credential.** A machine can
+  run sessions on several credentials at once (the sign-in the service runs
+  under, plus any token a create or the machine's declared environment hands a
+  session), and one of them running out of quota says nothing about the others,
+  so `state.quota.credential` names which one a session is blocked on and a
+  session on another credential never reads `quota_blocked` because of it. The
+  service remembers the block from whichever session on the credential announced
+  it, keeps it across restarts, and clears it when any session on that
+  credential is seen working again, or when any session's own record on it
+  shows the credential served a real turn after the refusal began. Once cleared
+  it stays cleared: a limit notice still on an idle screen that has not changed
+  since the credential was last seen serving is the old refusal, not a new one,
+  and does not bring the block back. `credential` is an opaque name — compare it
+  for equality, do not parse it, and do not confuse it with `usage.credential`,
+  which says whether a spend was a subscription or an API key. It is never the
+  credential itself: a session started with none of its own shares the name
+  `"default"`. `state.quota.resetHint` carries the runtime's own words about when it
   lifts — **display it, do not parse it**; it is scraped prose and another
   consumer of the same line ended up with the next widget glued onto the end.
 - **`quota_blocked` means the provider refused it** — alive, but out of quota.
@@ -1552,7 +1562,7 @@ This is the part to get right before you build a UI on it.
 | this service is **restarted** and starts watching a machine again | `source.status: ok`, then `control.resync` with `feed_gap`, once per restart |
 | a runtime on this machine **registers after you started watching** (it was unavailable at startup and came up on a retry) | `source.status: ok`, then `control.resync` with `feed_gap`, once for that runtime; its sessions are in the re-list |
 | a machine becomes unreachable | `source.status` |
-| this machine's **account** starts or stops refusing work | `machine.quota` |
+| one **credential** on this machine starts or stops refusing work | `machine.quota` (one event per credential) |
 | this machine's local **credential material** changes | `machine.account` |
 
 Events fire on **transitions**, not on content. A session that stays `working`
@@ -1670,9 +1680,19 @@ is the service saying the hole is its own.
 ### Act on `machine.quota` before you dispatch
 
 If you schedule work, this is the one event that should change what you do
-next. `blocked: true` means every session on that machine will refuse — so stop
-dispatching there, and let in-flight turns finish rather than starting new ones.
-`blocked: false` is an explicit all-clear, not something to infer from silence.
+next. `blocked: true` means every session on that machine **started with the
+credential the event names** will refuse — so stop dispatching to those, and let
+in-flight turns finish rather than starting new ones. It is not a statement about
+the machine: it can run sessions on other credentials (a token you handed a
+create, a machine-declared one) that still have quota, and an event for one
+credential never tells you anything about the others, except through `quotas`:
+every event carries the credentials blocked once that event's change is applied,
+so you never have to accumulate events to know the current set. A session says
+which credential it runs on through `state.quota.credential` once it is blocked,
+and `sources[].quotas` lists every credential currently blocked on a machine.
+`blocked: false` is an explicit all-clear for **that credential only** — a
+machine with two blocked credentials stays blocked on the second — and is not
+something to infer from silence.
 
 The failure it prevents was measured: when an account hit its weekly limit, a
 supervisor learned it 48 times, once per session it had already dispatched and
@@ -1687,9 +1707,10 @@ budget, not in this event.  And
 `quota.resetHint` is prose the runtime printed (`"aug 10 at 12am (asia/tokyo)"`),
 so show it to a human rather than parsing it into a timer — the service itself
 never uses it to expire a block. What clears a block is a session on that
-machine being observed working, or any session's runtime record showing a
-turn the account served after the block began — so a machine whose sessions
-all sit idle still reports `blocked: false` once the account serves again.
+credential being observed working, or any session's runtime record on it
+showing a turn the credential served after the block began — so a credential
+whose sessions all sit idle still reports `blocked: false` once it serves again.
+Evidence from a session on another credential clears nothing.
 
 ### `machine.account` tells you which identity, never whether it still works
 
@@ -1703,6 +1724,11 @@ must not read it that way. The same measurement that justifies
 fleet was healthy through exactly this kind of transition, and all three were
 wrong, because all three ultimately quote the process's own announcement
 about itself.
+
+It describes the credential the service itself runs under, the one every
+session started with none of its own shares (`"default"` in `machine.quota`); a
+token a create handed a session is not in that store, and rotating it raises
+nothing here.
 
 Join it against a session's own `credentialGeneration` (on `SessionState`,
 present on every read) or `startedAt` (on `Session`) to answer "did this

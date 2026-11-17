@@ -185,6 +185,8 @@ func TestMateriallyDiffers_CatchesEveryFieldACallerBranchesOn(t *testing.T) {
 		"prompt gone":    func(s *SessionState) { s.Prompt = nil },
 		"quota lifted":   func(s *SessionState) { s.Quota = nil },
 		"quota re-dated": func(s *SessionState) { s.Quota = &QuotaBlock{Since: later} },
+		// muster #490: the same moment on another credential is another block.
+		"quota re-credentialed": func(s *SessionState) { s.Quota = &QuotaBlock{Credential: "c-other", Since: gen} },
 		"last turn": func(s *SessionState) {
 			s.LastTurn = &TurnEnd{Outcome: "failed", Reason: "rate limited", Retryable: true}
 		},

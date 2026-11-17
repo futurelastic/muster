@@ -36,9 +36,11 @@ const (
 	// that driver's window, and a client must not rely on a number.
 	EventSessionRecord EventKind = "session.record"
 	EventSourceStatus  EventKind = "source.status"
-	// EventMachineQuota reports that this machine's ACCOUNT started or
-	// stopped refusing work — a fact about the machine, not about any one
-	// session, and the only event here whose subject is not a session.
+	// EventMachineQuota reports that one CREDENTIAL on this machine started or
+	// stopped refusing work (muster #490) — a fact about the credential, not
+	// about any one session, and the only event here whose subject is not a
+	// session. A machine can run sessions on several credentials, so a machine
+	// with a blocked credential is not a machine that can do no work.
 	//
 	// It exists because of how a supervisor learned this without it. When an
 	// account hit its weekly limit, 48 autopilot sessions each discovered it
@@ -150,14 +152,29 @@ type SessionRecordPayload struct {
 
 // MachineQuotaPayload is machine.quota's payload.
 //
+// One event reports ONE credential (muster #490): a machine can run sessions on
+// several, and a limit on one says nothing about the others. Credential names
+// it, Blocked says whether it is refusing work now, and Quota is its block
+// while it is. The credential that clears is announced by its own event, so a
+// machine with two blocked credentials whose first recovers carries
+// {credential: first, blocked: false} and stays blocked on the second.
+//
+// Quotas is every credential on the machine that is blocked once this change
+// has been applied, whichever one the event is about, so a subscriber that
+// missed an event, or joined between two, is never wrong for longer than one
+// event: it need not accumulate state to know what is blocked. It is always
+// present, and empty when nothing is.
+//
 // Blocked is explicit rather than implied by Quota being nil, so a recovery
-// event is a positive statement ("this account works again") and not an
+// event is a positive statement ("this credential works again") and not an
 // absence a subscriber has to interpret — §5.7's rule applied to the event
 // plane.
 type MachineQuotaPayload struct {
-	Machine MachineId   `json:"machine"`
-	Blocked bool        `json:"blocked"`
-	Quota   *QuotaBlock `json:"quota,omitempty"`
+	Machine    MachineId    `json:"machine"`
+	Credential string       `json:"credential"`
+	Blocked    bool         `json:"blocked"`
+	Quota      *QuotaBlock  `json:"quota,omitempty"`
+	Quotas     []QuotaBlock `json:"quotas"`
 }
 
 // ControlResyncPayload is control.resync's payload.

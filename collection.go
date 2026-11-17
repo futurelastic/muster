@@ -58,22 +58,29 @@ type SourceStatus struct {
 	Error      string      `json:"error,omitempty"`
 	ObservedAt Timestamp   `json:"observedAt"`
 
-	// Quota is this machine's account-level refusal, if any (#10). Non-nil
-	// means the account behind this machine is currently refusing work — the
-	// same fact StatusQuotaBlocked already reports per session, surfaced
-	// here per machine, and readable without enumerating a single session on
-	// it.
+	// Quotas lists the credentials on this machine that are refusing work, one
+	// block each, ordered by credential name (#10, per credential since muster
+	// #490). Empty means no credential this service knows of is blocked — not
+	// that a credential it has never seen has quota. It replaces the single
+	// `quota` this field used to be: a machine does not have one account, so a
+	// single block could only be the machine's, and that is what stopped every
+	// session when one credential ran out.
+	//
+	// It is the same fact StatusQuotaBlocked already reports per session,
+	// surfaced here per machine, and readable without enumerating a single
+	// session on it: a scheduler reads it to learn which credentials to stop
+	// dispatching to, and dispatches to the rest.
 	//
 	// Deliberately a field of its own, not folded into Status. A machine can
 	// be reachable and answering (Status: SourceOK) while every session on
-	// its account is refused — reachable-and-answering and
+	// one of its credentials is refused — reachable-and-answering and
 	// willing-to-work are different facts. This envelope exists precisely so
 	// a caller never has to infer one from the other; collapsing them here
 	// would reintroduce, at the source level, exactly the confusion this
 	// type already forbids at the session level. A caller that cannot tell
-	// "this machine is gone" from "this machine is fine but its account is
+	// "this machine is gone" from "this machine is fine but a credential is
 	// blocked" retries the wrong one forever.
-	Quota *QuotaBlock `json:"quota,omitempty"`
+	Quotas []QuotaBlock `json:"quotas,omitempty"`
 }
 
 // ErrCollectionNeedsSources is returned by NewCollection when constructed

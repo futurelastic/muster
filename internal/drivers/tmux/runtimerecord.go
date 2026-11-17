@@ -529,8 +529,12 @@ func (d *Driver) quotaRecordPath(s fleet.Session) (string, bool) {
 }
 
 // quotaEvidence settles, for one whole listing, what the evidence says about
-// the ACCOUNT (#489): the fact and verdict noteQuotaBlock takes, in place of
-// "whichever flagged session the loop met first".
+// one CREDENTIAL's account (#489, #490): the fact and verdict noteQuotaBlock
+// takes, in place of "whichever flagged session the loop met first".
+//
+// sessions are the sessions of that credential, and only them: a turn another
+// credential served proves nothing about this one, and a refusal on another
+// credential is not this one's.
 //
 // recordCleanTurn is returned when the account is shown to serve AFTER the
 // newest refusal there is evidence of, which is either of
@@ -566,9 +570,9 @@ func (d *Driver) quotaRecordPath(s fleet.Session) (string, bool) {
 // The cost is paid only by a listing with something to settle: no block and no
 // notice on any screen reads nothing at all, and a block costs one stat per
 // session (recordProbe), not a read.
-func (d *Driver) quotaEvidence(sessions []fleet.Session) (apiErrorFact, recordVerdict) {
+func (d *Driver) quotaEvidence(credential string, sessions []fleet.Session) (apiErrorFact, recordVerdict) {
 	now := d.now()
-	q, observed := d.quotaBlock()
+	q, observed := d.quotaBlockFor(credential)
 	var flagged []int
 	for i := range sessions {
 		if sessions[i].State.Status == fleet.StatusQuotaBlocked {
@@ -591,7 +595,7 @@ func (d *Driver) quotaEvidence(sessions []fleet.Session) (apiErrorFact, recordVe
 		f, v := d.quotaProbe.latest(path)
 		switch {
 		case v == recordCleanTurn:
-			d.noteServed(f.at, now)
+			d.noteServed(credential, f.at, now)
 			return f, v
 		case v == recordAPIError && verdict == recordUnavailable:
 			fact, verdict = f, v
@@ -631,16 +635,13 @@ func (d *Driver) quotaEvidence(sessions []fleet.Session) (apiErrorFact, recordVe
 	// served; the account serves again exactly when the turn is the later of
 	// the two. A turn proved by an earlier listing stands, whichever sessions
 	// this one happens to show.
-	proof := d.servedAt()
-	live := make(map[string]bool, len(sessions))
+	proof := d.servedAt(credential)
 	paths := make([]string, 0, len(sessions))
 	for i := range sessions {
 		if path, ok := d.quotaRecordPath(sessions[i]); ok {
-			live[path] = true
 			paths = append(paths, path)
 		}
 	}
-	d.quotaProbe.keep(live)
 	for _, path := range paths {
 		f, v := d.quotaProbe.latest(path)
 		switch {
@@ -654,7 +655,7 @@ func (d *Driver) quotaEvidence(sessions []fleet.Session) (apiErrorFact, recordVe
 		}
 	}
 	if proof.After(refusal) {
-		d.noteServed(proof, now)
+		d.noteServed(credential, proof, now)
 		return apiErrorFact{at: proof}, recordCleanTurn
 	}
 	return fact, verdict
@@ -676,28 +677,32 @@ func (d *Driver) screenSince(id string) time.Time {
 	return o.at
 }
 
-// noteServed remembers that the account was shown serving a turn at at: a
-// record's own timestamp, or the read at which a session was seen working.
+// noteServed remembers that credential's account was shown serving a turn at
+// at: a record's own timestamp, or the read at which a session on it was seen
+// working.
 //
 // A turn dated after now is a record this machine's clock disagrees with, and
 // remembering one would outrank every refusal recorded before it caught up, for
 // good — so it is not remembered.
-func (d *Driver) noteServed(at, now time.Time) {
+func (d *Driver) noteServed(credential string, at, now time.Time) {
 	if at.After(now) {
 		return
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if at.After(d.quotaServed) {
-		d.quotaServed = at
+	if a := d.accountLocked(credential); at.After(a.served) {
+		a.served = at
 	}
 }
 
-// servedAt is the newest turn any record has shown the account serving.
-func (d *Driver) servedAt() time.Time {
+// servedAt is the newest turn any record has shown credential's account serving.
+func (d *Driver) servedAt(credential string) time.Time {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.quotaServed
+	if a := d.quotas[credential]; a != nil {
+		return a.served
+	}
+	return time.Time{}
 }
 
 // upgradeLastTurnFromRecord applies #56's LastTurn upgrade to a bare

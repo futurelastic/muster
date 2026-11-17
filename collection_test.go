@@ -111,27 +111,27 @@ func TestCollection_UnmarshalRecomputesCompleteFromSources(t *testing.T) {
 	}
 }
 
-// #10.b: Quota is a fact about willingness, independent of Status, which is
+// #10.b: Quotas are a fact about willingness, independent of Status, which is
 // a fact about reachability — and it must stay that way through both
-// construction and the wire.
+// construction and the wire. One block per credential (#490).
 func TestSourceStatus_QuotaIsIndependentOfStatusAndRoundTrips(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	blocked, err := NewCollection([]int{1}, []SourceStatus{
 		{Machine: "a", Status: SourceOK, ObservedAt: now,
-			Quota: &QuotaBlock{Since: now, ResetHint: "Aug 10"}},
+			Quotas: []QuotaBlock{{Credential: "c-1", Since: now, ResetHint: "Aug 10"}}},
 	})
 	if err != nil {
 		t.Fatalf("NewCollection: %v", err)
 	}
 	// A source reporting SourceOK with an account block set is exactly the
 	// case §9's envelope exists to make expressible: reachable AND
-	// answering, but not willing. Complete() reads Status alone — Quota
+	// answering, but not willing. Complete() reads Status alone — Quotas
 	// must not move it, or the two axes have been folded back into one.
 	if !blocked.Complete() {
 		t.Fatal("Complete() = false, want true — an ok source stays ok regardless of Quota")
 	}
-	if blocked.Sources()[0].Quota == nil || blocked.Sources()[0].Quota.ResetHint != "Aug 10" {
-		t.Fatalf("Quota not carried on construction: %+v", blocked.Sources()[0])
+	if q := blocked.Sources()[0].Quotas; len(q) != 1 || q[0].ResetHint != "Aug 10" || q[0].Credential != "c-1" {
+		t.Fatalf("Quotas not carried on construction: %+v", blocked.Sources()[0])
 	}
 
 	b, err := json.Marshal(blocked)
@@ -142,12 +142,17 @@ func TestSourceStatus_QuotaIsIndependentOfStatusAndRoundTrips(t *testing.T) {
 	if err := json.Unmarshal(b, &decoded); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
+	// The single-block field this replaced is never written (muster #490): a
+	// client still reading it would read "no block" and keep dispatching.
+	if strings.Contains(string(b), `"quota":`) {
+		t.Errorf("the old machine-wide quota field is still on the wire: %s", b)
+	}
 	got := decoded.Sources()[0]
-	if got.Quota == nil || got.Quota.ResetHint != "Aug 10" {
-		t.Fatalf("Quota did not survive the wire: %+v", got)
+	if len(got.Quotas) != 1 || got.Quotas[0].ResetHint != "Aug 10" || got.Quotas[0].Credential != "c-1" {
+		t.Fatalf("Quotas did not survive the wire: %+v", got)
 	}
 	if got.Status != SourceOK {
-		t.Errorf("Status = %q, want ok — unaffected by Quota", got.Status)
+		t.Errorf("Status = %q, want ok — unaffected by Quotas", got.Status)
 	}
 
 	// The common case — no block — must not put an empty object on the
