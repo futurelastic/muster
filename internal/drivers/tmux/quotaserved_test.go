@@ -74,7 +74,7 @@ func (s *servedFixture) list(t *testing.T) fleet.Collection[fleet.Session] {
 
 func (s *servedFixture) blocked(t *testing.T) bool {
 	t.Helper()
-	q, _ := s.d.quotaBlock()
+	q, _ := s.d.quotaBlockFor(credentialDefault)
 	return q != nil
 }
 
@@ -144,12 +144,15 @@ func TestQuotaBlockClearsWhenAnySessionsRecordShowsATurnAfterIt(t *testing.T) {
 	}
 }
 
-// quotaOnlyOf is the collection's own account-level answer: the same fact the
-// machine.quota event announces, read the way a caller reads the listing.
+// quotaOnlyOf is the collection's own answer for the ambient credential: the
+// same fact the machine.quota event announces, read the way a caller reads the
+// listing.
 func quotaOnlyOf(col fleet.Collection[fleet.Session]) *fleet.QuotaBlock {
 	for _, src := range col.Sources() {
-		if src.Quota != nil {
-			return src.Quota
+		for i := range src.Quotas {
+			if src.Quotas[i].Credential == credentialDefault {
+				return &src.Quotas[i]
+			}
 		}
 	}
 	return nil
@@ -270,7 +273,7 @@ func TestARefusalAfterTheProofBlocksAgain(t *testing.T) {
 	again := servedAt.Add(30 * time.Minute)
 	appendRecordLine(t, s.root, "/work/alpha", "conv-alpha", rateLimitEntry("conv-alpha", again, "9:50pm (Asia/Saigon)"))
 	s.list(t)
-	q, _ := s.d.quotaBlock()
+	q, _ := s.d.quotaBlockFor(credentialDefault)
 	if q == nil {
 		t.Fatal("the account refused again after it had served and nothing said so")
 	}
@@ -384,13 +387,13 @@ func TestAStaticNoticeOlderThanTheLastServedTurnDoesNotBlockWithoutARecordStore(
 	tick := func() { clock.Add(int64(time.Minute)) }
 
 	list()
-	if q, _ := d.quotaBlock(); q == nil {
+	if q, _ := d.quotaBlockFor(credentialDefault); q == nil {
 		t.Fatal("fixture never reached a blocked account; the test proves nothing")
 	}
 	tick()
 	f.setCapture("%2", fixtureWorking)
 	list()
-	if q, _ := d.quotaBlock(); q != nil {
+	if q, _ := d.quotaBlockFor(credentialDefault); q != nil {
 		t.Fatal("a session seen working did not clear the block; the test proves nothing")
 	}
 
@@ -399,7 +402,7 @@ func TestAStaticNoticeOlderThanTheLastServedTurnDoesNotBlockWithoutARecordStore(
 	for i := 0; i < 3; i++ {
 		tick()
 		col := list()
-		if q, _ := d.quotaBlock(); q != nil {
+		if q, _ := d.quotaBlockFor(credentialDefault); q != nil {
 			t.Fatalf("read %d: a notice that predates the served turn re-created the block", i+1)
 		}
 		for _, sess := range col.Items() {
@@ -415,7 +418,7 @@ func TestAStaticNoticeOlderThanTheLastServedTurnDoesNotBlockWithoutARecordStore(
 	f.setCapture("%1", "transcript\nYou've hit your weekly limit · resets Aug 10 at 12am (Asia/Tokyo)\n"+
 		quotaServedRule+"\n❯ \n"+quotaServedRule+"\n")
 	list()
-	if q, _ := d.quotaBlock(); q == nil {
+	if q, _ := d.quotaBlockFor(credentialDefault); q == nil {
 		t.Fatal("a refusal that appeared after the account was last seen serving did not block")
 	}
 }

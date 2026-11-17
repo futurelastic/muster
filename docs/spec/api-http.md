@@ -3114,7 +3114,7 @@ resumption needs no client code. The server honours that header when no
 | `session.labels` | `{ "ref", "startedAt"?, "labels" }` — a session's labels changed, or a create carried some; `labels` is the **whole** map after the change, never the patch (muster #153). A driver's own `session.created` can be observed before a create's labels are stored and carry `{}`; this event is the guarantee |
 | `session.record` | `{ "ref", "startedAt"?, "cursor" }` — a session's **record** grew (muster #444). A reference and the cursor `GET …/record` would answer as `next` at that moment; **never content**, and these are the only keys |
 | `source.status` | a machine's reachability changed |
-| `machine.quota` | `{ "machine", "blocked": bool, "quota"? }` — this machine's **account** started or stopped refusing work |
+| `machine.quota` | `{ "machine", "credential", "blocked": bool, "quota"?, "quotas": [...] }` — one **credential** on this machine started or stopped refusing work (muster #490); `quota` is that credential's block while it is blocked, and `quotas` is every credential blocked once this change is applied (empty, never absent, when none is) |
 | `machine.account` | `{ "machine", "generation" }` — this machine's local **credential material** changed |
 | `control.resync` | `{ "reason": "epoch_changed" \| "cursor_expired" \| "feed_gap" }` |
 
@@ -3197,6 +3197,21 @@ one a scheduler should act on by **not** doing something. It fires once at the
 transition, carries the reset time when the runtime printed one, and is
 announced to a subscriber that connects while a block is already in force —
 joining late must not mean learning nothing.
+
+Its subject is a **credential**, not the machine (muster #490). A machine can run
+sessions on several credentials at once, and one of them reaching its usage
+limit says nothing about the others, so each credential that starts or stops
+refusing work is an event of its own and names itself in `credential` — an
+opaque string, comparable for equality and never a secret. A machine with two
+blocked credentials whose first recovers produces `{"credential": <first>,
+"blocked": false}` and is still blocked on the second; `blocked: false` retracts
+only the credential it names. A subscriber that joins mid-outage is told once
+per credential already blocked. `quotas` on each event lists every credential
+that is blocked once that event's change is applied, whichever credential the
+event is about, so an event is correct without the ones before it. The same
+blocks are listed as `sources[].quotas` on every listing, and a session started
+with a blocked credential reads `quota_blocked` while one started with another
+does not.
 
 The alternative, measured: an account hit its weekly limit and 48 autopilot
 sessions each discovered it separately, by being dispatched work and stalling.

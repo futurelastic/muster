@@ -71,6 +71,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -431,25 +432,14 @@ type Driver struct {
 	idem      *idemStore
 	retention time.Duration
 
-	// quota is the account-level block (§2.3's QuotaBlock), remembered
-	// because it outlives the screen that announced it and survives a
-	// restart — a weekly limit measured on this fleet had four days to run,
-	// and the service is deployed by restarting it.
-	quota *fleet.QuotaBlock
-	// quotaSinceObserved is true when quota.Since came from the runtime's
-	// own record of the refusal (#56) rather than from this driver's first
-	// sighting of the notice on screen. Not part of fleet.QuotaBlock's wire
-	// shape — §2.3 documents Since as a timestamp for humans and callers to
-	// read, not a provenance channel, and the honest label belongs in
-	// SessionState.Evidence (quotaBlockedState) the same way every other
-	// "how do we know this" note in this driver already lives in prose
-	// rather than in a new structured field.
-	quotaSinceObserved bool
-	// quotaServed is the newest time any session's runtime record showed the
-	// account serving a real turn, as this driver has read it (#489). A block
-	// or a refusal dated before it is history. Memory only: a restarted driver
-	// reads it back from the records on its first full listing.
-	quotaServed time.Time
+	// quotas is the account-level block of each CREDENTIAL (§2.3's QuotaBlock,
+	// muster #490), remembered because it outlives the screen that announced it
+	// and survives a restart — a weekly limit measured on this fleet had four
+	// days to run, and the service is deployed by restarting it. Keyed by the
+	// name credentialIdentity gives the credential a session started with: one
+	// machine runs sessions on several, and one running out is not the others
+	// running out. Guarded by mu, like every field here.
+	quotas map[string]*quotaAccount
 	// quotaProbe memoises that read per record (see recordProbe).
 	quotaProbe recordProbe
 
@@ -1324,6 +1314,12 @@ type paneRow struct {
 	// launchRC is what Create recorded about whether it put the remote-control
 	// flag on the command line: "1", "0", or "" when unknown (launchRemoteControlOption).
 	launchRC string
+	// credential is the name of the credential Create started the session with
+	// (credentialOption, muster #490), or "" when none was recorded: a session
+	// this driver did not start, one started before the option existed, one
+	// started with none of its own, or one whose option could not be set. Every
+	// reader takes the empty value as credentialDefault (rowCredential).
+	credential string
 	// activity and sig are the pane's last-output second and the fingerprint made
 	// of it (capturereuse.go, #449). Zero and empty unless the listing asked for
 	// them and the multiplexer answered: reuse never applies to a pane without.
@@ -1393,6 +1389,11 @@ func (d *Driver) enumerateWith(ctx context.Context, rereadUnread, reuseIdle bool
 		// muster #269: whether the launch carried the remote-control flag
 		// (launchRemoteControlOption) — the weakest evidence behind `off`.
 		"#{" + launchRemoteControlOption + "}",
+		// muster #490: the credential the session was started with
+		// (credentialOption), read where the session is rather than from a record
+		// this service keeps, so it is as durable as the session, follows a
+		// rename, and cannot be lost to a read that rewrites the record file.
+		"#{" + credentialOption + "}",
 	}
 	// muster #449: the activity fingerprint, asked for only by a driver that will
 	// use it, so every other listing is the one it always was.
@@ -2028,20 +2029,28 @@ func parseRows(out, sep string) ([]paneRow, error) {
 			continue
 		}
 		f := strings.Split(line, sep)
-		// 9 fields before muster #269 added the launch option; accepted so a
-		// listing from a multiplexer wrapper that predates it still parses. A
-		// driver that reuses captures (#449) asks for six more.
-		if len(f) != 9 && len(f) != 10 && len(f) != 10+captureReuseFields {
-			return nil, fmt.Errorf("parseRows: expected 10 fields, got %d in %q", len(f), line)
+		// 9 fields before muster #269 added the launch option, 10 before #490
+		// added the credential; accepted so a listing from a multiplexer wrapper
+		// that predates either still parses. A driver that reuses captures (#449)
+		// asks for six more after them.
+		base := len(f)
+		if base > 11 {
+			base -= captureReuseFields
 		}
-		launchRC := ""
-		if len(f) >= 10 {
+		if base != 9 && base != 10 && base != 11 {
+			return nil, fmt.Errorf("parseRows: expected 11 fields, got %d in %q", len(f), line)
+		}
+		launchRC, credential := "", ""
+		if base >= 10 {
 			launchRC = strings.TrimSpace(f[9])
+		}
+		if base >= 11 {
+			credential = strings.TrimSpace(f[10])
 		}
 		var activity int64
 		var sig string
-		if len(f) == 10+captureReuseFields {
-			activity, sig = reuseFingerprint(f[10:])
+		if len(f) > base {
+			activity, sig = reuseFingerprint(f[base:])
 		}
 		pid, _ := strconv.Atoi(f[3])
 		createdUnix, _ := strconv.ParseInt(f[4], 10, 64)
@@ -2059,10 +2068,11 @@ func parseRows(out, sep string) ([]paneRow, error) {
 			// the empty string, same as any other unset tmux format
 			// variable — never "1" — so an unmanaged session's pane always
 			// parses to false here.
-			managed:  f[8] == "1",
-			launchRC: launchRC,
-			activity: activity,
-			sig:      sig,
+			managed:    f[8] == "1",
+			launchRC:   launchRC,
+			credential: credential,
+			activity:   activity,
+			sig:        sig,
 		})
 	}
 	return rows, nil
@@ -2139,11 +2149,11 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 			ObservedAt: d.now(),
 			// The multiplexer not answering says nothing about whether the
 			// ACCOUNT is refusing work — that memory is this driver's own
-			// (quotaBlock, below) and does not depend on reaching tmux at
+			// (quotaBlocks, below) and does not depend on reaching tmux at
 			// all (#10). Reachability and willingness are different
 			// questions; answer both, independently, even when one of them
 			// just failed.
-			Quota: quotaOnly(d.quotaBlock()),
+			Quotas: d.quotaBlocks(),
 		}
 		return fleet.NewCollection([]fleet.Session{}, []fleet.SourceStatus{src})
 	}
@@ -2471,143 +2481,15 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 		}
 	}
 
-	// What the runtime's own records say about the account, settled once for
-	// the whole listing (#489): see quotaEvidence.
-	quotaRecord, quotaVerdict := d.quotaEvidence(sessions)
-
-	// A usage limit belongs to the ACCOUNT, not to whichever pane happened to
-	// print the notice, and it outlives that notice by days. Observe it once
-	// per read: any session showing it sets the block, any session actually
-	// working clears it.
-	var sawLimit, sawWorking bool
-	var hint string
+	// A usage limit belongs to a CREDENTIAL, not to the machine and not to
+	// whichever pane happened to print the notice (muster #490). Which credential
+	// each session runs on is a fact its create recorded; settle each
+	// credential's block from the sessions on it alone.
+	creds := make([]string, len(sessions))
 	for i := range sessions {
-		switch sessions[i].State.Status {
-		case fleet.StatusQuotaBlocked:
-			sawLimit = true
-			if q := sessions[i].State.Quota; q != nil && q.ResetHint != "" {
-				hint = q.ResetHint
-			}
-		case fleet.StatusWorking:
-			sawWorking = true
-		}
+		creds[i] = rowCredential(rowByName[sessions[i].ID])
 	}
-	if sawWorking {
-		// A session seen working is the account serving, and it stays proof for
-		// the reads after it: a notice still on an idle screen that has not
-		// changed since is the refusal the block was about, not a new one.
-		d.noteServed(now, now)
-	}
-	d.noteQuotaBlock(sawLimit, hint, sawWorking, quotaRecord, quotaVerdict, now)
-
-	// Apply it. A session that reads idle on a machine whose account is
-	// refusing work is not available, and idle is the status that means send
-	// it work — the whole failure this exists to prevent.
-	//
-	// Two statuses are rewritten, and the second was left out at first.
-	//
-	// idle, because idle is the status that means send it work.
-	//
-	// unknown, because unknown is not a competing truth — it is this driver
-	// saying it could not determine one (§5.7), and an account fact IS more
-	// specific than that. Leaving it out had a visible cost: four sessions on
-	// a blocked machine flapped unknown → quota_blocked → unknown across
-	// consecutive reads, because their panes redraw a counter, so the digest
-	// changed and the ambiguity that resolves to idle never settled. Eight
-	// spurious state events per cycle on a fleet where nothing was happening.
-	//
-	// Nothing else is rewritten. working, waiting_input and unsent text each
-	// carry something observed just now, and a remembered fact must not
-	// overwrite an observation.
-	//
-	// The same corroboration works in reverse, and must. A limit notice sits
-	// on the screen long after the limit lifts — nobody types into a session
-	// that refused them, so nothing overwrites it — and read literally it says
-	// "blocked" forever. Measured on a working machine: two sessions reporting
-	// quota_blocked from notices that had already expired, while two others on
-	// that same account were working.
-	//
-	// A session working NOW is proof the account is not refusing work, and it
-	// outranks a screen that has not changed since it was refused. So the
-	// notice becomes what it is — history — and the session reports what it
-	// otherwise is: settled, with nothing running and no question pending.
-	// This is F53's divider again, with the evidence in another pane instead
-	// of a lower line.
-	//
-	// recordCleanTurn joins sawWorking as an equally sufficient reason (#56):
-	// a blocked session's OWN durable record showing its most recent turn
-	// succeeded is the same kind of positive proof, from a source that
-	// outlives the notice scrolling off the one pane that showed it.
-	if sawWorking || quotaVerdict == recordCleanTurn {
-		for i := range sessions {
-			if sessions[i].State.Status != fleet.StatusQuotaBlocked {
-				continue
-			}
-			st := sessions[i].State
-			st.Status = fleet.StatusIdle
-			st.Quota = nil
-			if quotaVerdict == recordCleanTurn {
-				st.Evidence = "a limit notice is on screen, but a later turn on this account " +
-					"already succeeded, so the notice is history"
-			} else {
-				st.Evidence = "a limit notice is on screen, but another session on this account is working now, so the notice is history"
-			}
-			sessions[i].State = st
-		}
-	}
-
-	// q is read once and reused below for the source's own Quota field
-	// (#10) — the same remembered fact, at both grains, from a single
-	// lock acquisition rather than two.
-	q, sinceObserved := d.quotaBlock()
-	if q != nil {
-		for i := range sessions {
-			sessions[i].State = quotaBlockedState(sessions[i].State, q, sinceObserved)
-		}
-	}
-
-	// Every block carries a real since. The per-session path builds its
-	// QuotaBlock in classify, which has no clock, so it left the zero time —
-	// which serialises as year 1 and is worse than absent: a caller computing
-	// "blocked for how long" gets two millennia.
-	//
-	// This is exactly the session whose OWN screen showed the notice
-	// directly (quotaBlockedState's rewrite only touches idle/unknown/
-	// starting, by design — a session already reporting quota_blocked keeps
-	// classify.go's own evidence phrase). q's own Since/sinceObserved — the
-	// account-level fact noteQuotaBlock just finished maintaining, whether
-	// from THIS cycle's record or restored from a restart — is the
-	// authoritative answer (#56) and applies here first; the status's own
-	// since (this driver's first observed TRANSITION into the status, still
-	// a sighting rather than the refusal) and the read time are fallbacks
-	// for when there is no account-level block to consult at all.
-	for i := range sessions {
-		st := sessions[i].State.Quota
-		if st == nil || !st.Since.IsZero() {
-			continue
-		}
-		blocked := *st
-		recordConfirmed := false
-		switch {
-		case q != nil && !q.Since.IsZero():
-			blocked.Since = q.Since
-			recordConfirmed = sinceObserved
-			if q.ResetHint != "" && blocked.ResetHint == "" {
-				blocked.ResetHint = q.ResetHint
-			}
-		case sessions[i].State.Since != nil && !sessions[i].State.Since.IsZero():
-			blocked.Since = *sessions[i].State.Since
-		default:
-			blocked.Since = now
-		}
-		sessions[i].State.Quota = &blocked
-		if recordConfirmed {
-			sessions[i].State.Evidence += "; since is the runtime's own record of the refusal"
-		} else {
-			sessions[i].State.Evidence += "; since is when this driver first observed the notice, " +
-				"not when the refusal happened — the runtime's own record could not confirm it"
-		}
-	}
+	d.settleQuota(sessions, creds, now)
 
 	count := len(sessions)
 	src := fleet.SourceStatus{
@@ -2617,8 +2499,9 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 		ObservedAt: now,
 		// A scheduler asking "where can work run right now" reads this
 		// field, not Items() — the account fact must be visible here even
-		// against a filter that empties the item list entirely (#10).
-		Quota: q,
+		// against a filter that empties the item list entirely (#10). One
+		// block per credential since #490: a machine does not have one account.
+		Quotas: d.quotaBlocks(),
 	}
 	if missed > 0 {
 		// This machine answered — every session in count is real, including
@@ -2804,12 +2687,11 @@ func (d *Driver) State(ctx context.Context, req fleet.Request, ref fleet.Session
 		// Same rewrite List applies, generalised to a one-session read (#10)
 		// — see quotaBlockedState's own comment for why a session's own
 		// state must not be reported as an unqualified "starting"/"idle"/
-		// "unknown" while this machine's account is known to be refusing
+		// "unknown" while the credential it runs on is known to be refusing
 		// work. This is the read Create's own HTTP handler makes to build
 		// the state it hands back in a 201 — without this, a create
 		// reported nothing and the fact was swallowed until a later poll.
-		q, sinceObserved := d.quotaBlock()
-		return quotaBlockedState(st, q, sinceObserved), nil
+		return d.quotaStateFor(st, r), nil
 	}
 	// §5.7 applied to a singular read, and then applied a second time to its
 	// own answer.
@@ -5699,6 +5581,17 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 	if _, err := d.run(ctx, d.bin, "set-option", "-t", name, launchRemoteControlOption, launchRC); err != nil {
 		log.Printf("tmux: create %q: could not record its remote-control launch, `off` will not be claimed for it: %v", name, err)
 	}
+	// muster #490: name the credential the session was started with, where the
+	// session is (credentialOption). Only a session handed a credential of its
+	// own needs one: an unset option reads as credentialDefault, so the common
+	// create costs nothing extra. Best-effort like the options above, and it
+	// fails toward the default: without it the session's block is the ambient
+	// credential's, which is what every session's was before this existed.
+	if credential := credentialIdentity(spec.Env); credential != credentialDefault {
+		if _, err := d.run(ctx, d.bin, "set-option", "-t", name, credentialOption, credential); err != nil {
+			log.Printf("tmux: create %q: could not record which credential it runs on, its quota will be tracked with the ambient one: %v", name, err)
+		}
+	}
 	// #185: the process exists now, so the module can be asked to attach —
 	// asynchronously; this create's response never waits on it.
 	d.mods.launched(name)
@@ -6970,24 +6863,291 @@ func composerHoldsCollapsedPaste(painted string) bool {
 	return len(markerCounts(painted)) > 0
 }
 
-// noteQuotaBlock remembers that this machine's account is refusing work, and
-// forgets it the moment something proves otherwise.
+// settleQuota settles every credential's block from one listing and applies it
+// to the sessions on that credential (#489, #490). creds[i] is the credential
+// sessions[i] was started with.
 //
-// Called with what the current read saw: whether any session's SCREEN showed
-// a limit notice (sawLimit/hint — upgrade-only per #54: this is what may
-// promote the account INTO a block, never what clears one) and whether any
-// session was observed working (sawWorking).
+// A usage limit is not a property of a session. It is a property of the
+// CREDENTIAL every session started with it shares, it lasts days, and it appears
+// on screen for only as long as nothing else prints. Measured on a live fleet
+// hours after one began: 51 sessions, the notice still visible in 2 panes, and
+// every other session showing an ordinary idle screen it would happily accept
+// work into. So it is a remembered fact, not a screen read: any session on the
+// credential showing the notice sets the block, any session on it actually
+// working clears it, and what a block says is applied to the sessions that
+// cannot say otherwise.
+//
+// It is also not a property of the machine. One machine runs sessions on
+// several credentials, and one of them running out says nothing about the rest:
+// a block set from one credential's notice never reaches a session started with
+// another, and nothing a session on another credential does clears it. Each
+// credential is settled by exactly the code a machine was before, over the
+// sessions that run on it.
+//
+// A credential holding a block that no session in this listing runs on is
+// settled too, over no sessions: what an earlier listing proved still counts
+// (#489's memory of the newest turn served), and a block does not outlive it.
+//
+// The cost is paid only by a listing with something to settle: no block and no
+// notice on any screen reads nothing at all.
+func (d *Driver) settleQuota(sessions []fleet.Session, creds []string, now time.Time) {
+	groups := map[string][]int{}
+	for i := range sessions {
+		groups[creds[i]] = append(groups[creds[i]], i)
+	}
+	d.mu.Lock()
+	for credential, a := range d.quotas {
+		if _, ok := groups[credential]; !ok && a.block != nil {
+			groups[credential] = nil
+		}
+	}
+	d.mu.Unlock()
+	order := make([]string, 0, len(groups))
+	for credential := range groups {
+		order = append(order, credential)
+	}
+	sort.Strings(order)
+
+	evidenceRead := false
+	for _, credential := range order {
+		idx := groups[credential]
+		if d.settleCredential(credential, sessions, idx, now) {
+			evidenceRead = true
+		}
+	}
+	if evidenceRead {
+		// The memo of what each record said is kept for the records of the fleet
+		// as it is now, not as it was.
+		live := make(map[string]bool, len(sessions))
+		for i := range sessions {
+			if path, ok := d.quotaRecordPath(sessions[i]); ok {
+				live[path] = true
+			}
+		}
+		d.quotaProbe.keep(live)
+	}
+}
+
+// settleCredential is settleQuota for one credential, over the sessions idx
+// names. It reports whether it read any session's record.
+func (d *Driver) settleCredential(credential string, sessions []fleet.Session, idx []int, now time.Time) bool {
+	var sawLimit, sawWorking bool
+	var hint string
+	for _, i := range idx {
+		switch sessions[i].State.Status {
+		case fleet.StatusQuotaBlocked:
+			sawLimit = true
+			if q := sessions[i].State.Quota; q != nil && q.ResetHint != "" {
+				hint = q.ResetHint
+			}
+		case fleet.StatusWorking:
+			sawWorking = true
+		}
+	}
+	// What the runtime's own records say about the credential, settled once for
+	// the sessions on it (#489): see quotaEvidence. Read only when there is
+	// something to settle.
+	var quotaRecord apiErrorFact
+	quotaVerdict := recordUnavailable
+	read := false
+	if q, _ := d.quotaBlockFor(credential); q != nil || sawLimit {
+		members := make([]fleet.Session, len(idx))
+		for k, i := range idx {
+			members[k] = sessions[i]
+		}
+		quotaRecord, quotaVerdict = d.quotaEvidence(credential, members)
+		read = true
+	}
+	if sawWorking {
+		// A session seen working is the account serving, and it stays proof for
+		// the reads after it: a notice still on an idle screen that has not
+		// changed since is the refusal the block was about, not a new one.
+		d.noteServed(credential, now, now)
+	}
+	d.noteQuotaBlock(credential, sawLimit, hint, sawWorking, quotaRecord, quotaVerdict, now)
+
+	// Apply it. A session that reads idle on a credential that is refusing work
+	// is not available, and idle is the status that means send it work — the
+	// whole failure this exists to prevent.
+	//
+	// Two statuses are rewritten, and the second was left out at first.
+	//
+	// idle, because idle is the status that means send it work.
+	//
+	// unknown, because unknown is not a competing truth — it is this driver
+	// saying it could not determine one (§5.7), and an account fact IS more
+	// specific than that. Leaving it out had a visible cost: four sessions on
+	// a blocked machine flapped unknown → quota_blocked → unknown across
+	// consecutive reads, because their panes redraw a counter, so the digest
+	// changed and the ambiguity that resolves to idle never settled. Eight
+	// spurious state events per cycle on a fleet where nothing was happening.
+	//
+	// Nothing else is rewritten. working, waiting_input and unsent text each
+	// carry something observed just now, and a remembered fact must not
+	// overwrite an observation.
+	//
+	// The same corroboration works in reverse, and must. A limit notice sits
+	// on the screen long after the limit lifts — nobody types into a session
+	// that refused them, so nothing overwrites it — and read literally it says
+	// "blocked" forever. Measured on a working machine: two sessions reporting
+	// quota_blocked from notices that had already expired, while two others on
+	// that same account were working.
+	//
+	// A session working NOW is proof the credential is not refusing work, and it
+	// outranks a screen that has not changed since it was refused. So the
+	// notice becomes what it is — history — and the session reports what it
+	// otherwise is: settled, with nothing running and no question pending.
+	// This is F53's divider again, with the evidence in another pane instead
+	// of a lower line.
+	//
+	// recordCleanTurn joins sawWorking as an equally sufficient reason (#56):
+	// the credential's durable records showing a turn it served after the
+	// refusal is the same kind of positive proof, from a source that
+	// outlives the notice scrolling off the one pane that showed it.
+	if sawWorking || quotaVerdict == recordCleanTurn {
+		for _, i := range idx {
+			if sessions[i].State.Status != fleet.StatusQuotaBlocked {
+				continue
+			}
+			st := sessions[i].State
+			st.Status = fleet.StatusIdle
+			st.Quota = nil
+			if quotaVerdict == recordCleanTurn {
+				st.Evidence = "a limit notice is on screen, but a later turn on this credential " +
+					"already succeeded, so the notice is history"
+			} else {
+				st.Evidence = "a limit notice is on screen, but another session on this credential is working now, so the notice is history"
+			}
+			sessions[i].State = st
+		}
+	}
+
+	// q is read once and reused below, so the block a session is told is the one
+	// the source reports, from a single lock acquisition rather than two.
+	q, sinceObserved := d.quotaBlockFor(credential)
+	if q != nil {
+		for _, i := range idx {
+			sessions[i].State = quotaBlockedState(sessions[i].State, q, sinceObserved)
+		}
+	}
+
+	// Every block carries a real since, and names its credential. The
+	// per-session path builds its QuotaBlock in classify, which has no clock and
+	// no notion of a credential, so it left both zero — and a zero time
+	// serialises as year 1, which is worse than absent: a caller computing
+	// "blocked for how long" gets two millennia.
+	//
+	// This is exactly the session whose OWN screen showed the notice
+	// directly (quotaBlockedState's rewrite only touches idle/unknown/
+	// starting, by design — a session already reporting quota_blocked keeps
+	// classify.go's own evidence phrase). q's own Since/sinceObserved — the
+	// account-level fact noteQuotaBlock just finished maintaining, whether
+	// from THIS cycle's record or restored from a restart — is the
+	// authoritative answer (#56) and applies here first; the status's own
+	// since (this driver's first observed TRANSITION into the status, still
+	// a sighting rather than the refusal) and the read time are fallbacks
+	// for when there is no account-level block to consult at all.
+	for _, i := range idx {
+		st := sessions[i].State.Quota
+		if st == nil {
+			continue
+		}
+		blocked := *st
+		blocked.Credential = credential
+		if blocked.Since.IsZero() {
+			recordConfirmed := false
+			switch {
+			case q != nil && !q.Since.IsZero():
+				blocked.Since = q.Since
+				recordConfirmed = sinceObserved
+				if q.ResetHint != "" && blocked.ResetHint == "" {
+					blocked.ResetHint = q.ResetHint
+				}
+			case sessions[i].State.Since != nil && !sessions[i].State.Since.IsZero():
+				blocked.Since = *sessions[i].State.Since
+			default:
+				blocked.Since = now
+			}
+			if recordConfirmed {
+				sessions[i].State.Evidence += "; since is the runtime's own record of the refusal"
+			} else {
+				sessions[i].State.Evidence += "; since is when this driver first observed the notice, " +
+					"not when the refusal happened — the runtime's own record could not confirm it"
+			}
+		}
+		sessions[i].State.Quota = &blocked
+	}
+	return read
+}
+
+// quotaStateFor applies quotaBlockedState to a one-session read, for the
+// credential the session r runs on (#10, #490).
+func (d *Driver) quotaStateFor(st fleet.SessionState, r paneRow) fleet.SessionState {
+	credential := rowCredential(r)
+	q, sinceObserved := d.quotaBlockFor(credential)
+	st = quotaBlockedState(st, q, sinceObserved)
+	if st.Quota != nil && st.Quota.Credential == "" {
+		blocked := *st.Quota
+		blocked.Credential = credential
+		st.Quota = &blocked
+	}
+	return st
+}
+
+// quotaAccount is what this driver remembers about one credential's usage limit.
+type quotaAccount struct {
+	// block is the credential's block; nil while it is not blocked. The block's
+	// Credential field is always the key this account is held under.
+	block *fleet.QuotaBlock
+	// sinceObserved is true when block.Since came from the runtime's own record
+	// of the refusal (#56) rather than from this driver's first sighting of the
+	// notice on screen. Not part of fleet.QuotaBlock's wire shape — §2.3
+	// documents Since as a timestamp for humans and callers to read, not a
+	// provenance channel, and the honest label belongs in SessionState.Evidence
+	// (quotaBlockedState) the same way every other "how do we know this" note in
+	// this driver already lives in prose rather than in a new structured field.
+	sinceObserved bool
+	// served is the newest time any session on this credential had a runtime
+	// record showing it serving a real turn, as this driver has read it (#489).
+	// A block or a refusal dated before it is history. Memory only: a restarted
+	// driver reads it back from the records on its first full listing.
+	served time.Time
+}
+
+// accountLocked is the account held for credential, made when there is none.
+// Caller holds d.mu.
+func (d *Driver) accountLocked(credential string) *quotaAccount {
+	if d.quotas == nil {
+		d.quotas = map[string]*quotaAccount{}
+	}
+	a := d.quotas[credential]
+	if a == nil {
+		a = &quotaAccount{}
+		d.quotas[credential] = a
+	}
+	return a
+}
+
+// noteQuotaBlock remembers that one credential on this machine is refusing
+// work, and forgets it the moment something proves otherwise.
+//
+// Called with what the current read saw of the sessions on that credential
+// ALONE (muster #490): whether any session's SCREEN showed a limit notice
+// (sawLimit/hint — upgrade-only per #54: this is what may promote the
+// credential INTO a block, never what clears one) and whether any session was
+// observed working (sawWorking). Evidence from a session on another credential
+// proves nothing about this one and is never passed in.
 //
 // record and verdict are #56's structured source: what the runtime's own
-// records say about the account, settled once per read by quotaEvidence (#489)
-// from the sessions the screen flagged and, while a block is in force, from
-// every session's record. Three things follow from it —
+// records say about the credential, settled once per read by quotaEvidence
+// (#489) from the sessions the screen flagged and, while a block is in force,
+// from every session on the credential. Three things follow from it —
 //
 //   - recordAPIError with category "rate_limit" corrects Since to the
 //     refusal's own timestamp, and ResetHint to the record's own words,
 //     rather than trusting the screen's window-scraped copy of the same
 //     sentence.
-//   - recordCleanTurn is durable, positive proof the account is not
+//   - recordCleanTurn is durable, positive proof the credential is not
 //     refusing work — the same authority sawWorking already has, from a
 //     source that survives the notice scrolling off the one pane that
 //     showed it. It clears the block alongside sawWorking, never in place
@@ -6999,17 +7159,18 @@ func composerHoldsCollapsedPaste(painted string) bool {
 //   - recordUnavailable changes nothing here; the caller falls back to
 //     first-sighting semantics and says so in SessionState.Evidence
 //     (quotaBlockedState), never presenting one as the other.
-func (d *Driver) noteQuotaBlock(sawLimit bool, hint string, sawWorking bool, record apiErrorFact, verdict recordVerdict, now time.Time) {
+func (d *Driver) noteQuotaBlock(credential string, sawLimit bool, hint string, sawWorking bool, record apiErrorFact, verdict recordVerdict, now time.Time) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	a := d.accountLocked(credential)
 	switch {
 	case sawWorking, verdict == recordCleanTurn:
-		if d.quota != nil {
-			d.quota = nil
-			d.quotaSinceObserved = false
+		if a.block != nil {
+			a.block = nil
+			a.sinceObserved = false
 			d.saveQuotaLocked()
 		}
-	case sawLimit && d.quota == nil:
+	case sawLimit && a.block == nil:
 		since, sinceObserved, resetHint := now, false, hint
 		if verdict == recordAPIError && record.category == "rate_limit" {
 			since, sinceObserved = record.at, true
@@ -7017,47 +7178,58 @@ func (d *Driver) noteQuotaBlock(sawLimit bool, hint string, sawWorking bool, rec
 				resetHint = h
 			}
 		}
-		d.quota = &fleet.QuotaBlock{Since: since, ResetHint: resetHint}
-		d.quotaSinceObserved = sinceObserved
+		a.block = &fleet.QuotaBlock{Credential: credential, Since: since, ResetHint: resetHint}
+		a.sinceObserved = sinceObserved
 		d.saveQuotaLocked()
-	case sawLimit && verdict == recordAPIError && record.category == "rate_limit" && !d.quotaSinceObserved:
+	case sawLimit && verdict == recordAPIError && record.category == "rate_limit" && !a.sinceObserved:
 		// A block already exists from an earlier cycle's first sighting,
 		// and the record has only now resolved (a conversation lookup can
 		// legitimately lag a cycle, or the block was carried in from a
 		// restart before a record was ever consulted). Upgrade Since in
 		// place rather than waiting for the block to clear and re-enter.
-		d.quota.Since = record.at
-		d.quotaSinceObserved = true
-		if h := record.resetHintText(); h != "" && d.quota.ResetHint == "" {
-			d.quota.ResetHint = h
+		a.block.Since = record.at
+		a.sinceObserved = true
+		if h := record.resetHintText(); h != "" && a.block.ResetHint == "" {
+			a.block.ResetHint = h
 		}
 		d.saveQuotaLocked()
-	case sawLimit && hint != "" && d.quota.ResetHint == "":
+	case sawLimit && hint != "" && a.block.ResetHint == "":
 		// A later notice may carry a reset time the first one did not.
-		d.quota.ResetHint = hint
+		a.block.ResetHint = hint
 		d.saveQuotaLocked()
 	}
 }
 
-// quotaBlock reports the remembered account block, if any, and whether its
+// quotaBlockFor reports credential's remembered block, if any, and whether its
 // Since is the runtime's own record of the refusal rather than this
 // driver's first sighting of the notice (#56) — see quotaBlockedState for
 // where that distinction becomes something a caller can read.
-func (d *Driver) quotaBlock() (*fleet.QuotaBlock, bool) {
+func (d *Driver) quotaBlockFor(credential string) (*fleet.QuotaBlock, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.quota == nil {
+	a := d.quotas[credential]
+	if a == nil || a.block == nil {
 		return nil, false
 	}
-	q := *d.quota
-	return &q, d.quotaSinceObserved
+	q := *a.block
+	return &q, a.sinceObserved
 }
 
-// quotaOnly discards quotaBlock's sinceObserved half for call sites that
-// only need the wire fact — fleet.SourceStatus.Quota carries no evidence
-// string of its own to put the distinction in (unlike a session's own
-// SessionState, which quotaBlockedState annotates).
-func quotaOnly(q *fleet.QuotaBlock, _ bool) *fleet.QuotaBlock { return q }
+// quotaBlocks lists every credential's remembered block, ordered by credential
+// name so two reads of one state are equal (SourceStatus.Quotas, and the
+// transitions subscribe diffs).
+func (d *Driver) quotaBlocks() []fleet.QuotaBlock {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var out []fleet.QuotaBlock
+	for _, a := range d.quotas {
+		if a.block != nil {
+			out = append(out, *a.block)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Credential < out[j].Credential })
+	return out
+}
 
 // credentialGeneration reads the local credential store's own modification
 // time — the "generation" identifier #12 needs — or nil when unconfigured
@@ -7128,7 +7300,7 @@ func quotaBlockedState(st fleet.SessionState, q *fleet.QuotaBlock, sinceObserved
 	}
 	st.Status = fleet.StatusQuotaBlocked
 	st.Quota = q
-	st.Evidence = "this machine's account is refusing work; " + seen
+	st.Evidence = "the credential this session runs on is refusing work; " + seen
 	if sinceObserved {
 		st.Evidence += "; since is the runtime's own record of the refusal"
 	} else {
@@ -7141,36 +7313,65 @@ func quotaBlockedState(st fleet.SessionState, q *fleet.QuotaBlock, sinceObserved
 	return st
 }
 
-// quotaPersisted is what this driver actually writes to the state store —
-// fleet.QuotaBlock, embedded rather than nested, plus the one bit #56 needs
-// that has no home on that wire type (see quotaBlockedState's comment on
-// why it stays out of the wire shape).
+// quotaPersisted is what this driver writes to the "quota" key of the state
+// store: one entry per credential holding a block (muster #490).
 //
-// Embedded, specifically, rather than a nested `block` field: this key
-// already holds a bare QuotaBlock on any instance that persisted one before
-// #56, and encoding/json has no notion of a schema migration — a nested
-// field would decode an old file's top-level `since`/`resetHint` into
-// nothing, silently dropping an in-force block on the first restart after
-// this upgrade (found and rejected in review, not deployed and then
-// noticed). Embedded, `since` and `resetHint` stay exactly where an old
-// file already has them; `sinceObserved` is simply absent on a file no
-// version before #56 ever wrote, and decodes to its correct, honest
-// default: false, "not record-confirmed" — true of every block this driver
-// had ever persisted before this field existed.
+// # Reading what an older build wrote
+//
+// Before #490 the key held ONE block for the machine: `since` and `resetHint`
+// at the top of the object, plus the `sinceObserved` bit #56 added, and an empty
+// object (a zero since) when there was none. encoding/json has no notion of a
+// schema migration, and a decoder that only knew the new shape would read that
+// file as "no block", silently dropping an in-force one on the first restart
+// after the upgrade — the failure #56's own review caught for the previous
+// change to this file. So the old fields stay declared here, and loadQuota
+// attributes such a block to credentialDefault: the machine-wide block it was
+// is the one no session can be shown to be outside of, and the sessions that
+// were handed a credential of their own are the ones that can prove it wrong.
+// It does not outlast the first turn the default credential serves after it
+// began (#489), and a refusal the credential really is under is dated again by
+// the first record or notice that shows it.
+//
+// A file in the new shape read by a build that predates it decodes to a zero
+// top-level since, which that build reads as no block: it fails open, and the
+// notice, still on the screen of a refused session, puts the block back.
 type quotaPersisted struct {
-	fleet.QuotaBlock
-	SinceObserved bool `json:"sinceObserved,omitempty"`
+	// Credentials is the new shape.
+	Credentials map[string]quotaPersistedBlock `json:"credentials,omitempty"`
+
+	// The old, single-block shape. Read, never written.
+	Since         time.Time `json:"since,omitzero"`
+	ResetHint     string    `json:"resetHint,omitempty"`
+	SinceObserved bool      `json:"sinceObserved,omitempty"`
+}
+
+// quotaPersistedBlock is one credential's block as it is stored: the wire
+// QuotaBlock without its Credential (the map key says it) plus the one bit
+// #56 needs that has no home on that wire type (see quotaBlockedState's comment
+// on why it stays out of the wire shape).
+type quotaPersistedBlock struct {
+	Since         time.Time `json:"since"`
+	ResetHint     string    `json:"resetHint,omitempty"`
+	SinceObserved bool      `json:"sinceObserved,omitempty"`
 }
 
 func (d *Driver) saveQuotaLocked() {
 	if d.store == nil {
 		return
 	}
-	if d.quota == nil {
-		_ = d.store.Save("quota", quotaPersisted{})
-		return
+	var p quotaPersisted
+	for credential, a := range d.quotas {
+		if a.block == nil {
+			continue
+		}
+		if p.Credentials == nil {
+			p.Credentials = map[string]quotaPersistedBlock{}
+		}
+		p.Credentials[credential] = quotaPersistedBlock{
+			Since: a.block.Since, ResetHint: a.block.ResetHint, SinceObserved: a.sinceObserved,
+		}
 	}
-	_ = d.store.Save("quota", quotaPersisted{QuotaBlock: *d.quota, SinceObserved: d.quotaSinceObserved})
+	_ = d.store.Save("quota", p)
 }
 
 func (d *Driver) loadQuota() {
@@ -7178,10 +7379,21 @@ func (d *Driver) loadQuota() {
 		return
 	}
 	var p quotaPersisted
-	if found, err := d.store.Load("quota", &p); err == nil && found && !p.Since.IsZero() {
-		block := p.QuotaBlock
-		d.quota = &block
-		d.quotaSinceObserved = p.SinceObserved
+	if found, err := d.store.Load("quota", &p); err != nil || !found {
+		return
+	}
+	if len(p.Credentials) == 0 && !p.Since.IsZero() {
+		p.Credentials = map[string]quotaPersistedBlock{credentialDefault: {
+			Since: p.Since, ResetHint: p.ResetHint, SinceObserved: p.SinceObserved,
+		}}
+	}
+	for credential, b := range p.Credentials {
+		if b.Since.IsZero() {
+			continue
+		}
+		a := d.accountLocked(credential)
+		a.block = &fleet.QuotaBlock{Credential: credential, Since: b.Since, ResetHint: b.ResetHint}
+		a.sinceObserved = b.SinceObserved
 	}
 }
 

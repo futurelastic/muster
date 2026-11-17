@@ -353,7 +353,7 @@ SessionState {
   composerDigest? : string        // fingerprint of unsent composer text
   strandedDelivery? : boolean     // true only with waitingOn unsent-input: the unsent text is a message THIS driver delivered and reported queued, handed back by the runtime (#240)
   screenDigest?   : string        // fingerprint of the screen read — corroborates `keys` (§3); only from a driver declaring deliversRawKeys (§4.3)
-  quota?          : QuotaBlock    // set when status is quota_blocked
+  quota?          : QuotaBlock    // set when status is quota_blocked: the block of the credential THIS session runs on (muster #490)
   lastTurn?       : TurnEnd       // how the most recent turn ended, if the driver knows
   stalled?        : Stall         // status is `working` and nothing has been drawn for the whole stall bound (#391); only from a driver declaring observesStall (§4.3); absent = not judged stalled, never "healthy"
   turns?          : integer       // agent turns completed since the most recent prompt delivery (#111); 0 is a finding, absent means the driver could not count
@@ -438,6 +438,7 @@ WaitingReason =
   | "starting"        // muster #126: no composer painted at all yet — PromptDelivery.waitingOn only
 
 QuotaBlock {
+  credential?: string     // muster #490: the credential this block belongs to — opaque, comparable for equality, never a secret; sessions started with none of their own share "default"
   since     : Timestamp   // when the refusal happened, per a driver able to say so; otherwise when this driver first saw the notice — evidence states which (#56)
   resetHint?: string      // the runtime's own words on when it lifts; display, never parse
 }
@@ -769,7 +770,9 @@ Stall {
 > taken out of `quota_blocked` by a turn the account served after the
 > refusal in ANY session's record on the machine (#489), because the
 > account is what the block is about and a turn is positive proof of it, or
-> by a session observed working. A notice on a screen that has not changed
+> by a session observed working. "The account" is a CREDENTIAL (muster #490):
+> evidence from a session started with another credential proves nothing about
+> this one and clears nothing. A notice on a screen that has not changed
 > since the account was last shown serving is that old refusal, so it does
 > not promote a new block; a screen that changed after it is a new one. When no such record can be resolved, `since`
 > falls back to the time this driver first observed the notice — a real
@@ -3327,7 +3330,7 @@ SourceStatus {
   count?    : number
   error?    : string
   observedAt: Timestamp
-  quota?    : QuotaBlock   // this machine's ACCOUNT-level refusal, if any (§2.3, #10)
+  quotas?   : QuotaBlock[] // the credentials on this machine that are refusing work, one block each, ordered by credential (§2.3, #10, #490)
 }
 ```
 
@@ -3339,16 +3342,23 @@ rather than an oversight.
 **Never** return `items: []` for a source that failed. An unreachable machine
 contributes a `SourceStatus`, not an absence.
 
-**`quota` is a per-machine sibling of `SessionState.quota`, not the same
+**`quotas` is a per-machine sibling of `SessionState.quota`, not the same
 field relocated.** A machine can be reachable and answering — `status: "ok"` —
-while every session on its account is refused: reachable-and-answering and
-willing-to-work are different facts, and folding this into `status` would
+while every session on one of its credentials is refused: reachable-and-answering
+and willing-to-work are different facts, and folding this into `status` would
 force a caller to enumerate every session on a machine just to learn whether
 dispatching to it is pointless. This is the field a scheduler reads to answer
-"where can work run right now" without listing a single session. (Undocumented
-in this block until muster issue #57's audit; present on `collection.go`'s
-`SourceStatus` since #10, and populated by the tmux driver's own remembered
-`quotaBlock`.)
+"where can work run right now" without listing a single session.
+
+It is a list because a machine does not have one account (muster #490). It can
+run sessions on several credentials at once — the sign-in the service runs
+under, and any token a create or the machine's declared environment hands a
+session — and one of them reaching its limit says nothing about the others. The
+field this replaces, `quota`, was one block for the whole machine, so it could
+only mean "stop everything", and a supervisor that obeyed it stopped sessions
+whose credential still had quota. Each entry names its `credential`; a
+credential that is not listed is not known to be blocked, which is not the same
+as known to have quota. Absent or empty means nothing is blocked.
 
 **`complete` is derived, never supplied.** It is true iff every
 `SourceStatus.status` is `ok`. A caller-supplied boolean is exactly the kind of

@@ -1910,7 +1910,7 @@ whose own record holds it, even when that runtime cannot be read.
     "prompt": { "question": "…", "options": ["…"], "selected": 1, "kind": "tool-permission", "nonce": "…" },
     "waitingOn": "prompt",
     "composerDigest": "…", "screenDigest": "…",
-    "quota": { "since": "…", "resetHint": "…" },
+    "quota": { "credential": "…", "since": "…", "resetHint": "…" },
     "lastTurn": { "outcome": "failed", "reason": "…", "retryable": true },
     "stalled": { "since": "…", "reason": "…" },
     "controlChannel": { "state": "active", "bridgeId": "…" },

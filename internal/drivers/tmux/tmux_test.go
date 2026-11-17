@@ -402,6 +402,10 @@ type fakeSession struct {
 	// launchRC models launchRemoteControlOption (muster #269): "1", "0" or ""
 	// (never recorded). Emitted as the listing's tenth field.
 	launchRC string
+	// credential models credentialOption (muster #490): the name of the
+	// credential the session was started with, "" when none was recorded.
+	// Emitted as the listing's eleventh field.
+	credential string
 	// activity is #{window_activity} (muster #449): the epoch second of the pane's
 	// last output. Zero models a multiplexer that does not report it, and leaves the
 	// fingerprint fields empty. cursorX, cursorY and history stand for the rest of
@@ -531,7 +535,7 @@ func (f *fakeMux) exec(ctx context.Context, name string, args ...string) ([]byte
 			}
 			fields := []string{
 				s.name, s.paneID, s.cwd, itoa(s.pid), itoa64(s.created), dead,
-				itoa(s.deadStatus), s.title, managed, s.launchRC,
+				itoa(s.deadStatus), s.title, managed, s.launchRC, s.credential,
 			}
 			// The fingerprint comes only when the listing asked for it, as the
 			// real multiplexer answers a format it was given (#449).
@@ -4965,9 +4969,9 @@ func TestListSourceReportsAccountRefusalWithoutReadingSessions(t *testing.T) {
 			"even though the account is refusing work — conflating the two is exactly "+
 			"what this envelope exists to prevent, got status %q", src.Status)
 	}
-	if src.Quota == nil {
-		t.Fatal("Sources()[0].Quota is nil — a scheduler reading only the source list " +
-			"cannot tell this machine's account is refusing work without reading sessions")
+	if len(src.Quotas) != 1 || src.Quotas[0].Credential != credentialDefault {
+		t.Fatalf("Sources()[0].Quotas = %+v — a scheduler reading only the source list "+
+			"cannot tell which credential on this machine is refusing work without reading sessions", src.Quotas)
 	}
 
 	// And it survives a filter that empties Items() entirely — the case
@@ -4979,7 +4983,7 @@ func TestListSourceReportsAccountRefusalWithoutReadingSessions(t *testing.T) {
 	if len(filtered.Items()) != 0 {
 		t.Fatalf("filter should have matched nothing, got %d items", len(filtered.Items()))
 	}
-	if filtered.Sources()[0].Quota == nil {
+	if len(filtered.Sources()[0].Quotas) != 1 {
 		t.Error("the account fact must not depend on Items() being non-empty")
 	}
 }

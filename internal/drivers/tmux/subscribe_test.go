@@ -662,6 +662,9 @@ func TestSubscribeAnnouncesAndRetractsAnAccountBlock(t *testing.T) {
 	if !p.Blocked || p.Quota == nil || !strings.Contains(p.Quota.ResetHint, "aug 10") {
 		t.Errorf("payload = %+v, want blocked with a reset hint", p)
 	}
+	if p.Credential != credentialDefault || p.Quota.Credential != credentialDefault {
+		t.Errorf("payload = %+v, want it to name the credential the sessions run on (%q)", p, credentialDefault)
+	}
 	if p.Machine != "testbox" {
 		t.Errorf("machine = %q, want testbox", p.Machine)
 	}
@@ -674,8 +677,8 @@ func TestSubscribeAnnouncesAndRetractsAnAccountBlock(t *testing.T) {
 	if !ok {
 		t.Fatal("the account recovered and the stream never retracted the block")
 	}
-	if p.Blocked || p.Quota != nil {
-		t.Errorf("payload = %+v, want an explicit unblocked", p)
+	if p.Blocked || p.Quota != nil || p.Credential != credentialDefault {
+		t.Errorf("payload = %+v, want an explicit unblocked for the credential that was blocked", p)
 	}
 }
 

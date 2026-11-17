@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -355,9 +356,11 @@ type eventStream struct {
 	errc    chan error
 	trigger chan struct{}
 
-	// quota tracking, owned by run() alone — no lock.
-	quotaKnown bool
-	quotaBlock *fleet.QuotaBlock
+	// quota tracking, owned by run() alone — no lock. quotaBlocked is the set of
+	// credentials this stream last saw blocked (muster #490), so a transition of
+	// ONE credential is one event and the rest are not re-announced.
+	quotaKnown   bool
+	quotaBlocked map[string]bool
 
 	// credential generation tracking (#12), owned by run() alone — no lock.
 	// See run()'s own comment for why, unlike quota, the FIRST read never
@@ -820,26 +823,17 @@ func (s *eventStream) run(ctx context.Context, trigger <-chan struct{}, known ma
 		// the session diff learns the same thing one stalled session at a
 		// time, which is how the fact was learned 48 times before.
 		//
-		// The first pass announces a block that is already in force — a
+		// One credential's, not the machine's (muster #490): a machine can run
+		// sessions on several credentials and one running out is not the others
+		// running out, so each credential that starts or stops refusing work is
+		// an event of its own and names itself.
+		//
+		// The first pass announces every block already in force — a
 		// subscriber connecting mid-outage must not have to wait for a
 		// transition that already happened — but says nothing when there is
 		// none, because "not blocked" is the unremarkable case and an event
 		// for it on every new subscription is noise.
-		if q, _ := s.d.quotaBlock(); (q != nil) != (s.quotaBlock != nil) || !s.quotaKnown {
-			if q != nil || s.quotaKnown {
-				s.emit(ctx, fleet.Event{
-					Machine: s.d.machine,
-					Kind:    fleet.EventMachineQuota,
-					Payload: fleet.MachineQuotaPayload{
-						Machine: s.d.machine,
-						Blocked: q != nil,
-						Quota:   q,
-					},
-				})
-			}
-			s.quotaKnown = true
-			s.quotaBlock = q
-		}
+		s.quotaEvents(ctx)
 
 		// The credential store's own generation (#12), compared against what
 		// this stream last saw — the second machine-level fact on this loop
@@ -1198,4 +1192,57 @@ func (d *Driver) relistGapFor(cost time.Duration) time.Duration {
 		return d.relistGap(cost)
 	}
 	return relistGap(cost)
+}
+
+// quotaEvents emits machine.quota for every credential whose block began or
+// ended since this stream last looked (muster #490), in credential order so two
+// subscribers to one machine see the same sequence. The first pass emits the
+// blocks already in force and nothing for credentials that are not.
+func (s *eventStream) quotaEvents(ctx context.Context) {
+	blocks := s.d.quotaBlocks()
+	// Every event carries the whole set, so it stands alone (MachineQuotaPayload).
+	all := blocks
+	if all == nil {
+		all = []fleet.QuotaBlock{}
+	}
+	now := make(map[string]bool, len(blocks))
+	for i := range blocks {
+		now[blocks[i].Credential] = true
+		if s.quotaBlocked[blocks[i].Credential] {
+			continue
+		}
+		q := blocks[i]
+		s.emit(ctx, fleet.Event{
+			Machine: s.d.machine,
+			Kind:    fleet.EventMachineQuota,
+			Payload: fleet.MachineQuotaPayload{
+				Machine:    s.d.machine,
+				Credential: q.Credential,
+				Blocked:    true,
+				Quota:      &q,
+				Quotas:     all,
+			},
+		})
+	}
+	var cleared []string
+	for credential := range s.quotaBlocked {
+		if !now[credential] {
+			cleared = append(cleared, credential)
+		}
+	}
+	sort.Strings(cleared)
+	for _, credential := range cleared {
+		s.emit(ctx, fleet.Event{
+			Machine: s.d.machine,
+			Kind:    fleet.EventMachineQuota,
+			Payload: fleet.MachineQuotaPayload{
+				Machine:    s.d.machine,
+				Credential: credential,
+				Blocked:    false,
+				Quotas:     all,
+			},
+		})
+	}
+	s.quotaKnown = true
+	s.quotaBlocked = now
 }
