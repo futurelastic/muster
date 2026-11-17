@@ -218,8 +218,21 @@ func readSessionAccess(dir string) (string, bool) {
 // GET /v1/runtimes. Nothing when none is configured here or the provider policy
 // does not name `openai` — a sign-in that cannot be used is not this runtime's.
 func (d *Driver) Grants() []fleet.RuntimeGrant {
-	if !d.grantUsable() {
+	g, ok := d.grantRow()
+	if !ok {
 		return nil
+	}
+	g.Quota = d.liveQuota() // muster #458
+	return []fleet.RuntimeGrant{g}
+}
+
+// grantRow is the sign-in's row without its quota: the part GET /v1/runtimes
+// reads from the sign-in's own state. False when none is configured here or the
+// provider policy does not name `openai`. The credentials view (credview.go)
+// reads it too, so the two listings cannot disagree about where the sign-in stands.
+func (d *Driver) grantRow() (fleet.RuntimeGrant, bool) {
+	if !d.grantUsable() {
+		return fleet.RuntimeGrant{}, false
 	}
 	st := d.grants.State()
 	g := fleet.RuntimeGrant{Provider: st.Provider, Reason: st.Reason}
@@ -245,8 +258,7 @@ func (d *Driver) Grants() []fleet.RuntimeGrant {
 		t := st.SignedInAt.UTC().Truncate(time.Second)
 		g.RefreshedAt = &t
 	}
-	g.Quota = d.liveQuota() // muster #458
-	return []fleet.RuntimeGrant{g}
+	return g, true
 }
 
 var _ driver.GrantReporter = (*Driver)(nil)

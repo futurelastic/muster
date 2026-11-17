@@ -128,6 +128,15 @@ and restarts the service when it exits.
   is taken over (its file is in `adopted/`, out of that directory) a plain install
   is ordinary again. With more than one such unit, adopt one at a time: the next
   plain run names the one that is left.
+
+  **Exit status of `service install` (muster #494).** `0` done. `3` it refused
+  before it wrote or ran anything, so the machine is as it was: the refusals above
+  (a unit of the operator's beside the standard one, an `--adopt` that is refused),
+  a refused `--addr` or `--tmux`, and a platform with no per-user service manager.
+  `2` a usage error. `1` any other failure, which may have left a binary, a unit or
+  a directory written; the release installer puts the previous version back from a
+  `1` and does not from a `3`. `75` is the update client's "busy" answer from its
+  own `busy` command (see "Kept current by the host's update client"), never this one's.
 - **`doctor` fails, the service is not started.** The unit and files stay;
   fix the failing row and run it again. `--no-start` writes everything and runs
   `doctor` without loading or starting the unit.
@@ -197,8 +206,9 @@ It checks the download against the version's `SHA256SUMS`, then runs that binary
 [`muster service install`](#the-short-way-muster-service-install), so what is above applies unchanged: a new machine
 gets a service, an existing one keeps its configuration and gets the new binary and a restart, and the command ends
 by asking the service whether it is healthy. If the new version does not come up, the previous one is put back and
-the installer exits 1. npm remains the other way in; [`release-host.md`](release-host.md) says how a final reaches
-the host.
+the installer exits 1; when `service install` refused before changing anything (exit status 3, described under the
+short way above), there is nothing to put back, and the installer says the machine was not changed and exits 1. npm
+remains the other way in; [`release-host.md`](release-host.md) says how a final reaches the host.
 
 A host that asks for a sign-in answers 401 to an unsigned read, the installer's own download included. Give the
 installer the read token in `DL_TOKEN` and it sends it as a bearer header on every read it makes (the newest-version
@@ -853,6 +863,11 @@ that. So the operator chooses, in the file `FLEET_CONFIG` names:
   the rule applies to no session and nothing is stripped or written.
 - **Usage names the kind.** A session's `usage.credential` is `subscription` or
   `api-key` (`docs/api.md`), so spend on the two accounts is never added together.
+- **The credentials a machine holds are listed, without values.** `credentials` on
+  `GET /v1/runtimes` (#497) names each provider's API key supplied by a `sessionEnv`
+  entry and the stored sign-in, with their state: a key file that is missing or
+  unusable reads `degraded` with a reason that names the variable and never the file.
+  A client reads it instead of running the runtime's own programs.
 - The declaration is read at start and changing it needs a restart, like `sessionEnv`;
   a reload that changes it is refused whole.
 

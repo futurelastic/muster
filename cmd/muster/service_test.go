@@ -393,6 +393,49 @@ func TestServiceInstallReportsAServiceThatNeverBecomesHealthy(t *testing.T) {
 	}
 }
 
+// muster #494: the release installer rolls back a failed install, so it must be able to tell a refusal that changed
+// nothing from a failure that may have left something behind. The status follows what was written, not the kind of
+// error: the refusals above exit svcExitNothingChanged and leave no binary, and a failure after the binary was copied
+// exits 1, rollback and all.
+func TestServiceInstallStatusSaysWhetherAnythingWasWritten(t *testing.T) {
+	t.Run("a failure after the binary was written exits 1", func(t *testing.T) {
+		f := newSvcFixture(t, "linux")
+		f.mgr.doctorFail = true
+		if code := f.install(t); code != 1 {
+			t.Fatalf("exit %d, want 1\n%s%s", code, f.out, f.errb)
+		}
+		if _, err := os.Stat(f.p.Bin); err != nil {
+			t.Errorf("the test no longer reaches a failure after the first write: %v", err)
+		}
+	})
+	t.Run("a service that never becomes healthy exits 1", func(t *testing.T) {
+		f := newSvcFixture(t, "linux")
+		f.env.HealthWait = 100 * time.Millisecond
+		l, _ := net.Listen("tcp", "127.0.0.1:0")
+		dead := l.Addr().String()
+		l.Close()
+		if code := f.run(t, "install", "--addr", dead, "--tmux", f.tmux); code != 1 {
+			t.Fatalf("exit %d, want 1\n%s%s", code, f.out, f.errb)
+		}
+	})
+	t.Run("a refusal before the first write exits svcExitNothingChanged and writes nothing", func(t *testing.T) {
+		f := newSvcFixture(t, "linux")
+		before := snapshotTree(t, f.env.Home)
+		if code := f.run(t, "install", "--tmux", "tmux"); code != svcExitNothingChanged {
+			t.Fatalf("exit %d, want %d\n%s%s", code, svcExitNothingChanged, f.out, f.errb)
+		}
+		if after := snapshotTree(t, f.env.Home); len(after) != len(before) {
+			t.Errorf("a refusal wrote: %d entries before, %d after", len(before), len(after))
+		}
+	})
+	t.Run("other commands keep exit 1", func(t *testing.T) {
+		f := newSvcFixture(t, "linux")
+		if code := f.run(t, "status"); code != 1 {
+			t.Fatalf("status of nothing installed exited %d, want 1", code)
+		}
+	})
+}
+
 func TestServiceInstallRefusals(t *testing.T) {
 	f := newSvcFixture(t, "linux")
 	for _, tc := range []struct {
@@ -407,8 +450,8 @@ func TestServiceInstallRefusals(t *testing.T) {
 		{"relative tmux", []string{"install", "--tmux", "tmux"}, "absolute path"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if code := f.run(t, tc.args...); code != 1 || !strings.Contains(f.errb.String(), tc.want) {
-				t.Errorf("exit %d, stderr %q, want %q", code, f.errb, tc.want)
+			if code := f.run(t, tc.args...); code != svcExitNothingChanged || !strings.Contains(f.errb.String(), tc.want) {
+				t.Errorf("exit %d, stderr %q, want exit %d and %q", code, f.errb, svcExitNothingChanged, tc.want)
 			}
 		})
 	}
@@ -419,7 +462,7 @@ func TestServiceInstallRefusals(t *testing.T) {
 
 	w := newSvcFixture(t, "linux")
 	w.env.GOOS = "windows"
-	if code := w.run(t, "install"); code != 1 || !strings.Contains(w.errb.String(), "Windows") {
+	if code := w.run(t, "install"); code != svcExitNothingChanged || !strings.Contains(w.errb.String(), "Windows") {
 		t.Errorf("windows: exit %d, stderr %q", code, w.errb)
 	}
 }

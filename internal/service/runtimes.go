@@ -389,7 +389,7 @@ func (s *Service) localRuntimeRows(ctx context.Context) []fleet.RuntimeInfo {
 		caps := d.Capabilities()
 		ps := fleet.PostureSupportFrom(caps)
 		up = append(up, fleet.RuntimeInfo{Machine: s.self, Runtime: rt, Capabilities: caps, Status: fleet.RuntimeAvailable, Posture: &ps,
-			Models: modelsOf(d), Grants: grantsOf(d)})
+			Models: modelsOf(d), Grants: grantsOf(d), Credentials: credentialsOf(d)})
 	}
 	return append(append(up, down...), noDriver...)
 }
@@ -410,6 +410,17 @@ func grantsOf(d driver.Driver) []fleet.RuntimeGrant {
 		return nil
 	}
 	return r.Grants()
+}
+
+// credentialsOf is a driver's account of the provider credentials its sessions can
+// be given (muster #497), or nil when it holds none or cannot say. Answered from
+// what the driver already has; it makes no call to the runtime or a provider.
+func credentialsOf(d driver.Driver) []fleet.RuntimeCredential {
+	r, ok := d.(driver.CredentialReporter)
+	if !ok {
+		return nil
+	}
+	return r.Credentials()
 }
 
 // modelsOf is a driver's own account of the models a create may name, or
