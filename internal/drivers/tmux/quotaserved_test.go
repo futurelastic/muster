@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -318,5 +319,103 @@ func TestSubscribeRetractsABlockWhenARecordShowsTheAccountServing(t *testing.T) 
 	}
 	if p.Blocked || p.Quota != nil {
 		t.Errorf("payload = %+v, want an explicit blocked: false", p)
+	}
+}
+
+// #489, second report: after the block cleared, two idle sessions that had no
+// turn since the wall still showed the old notice, and each read promoted the
+// block again — 107 of 124 sessions blocked while others completed turns.
+// A notice on an idle screen whose own record has no newer turn is history.
+
+// A session seen working is proof the account served at that read, and it
+// stays proof for the reads after it: the notice on a screen that has not
+// changed since before that is the old refusal, not a new one — even when no
+// record shows a turn after it.
+func TestASessionSeenWorkingOutranksTheOldNoticeStillOnAnIdleScreen(t *testing.T) {
+	s := newServedFixture(t)
+	s.list(t)
+	if !s.blocked(t) {
+		t.Fatal("fixture never reached a blocked account; the test proves nothing")
+	}
+
+	// beta is caught mid-turn: the block clears.
+	s.f.setCapture("%2", fixtureWorking)
+	s.list(t)
+	if s.blocked(t) {
+		t.Fatal("a session seen working did not clear the block; the test proves nothing")
+	}
+
+	// beta finishes and goes idle. Its record shows no turn after the refusal
+	// (nothing was written to it), nothing reads working this cycle, and alpha
+	// still shows the old notice with its record still ending in the refusal.
+	s.f.setCapture("%2", idleFixtureFor("beta"))
+	for i := 0; i < 3; i++ {
+		col := s.list(t)
+		if s.blocked(t) {
+			t.Fatalf("read %d: the old notice on an idle screen re-created a block the account had outlived", i+1)
+		}
+		for _, sess := range col.Items() {
+			if sess.State.Status == fleet.StatusQuotaBlocked {
+				t.Fatalf("read %d: %s reads quota_blocked again", i+1, sess.ID)
+			}
+		}
+	}
+}
+
+// With no record store at all there is no refusal time to compare; the only
+// dating is the screen's own. A screen that has not changed since before the
+// account was seen serving cannot be showing a refusal newer than that.
+func TestAStaticNoticeOlderThanTheLastServedTurnDoesNotBlockWithoutARecordStore(t *testing.T) {
+	f := twoSessions()
+	f.captures["%1"] = refusalScreen
+	f.captures["%2"] = idleFixtureFor("beta")
+	var clock atomic.Int64
+	clock.Store(sessionStart.Add(2 * time.Hour).UnixNano())
+	d := New("testbox", withExec(f.exec),
+		withNonce(func() string { return testNonce }),
+		withClock(func() time.Time { return time.Unix(0, clock.Load()) }))
+	list := func() fleet.Collection[fleet.Session] {
+		col, err := d.List(context.Background(), testCaller, driver.ListFilter{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return col
+	}
+	tick := func() { clock.Add(int64(time.Minute)) }
+
+	list()
+	if q, _ := d.quotaBlock(); q == nil {
+		t.Fatal("fixture never reached a blocked account; the test proves nothing")
+	}
+	tick()
+	f.setCapture("%2", fixtureWorking)
+	list()
+	if q, _ := d.quotaBlock(); q != nil {
+		t.Fatal("a session seen working did not clear the block; the test proves nothing")
+	}
+
+	tick()
+	f.setCapture("%2", idleFixtureFor("beta"))
+	for i := 0; i < 3; i++ {
+		tick()
+		col := list()
+		if q, _ := d.quotaBlock(); q != nil {
+			t.Fatalf("read %d: a notice that predates the served turn re-created the block", i+1)
+		}
+		for _, sess := range col.Items() {
+			if sess.State.Status == fleet.StatusQuotaBlocked {
+				t.Fatalf("read %d: %s reads quota_blocked again", i+1, sess.ID)
+			}
+		}
+	}
+
+	// A NEW refusal reads differently: the screen changes, so it is newer than
+	// the proof, and the block comes back.
+	tick()
+	f.setCapture("%1", "transcript\nYou've hit your weekly limit · resets Aug 10 at 12am (Asia/Tokyo)\n"+
+		quotaServedRule+"\n❯ \n"+quotaServedRule+"\n")
+	list()
+	if q, _ := d.quotaBlock(); q == nil {
+		t.Fatal("a refusal that appeared after the account was last seen serving did not block")
 	}
 }

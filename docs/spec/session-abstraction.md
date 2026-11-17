@@ -768,7 +768,10 @@ Stall {
 > session whose screen announced the notice: an account-level block is
 > taken out of `quota_blocked` by a turn the account served after the
 > refusal in ANY session's record on the machine (#489), because the
-> account is what the block is about and a turn is positive proof of it. When no such record can be resolved, `since`
+> account is what the block is about and a turn is positive proof of it, or
+> by a session observed working. A notice on a screen that has not changed
+> since the account was last shown serving is that old refusal, so it does
+> not promote a new block; a screen that changed after it is a new one. When no such record can be resolved, `since`
 > falls back to the time this driver first observed the notice — a real
 > fact, just not the one the field name promises — and `evidence` says so
 > explicitly rather than presenting one as the other.

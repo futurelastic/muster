@@ -2492,6 +2492,12 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 			sawWorking = true
 		}
 	}
+	if sawWorking {
+		// A session seen working is the account serving, and it stays proof for
+		// the reads after it: a notice still on an idle screen that has not
+		// changed since is the refusal the block was about, not a new one.
+		d.noteServed(now, now)
+	}
 	d.noteQuotaBlock(sawLimit, hint, sawWorking, quotaRecord, quotaVerdict, now)
 
 	// Apply it. A session that reads idle on a machine whose account is
@@ -2541,8 +2547,8 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 			st.Status = fleet.StatusIdle
 			st.Quota = nil
 			if quotaVerdict == recordCleanTurn {
-				st.Evidence = "a limit notice is on screen, but the runtime's own record shows " +
-					"a later turn on this account already succeeded, so the notice is history"
+				st.Evidence = "a limit notice is on screen, but a later turn on this account " +
+					"already succeeded, so the notice is history"
 			} else {
 				st.Evidence = "a limit notice is on screen, but another session on this account is working now, so the notice is history"
 			}

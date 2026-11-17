@@ -356,7 +356,10 @@ Two rules that will save you an incident:
   perfectly idle.** The service remembers it from whichever session announced
   it, keeps it across restarts, and clears it when any session is seen working
   again, or when any session's own record shows the account served a real
-  turn after the refusal began. `state.quota.resetHint` carries the runtime's own words about when it
+  turn after the refusal began. Once cleared it stays cleared: a limit notice
+  still on an idle screen that has not changed since the account was last
+  seen serving is the old refusal, not a new one, and does not bring the
+  block back. `state.quota.resetHint` carries the runtime's own words about when it
   lifts — **display it, do not parse it**; it is scraped prose and another
   consumer of the same line ended up with the next widget glued onto the end.
 - **`quota_blocked` means the provider refused it** — alive, but out of quota.

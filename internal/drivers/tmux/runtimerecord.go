@@ -528,40 +528,45 @@ func (d *Driver) quotaRecordPath(s fleet.Session) (string, bool) {
 	return d.conversations.recordPath(string(s.Cwd), s.Conversation.ID), true
 }
 
-// quotaEvidence settles, for one whole listing, what the sessions' runtime
-// records say about the ACCOUNT (#489): the fact and verdict noteQuotaBlock
-// takes, in place of "whichever flagged session the loop met first".
+// quotaEvidence settles, for one whole listing, what the evidence says about
+// the ACCOUNT (#489): the fact and verdict noteQuotaBlock takes, in place of
+// "whichever flagged session the loop met first".
 //
-// recordCleanTurn is returned when the records prove the account is not
-// refusing work, which is either of
+// recordCleanTurn is returned when the account is shown to serve AFTER the
+// newest refusal there is evidence of, which is either of
 //
 //   - a session whose screen shows a limit notice but whose OWN newest turn
 //     in its record is one the account served — the notice is history, as
 //     #56 established; or
-//   - any session at all whose newest turn in its record is one the account
-//     served AFTER the block began (or, with none yet, after the refusal the
-//     flagged session's record dates). A turn is durable, positive proof the
-//     account serves; it needs no spinner caught on screen, and it does not
-//     need the session to be one whose screen happens to show a notice.
+//   - a turn served later than every refusal the machine shows evidence of:
+//     any session's record whose newest turn is a real answer, or a session
+//     this driver saw working (noteServed). A turn is positive proof the
+//     account serves; it needs no spinner caught on this read, and it does
+//     not need the session to be one whose screen happens to show a notice.
+//
+// "Evidence of a refusal" is, newest first wins: the block's own since; the
+// refusal any record dates (a rate_limit entry's own timestamp); and a limit
+// notice on a screen whose record dates nothing, which cannot be newer than
+// the moment this driver first saw that screen (screenSince). That last one
+// is what keeps an old notice, still sitting on an idle screen nobody has
+// typed into, from re-creating a block the account has outlived: its screen
+// has not changed since before the proof, so it is the old refusal. A NEW
+// refusal changes the screen, so it is dated after the proof and blocks.
 //
 // Before this the record half read only the FIRST session whose screen showed
 // a notice. With no notice on any screen, which is how a block outlives the
 // notices that announced it, nobody was read; with a refusal nobody ever
-// resumed listed first, it answered for every session after it. A block then
-// stayed for as long as the account's own weekly window, hours past the
-// provider serving again.
+// resumed listed first, it answered for every session after it; and a notice
+// left on an idle screen put the block back as soon as it cleared.
 //
 // recordAPIError is the first flagged session's refusal, which noteQuotaBlock
 // uses to date a block at the refusal itself; recordUnavailable is "no usable
 // record said anything", and the caller keeps its screen-derived fallback.
 //
 // The cost is paid only by a listing with something to settle: no block and no
-// notice on any screen reads no record at all, and a block costs one stat per
+// notice on any screen reads nothing at all, and a block costs one stat per
 // session (recordProbe), not a read.
 func (d *Driver) quotaEvidence(sessions []fleet.Session) (apiErrorFact, recordVerdict) {
-	if d.conversations == nil {
-		return apiErrorFact{}, recordUnavailable
-	}
 	now := d.now()
 	q, observed := d.quotaBlock()
 	var flagged []int
@@ -576,9 +581,11 @@ func (d *Driver) quotaEvidence(sessions []fleet.Session) (apiErrorFact, recordVe
 
 	var fact apiErrorFact
 	verdict := recordUnavailable
+	var undated []int // flagged sessions whose record dates no refusal
 	for _, i := range flagged {
 		path, ok := d.quotaRecordPath(sessions[i])
 		if !ok {
+			undated = append(undated, i)
 			continue
 		}
 		f, v := d.quotaProbe.latest(path)
@@ -589,6 +596,9 @@ func (d *Driver) quotaEvidence(sessions []fleet.Session) (apiErrorFact, recordVe
 		case v == recordAPIError && verdict == recordUnavailable:
 			fact, verdict = f, v
 		}
+		if !(v == recordAPIError && f.category == "rate_limit") {
+			undated = append(undated, i)
+		}
 	}
 
 	// The time the account is known to have refused work at, which a turn must
@@ -597,15 +607,22 @@ func (d *Driver) quotaEvidence(sessions []fleet.Session) (apiErrorFact, recordVe
 	// later. With neither (a block first seen on a screen, no record to date
 	// it) it is the moment the block began being remembered, which nothing can
 	// precede and so cannot be disproved by a turn recorded before it.
-	var since time.Time
+	var refusal time.Time
 	switch {
 	case verdict == recordAPIError && fact.category == "rate_limit" &&
 		(q == nil || !observed || fact.at.After(q.Since)):
-		since = fact.at
+		refusal = fact.at
 	case q != nil:
-		since = q.Since
+		refusal = q.Since
 	}
-	if since.IsZero() {
+	// A notice no record dates is newest-bounded by when its screen was first
+	// seen. A session this driver has never seen adds nothing it can claim.
+	for _, i := range undated {
+		if t := d.screenSince(sessions[i].ID); t.After(refusal) {
+			refusal = t
+		}
+	}
+	if refusal.IsZero() {
 		return fact, verdict
 	}
 
@@ -614,7 +631,7 @@ func (d *Driver) quotaEvidence(sessions []fleet.Session) (apiErrorFact, recordVe
 	// served; the account serves again exactly when the turn is the later of
 	// the two. A turn proved by an earlier listing stands, whichever sessions
 	// this one happens to show.
-	refusal, proof := since, d.servedAt()
+	proof := d.servedAt()
 	live := make(map[string]bool, len(sessions))
 	paths := make([]string, 0, len(sessions))
 	for i := range sessions {
@@ -643,7 +660,24 @@ func (d *Driver) quotaEvidence(sessions []fleet.Session) (apiErrorFact, recordVe
 	return fact, verdict
 }
 
-// noteServed remembers that a record showed the account serving a turn at at.
+// screenSince is when this driver first saw session id's screen showing what it
+// shows now (observation.digestSince): the latest a notice on it can have
+// appeared. Zero for a session never observed.
+func (d *Driver) screenSince(id string) time.Time {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	o, ok := d.observed[id]
+	if !ok {
+		return time.Time{}
+	}
+	if !o.digestSince.IsZero() {
+		return o.digestSince
+	}
+	return o.at
+}
+
+// noteServed remembers that the account was shown serving a turn at at: a
+// record's own timestamp, or the read at which a session was seen working.
 //
 // A turn dated after now is a record this machine's clock disagrees with, and
 // remembering one would outrank every refusal recorded before it caught up, for
