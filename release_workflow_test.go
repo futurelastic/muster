@@ -639,6 +639,37 @@ func releaseNpmWorkflow(t *testing.T) string {
 	return string(b)
 }
 
+// The binaries artifact outlives its run only by what its consumers need: the
+// publish and Windows jobs read it minutes after it is written. The org's
+// artifact quota is shared by every repository and a candidate is cut for every
+// green trunk head, so a candidate's copy is kept for one day and only a final's
+// for a week (#503). The condition is the one the publish job uses to pick the
+// dist-tag, so what is `next` there is short-lived here.
+func TestReleaseNpmBinariesRetentionFollowsTheTagShape(t *testing.T) {
+	binaries := jobBlock(t, releaseNpmWorkflow(t), "binaries")
+	i := strings.Index(binaries, "actions/upload-artifact@")
+	if i < 0 {
+		t.Fatal("the binaries job no longer uploads an artifact; update this test with the new consumer")
+	}
+	step := binaries[i:]
+	if next := strings.Index(step, "\n      - "); next >= 0 {
+		step = step[:next]
+	}
+	m := regexp.MustCompile(`(?m)^\s+retention-days:\s*(.+?)\s*$`).FindStringSubmatch(step)
+	if m == nil {
+		t.Fatal("the binaries artifact sets no retention-days: it would fall back to the repository default")
+	}
+	const want = "${{ contains(inputs.tag, '-') && 1 || 7 }}"
+	if m[1] != want {
+		t.Errorf("retention-days = %q, want %q: a candidate (a tag with a prerelease suffix) keeps 1 day, a final 7", m[1], want)
+	}
+	// The pair of branches is the whole rule: the candidate side must be the
+	// short one and must not be 0 (falsy: `x && 0 || 7` would answer 7).
+	if !strings.Contains(m[1], "&& 1 ||") {
+		t.Error("the candidate retention must be 1 day, and never 0, which is falsy in an expression")
+	}
+}
+
 // The publish needs the Windows run, the run is on both architectures' own
 // hardware, and it cannot be skipped: a job skipped by its own `if:` skips every
 // job that needs it, and a publish that silently does not happen reads as green.

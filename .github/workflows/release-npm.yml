@@ -175,12 +175,21 @@ jobs:
       # below. The name carries the tag: one run can publish two tags (a
       # candidate and a final) and upload-artifact refuses a second artifact of
       # the same name in a run.
+      #
+      # Retention follows the tag's shape (#503). The org is on a plan with a
+      # small artifact storage quota shared by every repository, and every
+      # trunk head cuts a candidate, so candidates piled up superseded and a
+      # full quota failed `upload-artifact` org-wide. A candidate (a `-` in the
+      # tag, the same test the npm job uses for its dist-tag) is replaced by
+      # the next one and needed only until this run's own `npm` and Windows
+      # jobs have read it: one day. A final keeps a week. A file anyone needs
+      # for longer belongs on a release, which does not count against the quota.
       - uses: actions/upload-artifact@v4
         with:
           name: muster-binaries-${{ inputs.tag }}
           path: ${{ runner.temp }}/dist/muster-*
           if-no-files-found: error
-          retention-days: 7
+          retention-days: ${{ contains(inputs.tag, '-') && 1 || 7 }}
 
   # Each windows binary the tag built, run once on the hardware it is for (#309).
   # The job always runs, and its steps skip for a tag without windows binaries:
