@@ -519,10 +519,40 @@ func launcherRefusal(p *process, logs *logCapture) string {
 	return ""
 }
 
+// readyBudget is how long one start attempt may wait for the runtime to answer:
+// readyTimeout, or — when the request's deadline leaves more than that — what the
+// deadline leaves less readyReserve for the catalog read, the agent check and the
+// session create that follow (muster #478).
+//
+// It is the larger of the two and never the smaller: a deadline that leaves less
+// than readyTimeout does not shorten the wait here, it ends it by being the
+// deadline, and the answer names it that way. A request with no deadline waits
+// readyTimeout. A runtime that never answers holds the create for the extended
+// budget and not for the whole deadline, so the part of the deadline the reserve
+// holds back is still there to say so. Each attempt of startServer works this out
+// afresh, so a retry after a child that died gets what is left, not the first
+// attempt's figure.
+func readyBudget(ctx context.Context) time.Duration {
+	budget := readyTimeout
+	if dl, ok := ctx.Deadline(); ok {
+		// Whole tenths of a second, rounded down: the budget is named in the answer
+		// (driver.StepTimeout), and "23.8s" is a figure an operator can read where
+		// "23.874512341s" is not.
+		if room := (time.Until(dl) - readyReserve).Truncate(readyBudgetStep); room > budget {
+			budget = room
+		}
+	}
+	return budget
+}
+
+// readyBudgetStep is the grain an extended budget is cut to (readyBudget).
+const readyBudgetStep = 100 * time.Millisecond
+
 // waitReady polls the server's own session listing (authenticated) until it
-// answers 200, the child exits, or ctx / the readiness budget runs out.
+// answers 200, the child exits, or ctx / the readiness budget (readyBudget) runs out.
 func waitReady(ctx context.Context, baseURL, username, password string, exited <-chan struct{}) error {
-	cctx, cancel := context.WithTimeout(ctx, readyTimeout)
+	budget := readyBudget(ctx)
+	cctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 
 	client := &http.Client{Timeout: 2 * time.Second}
@@ -547,12 +577,14 @@ func waitReady(ctx context.Context, baseURL, username, password string, exited <
 		case <-cctx.Done():
 			// Two different budgets end here, and the answer must say which
 			// (muster #476). The outer context still being live means it was this
-			// wait's own readyTimeout; otherwise it was the caller's deadline (or
-			// the caller going away) while the wait was running.
+			// wait's own budget; otherwise it was the caller's deadline (or the
+			// caller going away) while the wait was running. The budget named is the
+			// one this wait used, which is more than readyTimeout when the deadline
+			// allowed it (muster #478).
 			if oerr := ctx.Err(); oerr != nil {
 				return &driver.StepTimeout{Step: stepReady, Err: oerr}
 			}
-			return &driver.StepTimeout{Step: stepReady, Budget: readyTimeout, Err: cctx.Err()}
+			return &driver.StepTimeout{Step: stepReady, Budget: budget, Err: cctx.Err()}
 		case <-exited:
 			return errExitedBeforeReady
 		case <-ticker.C:
