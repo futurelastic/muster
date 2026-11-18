@@ -227,8 +227,11 @@ const (
 	// Not implied by anything: not by read, send or relay, not by the legacy
 	// single-token flags' mutation set, and not by `muster service install`'s set
 	// (see supervisorGrants), so nobody holds it until an operator writes it down.
-	// A signed machine list may name it for a peer — an owner-signed, explicit act,
-	// and the way a fleet lets one machine read another's records.
+	// Nor by a signed machine list: a list that names it is refused whole, like
+	// push-list, debug and credentials (muster #455, the owner's ruling) — which
+	// machine may read this one's session content is decided on this machine. A
+	// fleet still lets one machine read another's records: the operator adds
+	// record to that peer's principal on the machine that owns the sessions.
 	//
 	// For a peer target it does NOT additionally require relay, the ruling #81
 	// made for reads (reaching is not changing). The machine that owns the session

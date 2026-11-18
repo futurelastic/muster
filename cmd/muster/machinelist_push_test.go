@@ -150,6 +150,9 @@ func TestAcceptPushed_RefusalReasons(t *testing.T) {
 		{"a list naming push-list", func(t *testing.T, r *reloadRig, l liveList) []byte {
 			return signRaw(t, l.owner, 6, good, func(d *machinelist.Document) { d.Machines[0].Grants = []string{"read", "push-list"} })
 		}, nil, fleet.ErrorInvalid, fleet.ReasonMachineListGrant},
+		{"a list naming record", func(t *testing.T, r *reloadRig, l liveList) []byte {
+			return signRaw(t, l.owner, 6, good, func(d *machinelist.Document) { d.Machines[0].Grants = []string{"read", "record"} })
+		}, nil, fleet.ErrorInvalid, fleet.ReasonMachineListGrant},
 		{"a lower sequence", func(t *testing.T, r *reloadRig, l liveList) []byte {
 			return signRaw(t, l.owner, 4, good, nil)
 		}, nil, fleet.ErrorConflict, fleet.ReasonMachineListNotNewer},
@@ -523,8 +526,9 @@ func TestPushListComesFromTheOperatorNotTheList(t *testing.T) {
 	// Both are decisions about THIS machine that a signed list must never make for
 	// it: who may hand it a list (push-list, #352) and who may read its process's
 	// internals (debug, #450).
-	// ... and which provider account and key its sessions run on (credentials, #498).
-	for _, local := range []string{"push-list", "debug", "credentials"} {
+	// ... and which provider account and key its sessions run on (credentials, #498),
+	// ... and which machine may read its sessions' full records (record, #455).
+	for _, local := range []string{"push-list", "debug", "credentials", "record"} {
 		t.Run("a list that names "+local+" is refused whole", func(t *testing.T) {
 			f, cfg := newListFixture(t, "only", 4)
 			cfg.MachineList.Path = f.listPath

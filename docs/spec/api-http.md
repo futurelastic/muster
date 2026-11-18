@@ -3628,9 +3628,14 @@ the only one, which is why the list has no `since=`.
   grant, and nothing implies it: not `read`, `send` or `relay`, not the legacy
   all-verbs flags, and not the set `muster service install` enrols the local
   service principal with — nobody holds it until an operator writes it down. A
-  signed machine list may name it for a peer: an explicit, owner-signed act, and
-  how one machine of a fleet is allowed to read another's records. For a peer
-  target it does not also require `relay` (muster #81); the machine that owns the
+  signed machine list cannot give it: a list that names it is refused whole
+  (muster #455), because which machine may read this machine's session content is
+  a local decision, like `push-list`, `debug` and `credentials`. One machine of a
+  fleet is still allowed to read another's records when the operator adds `record`
+  to that peer's principal on the machine that owns the sessions (in `prefer` and
+  `only`, a machine the list also names has its hand-written principal replaced and
+  does not yet keep it: muster #502). For a peer target it does not also require
+  `relay` (muster #81); the machine that owns the
   session applies its own table to the asserted caller, so a relayed read needs
   `record` on the entry machine's principal and on the owner, for the principal the
   entry machine relays as. A grant is not the only lock: the machine's operator may

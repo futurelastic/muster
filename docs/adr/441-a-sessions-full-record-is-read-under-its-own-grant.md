@@ -47,9 +47,15 @@ not a wider `turns`: `turns` keeps its shape, its boundary and its grant.
   nothing stands in for it: not `read`, not `send`, not `relay`. It is in no
   default set. `muster service install` does not enrol the local service
   principal with it, the legacy single-token flags do not imply it, and no
-  existing principal gains it by upgrading. A signed machine list may name it for
-  a peer — an owner-signed, explicit act, and the way one machine of a fleet is
-  allowed to read another's records. For a peer target it does not also require
+  existing principal gains it by upgrading. A signed machine list may not name it:
+  it is refused whole, like `push-list`, `debug` and `credentials` (the owner's
+  ruling on #455, 2026-11-18; this ADR first let a list name it). Session content
+  leaves a machine only through a grant that machine's own principal table gives.
+  One machine of a fleet is still allowed to read another's records: the operator
+  adds `record` to that peer's principal on the machine that owns the sessions.
+  (A machine the list also names has its hand-written principal replaced in
+  `prefer` and `only`, and only `push-list` is carried across, so there the grant
+  does not yet reach it: #502.) For a peer target it does not also require
   `relay` (the ruling of [#81](81-relay-grant-not-required-for-reads.md): reaching
   is not changing); the machine that owns the session applies its own table to the
   asserted caller. A read relayed through machine A therefore needs `record` on
