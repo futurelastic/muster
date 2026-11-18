@@ -212,16 +212,36 @@ const (
 	// inside defaultDeadlineMs, so waiting here does not by itself end a create;
 	// what can is a slow start taking readiness, this wait and the sandbox
 	// measurement (which has a budget of its own) together past the deadline, and
-	// then the answer says which step it was in (muster #476).
+	// then the answer says which step it was in (muster #476). A start that took
+	// readiness past readyTimeout (readyBudget, muster #478) has used the part of
+	// the deadline this wait would have had, so a model the first answer did not
+	// list can be cut short by the deadline here; readyReserve is sized for the
+	// first answer, not for this settle.
 	defaultCatalogSettle = 8 * time.Second
 	defaultCatalogPoll   = 500 * time.Millisecond
 )
 
-// readyTimeout is how long one start attempt waits for the runtime to answer. It
-// is this driver's own budget, shorter than the default deadline, so a start that
-// is slow ends a create before the caller's deadline does; the error says so
-// (driver.StepTimeout, muster #476). A variable so a test can shorten it.
+// readyTimeout is how long one start attempt waits for the runtime to answer when
+// the request has no more time than that to give. It is this driver's own floor,
+// shorter than the default deadline: a request with a longer deadline lets the wait
+// run past it, up to readyReserve short of the deadline (readyBudget), and the error
+// says which of the two ended it (driver.StepTimeout, muster #476, #478). A variable
+// so a test can shorten it.
 var readyTimeout = 10 * time.Second
+
+// readyReserve is the time a start leaves for what a create does after the runtime
+// answers: reading the model catalog, checking the agent and creating the session
+// (muster #478). The wait for readiness may use the request's deadline down to this.
+//
+// Sized from the measurement the issue waited for: across 149 driver-launched
+// creates on one loaded host, oc.ready was p50 2.2 s, p90 5.6 s, p99 8.2 s and
+// once 10.0 s, which is readyTimeout and ended that create with a 504; every
+// phase before it totalled under 0.25 s, so there was nothing there to cut instead.
+// oc.catalog's worst was 3.9 s, so 4 s of the reserve is the catalog read; the other
+// 2 s is for the agent check and the session create, which are not noted as phases of
+// their own, so that part is an allowance and not a measurement. A variable so a
+// test can set it.
+var readyReserve = 6 * time.Second
 
 // DefaultDeadlineMs is the deadline a driver built without WithDeadline
 // declares. It is exported so the service can describe a runtime that has no

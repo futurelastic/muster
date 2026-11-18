@@ -1206,8 +1206,14 @@ are bounded only by the effective deadline, and the answer then reads `no answer
 within <deadline>`. A step that has a budget of its own shorter than the
 deadline — the wait for a runtime to become ready after it was started — can end
 a call first, and the answer then names that step and its budget (`... ran past
-its own budget of 10s (the request's deadline of 30s had not run out)`) instead
-of blaming the deadline; the operator looks at the step, not at the caller. A
+its own budget of 23.8s (the request's deadline of 30s had not run out)`) instead
+of blaming the deadline; the operator looks at the step, not at the caller. That
+wait is 10s at least, and when the deadline leaves more it takes what the
+deadline leaves less a reserve of 6s for the model catalog, the agent check and
+the session create that follow (muster #478): on a busy machine a runtime was
+measured taking up to 10s to answer, and a fixed 10s ended creates that had 20s
+of their deadline unused. A runtime that never answers therefore holds a create
+for that longer budget, not for the whole deadline. A
 deadline that ended a call during a named step says which (`no answer within
 30s (the deadline ran out during ...)`), and a caller that hangs up before the
 answer is told so (`the request was cancelled ...`). All three are `unreachable`,
