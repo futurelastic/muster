@@ -846,8 +846,10 @@ still being read and can be a few hundred bytes; pass it back unchanged.
 
 **Authority.** The `record` grant under a principal table — `read` and `send` do
 not stand in for it, and it is in no default set (`muster service install` does not
-enrol the local service principal with it; a signed machine list may name it for a
-peer). Without a principal table a valid token is the credential, exactly as for
+enrol the local service principal with it, and a signed machine list cannot give it:
+an operator adds it to a peer's principal on the machine that owns the sessions;
+`docs/machine-list.md` says where that does not yet reach a machine the list also
+names). Without a principal table a valid token is the credential, exactly as for
 `turns`. For a peer target it does **not** also require `relay`; the machine that
 owns the session applies its own table to the asserted caller, so a read relayed
 through machine A needs `record` on A's principal **and** on the owner, for the

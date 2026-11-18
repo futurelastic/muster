@@ -232,7 +232,7 @@ const (
 	// does not support.
 	ReasonMachineListUnsupported = "machine-list-unsupported"
 	// ReasonMachineListGrant: the list names a grant this build does not know,
-	// or one a list may not give (push-list).
+	// or one a list may not give (push-list, debug, credentials, record).
 	ReasonMachineListGrant = "machine-list-grant"
 	// ReasonMachineListNotNewer: the sequence is not higher than the highest
 	// this machine has accepted. Re-sign with a higher one.

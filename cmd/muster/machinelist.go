@@ -234,6 +234,15 @@ func machinePrincipals(doc machinelist.Document) ([]service.Principal, error) {
 			if gr == service.GrantCredentials {
 				return nil, listGrantError{fmt.Sprintf("machine list: machine %q: a list cannot give %q; an operator grants it on this machine, in the config", m.ID, g)}
 			}
+			// And for record (muster #455, the owner's ruling on #441's open question):
+			// a session's full record is whatever its agent printed or read, so which
+			// machine may read it is for the machine that owns the sessions to say. One
+			// owner-signed list that named it would open every machine's session content
+			// to a peer at once. A fleet still lets one machine read another's records:
+			// the operator adds record to that peer's principal on the owning machine.
+			if gr == service.GrantRecord {
+				return nil, listGrantError{fmt.Sprintf("machine list: machine %q: a list cannot give %q; an operator grants it on this machine, in the config", m.ID, g)}
+			}
 			grants = append(grants, gr)
 		}
 		k, err := peerkey.ParsePublicKey(m.PublicKey)

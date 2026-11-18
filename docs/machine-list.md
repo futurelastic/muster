@@ -80,7 +80,16 @@ Each listed machine other than the one reading the list:
 A listed machine's own entry is skipped on that machine. A machine with no
 address can call the others but is not called.
 
-An unknown grant name refuses the whole list rather than being dropped.
+An unknown grant name refuses the whole list rather than being dropped. So does a
+grant that stays local to the machine that holds the sessions: `push-list`,
+`debug`, `credentials` and `record` (the full read of a session). A list cannot
+give them, because who may hand a machine its next list, profile it, change the
+provider account its sessions run on, or read what its sessions said is decided on
+that machine, by its own operator, in its config. One machine of a fleet can still
+read another's records: the operator of the machine that owns the sessions adds
+`record` to that peer's principal (`muster principal grant machine-a record`).
+In `prefer` and `only`, only `push-list` survives a list naming the same machine
+(see below); the others do not yet (#502).
 
 Principals that are not machines (an operator's token, say) are never touched.
 `prefer` and `only` replace a hand-written principal of the same name as a listed
@@ -132,7 +141,7 @@ The document in the payload:
 | `machines[].id` | the machine's id as it names itself (`FLEET_MACHINE`); unique. |
 | `machines[].publicKey` | the machine's signing key (`muster key show`). |
 | `machines[].addresses` | base URLs, in the order to try. |
-| `machines[].grants` | grants the machine holds on the others. |
+| `machines[].grants` | grants the machine holds on the others. A list cannot give `push-list`, `debug`, `credentials` or `record` — see *What a machine in the list becomes*. |
 | `issuers` | sign-in issuers the fleet trusts, for clients that verify people. Recorded and shown; the service does not verify a person itself yet. |
 | `signers` | the keys allowed to sign this fleet's lists. **Exactly one is supported**; a document naming more is refused with "not supported yet". |
 | `nextSigner` | the pre-pinned recovery key (below). Optional. |
@@ -230,7 +239,7 @@ anything else means nothing changed, on disk or in memory, and the reason is one
 | 400 | `machine-list-signer-not-pinned` | signed by a key not pinned here |
 | 400 | `machine-list-signature` | the signature does not verify |
 | 400 | `machine-list-other-fleet` | another fleet's list |
-| 400 | `machine-list-grant` | an unknown grant, or `push-list`, in the list |
+| 400 | `machine-list-grant` | an unknown grant, or one that stays local (`push-list`, `debug`, `credentials`, `record`), in the list |
 | 501 | `machine-list-unsupported` | names several signers |
 | 409 | `machine-list-not-newer` | `seq` is not higher than the highest accepted |
 | 501 | `machine-list-not-applied` | genuine, but this machine cannot put it in force now (a peer in it cannot be built; the sequence cannot be recorded, in which case the previous file is restored) |
