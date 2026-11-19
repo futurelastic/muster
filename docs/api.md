@@ -547,9 +547,21 @@ backwards — see *Events* below.
 
 ### `GET /v1/sessions/closed`
 
-Parameters: `since` (RFC 3339; keeps records that closed at or after it) and
-`scope`. Returns `{items, sources, complete}` of closed-session records, newest
-first (#179).
+Parameters: `since` (RFC 3339; keeps records that closed at or after it),
+`before` and `limit` (below) and `scope`. Returns `{items, sources, complete}` of
+closed-session records, newest first (#179).
+
+**Read the latest records first, then page back (#482).** Without `limit`, a
+read returns every record in the retention window — on a busy fleet that is
+thousands of rows and seconds. `limit=200` returns the newest 200. To get the
+next page, send `before=<closedAt of the last row>` (the value exactly as the
+response printed it, fractional seconds included) with the same `limit`:
+`before` keeps records that closed **strictly before** it, so no record is
+read twice. A page with fewer than `limit` rows is the last one. A page never
+splits records that closed at the same instant, so it can hold more than
+`limit` rows — send the same `before` regardless. A call without either
+parameter is answered as it always was; a fleet read behaves the same across
+peers, including a peer too old to apply them (slower, not different).
 
 The answer to "which sessions ran here in the last N days, and when did each
 end" — without keeping your own copy of session state. Each machine keeps one

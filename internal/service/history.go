@@ -848,16 +848,70 @@ func (h *historyStore) list(since time.Time) []fleet.ClosedSession {
 	return out
 }
 
+// sortClosed orders records newest first. Records that closed at one instant
+// are common — a single sweep that finds several sessions gone stamps them all
+// with the same time — so the order among them is fixed rather than left to
+// whichever machine answered first: session id, then machine, then runtime.
+// A reader that pages (muster #482) sees the same sequence on every read.
 func sortClosed(items []fleet.ClosedSession) {
-	sort.SliceStable(items, func(i, j int) bool { return items[i].ClosedAt.After(items[j].ClosedAt) })
+	sort.SliceStable(items, func(i, j int) bool {
+		a, b := items[i], items[j]
+		if !a.ClosedAt.Equal(b.ClosedAt) {
+			return a.ClosedAt.After(b.ClosedAt)
+		}
+		if a.ID != b.ID {
+			return a.ID < b.ID
+		}
+		if a.Machine != b.Machine {
+			return a.Machine < b.Machine
+		}
+		return a.Runtime < b.Runtime
+	})
+}
+
+// pageClosed applies Before and Limit to records already sorted newest first
+// (muster #482), and is the same function for this machine's own records, for
+// the merged fleet answer, and for whatever an older peer returned unbounded.
+//
+// Before is exclusive and Since is inclusive, so a page that ends at some
+// closedAt is continued with Before set to that value and no record is read
+// twice. For that to also mean no record is skipped, a page never splits a
+// run of records that share one closedAt: when Limit falls inside such a run,
+// the whole run is kept and the page is longer than Limit. A cursor that was
+// only a timestamp could not name "the third of five records at this instant",
+// so the page does not end there.
+func pageClosed(items []fleet.ClosedSession, before time.Time, limit int) []fleet.ClosedSession {
+	if !before.IsZero() {
+		i := 0
+		for i < len(items) && !items[i].ClosedAt.Before(before) {
+			i++
+		}
+		items = items[i:]
+	}
+	if limit > 0 && len(items) > limit {
+		edge := items[limit-1].ClosedAt
+		end := limit
+		for end < len(items) && items[end].ClosedAt.Equal(edge) {
+			end++
+		}
+		items = items[:end]
+	}
+	return items
 }
 
 // ListClosedSessions answers GET /v1/sessions/closed. ScopeLocal reads this
 // machine's own records only (§13.1); ScopeFleet adds every peer that can
 // answer, and a peer that cannot contributes a SourceStatus saying so — never
 // a silent absence (§9).
-func (s *Service) ListClosedSessions(ctx context.Context, req fleet.Request, scope Scope, since time.Time, callerDeadline time.Duration) (fleet.Collection[fleet.ClosedSession], error) {
-	items := s.history.list(since)
+//
+// Before and Limit (muster #482) are asked of every peer and then applied to
+// the merged list here: the newest Limit records of the union are all among
+// the newest Limit of whichever machine holds them, so each peer's page is
+// enough. A peer that ignores them returns more than needed and the cut here
+// still makes the answer the same; it costs that peer's read time and nothing
+// else.
+func (s *Service) ListClosedSessions(ctx context.Context, req fleet.Request, scope Scope, q driver.ClosedQuery, callerDeadline time.Duration) (fleet.Collection[fleet.ClosedSession], error) {
+	items := s.history.list(q.Since)
 	sources := []fleet.SourceStatus{{Machine: s.self, Status: fleet.SourceOK, ObservedAt: time.Now()}}
 
 	if scope == ScopeFleet {
@@ -872,7 +926,7 @@ func (s *Service) ListClosedSessions(ctx context.Context, req fleet.Request, sco
 			}
 			deadline := effectiveDeadline(d.Capabilities().DeadlineMs, callerDeadline)
 			callCtx, cancel := context.WithTimeout(ctx, deadline)
-			col, err := cl.ListClosed(callCtx, req, since)
+			col, err := cl.ListClosed(callCtx, req, q)
 			cancel()
 			if err != nil {
 				sources = append(sources, fleet.SourceStatus{
@@ -886,7 +940,7 @@ func (s *Service) ListClosedSessions(ctx context.Context, req fleet.Request, sco
 		}
 		sortClosed(items)
 	}
-	return fleet.NewCollection(items, sources)
+	return fleet.NewCollection(pageClosed(items, q.Before, q.Limit), sources)
 }
 
 // SetClosedRetention configures how long closed-session records are kept

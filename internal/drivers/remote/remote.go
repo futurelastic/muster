@@ -1486,18 +1486,31 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 // asking for its LOCAL view only (§13.1) and adopting the SourceStatus it
 // returns (§13.2) — List's two rules, for the same reasons.
 //
+// Before and Limit (muster #482) are passed on so the peer reads less. A peer
+// on a build that predates them ignores both and answers with every record it
+// has; the caller bounds the merged list itself, so that is slower, never
+// wrong.
+//
 // A peer on a build that predates the route answers with its router's bare
 // 404. That is reported as a source that cannot answer this question, never
 // as a peer with nothing closed: an empty list from it would be a claim it
 // never made.
-func (d *Driver) ListClosed(ctx context.Context, req fleet.Request, since time.Time) (fleet.Collection[fleet.ClosedSession], error) {
+func (d *Driver) ListClosed(ctx context.Context, req fleet.Request, cq driver.ClosedQuery) (fleet.Collection[fleet.ClosedSession], error) {
 	ctx, cancel := d.bounded(ctx)
 	defer cancel()
 
 	q := url.Values{}
 	q.Set("scope", "local") // §13.1 — never "fleet"
-	if !since.IsZero() {
-		q.Set("since", since.UTC().Format(time.RFC3339))
+	if !cq.Since.IsZero() {
+		q.Set("since", cq.Since.UTC().Format(time.RFC3339))
+	}
+	if !cq.Before.IsZero() {
+		// Nanoseconds, unlike since: a cursor that dropped them would name an
+		// earlier instant than the page ended at and skip the records between.
+		q.Set("before", cq.Before.UTC().Format(time.RFC3339Nano))
+	}
+	if cq.Limit > 0 {
+		q.Set("limit", strconv.Itoa(cq.Limit))
 	}
 	var out fleet.Collection[fleet.ClosedSession]
 	if err := d.do(ctx, req, http.MethodGet, "/v1/sessions/closed?"+q.Encode(), nil, &out); err != nil {

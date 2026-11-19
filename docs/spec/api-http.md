@@ -1057,7 +1057,7 @@ since start, so a deployment can read its own hit rate.
 #### Closed sessions
 
 ```
-GET /v1/sessions/closed?scope=fleet|local&since=<RFC3339>
+GET /v1/sessions/closed?scope=fleet|local&since=<RFC3339>&before=<RFC3339>&limit=<n>
 → 200 Collection<ClosedSession>
 ```
 
@@ -1121,6 +1121,44 @@ keeps records with `closedAt` at or after it; a malformed value is
 (§13.1). A peer whose router has no such route answers a bare `404`; the
 proxying service **must** report that source `degraded` with no items, never as
 an `ok` peer with nothing closed.
+
+**A bounded read: `limit` and `before`** (muster #482). The list is newest first,
+and a first read that needs only the latest records asks for them:
+
+- `limit=<n>` keeps the newest `n` records. It is a positive integer; `0`, a
+  negative number or anything else is `400 invalid`. It is not capped: the
+  retention period already bounds the list.
+- `before=<RFC 3339>` keeps records with `closedAt` **strictly before** it, the
+  mirror of `since` (which is at or after it). Fractional seconds are accepted
+  and are significant: a client continues from the `closedAt` of the last row
+  exactly as the response printed it.
+- The two combine, and either may be sent with `since` or alone. A call that
+  names neither is answered exactly as it was before they existed.
+
+To read the next page, send `before=<closedAt of the last row>` with the same
+`limit`. A page that holds fewer than `limit` rows is the last one; a page with
+`limit` or more may be followed by another, which is empty when the list ended
+exactly there. No field of a row is removed or shortened, and the envelope
+carries no new field — the cursor is a value the rows already carry.
+
+**A page never splits records that closed at one instant.** Records are ordered
+`closedAt` descending, then `id`, then `machine`, then `runtime`, so the same
+read gives the same order. When `limit` falls inside a run of records sharing
+one `closedAt`, the whole run is returned and the page is longer than `limit`.
+Without this, a cursor that is only a timestamp could not name "the third of
+five records at this instant", and the rest of the run would be skipped by the
+next page. (A single sweep that finds several sessions gone stamps them all
+with one time, so such runs are ordinary.)
+
+**A fleet read bounds the merge, not just each machine.** A proxying service
+sends `limit` and `before` to each peer along with `scope=local`, merges what
+comes back with its own records, and applies both once more to the merged list:
+the newest `limit` of the union are among the newest `limit` of the machine
+that holds each one, so a peer's page is enough. A peer on a build that
+predates the parameters ignores them and returns every record it has. That is
+**not** an error and not a degraded source: the answer is the same, only
+slower, because the proxying service applies `before` and `limit` itself to
+everything it received.
 
 #### Input audit
 
