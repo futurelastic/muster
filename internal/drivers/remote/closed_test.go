@@ -2,9 +2,13 @@ package remote
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -66,7 +70,7 @@ func TestFederatedClosedSessionsArriveFromThePeer(t *testing.T) {
 		t.Fatalf("closing on the peer: %v", err)
 	}
 
-	got, err := svcA.ListClosedSessions(context.Background(), fleetCaller(token), service.ScopeFleet, time.Time{}, 0)
+	got, err := svcA.ListClosedSessions(context.Background(), fleetCaller(token), service.ScopeFleet, driver.ClosedQuery{}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +86,7 @@ func TestFederatedClosedSessionsArriveFromThePeer(t *testing.T) {
 	}
 
 	// scope=local never reaches the peer (§13.1).
-	local, _ := svcA.ListClosedSessions(context.Background(), fleetCaller(token), service.ScopeLocal, time.Time{}, 0)
+	local, _ := svcA.ListClosedSessions(context.Background(), fleetCaller(token), service.ScopeLocal, driver.ClosedQuery{}, 0)
 	if len(local.Items()) != 0 || len(local.Sources()) != 1 {
 		t.Errorf("a local read reached the peer: items=%+v sources=%+v", local.Items(), local.Sources())
 	}
@@ -97,7 +101,7 @@ func TestFederatedClosedSessionsFromAnOlderPeerAreNotEmpty(t *testing.T) {
 	rd := New("peerbox", old.URL, WithDeadline(2*time.Second))
 	svcA := homeService(t, "homebox", "peerbox", rd)
 
-	got, err := svcA.ListClosedSessions(context.Background(), fleetCaller(token), service.ScopeFleet, time.Time{}, 0)
+	got, err := svcA.ListClosedSessions(context.Background(), fleetCaller(token), service.ScopeFleet, driver.ClosedQuery{}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +160,7 @@ func TestFederatedClosedSessionsCarryThePeersFinalUsage(t *testing.T) {
 	if _, err := rd.Close(context.Background(), fleetCaller(token), fleet.SessionRef{Machine: "peerbox", ID: "work"}); err != nil {
 		t.Fatalf("closing on the peer: %v", err)
 	}
-	got, err := svcA.ListClosedSessions(context.Background(), fleetCaller(token), service.ScopeFleet, time.Time{}, 0)
+	got, err := svcA.ListClosedSessions(context.Background(), fleetCaller(token), service.ScopeFleet, driver.ClosedQuery{}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,5 +171,151 @@ func TestFederatedClosedSessionsCarryThePeersFinalUsage(t *testing.T) {
 	if u == nil || u.Input != 311 || u.Output != 42 || u.Provider != "p" || u.Model != "m" ||
 		!u.AsOf.Equal(time.Date(2026, 1, 1, 0, 0, 9, 0, time.UTC)) {
 		t.Fatalf("usage = %+v, want the figure the peer kept", u)
+	}
+}
+
+// recordingClosedPeer serves GET /v1/sessions/closed from a fixed list, newest
+// first, and remembers every query it was sent. With honor set it applies
+// before and limit as a current build does; without, it answers with
+// everything it has, as a build that predates them does (muster #482).
+type recordingClosedPeer struct {
+	mu      sync.Mutex
+	queries []url.Values
+}
+
+func (p *recordingClosedPeer) serve(t *testing.T, rows []fleet.ClosedSession, honor bool) string {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/sessions/closed", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		p.mu.Lock()
+		p.queries = append(p.queries, q)
+		p.mu.Unlock()
+		out := rows
+		if honor {
+			if raw := q.Get("before"); raw != "" {
+				b, err := time.Parse(time.RFC3339Nano, raw)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				var kept []fleet.ClosedSession
+				for _, c := range out {
+					if c.ClosedAt.Before(b) {
+						kept = append(kept, c)
+					}
+				}
+				out = kept
+			}
+			if raw := q.Get("limit"); raw != "" {
+				n, _ := strconv.Atoi(raw)
+				if n < len(out) {
+					out = out[:n]
+				}
+			}
+		}
+		col, err := fleet.NewCollection(out, []fleet.SourceStatus{{Machine: "peerbox", Status: fleet.SourceOK, ObservedAt: time.Now()}})
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(col)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+func peerClosedRows() []fleet.ClosedSession {
+	base := time.Date(2026, 3, 1, 12, 0, 0, 123456789, time.UTC)
+	row := func(id string, sec int) fleet.ClosedSession {
+		return fleet.ClosedSession{
+			SessionRef: fleet.SessionRef{Machine: "peerbox", ID: id},
+			ClosedAt:   base.Add(time.Duration(sec) * time.Second), ClosedBy: fleet.ClosedByClose,
+		}
+	}
+	return []fleet.ClosedSession{row("p5", 50), row("p4", 40), row("p3", 30), row("p2", 20), row("p1", 10)}
+}
+
+func closedIDs(col fleet.Collection[fleet.ClosedSession]) string {
+	var ids []string
+	for _, c := range col.Items() {
+		ids = append(ids, c.ID)
+	}
+	return strings.Join(ids, ",")
+}
+
+// limit and before reach the peer, and before keeps its nanoseconds: the cursor
+// is the closedAt of a row as the API printed it, and a second-resolution copy
+// would name an earlier instant and skip the rows between.
+func TestFederatedClosedSessionsAskThePeerForOnePage(t *testing.T) {
+	const token = "federation-token"
+	rows := peerClosedRows()
+	var peer recordingClosedPeer
+	rd := New("peerbox", peer.serve(t, rows, true), WithDeadline(2*time.Second))
+	svcA := homeService(t, "homebox", "peerbox", rd)
+
+	before := rows[1].ClosedAt // p4: strictly older than it means p3, p2, p1
+	got, err := svcA.ListClosedSessions(context.Background(), fleetCaller(token), service.ScopeFleet,
+		driver.ClosedQuery{Before: before, Limit: 2}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closedIDs(got) != "p3,p2" {
+		t.Errorf("page = %q, want p3,p2", closedIDs(got))
+	}
+	if !got.Complete() {
+		t.Errorf("both sources answered; want complete, sources=%+v", got.Sources())
+	}
+	if len(peer.queries) != 1 {
+		t.Fatalf("the peer was asked %d times", len(peer.queries))
+	}
+	q := peer.queries[0]
+	if q.Get("scope") != "local" || q.Get("limit") != "2" {
+		t.Errorf("peer query %v: want scope=local and limit=2", q)
+	}
+	if want := before.UTC().Format(time.RFC3339Nano); q.Get("before") != want {
+		t.Errorf("peer was sent before=%q, want %q (nanoseconds kept)", q.Get("before"), want)
+	}
+
+	// A read naming neither asks for neither.
+	peer.queries = nil
+	if _, err := svcA.ListClosedSessions(context.Background(), fleetCaller(token), service.ScopeFleet, driver.ClosedQuery{}, 0); err != nil {
+		t.Fatal(err)
+	}
+	if q := peer.queries[0]; q.Has("limit") || q.Has("before") {
+		t.Errorf("an unbounded read sent %v", q)
+	}
+}
+
+// A peer on a build that predates the parameters ignores them and answers with
+// everything. The service cuts what comes back, so the caller gets the same
+// page either way; only the peer's read is longer.
+func TestFederatedClosedSessionsFromAPeerThatIgnoresTheBound(t *testing.T) {
+	const token = "federation-token"
+	rows := peerClosedRows()
+	var peer recordingClosedPeer
+	rd := New("peerbox", peer.serve(t, rows, false), WithDeadline(2*time.Second))
+	svcA := homeService(t, "homebox", "peerbox", rd)
+
+	got, err := svcA.ListClosedSessions(context.Background(), fleetCaller(token), service.ScopeFleet,
+		driver.ClosedQuery{Limit: 2}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closedIDs(got) != "p5,p4" {
+		t.Errorf("first page = %q, want p5,p4 (cut here though the peer sent all five)", closedIDs(got))
+	}
+	got, err = svcA.ListClosedSessions(context.Background(), fleetCaller(token), service.ScopeFleet,
+		driver.ClosedQuery{Before: rows[1].ClosedAt, Limit: 2}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closedIDs(got) != "p3,p2" {
+		t.Errorf("second page = %q, want p3,p2", closedIDs(got))
+	}
+	if !got.Complete() {
+		t.Errorf("an old peer that answers is still ok; sources=%+v", got.Sources())
 	}
 }

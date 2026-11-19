@@ -1,9 +1,11 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +13,8 @@ import (
 	"time"
 
 	fleet "github.com/futurelastic/muster"
+	"github.com/futurelastic/muster/internal/driver"
+	"github.com/futurelastic/muster/internal/drivers/stub"
 	"github.com/futurelastic/muster/internal/state"
 )
 
@@ -491,5 +495,241 @@ func TestClosed_CarriesTheAgentTheLiveSessionHad(t *testing.T) {
 		if want := id != unknown; has != want {
 			t.Errorf("session %s: agent key present = %v, want %v (%s)", id, has, want, body)
 		}
+	}
+}
+
+// Tests for muster #482: a bounded read of the closed list, `limit` newest
+// first and `before` to page back through older records.
+
+func pagedRec(machine fleet.MachineId, id string, at time.Time) fleet.ClosedSession {
+	return fleet.ClosedSession{
+		SessionRef: fleet.SessionRef{Machine: machine, ID: id},
+		Runtime:    "fake",
+		ClosedAt:   at,
+		ClosedBy:   fleet.ClosedByClose,
+	}
+}
+
+func recIDs(items []fleet.ClosedSession) string {
+	ids := make([]string, len(items))
+	for i, c := range items {
+		ids[i] = c.ID
+	}
+	return strings.Join(ids, ",")
+}
+
+// Records that closed at one instant have one fixed order whichever machine
+// answered first: id, then machine. Without it a page boundary inside such a
+// run would depend on which peer's reply was appended first.
+func TestSortClosed_TiesHaveOneOrder(t *testing.T) {
+	at := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	older := at.Add(-time.Second)
+	in := []fleet.ClosedSession{
+		pagedRec("b", "x", at), pagedRec("a", "y", at), pagedRec("a", "x", at), pagedRec("a", "old", older),
+	}
+	for _, perm := range [][]int{{0, 1, 2, 3}, {3, 2, 1, 0}, {1, 3, 0, 2}} {
+		items := make([]fleet.ClosedSession, len(in))
+		for i, p := range perm {
+			items[i] = in[p]
+		}
+		sortClosed(items)
+		var got []string
+		for _, c := range items {
+			got = append(got, string(c.Machine)+"/"+c.ID)
+		}
+		if want := "a/x b/x a/y a/old"; strings.Join(got, " ") != want {
+			t.Errorf("order %v = %q, want %q", perm, strings.Join(got, " "), want)
+		}
+	}
+}
+
+func TestPageClosed(t *testing.T) {
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	at := func(s int) time.Time { return base.Add(time.Duration(s) * time.Second) }
+	// Newest first, as every caller hands it over: three records share 30 s.
+	all := []fleet.ClosedSession{
+		pagedRec("m", "r1", at(50)), pagedRec("m", "r2", at(40)),
+		pagedRec("m", "r3", at(30)), pagedRec("m", "r4", at(30)), pagedRec("m", "r5", at(30)),
+		pagedRec("m", "r6", at(20)), pagedRec("m", "r7", at(10)),
+	}
+	cases := []struct {
+		name   string
+		before time.Time
+		limit  int
+		want   string
+	}{
+		{"no bound is everything", time.Time{}, 0, "r1,r2,r3,r4,r5,r6,r7"},
+		{"limit takes the newest", time.Time{}, 2, "r1,r2"},
+		{"limit inside a tied run keeps the whole run", time.Time{}, 3, "r1,r2,r3,r4,r5"},
+		{"limit on the first of a run keeps the run", time.Time{}, 4, "r1,r2,r3,r4,r5"},
+		{"limit past the end is everything", time.Time{}, 100, "r1,r2,r3,r4,r5,r6,r7"},
+		{"before is exclusive", at(30), 0, "r6,r7"},
+		{"before between records", at(35), 0, "r3,r4,r5,r6,r7"},
+		{"before newer than everything", at(99), 0, "r1,r2,r3,r4,r5,r6,r7"},
+		{"before older than everything", at(1), 0, ""},
+		{"before and limit", at(45), 2, "r2,r3,r4,r5"},
+	}
+	for _, c := range cases {
+		got := pageClosed(append([]fleet.ClosedSession(nil), all...), c.before, c.limit)
+		if recIDs(got) != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, recIDs(got), c.want)
+		}
+	}
+}
+
+// seedClosed puts records straight into the store, the way a machine that has
+// been closing sessions for days holds them.
+func seedClosed(svc *Service, recs ...fleet.ClosedSession) {
+	h := svc.history
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.closed = append(h.closed, recs...)
+	h.closedChangedLocked()
+}
+
+func TestClosed_LimitAndBeforePageBackThroughTheList(t *testing.T) {
+	svc := New("test-machine")
+	srv := labelServer(t, svc, newLabelDriver(), tokenCfg())
+	base := time.Now().Add(-time.Hour).Truncate(time.Second)
+	at := func(s int) time.Time { return base.Add(time.Duration(s) * time.Second) }
+	seedClosed(svc,
+		pagedRec("test-machine", "r7", at(10)), pagedRec("test-machine", "r5", at(30)),
+		pagedRec("test-machine", "r1", at(50)), pagedRec("test-machine", "r3", at(30)),
+		pagedRec("test-machine", "r6", at(20)), pagedRec("test-machine", "r2", at(40)),
+		pagedRec("test-machine", "r4", at(30)),
+	)
+	ids := func(query string) string {
+		col, _ := listClosed(t, srv, query)
+		return recIDs(col.Items())
+	}
+	cursor := func(s int) string { return "&before=" + url.QueryEscape(at(s).UTC().Format(time.RFC3339Nano)) }
+
+	// A call naming neither parameter is what it always was.
+	if got := ids(""); got != "r1,r2,r3,r4,r5,r6,r7" {
+		t.Errorf("no parameters: %q", got)
+	}
+	if got := ids("&limit=2"); got != "r1,r2" {
+		t.Errorf("limit=2: %q", got)
+	}
+	if got := ids("&limit=2" + cursor(40)); got != "r3,r4,r5" {
+		t.Errorf("limit=2 before the second page: %q (a page never splits a run that closed together)", got)
+	}
+	if got := ids("&limit=2" + cursor(30)); got != "r6,r7" {
+		t.Errorf("last page: %q", got)
+	}
+	if got := ids("&limit=2" + cursor(10)); got != "" {
+		t.Errorf("past the oldest: %q", got)
+	}
+	if got := ids(cursor(30)); got != "r6,r7" {
+		t.Errorf("before alone: %q", got)
+	}
+
+	// Walking the whole list one at a time returns every record exactly once.
+	var walked []string
+	next := ""
+	for page := 0; page < 20; page++ {
+		col, _ := listClosed(t, srv, "&limit=1"+next)
+		items := col.Items()
+		if len(items) == 0 {
+			break
+		}
+		for _, c := range items {
+			walked = append(walked, c.ID)
+		}
+		last := items[len(items)-1].ClosedAt
+		next = "&before=" + url.QueryEscape(last.UTC().Format(time.RFC3339Nano))
+	}
+	if got := strings.Join(walked, ","); got != "r1,r2,r3,r4,r5,r6,r7" {
+		t.Errorf("a walk by cursor read %q", got)
+	}
+}
+
+// The cursor is the closedAt of the last row as the API printed it, nanoseconds
+// included: one nanosecond more reaches the record, the value itself does not.
+func TestClosed_BeforeKeepsNanosecondPrecision(t *testing.T) {
+	svc := New("test-machine")
+	srv := labelServer(t, svc, newLabelDriver(), tokenCfg())
+	exact := time.Now().Add(-time.Hour).Truncate(time.Second).Add(123456789 * time.Nanosecond)
+	seedClosed(svc, pagedRec("test-machine", "only", exact))
+	q := func(t time.Time) string {
+		return "&before=" + url.QueryEscape(t.UTC().Format(time.RFC3339Nano))
+	}
+	if col, _ := listClosed(t, srv, q(exact)); len(col.Items()) != 0 {
+		t.Errorf("before = the record's own closedAt must exclude it, got %s", recIDs(col.Items()))
+	}
+	if col, _ := listClosed(t, srv, q(exact.Add(time.Nanosecond))); len(col.Items()) != 1 {
+		t.Errorf("one nanosecond later must reach it, got %d", len(col.Items()))
+	}
+}
+
+func TestClosed_LimitAndBeforeAreValidated(t *testing.T) {
+	svc := New("test-machine")
+	srv := labelServer(t, svc, newLabelDriver(), tokenCfg())
+	for _, q := range []string{"limit=0", "limit=-3", "limit=abc", "limit=1.5", "before=yesterday", "before=2026-01-01"} {
+		code, raw := labelCall(t, http.MethodGet, srv.URL+"/v1/sessions/closed?"+q, testToken, nil, nil)
+		if code != http.StatusBadRequest {
+			t.Errorf("%s: want 400, got %d %s", q, code, raw)
+		}
+	}
+}
+
+// closedPeer is a peer driver that holds closed records and answers a read with
+// exactly the page it was asked for, recording what it was asked.
+type closedPeer struct {
+	stub.Driver
+	rows []fleet.ClosedSession
+	got  driver.ClosedQuery
+}
+
+func (p *closedPeer) ListClosed(_ context.Context, _ fleet.Request, q driver.ClosedQuery) (fleet.Collection[fleet.ClosedSession], error) {
+	p.got = q
+	return fleet.NewCollection(pageClosed(p.rows, q.Before, q.Limit),
+		[]fleet.SourceStatus{{Machine: "peerbox", Status: fleet.SourceOK, ObservedAt: time.Now()}})
+}
+
+// A fleet read merges this machine's records with each peer's page and cuts the
+// result once: the newest across both, with a run that closed at one instant
+// kept whole even when its members came from different machines.
+func TestClosed_FleetReadMergesPagesAndCutsOnce(t *testing.T) {
+	svc := New("test-machine")
+	base := time.Now().Add(-time.Hour).Truncate(time.Second)
+	at := func(s int) time.Time { return base.Add(time.Duration(s) * time.Second) }
+	seedClosed(svc,
+		pagedRec("test-machine", "l50", at(50)), pagedRec("test-machine", "l30", at(30)), pagedRec("test-machine", "l10", at(10)))
+	peer := &closedPeer{Driver: stub.Driver{DeadlineMs: 500}, rows: []fleet.ClosedSession{
+		pagedRec("peerbox", "p40", at(40)), pagedRec("peerbox", "p30", at(30)), pagedRec("peerbox", "p20", at(20)),
+	}}
+	if err := svc.RegisterPeerDriver("peerbox", peer); err != nil {
+		t.Fatal(err)
+	}
+
+	col, err := svc.ListClosedSessions(context.Background(), fleet.SystemRequest(), ScopeFleet, driver.ClosedQuery{Limit: 3}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := recIDs(col.Items()); got != "l50,p40,l30,p30" {
+		t.Errorf("page = %q, want l50,p40,l30,p30 (the 30 s run stays whole)", got)
+	}
+	if peer.got.Limit != 3 {
+		t.Errorf("the peer was asked %+v, want its own page of 3", peer.got)
+	}
+
+	col, err = svc.ListClosedSessions(context.Background(), fleet.SystemRequest(), ScopeFleet,
+		driver.ClosedQuery{Before: at(30), Limit: 3}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := recIDs(col.Items()); got != "p20,l10" {
+		t.Errorf("next page = %q, want p20,l10", got)
+	}
+	if !peer.got.Before.Equal(at(30)) {
+		t.Errorf("the peer was not sent the cursor: %+v", peer.got)
+	}
+
+	// Local scope never reaches the peer, bounded or not.
+	peer.got = driver.ClosedQuery{}
+	col, _ = svc.ListClosedSessions(context.Background(), fleet.SystemRequest(), ScopeLocal, driver.ClosedQuery{Limit: 1}, 0)
+	if got := recIDs(col.Items()); got != "l50" || peer.got != (driver.ClosedQuery{}) {
+		t.Errorf("local read = %q, peer asked %+v", got, peer.got)
 	}
 }

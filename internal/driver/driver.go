@@ -329,7 +329,28 @@ type RecordHolder interface {
 // runtime. A peer driver without it is reported as a source that cannot
 // answer, never as a peer with nothing closed.
 type ClosedLister interface {
-	ListClosed(ctx context.Context, req fleet.Request, since time.Time) (fleet.Collection[fleet.ClosedSession], error)
+	ListClosed(ctx context.Context, req fleet.Request, q ClosedQuery) (fleet.Collection[fleet.ClosedSession], error)
+}
+
+// ClosedQuery narrows one read of the closed-session records (muster #179,
+// #482). The zero value is "everything retained", which is what a read
+// without parameters has always meant.
+//
+// A peer that predates Before and Limit ignores them and answers with every
+// record it has. That is a correct answer, only a slower one: the service
+// applies both again to whatever comes back, so an old peer in the fleet
+// never changes what a caller receives.
+type ClosedQuery struct {
+	// Since keeps records that closed at or after it. Zero keeps all.
+	Since time.Time
+	// Before keeps records that closed strictly before it, so a page that
+	// ends at one closedAt is continued with that same value. Zero keeps all.
+	Before time.Time
+	// Limit is the fewest rows the caller needs, newest first: the answer
+	// holds the newest Limit records, plus any older ones that share the
+	// last one's closedAt, so a page never splits a run that closed at one
+	// instant. Zero or negative means no limit.
+	Limit int
 }
 
 // LabelRelayer is an OPTIONAL capability: a driver fronting a PEER that can

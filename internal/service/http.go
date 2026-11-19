@@ -847,7 +847,9 @@ func handleListSessions(svc *Service) http.HandlerFunc {
 // handleListClosedSessions answers GET /v1/sessions/closed (muster
 // #179): the records this service keeps of sessions that ended, for a bounded
 // retention period. `since` (RFC 3339) keeps records that closed at or after
-// it; `scope` has the live list's meaning.
+// it; `scope` has the live list's meaning. `limit` and `before` (muster #482)
+// bound a read to the newest records and page back through older ones; a call
+// naming neither is answered exactly as before.
 func handleListClosedSessions(svc *Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
@@ -869,7 +871,24 @@ func handleListClosedSessions(svc *Service) http.HandlerFunc {
 			}
 			since = t
 		}
-		col, err := svc.ListClosedSessions(r.Context(), requestFrom(r), scope, since, parseDeadline(r))
+		query := driver.ClosedQuery{Since: since}
+		if raw := q.Get("before"); raw != "" {
+			t, err := time.Parse(time.RFC3339Nano, raw)
+			if err != nil {
+				writeError(w, &fleet.Error{Kind: fleet.ErrorInvalid, Message: "before must be an RFC 3339 timestamp"})
+				return
+			}
+			query.Before = t
+		}
+		if raw := q.Get("limit"); raw != "" {
+			n, err := strconv.Atoi(raw)
+			if err != nil || n < 1 {
+				writeError(w, &fleet.Error{Kind: fleet.ErrorInvalid, Message: "limit must be a positive integer"})
+				return
+			}
+			query.Limit = n
+		}
+		col, err := svc.ListClosedSessions(r.Context(), requestFrom(r), scope, query, parseDeadline(r))
 		if err != nil {
 			writeError(w, &fleet.Error{Kind: fleet.ErrorInvalid, Message: err.Error()})
 			return
