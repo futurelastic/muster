@@ -399,7 +399,7 @@ func TestIntegration_ExternalDirectoryRulesAreWhatTheRuntimeResolves(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := writeSessionConfig(sess, true, plan, providers, nil); err != nil {
+	if err := writeSessionConfig(sess, true, plan, providers, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -983,4 +983,159 @@ func TestIntegration_AnAgentsPinnedModelIsJudgedAndTheHelperModelIsPinned(t *tes
 		t.Errorf("the runtime's merged configuration names small_model %q, want the helper model the policy chose, opencode/big-pickle", merged.SmallModel)
 	}
 	_, _ = d.Close(ctx, req, sess.SessionRef)
+}
+
+// muster #504, against the REAL runtime: an instruction file the operator names
+// reaches the MODEL as system context on every turn of an isolated session, next to
+// the project's own `instructions` (the runtime concatenates the lists, it does not
+// let one replace the other), and a session that is running keeps the text it
+// started with while a session created after an edit gets the new one. The model is
+// a local stand-in that speaks the OpenAI-compatible wire and records the request it
+// was sent, so what is asserted is what the runtime really put on the wire, with no
+// credential and no cost.
+func TestIntegration_OperatorInstructionsReachTheModelAsSystemContext(t *testing.T) {
+	requireOpencodeIntegration(t)
+
+	var mu sync.Mutex
+	var systems []string // the system messages of each of the session's own requests, joined
+	model := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var body struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content any    `json:"content"`
+			} `json:"messages"`
+		}
+		// Only the session's own turns: the runtime may make other model calls (a
+		// title, say) that are not the subject here.
+		if json.Unmarshal(raw, &body) == nil && strings.Contains(string(raw), "USER-TEXT-") {
+			var system strings.Builder
+			for _, m := range body.Messages {
+				if m.Role == "system" {
+					b, _ := json.Marshal(m.Content)
+					system.Write(b)
+					system.WriteByte('\n')
+				}
+			}
+			mu.Lock()
+			systems = append(systems, system.String())
+			mu.Unlock()
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		chunk := `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":null}]}`
+		done := `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`
+		_, _ = io.WriteString(w, "data: "+chunk+"\n\ndata: "+done+"\n\ndata: [DONE]\n\n")
+	}))
+	defer model.Close()
+
+	cwd := t.TempDir()
+	config := `{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": ["PROJECT-RULES.md"],
+  "provider": {
+    "standin": {
+      "npm": "@ai-sdk/openai-compatible",
+      "options": { "baseURL": "` + model.URL + `/v1", "apiKey": "not-a-real-key" },
+      "models": { "m": { "name": "M" } }
+    }
+  }
+}`
+	if err := os.WriteFile(filepath.Join(cwd, "opencode.json"), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cwd, "PROJECT-RULES.md"), []byte("PROJECT-RULE-MARKER"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	opDir := t.TempDir()
+	one := filepath.Join(opDir, "rules[1].md") // a name a glob would read as a pattern
+	two := filepath.Join(opDir, "more.md")
+	if err := os.WriteFile(one, []byte("OPERATOR-RULE-ONE-v1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(two, []byte("OPERATOR-RULE-TWO"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	req := fleet.RequestFrom(fleet.Caller{Principal: "integration-test"})
+	d, err := New(ctx, "test-machine", WithSessionRoot(t.TempDir()), WithOperatorInstructions([]string{one, two}))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer d.Shutdown()
+
+	waitFor := func(n int) {
+		t.Helper()
+		deadline := time.Now().Add(45 * time.Second)
+		for time.Now().Before(deadline) {
+			mu.Lock()
+			got := len(systems)
+			mu.Unlock()
+			if got >= n {
+				return
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+		t.Fatalf("the model received fewer than %d requests", n)
+	}
+	sees := func(system string, want ...string) {
+		t.Helper()
+		for _, w := range want {
+			if !strings.Contains(system, w) {
+				t.Errorf("the system messages do not carry %q:\n%s", w, system)
+			}
+		}
+	}
+
+	first, err := d.Create(ctx, req, "k-one", fleet.SessionSpec{
+		Cwd: fleet.AbsolutePath(cwd), Name: "one", Model: "standin/m", Prompt: "USER-TEXT-ONE",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	defer d.Close(ctx, req, first.SessionRef)
+	waitFor(1)
+	mu.Lock()
+	sees(systems[0], "OPERATOR-RULE-ONE-v1", "OPERATOR-RULE-TWO", "PROJECT-RULE-MARKER")
+	mu.Unlock()
+
+	// An edit after the session started does not reach it, on a later turn.
+	if err := os.WriteFile(one, []byte("OPERATOR-RULE-ONE-v2"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Second) // let the first turn finish before the next prompt
+	if _, err := d.Send(ctx, req, first.SessionRef, "USER-TEXT-TWO", driver.SendOptions{Submit: true}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	waitFor(2)
+	mu.Lock()
+	sees(systems[1], "OPERATOR-RULE-ONE-v1", "OPERATOR-RULE-TWO")
+	if strings.Contains(systems[1], "OPERATOR-RULE-ONE-v2") {
+		t.Error("an edit reached a session that was already running")
+	}
+	mu.Unlock()
+
+	// A session created after the edit gets the new text, with no restart.
+	second, err := d.Create(ctx, req, "k-two", fleet.SessionSpec{
+		Cwd: fleet.AbsolutePath(cwd), Name: "two", Model: "standin/m", Prompt: "USER-TEXT-THREE",
+	})
+	if err != nil {
+		t.Fatalf("Create after the edit: %v", err)
+	}
+	defer d.Close(ctx, req, second.SessionRef)
+	waitFor(3)
+	mu.Lock()
+	sees(systems[2], "OPERATOR-RULE-ONE-v2", "OPERATOR-RULE-TWO", "PROJECT-RULE-MARKER")
+	mu.Unlock()
+
+	// A file that is gone refuses the create; nothing starts without its rules.
+	if err := os.Remove(two); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Create(ctx, req, "k-three", fleet.SessionSpec{
+		Cwd: fleet.AbsolutePath(cwd), Name: "three", Model: "standin/m", Prompt: "USER-TEXT-FOUR",
+	}); err == nil {
+		t.Error("a create ran with an instruction file missing")
+	}
 }

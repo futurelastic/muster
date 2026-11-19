@@ -198,8 +198,10 @@ func externalDirectoryFor(plan *sandboxPlan) externalDirectoryRules {
 // The decisions never share a path — a session with no bypass has no
 // `permission` entry at all. The operator's agents (operatoragents.go, muster
 // #396) go under `agent`, a key nothing else here writes; none configured means
-// no such key, so the file is what it was before they existed.
-func writeSessionConfig(dir string, bypass bool, plan *sandboxPlan, providers providerPolicy, agents operatorAgents) error {
+// no such key, so the file is what it was before they existed. The same holds for
+// the operator's instruction files (operatorinstructions.go, muster #504): their
+// copies' paths go under `instructions`, a key nothing else here writes.
+func writeSessionConfig(dir string, bypass bool, plan *sandboxPlan, providers providerPolicy, agents operatorAgents, instructions []string) error {
 	path := filepath.Join(dir, permissionConfigRel)
 	if err := privfs.MkdirAll(filepath.Dir(path)); err != nil {
 		return fmt.Errorf("opencode: creating the session's config directory: %w", err)
@@ -210,6 +212,9 @@ func writeSessionConfig(dir string, bypass bool, plan *sandboxPlan, providers pr
 	}
 	if len(agents) > 0 {
 		cfg["agent"] = agents
+	}
+	if len(instructions) > 0 {
+		cfg["instructions"] = instructions
 	}
 	if bypass {
 		// checkPermissionMode refuses a bypass create with no sandbox, so a nil plan here

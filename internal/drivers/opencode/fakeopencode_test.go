@@ -166,6 +166,38 @@ func fakeSessionAgents(printLogs bool) (names []string, listed bool) {
 	return names, true
 }
 
+// fakeSessionInstructions is the stand-in for the runtime reading the
+// `instructions` entries of the session's own opencode.json (muster #504). The
+// real runtime reads those files when it builds a turn's system prompt, so this
+// reads them when a prompt arrives, not at start: what a session is told is
+// whatever the entries name AT THAT MOMENT. A path it cannot read is recorded as
+// the sentinel below, which is also what the real runtime does with one, silently.
+func fakeSessionInstructions() (texts []string, listed bool) {
+	raw, err := os.ReadFile(filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "opencode", "opencode.json"))
+	if err != nil {
+		return nil, false
+	}
+	var cfg struct {
+		Instructions []string `json:"instructions"`
+	}
+	if json.Unmarshal(raw, &cfg) != nil || len(cfg.Instructions) == 0 {
+		return nil, false
+	}
+	for _, p := range cfg.Instructions {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			texts = append(texts, fakeInstructionUnreadable)
+			continue
+		}
+		texts = append(texts, string(b))
+	}
+	return texts, true
+}
+
+// fakeInstructionUnreadable is what the stand-in records for an instruction path
+// it could not read.
+const fakeInstructionUnreadable = "<unreadable instruction file>"
+
 func runFakeOpencode(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	port := fs.Int("port", 0, "")
@@ -299,6 +331,17 @@ func runFakeOpencode(args []string) {
 					os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
 					_, _ = f.Write(append(bytes.TrimSpace(raw), '\n'))
 					_ = f.Close()
+				}
+			}
+			// The instruction files the session is configured with, as they read NOW
+			// (muster #504): one JSON array of texts per prompt, in a file of their own.
+			if texts, ok := fakeSessionInstructions(); ok {
+				if line, err := json.Marshal(texts); err == nil {
+					if f, err := os.OpenFile(os.Getenv("XDG_DATA_HOME")+"/fake-instructions.jsonl",
+						os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
+						_, _ = f.Write(append(line, '\n'))
+						_ = f.Close()
+					}
 				}
 			}
 			w.WriteHeader(http.StatusNoContent)

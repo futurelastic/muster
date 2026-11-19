@@ -97,6 +97,21 @@ func TestValidateConfigExtras_StartupSettings(t *testing.T) {
 			map[string]string{"FLEET_RUNTIME": "none"}, `opencode.agents "agents.json" must be an absolute path`},
 		{"opencode object without agents", map[string]any{"opencode": map[string]any{}}, tmux_, ""},
 
+		// muster #504: the same for the instruction files — only each PATH is judged
+		// at the start; whether a file exists and holds text is judged on every create.
+		{"opencode instructions, absolute", map[string]any{"opencode": map[string]any{"instructions": []string{"/etc/fleet/rules.md", "/etc/fleet/more.md"}}}, tmux_, ""},
+		{"opencode instructions, a file that does not exist yet", map[string]any{"opencode": map[string]any{"instructions": []string{"/nonexistent/rules.md"}}}, tmux_, ""},
+		{"opencode instructions, relative", map[string]any{"opencode": map[string]any{"instructions": []string{"/etc/fleet/rules.md", "rules.md"}}}, tmux_,
+			`opencode.instructions[1] "rules.md" must be an absolute path`},
+		{"opencode instructions, relative, runtime not enabled",
+			map[string]any{"opencode": map[string]any{"instructions": []string{"rules.md"}}},
+			map[string]string{"FLEET_RUNTIME": "none"}, `opencode.instructions[0] "rules.md" must be an absolute path`},
+		{"opencode instructions, an empty entry", map[string]any{"opencode": map[string]any{"instructions": []string{""}}}, tmux_,
+			`opencode.instructions[0] is empty`},
+		{"opencode instructions, one path twice", map[string]any{"opencode": map[string]any{"instructions": []string{"/etc/fleet/rules.md", "/etc/fleet//rules.md"}}}, tmux_,
+			`opencode.instructions lists "/etc/fleet//rules.md" twice`},
+		{"opencode instructions, an empty list", map[string]any{"opencode": map[string]any{"instructions": []string{}}}, tmux_, ""},
+
 		// muster #400: a declared model list is the Claude Code runtime's alone.
 		{"models, the terminal runtime", map[string]any{"models": map[string]any{string(tmux.DefaultRuntime): []string{"opus", "sonnet"}}}, tmux_, ""},
 		{"models, an empty list", map[string]any{"models": map[string]any{string(tmux.DefaultRuntime): []string{}}}, tmux_, ""},

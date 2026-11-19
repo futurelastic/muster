@@ -609,7 +609,8 @@ to it.
   records it for `muster doctor` (row `config.reload`: `warn`, with the reason).
   Fix the file and the next check applies it.
 - Only the two tables move. `trustRoots`, `defaultRuntime`, `sessionEnv`, `providerCredentials`,
-  `opencode` (which file holds [the machine's opencode agents](#agents-every-opencode-session-on-this-machine-receives)),
+  `opencode` (which file holds [the machine's opencode agents](#agents-every-opencode-session-on-this-machine-receives), and which files are
+  [its instruction files](#instruction-files-every-opencode-session-on-this-machine-receives)),
   `models` ([the model lists a client may offer](#models-a-client-may-offer-for-a-create)),
   `maxInputBytes`, `gateRemoteControlInput`, `closedRetentionDays`,
   `inputAuditRetentionDays`, `profilingEndpoint`, `refuseRecordReads` and `machineList` are read at start, so an edit that
@@ -617,7 +618,7 @@ to it.
   principals and peers included — is applied until the service restarts. The
   refusal also says whether the restart it points to would work: it runs the same
   file checks as `muster doctor`'s `config.load` row and as the start itself (the
-  principal table, trust roots, `sessionEnv`, `providerCredentials`, `opencode.agents`, `models`, a `defaultRuntime` the machine does
+  principal table, trust roots, `sessionEnv`, `providerCredentials`, `opencode.agents`, `opencode.instructions`, `models`, a `defaultRuntime` the machine does
   not run, `maxInputBytes`, the retention days, a `machineList` in mode `only`
   that does not verify, the peer list), and ends either "the file passes start-up
   validation" or "a restart would fail: <the start-up error>". Read that before
@@ -758,6 +759,56 @@ own configuration carries under that name: one definition per agent.
   session the sandbox, not the agent file, is the boundary.
 - It has no effect on a shared-mode driver (a test seam that talks to a server it
   did not start), which has no configuration of its own to write them into.
+
+### Instruction files every opencode session on this machine receives
+
+An `opencode` session runs with a home and configuration directories of its own,
+so it never reads the service user's instruction files (not
+`~/.config/opencode/AGENTS.md`, not a rules folder the operator keeps), and follows
+only the `AGENTS.md` of the project it works in. A Claude session on the same
+machine gets the operator's rules; without this setting an `opencode` session does
+not. To give every `opencode` session the same rules, list the files in
+`opencode.instructions` in the file `FLEET_CONFIG` names, as absolute paths:
+
+```json
+{ "opencode": { "instructions": ["/etc/muster/rules.md"] } }
+```
+
+One combined rules file the operator keeps current is the usual shape; several are
+read in the order listed. Each file is plain text (Markdown, as the runtime
+expects), at most 1 MiB.
+
+- **The paths are declared at start; the content is read on every create and every
+  relaunch**, exactly like [`opencode.agents`](#agents-every-opencode-session-on-this-machine-receives).
+  Editing a file, or creating one after the service started, needs no restart.
+  Changing *which files* are listed is a restart-only edit. A path must be absolute
+  and may be listed once; whether the file exists is not checked at start.
+- **A session keeps what it started with.** The service copies each file into that
+  session's own directory when the session starts and hands the runtime the copy,
+  so an edit, or the file being removed, never reaches a session that is already
+  running. A confined session also reads the copy where it could not read the
+  operator's own path. A session started after the edit gets the new text.
+- **A file that cannot be used refuses the create with the reason** (`unsupported`:
+  an operator must repair it). That covers a file that is missing or cannot be read,
+  a path that is a directory or not a regular file, an empty file (or one with only
+  whitespace), a file over 1 MiB, and one that is not UTF-8 text. One bad file
+  among several refuses the create. A session never starts without its rules: the
+  runtime would skip a file it could not find without a word, which is why the
+  service reads them itself first. A session that cannot be relaunched after a
+  restart for this reason is listed `unknown` with the reason. The reason names the
+  file and what is wrong with it, never what it holds.
+- **The project's own `instructions` still apply.** The runtime adds the operator's
+  files to whatever the project's `AGENTS.md` and `opencode.json` list; neither
+  replaces the other. The gated integration test (`FLEET_OPENCODE_INTEGRATION=1`)
+  pins that against opencode 1.18.
+- **It is instruction files only.** This setting adds no tool server, permission
+  or provider, and the exclusion that keeps those out of the agents file stays as it
+  is. The text is visible to the session, like any instruction file, and is not a
+  secret channel: no secret belongs in it, and it is never logged. The service logs
+  only how many files are configured.
+- Claude sessions are unchanged, and the setting has no effect on a shared-mode
+  driver (a test seam that talks to a server it did not start), which has no
+  configuration of its own to write the files into.
 
 ### A ChatGPT subscription for every opencode session
 

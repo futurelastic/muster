@@ -961,6 +961,18 @@ An operator file that is missing or invalid refuses the create (`unsupported`, w
 the reason, and for the operator to repair); it never falls back to the default
 agent. `pins.agent.honoured` resolves as above, from the first turn's own record.
 
+**Rules every `opencode` session follows** (muster #504). An isolated session reads no
+instruction file the machine's user keeps, so the operator of a machine can name
+instruction files that every `opencode` session on it receives as its own
+`instructions`, next to the project's `AGENTS.md`
+(`opencode.instructions` in the machine's configuration file,
+[`install.md`](install.md#instruction-files-every-opencode-session-on-this-machine-receives)).
+You pass nothing on the create. A session follows the text the files held when it
+started: an edit reaches the sessions created after it, not the ones running. A file
+that is missing, unreadable, empty or not text refuses the create (`unsupported`,
+with the reason, and for the operator to repair); a session never starts without
+its rules.
+
 **The `model` pin on `opencode` resolves the same way** (muster #373). The model
 is carried in the create body and applies to every turn, but the create response
 never names the model in use, so `pins.model.honoured` is `null` on the create

@@ -767,6 +767,23 @@ func validateConfigExtras(cfg *fileConfig, getenv func(string) string) error {
 	if p := cfg.operatorAgentsFile(); p != "" && !filepath.IsAbs(p) {
 		return fmt.Errorf("opencode.agents %q must be an absolute path", p)
 	}
+	// The operator's opencode instruction files (muster #504): only the paths are
+	// judged here, for the same reason. A path that is not absolute is read against
+	// the service's own working directory, which nobody chose; one listed twice would
+	// put the same rules in every prompt twice.
+	seenInstruction := map[string]bool{}
+	for i, p := range cfg.operatorInstructionFiles() {
+		if p == "" {
+			return fmt.Errorf("opencode.instructions[%d] is empty: each entry is the absolute path of an instruction file", i)
+		}
+		if !filepath.IsAbs(p) {
+			return fmt.Errorf("opencode.instructions[%d] %q must be an absolute path", i, p)
+		}
+		if seenInstruction[filepath.Clean(p)] {
+			return fmt.Errorf("opencode.instructions lists %q twice", p)
+		}
+		seenInstruction[filepath.Clean(p)] = true
+	}
 	// Declared model lists (muster #400): the shape is judged here so the start,
 	// the doctor and a reload agree.
 	if err := validateModelsConfig(cfg.Models); err != nil {

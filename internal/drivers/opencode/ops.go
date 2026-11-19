@@ -399,6 +399,12 @@ func (d *Driver) startServerIn(ctx context.Context, spec fleet.SessionSpec, exis
 	if err != nil {
 		return nil, err
 	}
+	// muster #504: the same for the operator's instruction files — read here, before
+	// any side effect, and an unusable one refuses the start.
+	instructions, err := d.operatorInstructionsFor()
+	if err != nil {
+		return nil, err
+	}
 	d.mu.RLock()
 	closed := d.closed
 	d.mu.RUnlock()
@@ -462,7 +468,15 @@ func (d *Driver) startServerIn(ctx context.Context, spec fleet.SessionSpec, exis
 	// relaunch, so a changed operator setting applies from the next start. The
 	// operator's agents (muster #396) ride in the same file for the same reason.
 	configuring := time.Now()
-	if err := writeSessionConfig(dir, bypass, plan, d.providers, agents); err != nil {
+	// The operator's instruction files (muster #504) are copied into the session's own
+	// directory first, so the configuration names the copies this start took.
+	instructionPaths, err := writeOperatorInstructions(dir, instructions)
+	if err != nil {
+		driver.NotePhase(ctx, phaseConfig, configuring)
+		cleanup()
+		return nil, d.invalidStart(err)
+	}
+	if err := writeSessionConfig(dir, bypass, plan, d.providers, agents, instructionPaths); err != nil {
 		driver.NotePhase(ctx, phaseConfig, configuring)
 		cleanup()
 		return nil, d.invalidStart(err)
