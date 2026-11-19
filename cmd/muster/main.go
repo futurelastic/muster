@@ -145,7 +145,10 @@
 //	                       every create forever), and opencode.agents (muster
 //	                       issue #396: the path of a JSON file of agents every
 //	                       isolated opencode session receives, read again on
-//	                       every create). When present the
+//	                       every create), and opencode.instructions (muster
+//	                       issue #504: the absolute paths of instruction files
+//	                       every isolated opencode session receives, read again
+//	                       on every create). When present the
 //	                       principal table is authoritative and FLEET_TOKEN /
 //	                       FLEET_ALLOW_* are ignored. Absent means
 //	                       single-token mode.
@@ -867,6 +870,9 @@ func main() {
 		if cfgFile.operatorAgentsFile() != "" {
 			log.Printf("muster: opencode operator agents configured (#396)")
 		}
+		if n := len(cfgFile.operatorInstructionFiles()); n > 0 {
+			log.Printf("muster: opencode operator instruction files configured: %d (#504)", n)
+		}
 		stopOpencode = svc.StartOptionalRuntime(context.Background(), service.OptionalRuntime{
 			Runtime:    opencode.DefaultRuntime,
 			DeadlineMs: opencode.DefaultDeadlineMs,
@@ -894,6 +900,10 @@ func main() {
 					// session's own configuration. The path is fixed here; the file is
 					// read again on every create. Empty defines none.
 					opencode.WithOperatorAgents(cfgFile.operatorAgentsFile()),
+					// muster #504: instruction files the operator names, copied into every
+					// session's own directory. The paths are fixed here; each file is read
+					// again on every create. Empty names none.
+					opencode.WithOperatorInstructions(cfgFile.operatorInstructionFiles()),
 					// muster #398: the driver says, one line per process, when it stops a
 					// server an earlier service left running.
 					opencode.WithLogf(func(format string, args ...any) { log.Printf("muster: "+format, args...) }),

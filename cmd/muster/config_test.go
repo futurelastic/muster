@@ -320,6 +320,56 @@ func TestLoadConfigRejectsATypoInsideTheOpencodeObject(t *testing.T) {
 	}
 }
 
+// muster #504: opencode.instructions is a list of paths on the same object, and
+// reads as "none" through the accessor whether the list, the object or the file is
+// absent.
+func TestLoadConfigReadsOpencodeInstructions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	body := `{"principals": [{"name": "op", "token": "tok"}],
+  "opencode": {"agents": "/etc/fleet/a.json", "instructions": ["/etc/fleet/rules.md", "/etc/fleet/more.md"]}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.operatorInstructionFiles(); len(got) != 2 || got[0] != "/etc/fleet/rules.md" || got[1] != "/etc/fleet/more.md" {
+		t.Errorf("operatorInstructionFiles() = %v, want the two configured paths, in order", got)
+	}
+	if got := cfg.operatorAgentsFile(); got != "/etc/fleet/a.json" {
+		t.Errorf("operatorAgentsFile() = %q, want it unchanged beside the instruction files", got)
+	}
+
+	if err := os.WriteFile(path, []byte(`{"principals": [{"name": "op", "token": "tok"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.operatorInstructionFiles(); len(got) != 0 {
+		t.Errorf("operatorInstructionFiles() = %v with no opencode object, want none", got)
+	}
+	var none *fileConfig
+	if got := none.operatorInstructionFiles(); len(got) != 0 {
+		t.Errorf("operatorInstructionFiles() on no config file = %v, want none", got)
+	}
+}
+
+// A path given as one string where the list is expected fails the load: a single
+// file must not silently define none.
+func TestLoadConfigRejectsInstructionsThatAreNotAList(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	body := `{"principals": [{"name": "op", "token": "tok"}], "opencode": {"instructions": "/etc/fleet/rules.md"}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadConfig(path); err == nil {
+		t.Fatal("loadConfig accepted a string where the list of instruction files belongs")
+	}
+}
+
 // The loader's DisallowUnknownFields (muster issue #94's finding 1: the
 // code ships before the config entry, never the reverse) must keep applying
 // inside a sessionEnv entry, not just at the top level — a typo here is

@@ -168,15 +168,16 @@ type fileConfig struct {
 	} `json:"providerCredentials,omitempty"`
 
 	// Opencode holds this machine's settings for the opencode runtime that are
-	// not environment variables. Today that is Agents (muster #396): the path of
-	// a JSON file of agents every isolated opencode session on this machine
-	// receives, so an agent defined once can be named on any create without a
-	// change to any repo. Config-file-only and per machine, like SessionEnv: the
-	// declaration (WHICH file) is read at start and changing it needs a restart,
-	// while what the file holds is read afresh on every create, so editing an
-	// agent needs none. The path must be absolute; its existence is not checked
+	// not environment variables: Agents (muster #396), the path of a JSON file of
+	// agents every isolated opencode session on this machine receives, so an agent
+	// defined once can be named on any create without a change to any repo; and
+	// Instructions (muster #504), the paths of instruction files every such session
+	// receives as the runtime's own `instructions`. Config-file-only and per machine,
+	// like SessionEnv: the declaration (WHICH files) is read at start and changing it
+	// needs a restart, while what the files hold is read afresh on every create, so
+	// editing one needs none. A path must be absolute; its existence is not checked
 	// at start — a file that is missing or unusable when a session is created
-	// refuses that create with the reason. docs/install.md has the file's shape.
+	// refuses that create with the reason. docs/install.md has the files' shape.
 	Opencode *opencodeConfig `json:"opencode,omitempty"`
 
 	// Models declares, per runtime id, the model ids a client may offer for a
@@ -385,6 +386,11 @@ func (c *fileConfig) gatesRemoteControlInput() bool {
 // opencodeConfig is the "opencode" object of the config file.
 type opencodeConfig struct {
 	Agents string `json:"agents,omitempty"`
+	// Instructions are absolute paths of instruction files every isolated opencode
+	// session on this machine receives (muster #504). Declared like Agents: the paths
+	// are read at start (a change needs a restart), what the files hold is read on
+	// every create, and a file that cannot be used refuses that create.
+	Instructions []string `json:"instructions,omitempty"`
 }
 
 // operatorAgentsFile is the path of the operator's opencode agent file, or "" when
@@ -394,6 +400,16 @@ func (c *fileConfig) operatorAgentsFile() string {
 		return ""
 	}
 	return c.Opencode.Agents
+}
+
+// operatorInstructionFiles are the paths of the operator's opencode instruction
+// files, or nil when none is configured. Safe on a nil receiver (no config file at
+// all).
+func (c *fileConfig) operatorInstructionFiles() []string {
+	if c == nil || c.Opencode == nil {
+		return nil
+	}
+	return c.Opencode.Instructions
 }
 
 // declaredModels is the operator's model list for runtime, or nil when none is

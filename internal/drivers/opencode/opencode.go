@@ -331,6 +331,11 @@ type Driver struct {
 	// create and relaunch. Empty means the machine defines none.
 	agentsFile string
 
+	// instructionFiles are the operator's instruction files (WithOperatorInstructions,
+	// muster #504): their paths are fixed here, their content is read again on every
+	// create and relaunch. Empty means the machine names none.
+	instructionFiles []string
+
 	// sandbox is what this driver can enforce on this host (nil: nothing) and
 	// sandboxWhy says why not, in words a refused create can quote (muster
 	// #281). sandboxRead is the operator's extra readable directories — an
@@ -578,6 +583,19 @@ func WithProviders(ids []string) Option { return func(d *Driver) { d.providerIDs
 // shared mode, which has no configuration of its own to write them into.
 // operatoragents.go has the file's shape and how it meets a project's agents.
 func WithOperatorAgents(path string) Option { return func(d *Driver) { d.agentsFile = path } }
+
+// WithOperatorInstructions names instruction files (absolute paths) every isolated
+// session on this machine receives as the runtime's own `instructions` (muster
+// #504), so the machine's rules reach an opencode session as they reach a Claude
+// one. The paths are fixed here; each file is read again on every create and every
+// relaunch and copied into the session's own directory, so editing a file needs no
+// restart and a running session keeps what it started with. A file that is missing
+// or cannot be used refuses the create with the reason. Empty (the default) names
+// none. Ignored in shared mode, which has no configuration of its own to write them
+// into. operatorinstructions.go has the rest.
+func WithOperatorInstructions(paths []string) Option {
+	return func(d *Driver) { d.instructionFiles = append([]string(nil), paths...) }
+}
 
 // WithLogf gives the driver somewhere to say that it stopped a server no
 // session held (muster #398): the start-up sweep and the reap of a server the

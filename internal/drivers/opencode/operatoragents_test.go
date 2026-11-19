@@ -160,7 +160,7 @@ func TestOperatorAgents_AFileThatCannotBeReadIsRefused(t *testing.T) {
 
 func TestOperatorAgents_TheConfigCarriesThemOnlyWhenThereAreSome(t *testing.T) {
 	dir := t.TempDir()
-	if err := writeSessionConfig(dir, false, nil, providerPolicy{}, nil); err != nil {
+	if err := writeSessionConfig(dir, false, nil, providerPolicy{}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	raw, _ := os.ReadFile(filepath.Join(dir, permissionConfigRel))
@@ -174,7 +174,7 @@ func TestOperatorAgents_TheConfigCarriesThemOnlyWhenThereAreSome(t *testing.T) {
 	}
 	// Alongside a bypass session's posture and the provider policy, neither moved.
 	plan := &sandboxPlan{read: []string{"/work"}}
-	if err := writeSessionConfig(dir, true, plan, providerPolicy{}, agents); err != nil {
+	if err := writeSessionConfig(dir, true, plan, providerPolicy{}, agents, nil); err != nil {
 		t.Fatal(err)
 	}
 	var cfg map[string]any
