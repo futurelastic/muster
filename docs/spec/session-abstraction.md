@@ -216,6 +216,18 @@ the system directories the profile reads. The driver therefore either points the
 Command Line Tools (`DEVELOPER_DIR`, §4.3) or adds the selected directory to the reads; a create
 cannot name that variable.
 
+**On macOS the per-user temporary directory stays denied, and the toolchain shim's cache is moved out of
+it** (muster #505). The system names a per-user temporary directory of its own (`confstr`'s
+`_CS_DARWIN_USER_TEMP_DIR`); other processes keep hand-off files there, so the profile never grants it,
+by prefix or otherwise: a grant on a name inside it (`tmp.` for `mktemp`'s fallback) would match every
+directory another process made with `mktemp -d`, and a profile cannot tell a session's own from those.
+Two things in a session reach for that directory regardless of `TMPDIR`. The toolchain shim behind `git`,
+`cc` and `python3` keeps a lookup cache there, which the driver redirects into the session's own `tmp`
+(`xcrun_db`, §4.3), so the refused write no longer prints an error into every tool output. And
+`mktemp -d`, or `mktemp -t`, with no template: on macOS it prefers that directory and consults `TMPDIR`
+only when the system gives none, so it is refused in a confined session whatever the environment says. A
+program that needs a scratch directory there names it — `mktemp -d "$TMPDIR/x.XXXXXXXX"`.
+
 **The profile replaces a harness's own sandbox; it never nests inside it.** A macOS profile cannot be
 applied from inside another (`Operation not permitted`), so a harness that ships its own sandbox
 fails closed under this one and refuses every shell command. A driver whose runtime has one must
@@ -2446,6 +2458,14 @@ service's. A create that carries `isolateEnvironment: true` against a `false` dr
   like any other grant. A session that needs the full Xcode toolchain is not served by either: it is
   given the smaller one. On macOS the name is owned whether or not the driver sets it for a given
   session, so what a session finds does not depend on which Xcode the host happens to have selected;
+- `xcrun_db`, on macOS only, and only for a session started under a sandbox profile: the path of the
+  toolchain shim's lookup cache, `<session directory>/tmp/xcrun_db`. The shim's default is the
+  per-user temporary directory, which the profile refuses (§2.1, *the per-user temporary directory stays
+  denied*), so without it every `git`, `cc` or `python3` prints `couldn't create cache file …
+  (errno=Operation not permitted)` into the output a model reads. The name is lower case (the library
+  reads it so) and the value must be absolute (a relative one is ignored). Like `DEVELOPER_DIR` it is
+  owned on macOS whether or not the driver sets it; an unconfined session is given none of it
+  (muster #505);
 - `OPENCODE_DISABLE_CLAUDE_CODE=1`, because by default opencode loads the user's Claude Code
   instructions and skills;
 - this machine's `sessionEnv` entries that apply, then the create's `env` (a variable name may be

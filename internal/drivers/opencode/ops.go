@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -449,6 +450,12 @@ func (d *Driver) startServerIn(ctx context.Context, spec fleet.SessionSpec, exis
 		// decides, and owned so a create cannot name it.
 		if plan.developerDir != "" {
 			extra[envKey(developerDirEnv)] = plan.developerDir
+		}
+		// muster #505: and where the shim keeps its lookup cache. Its default is the
+		// per-user temporary directory the profile (rightly) refuses to write, so
+		// the cache goes inside the session's own directory instead.
+		for k, v := range xcrunCacheEnv(runtime.GOOS, dir) {
+			extra[envKey(k)] = v
 		}
 		if plan.cache != nil {
 			extra[packageCacheEnv] = string(plan.cache.Path)

@@ -4,7 +4,9 @@ package opencode
 
 import (
 	"context"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -89,5 +91,134 @@ func TestConfinedSessionIsGivenTheCommandLineToolsAndItsOwnHereDocumentPrefix(t 
 	})
 	if kindOfErr(err) != fleet.ErrorInvalid {
 		t.Errorf("a create naming DEVELOPER_DIR = %v, want ErrorInvalid", err)
+	}
+}
+
+// darwinUserTempDir is the per-user temporary directory the system names
+// (confstr's _CS_DARWIN_USER_TEMP_DIR): where code that ignores TMPDIR writes,
+// and where other processes keep their own files. Empty when it cannot be read.
+func darwinUserTempDir(t *testing.T) string {
+	t.Helper()
+	out, err := exec.Command("/usr/bin/getconf", "DARWIN_USER_TEMP_DIR").Output()
+	if err != nil {
+		return ""
+	}
+	dir := strings.TrimSpace(string(out))
+	if dir == "" || !filepath.IsAbs(dir) {
+		return ""
+	}
+	return filepath.Clean(dir)
+}
+
+// muster #505: the toolchain shim behind `git` (and `cc`, `python3`) keeps a lookup
+// cache in the per-user temporary directory, which a confined session may not
+// write, so every call used to print `couldn't create cache file` into the output
+// the model reads. The shim reads the cache's path from `xcrun_db`; the driver
+// points it inside the session's own tmp, where the profile already allows a write.
+//
+// This runs the real shim from inside a real confined session's process, and it
+// asserts both halves: the noise is gone AND the cache is where it was sent, so a
+// silent success that wrote nowhere would not pass.
+func TestConfinedSessionsToolchainShimCachesInsideTheSession(t *testing.T) {
+	d, _ := newIsolatedDriver(t)
+	requireSandboxHost(t, d)
+
+	// The control: the shim runs in a session that is NOT confined. Without it a
+	// host with no working shim would make the confined result mean nothing.
+	open := mustCreate(t, d, "k-xcrun-open", fleet.SessionSpec{Cwd: fleet.AbsolutePath(t.TempDir())})
+	if r := sh(t, d, open.ID, "/usr/bin/git --version"); r.Rc != 0 || !strings.Contains(r.Out, "git version") {
+		t.Skipf("the /usr/bin/git shim does not run even outside a sandbox on this host, so this proves nothing: %+v", r)
+	}
+
+	sess, _ := sandboxedSession(t, d, "k-xcrun-sbx", fleet.SandboxSpec{})
+	vars := inside(t, d, sess.ID).vars()
+	cache, tmp := vars[xcrunDBEnv], vars["TMPDIR"]
+	if cache == "" || !filepath.IsAbs(cache) || !strings.HasPrefix(cache, tmp+"/") {
+		t.Errorf("%s = %q, want an absolute path inside the session's TMPDIR = %q", xcrunDBEnv, cache, tmp)
+	}
+
+	// Stdout and stderr arrive together, so any complaint is in Out.
+	r := sh(t, d, sess.ID, "/usr/bin/git --version")
+	if r.Rc != 0 || !strings.HasPrefix(r.Out, "git version") || strings.Contains(r.Out, "error") || strings.Contains(r.Out, "warning") {
+		t.Errorf("/usr/bin/git --version in a confined session did not run clean: %+v", r)
+	}
+	if strings.Contains(r.Out, "cache file") {
+		t.Errorf("the shim still tried to write its cache outside the session: %+v", r)
+	}
+	if _, err := os.Stat(cache); err != nil {
+		t.Errorf("the shim's cache is not at %s, where the driver sent it: %v", cache, err)
+	}
+
+	// An unconfined session is given none of this: nothing refuses its write.
+	if v, ok := inside(t, d, open.ID).vars()[xcrunDBEnv]; ok {
+		t.Errorf("an unconfined session was given %s = %q", xcrunDBEnv, v)
+	}
+
+	// And a create may not supply it: refused, and nothing starts.
+	_, err := d.Create(context.Background(), testReq, "k-xcrun-override", fleet.SessionSpec{
+		Cwd: fleet.AbsolutePath(t.TempDir()), Sandbox: &fleet.SandboxSpec{}, Env: map[string]string{xcrunDBEnv: "/somewhere/xcrun_db"},
+	})
+	if kindOfErr(err) != fleet.ErrorInvalid {
+		t.Errorf("a create naming %s = %v, want ErrorInvalid", xcrunDBEnv, err)
+	}
+}
+
+// muster #505: the fix above moves one file; it does NOT open the per-user
+// temporary directory. That directory holds other processes' hand-off files, and
+// a grant on a name inside it (`tmp.` for `mktemp`'s fallback) would match every
+// directory another process made with `mktemp -d`, so a confined session could
+// write into one it did not create. This is the guard: whoever adds that grant
+// breaks this test and has to answer the reason it was left out.
+func TestConfinedSessionStillCannotWriteTheUserTempDir(t *testing.T) {
+	d, _ := newIsolatedDriver(t)
+	requireSandboxHost(t, d)
+	temp := darwinUserTempDir(t)
+	if temp == "" {
+		t.Skip("the per-user temporary directory cannot be read on this host")
+	}
+
+	// A directory made OUTSIDE the sandbox, named the way `mktemp -d` names one:
+	// another process's, which a prefix grant would hand to the session.
+	foreign, err := os.MkdirTemp(temp, "tmp.")
+	if err != nil {
+		t.Skipf("cannot write the per-user temporary directory from the test either: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(foreign) })
+	fresh := filepath.Join(temp, "muster-505-probe-"+filepath.Base(foreign))
+	t.Cleanup(func() { _ = os.Remove(fresh) })
+
+	// The control: the same writes in a session that is NOT confined, so a refusal
+	// below cannot be a mistake in the probe.
+	open := mustCreate(t, d, "k-usertemp-open", fleet.SessionSpec{Cwd: fleet.AbsolutePath(t.TempDir())})
+	if r := sh(t, d, open.ID, "echo x > '"+filepath.Join(foreign, "control")+"'"); r.Rc != 0 {
+		t.Skipf("an unconfined session cannot write %s either, so this proves nothing: %+v", temp, r)
+	}
+
+	sess, _ := sandboxedSession(t, d, "k-usertemp-sbx", fleet.SandboxSpec{})
+	for name, target := range map[string]string{
+		"a new name":                      fresh,
+		"a file in another process's dir": filepath.Join(foreign, "planted"),
+	} {
+		if r := sh(t, d, sess.ID, "echo x > '"+target+"'"); r.Rc == 0 {
+			t.Errorf("a confined session wrote %s in the per-user temporary directory: %+v", name, r)
+		}
+		if _, err := os.Stat(target); err == nil {
+			t.Errorf("%s exists after a confined session was refused", target)
+		}
+	}
+
+	// What a program that names no directory meets, stated so the decision is on
+	// the record. On macOS `mktemp -d` (and `mktemp -t`) take the per-user
+	// temporary directory FIRST and consult TMPDIR only when that is unavailable
+	// (mktemp(1)), so handing a child TMPDIR does not help: the call is refused
+	// whatever the environment says. What works is a template the caller places
+	// itself, under the TMPDIR the session has. The profile is not widened for it.
+	for _, cmd := range []string{"env -i /usr/bin/mktemp -d", `env -i TMPDIR="$TMPDIR" /usr/bin/mktemp -d`} {
+		if r := sh(t, d, sess.ID, cmd); r.Rc == 0 {
+			t.Errorf("%q created a directory in the per-user temporary directory: %+v", cmd, r)
+		}
+	}
+	if r := sh(t, d, sess.ID, `env -i TMPDIR="$TMPDIR" /usr/bin/mktemp -d "$TMPDIR/probe.XXXXXXXX"`); r.Rc != 0 {
+		t.Errorf("mktemp given a template under the session's TMPDIR did not work: %+v", r)
 	}
 }
