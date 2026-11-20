@@ -347,3 +347,94 @@ func TestState_AStopTheDriverMadeIsNotReportedAsAnExit(t *testing.T) {
 		t.Errorf("a stop the driver made was reported as an exit: %q", sink.lines)
 	}
 }
+
+// replaceMessage swaps the record's message with this id for another, in place, the
+// way a runtime finishes a message it was still writing.
+func replaceMessage(t *testing.T, f *fakeServer, session, id string, msg any) {
+	t.Helper()
+	raw, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i, r := range f.messages[session] {
+		var m struct {
+			Info struct {
+				ID string `json:"id"`
+			} `json:"info"`
+		}
+		if json.Unmarshal(r, &m) == nil && m.Info.ID == id {
+			f.messages[session][i] = raw
+			return
+		}
+	}
+	t.Fatalf("no message %q to replace", id)
+}
+
+// The one place a tail read and a cursor poller can come to different answers
+// (muster #506, the plan's R3): an assistant message that finishes AFTER a later
+// assistant message already exists.
+//
+// A message the runtime is still writing is held, and passed over only when a later
+// assistant message exists, because the runtime writes a session's messages one
+// after another — so an unfinished one with a successor can only be what a cut-off
+// turn left behind (muster #282). On a runtime that does that, the case below
+// cannot happen. This pins what the code does if one ever did not: the cursor
+// poller has consumed past the message and never sees it, and a tail read returns
+// it. It is here so that loosening the rule, or the runtime changing underneath it,
+// is a deliberate change and not a silent one.
+//
+// Not measured against a live runtime in the session that wrote this: the premise
+// is the one the package comment already rests on.
+func TestTurns_ATurnThatFinishesAfterALaterAssistantMessageExistsIsOnlyInATailRead(t *testing.T) {
+	f := newFakeServer(t)
+	d := newTestDriver(t, f)
+	ref := createOne(t, d, "/work/x", "k1")
+	cursor := getTurns(t, d, ref, "", 0).Next
+
+	f.addMessage(ref.ID, tUser("msg_u1", 10, "q1"))
+	f.addMessage(ref.ID, tAsst("msg_a1", 11, 0, tText("in flight"))) // never finished when the next one was written
+	f.addMessage(ref.ID, tUser("msg_u2", 20, "q2"))
+	f.addMessage(ref.ID, tAsst("msg_a2", 21, 22, tText("the next answer")))
+
+	poll := getTurns(t, d, ref, cursor, 0)
+	if got, want := texts(poll), []string{"the next answer"}; !eqStrings(got, want) {
+		t.Fatalf("a poller past a remnant = %q, want %q", got, want)
+	}
+
+	replaceMessage(t, f, ref.ID, "msg_a1", tAsst("msg_a1", 11, 15, tText("finished late")))
+
+	if got := texts(getTurns(t, d, ref, poll.Next, 0)); len(got) != 0 {
+		t.Fatalf("the poller that had passed it was told %q; it never sees it", got)
+	}
+	if got, want := texts(getTurns(t, d, ref, "", 0)), []string{"finished late", "the next answer"}; !eqStrings(got, want) {
+		t.Fatalf("a tail read = %q, want both turns, oldest first: %q", got, want)
+	}
+}
+
+// A second service started on a state directory a first one is running on stops the
+// first one's servers before it does anything else: the start-up sweep takes every
+// server under the session root for one an earlier service left behind. That is true
+// after a crash and false against a live service, and nothing tells them apart
+// (muster #507, found while looking into #506). Written as the behaviour #507 asks
+// for and skipped until it is true; it was run once without the skip to confirm that
+// it fails today.
+func TestStartupSweep_ASecondDriverOnTheSameStateDirectoryLeavesTheFirstsServersRunning(t *testing.T) {
+	t.Skip("muster #507: not yet true — the second start sweeps the first one's servers")
+	state := t.TempDir()
+	d1 := newStateDriver(t, state)
+	t.Cleanup(func() { _ = d1.Shutdown() })
+	sess := mustCreate(t, d1, "k1", fleet.SessionSpec{})
+	pid := inside(t, d1, sess.ID).Pid
+
+	d2 := newStateDriver(t, state)
+	t.Cleanup(func() { _ = d2.Shutdown() })
+
+	if !alive(pid) {
+		t.Fatalf("the first service's server (pid %d) was stopped by a second service starting on its state directory", pid)
+	}
+	if st, err := d1.State(context.Background(), testReq, sess.SessionRef); err != nil || st.Status == fleet.StatusDead {
+		t.Fatalf("the first service's session reads %q (err %v) after a second service started", st.Status, err)
+	}
+}
