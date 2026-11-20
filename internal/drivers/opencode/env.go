@@ -37,6 +37,9 @@ import (
 //   - DEVELOPER_DIR, on macOS and only for a sandboxed session whose host selected a
 //     developer directory the profile cannot read (muster #484): the Command Line
 //     Tools, so that the `git` shim finds a toolchain it may open.
+//   - xcrun_db, on macOS and only for a sandboxed session (muster #505): where the
+//     toolchain shim keeps its lookup cache, inside the session's own tmp. Its
+//     default is the per-user temporary directory, which the profile refuses.
 //   - OPENCODE_DISABLE_CLAUDE_CODE=1: by default opencode loads the user's
 //     Claude Code instructions and skills, which a session that asked for a
 //     clean environment did not ask for.

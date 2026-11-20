@@ -12,11 +12,12 @@ func envKey(name string) string { return name }
 
 // platformOwnedEnv is the set of variables only some platforms set themselves.
 // Here: TMPPREFIX, which zsh writes here-document temp files under, and — on
-// macOS only, where the toolchain shim reads it — DEVELOPER_DIR (muster #484).
+// macOS only, where the toolchain shim reads them — DEVELOPER_DIR (muster #484)
+// and xcrun_db, the shim's lookup cache (muster #505).
 var platformOwnedEnv = func() []string {
 	names := []string{"TMPPREFIX"}
 	if runtime.GOOS == "darwin" {
-		names = append(names, developerDirEnv)
+		names = append(names, developerDirEnv, xcrunDBEnv)
 	}
 	return names
 }()

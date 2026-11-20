@@ -1,5 +1,7 @@
 package opencode
 
+import "path/filepath"
+
 // The toolchain a confined session's `git` needs (muster #484).
 //
 // On macOS `/usr/bin/git` is not git: it is a shim that asks the developer
@@ -17,6 +19,33 @@ package opencode
 // developerDirEnv is the variable the shim reads before it consults the
 // selection. A driver-owned name on macOS: a create may not set it.
 const developerDirEnv = "DEVELOPER_DIR"
+
+// xcrunDBEnv is the variable the toolchain shim reads for the path of its lookup
+// cache (muster #505). Its name is lower case: the library spells it that way
+// and the environment is case-sensitive. A driver-owned name on macOS: a create
+// may not set it.
+//
+// The shim keeps that cache in the per-user temporary directory the system names
+// (confstr's _CS_DARWIN_USER_TEMP_DIR), not in TMPDIR, so a confined session is
+// refused the write on every `git`, `cc` or `python3` it runs — `couldn't create
+// cache file '…/xcrun_db-…' (errno=Operation not permitted)` — and the message
+// lands in every tool output the model reads. The directory also holds other
+// processes' files, so it is not opened to the session; the variable moves the
+// cache into the session's own tmp instead. It must be absolute: the library
+// ignores a relative value and falls back to the refused directory.
+const xcrunDBEnv = "xcrun_db"
+
+// xcrunCacheEnv is the environment a session started under a sandbox profile is
+// given so the toolchain shim's cache is inside the session's own directory dir
+// (muster #505). Only macOS has the shim; an unconfined session is given none of
+// it, for the reason DEVELOPER_DIR is not given to one: nothing refuses its write,
+// and it keeps the cache the rest of the user's processes share.
+func xcrunCacheEnv(goos, dir string) map[string]string {
+	if goos != "darwin" {
+		return nil
+	}
+	return map[string]string{xcrunDBEnv: filepath.Join(dir, "tmp", "xcrun_db")}
+}
 
 // commandLineToolsDir is where the Command Line Tools package installs. It sits
 // under /Library, which the profile already reads.

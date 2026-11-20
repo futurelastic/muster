@@ -153,3 +153,49 @@ func TestScopedEnvPutsTheHereDocumentPrefixInsideTheSessionsTmp(t *testing.T) {
 		t.Errorf("TMPPREFIX = %q is not inside TMPDIR = %q", prefix, env["TMPDIR"])
 	}
 }
+
+// muster #505: the toolchain shim's lookup cache is moved inside the session by
+// a variable the driver sets. Which value, and on which platform, is pure, so it
+// is checked on every platform.
+func TestXcrunCacheEnvIsAnAbsolutePathInsideTheSessionsTmpOnMacOSOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip(macOnlyReason)
+	}
+	dir := "/var/session/abc"
+	got := xcrunCacheEnv("darwin", dir)
+	if len(got) != 1 {
+		t.Fatalf("xcrunCacheEnv(darwin) = %v, want exactly the shim's cache variable", got)
+	}
+	v := got[xcrunDBEnv]
+	// The library ignores a relative value and falls back to the directory the
+	// profile refuses, so the value must be absolute; and it must be where the
+	// session may write, which is its own tmp.
+	if v != dir+"/tmp/xcrun_db" {
+		t.Errorf("%s = %q, want the cache file inside the session's tmp %q", xcrunDBEnv, v, dir+"/tmp")
+	}
+	if xcrunDBEnv != "xcrun_db" {
+		t.Errorf("the variable is spelled %q: the library reads the lower-case name and the environment is case-sensitive", xcrunDBEnv)
+	}
+	for _, goos := range []string{"linux", "windows", "freebsd"} {
+		if got := xcrunCacheEnv(goos, dir); got != nil {
+			t.Errorf("xcrunCacheEnv(%s) = %v: only macOS has the shim", goos, got)
+		}
+	}
+}
+
+func TestTheShimsCacheVariableIsOwnedOnMacOSOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip(macOnlyReason)
+	}
+	if got, want := ownedName(xcrunDBEnv), runtime.GOOS == "darwin"; got != want {
+		t.Errorf("%s owned = %v on %s, want %v", xcrunDBEnv, got, runtime.GOOS, want)
+	}
+	if runtime.GOOS == "darwin" {
+		// A create that named it would point the cache back at the directory the
+		// profile refuses, or at a place another session reads.
+		err := checkOwnedEnv(map[string]string{xcrunDBEnv: "/somewhere/xcrun_db"})
+		if err == nil || !strings.Contains(err.Error(), xcrunDBEnv) {
+			t.Errorf("a create naming %s = %v, want a refusal that names it", xcrunDBEnv, err)
+		}
+	}
+}
