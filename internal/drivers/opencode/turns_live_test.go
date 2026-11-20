@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -297,6 +298,13 @@ func TestState_ADeadSessionSaysHowItsProcessEnded(t *testing.T) {
 	sess := mustCreate(t, d, "k1", fleet.SessionSpec{})
 	killAndWait(t, d, sess.ID)
 
+	// How a killed process reads is the platform's own: a signal where there are
+	// signals, an exit status where a job object ends it.
+	how := "signal: killed"
+	if runtime.GOOS == "windows" {
+		how = "exit status "
+	}
+
 	st, err := d.State(context.Background(), testReq, sess.SessionRef)
 	if err != nil {
 		t.Fatal(err)
@@ -306,14 +314,14 @@ func TestState_ADeadSessionSaysHowItsProcessEnded(t *testing.T) {
 		if s.Status != fleet.StatusDead {
 			t.Errorf("%s: status = %q, want dead", where, s.Status)
 		}
-		for _, want := range []string{"the session's runtime process has exited", "signal: killed", ", up ", "after the session last did anything"} {
+		for _, want := range []string{"the session's runtime process has exited", how, ", up ", "after the session last did anything"} {
 			if !strings.Contains(s.Evidence, want) {
 				t.Errorf("%s: evidence %q lacks %q", where, s.Evidence, want)
 			}
 		}
 	}
 	waitForLine(t, sink, "exited and this driver had not stopped it")
-	if !sink.has("session "+sess.ID) || !sink.has("signal: killed") {
+	if !sink.has("session "+sess.ID) || !sink.has(how) {
 		t.Errorf("the line does not name the session and how it ended: %q", sink.lines)
 	}
 }
