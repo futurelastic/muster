@@ -140,15 +140,18 @@ func TestAcquire_AStaleRecordIsNotAnOwner(t *testing.T) {
 	}
 	defer l.Release()
 
-	raw, err := os.ReadFile(filepath.Join(dir, lockName))
+	// Read the way a refused start does, through a handle of its own and from where
+	// the record begins: on Windows the locked byte cannot be read by another handle.
+	f, err := os.Open(filepath.Join(dir, lockName))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := readHolder(l.f); got == nil || got.Pid != os.Getpid() {
-		t.Errorf("the record still names someone else: %q", raw)
+	defer f.Close()
+	if got := readHolder(f); got == nil || got.Pid != os.Getpid() {
+		t.Errorf("the record still names someone else: %+v", got)
 	}
-	if len(raw) >= len(stale) {
-		t.Errorf("the record was not cut to the new content: %d bytes, was %d", len(raw), len(stale))
+	if fi, err := f.Stat(); err != nil || fi.Size() >= int64(len(stale)) {
+		t.Errorf("the record was not cut to the new content: %v bytes, was %d (%v)", fi.Size(), len(stale), err)
 	}
 }
 
