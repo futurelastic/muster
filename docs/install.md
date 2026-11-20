@@ -317,6 +317,19 @@ order of this page and the order of its output are the same.
    every restart (defect D5). The service creates it if it is missing; creating
    it yourself lets you choose the owner. Row: `state.dir`.
 
+   **One service owns a state directory at a time.** The service takes it before
+   it reads or changes anything in it, by holding a lock on `muster.lock` there
+   for as long as it runs; the system drops the lock when the process ends,
+   however it ends, so a crash leaves nothing to clean up. A second service
+   started on the same directory stops at once with `state directory … is in use
+   by a running muster service (pid …)` and touches nothing — in particular it
+   does not stop the first one's runtime servers, which a start-up sweep of
+   servers an earlier service left behind would otherwise do. Give each service
+   its own `FLEET_STATE_DIR`. A service manager that restarts the unit retries a
+   refused start by its own schedule, so a restart that overlaps the old process
+   is only late, not lost. The file `muster.lock` itself is only the owner saying
+   who it is: leave it in place, and do not read a left-over one as an owner.
+
 5. **Write a principal table** — `FLEET_CONFIG`. A fleet runs in table mode:
    one identity per caller, per-verb grants, per-peer credentials. Start from
    an empty document and enrol with the command that validates grants before

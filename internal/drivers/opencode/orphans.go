@@ -91,6 +91,11 @@ func (d *Driver) say(format string, args ...any) {
 // still-running server are resumed (or listed unknown) after, and the processes
 // whose record is gone are exactly the ones nothing else would ever stop.
 //
+// That premise is the caller's to keep, not this function's to check: the service
+// owns its state directory (state.Acquire, muster #507) before it builds the
+// driver, so no other live service has a server under this root, and a second
+// start that cannot own the directory never gets here.
+//
 // It runs only with a state directory. Without one the root is the OS temp
 // directory, which is not this driver's alone, and nothing outlives the service
 // by design. A process it cannot read, one that is not its own group's leader,

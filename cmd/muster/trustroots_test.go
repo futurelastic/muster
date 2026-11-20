@@ -239,12 +239,14 @@ func TestDoctorReportsATrustRootThatIsHome(t *testing.T) {
 // and returns its stderr lines up to the point the service is serving or has
 // stopped, together with whether the process had exited by then. The wiring in
 // main.go is what this covers: the helpers above judge a root, and nothing else
-// asserts that the start calls them.
+// asserts that the start calls them. Each start has a state directory of its own: a
+// service owns its directory until it ends (#507), and the child of the start before
+// is only killed when the test is over.
 func serveTrustLines(t *testing.T, home, roots string) (lines []string, exited bool) {
 	t.Helper()
 	cmd, sc := startServe(t,
 		"HOME="+home, "FLEET_TRUST_ROOTS="+roots, "FLEET_RUNTIME=tmux", "FLEET_TOKEN=secret",
-		"FLEET_MACHINE=testbox", "FLEET_ADDR=127.0.0.1:0", "FLEET_STATE_DIR="+filepath.Join(home, "state"),
+		"FLEET_MACHINE=testbox", "FLEET_ADDR=127.0.0.1:0", "FLEET_STATE_DIR="+filepath.Join(t.TempDir(), "state"),
 		"FLEET_RUNTIME_OPENCODE=", "FLEET_CONFIG=", "FLEET_PEERS=", "FLEET_LOG_FILE=", "FLEET_TRUST_STATE_PATH=")
 	done := make(chan struct{})
 	out := make(chan string)

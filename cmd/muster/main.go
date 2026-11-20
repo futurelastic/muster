@@ -514,6 +514,21 @@ func main() {
 		log.Fatalf("muster: %v", err)
 	}
 
+	// One service per state directory (muster #507), taken before anything reads
+	// or changes what is in it. A runtime driver's start-up sweep stops every
+	// server it finds under the directory as an earlier service's leftover, which
+	// is right after a crash and wrong when the earlier service is alive, and it
+	// runs while the driver is built, before this process has bound an address.
+	// A second start therefore stops here, saying who has the directory, instead
+	// of finding that out by stopping the first one's servers. Held until this
+	// process ends, however it ends (the system drops it); a clean stop gives it
+	// back when main returns, after the last write.
+	stateLock, err := state.Acquire(os.Getenv("FLEET_STATE_DIR"))
+	if err != nil {
+		log.Fatalf("muster: %v", err)
+	}
+	defer stateLock.Release()
+
 	// Durable state (§7.3, §10, §12). Nil is a valid configuration; a
 	// configured directory that cannot be opened is not, because starting
 	// anyway would silently be the in-memory behaviour this replaces.
