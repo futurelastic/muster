@@ -348,9 +348,20 @@ func runFakeOpencode(args []string) {
 		case path == "/session/"+sessionID+"/abort":
 			writeJSON(w, true)
 		case path == "/session/"+sessionID+"/message":
-			msgs := []wireMessage{}
+			// Passed through as the planted file holds them, parts and all, and cut to
+			// the TAIL by `limit` the way the real server answers (muster #506): a
+			// stand-in that decoded into wireMessage dropped every part's text, so
+			// nothing could read a turn through a real process, and one that ignored
+			// `limit` answered a one-message read with the head of the record.
+			msgs := []json.RawMessage{}
 			if raw, err := os.ReadFile(os.Getenv("XDG_DATA_HOME") + "/fake-messages.json"); err == nil {
 				_ = json.Unmarshal(raw, &msgs)
+			}
+			if raw := r.URL.Query().Get("limit"); raw != "" {
+				var limit int
+				if _, err := fmt.Sscanf(raw, "%d", &limit); err == nil && limit >= 0 && limit < len(msgs) {
+					msgs = msgs[len(msgs)-limit:]
+				}
 			}
 			writeJSON(w, msgs)
 		case path == "/event" && r.Method == http.MethodGet:

@@ -110,6 +110,95 @@ func TestTurns_ServesThePageAndForwardsTheQuery(t *testing.T) {
 	}
 }
 
+// muster #506: a poller that holds a cursor is told only what is new, so a run of
+// turns=0 on its reads is the right answer — and the line used to read the same as
+// a tail read that came back empty. The line now says which kind of read it was,
+// and whether a cursor read moved, without ever carrying the cursor.
+func TestTurns_TheAuditLineSaysWhetherTheReadWasFromACursor(t *testing.T) {
+	const since = "SINCE-CURSOR-VALUE"
+	const next = "NEXT-CURSOR-VALUE"
+	at := time.Date(2026, 10, 4, 10, 0, 4, 0, time.UTC)
+	cases := []struct {
+		name    string
+		query   string
+		page    fleet.TurnsPage
+		want    []string
+		wantNot []string
+	}{
+		{
+			name:    "a tail read that came back empty",
+			query:   "",
+			page:    fleet.TurnsPage{Next: next},
+			want:    []string{"turns=0", " from=tail ", " took="},
+			wantNot: []string{"moved="},
+		},
+		{
+			name:  "a cursor read that found nothing new",
+			query: "?since=" + since,
+			page:  fleet.TurnsPage{Next: since},
+			want:  []string{"turns=0", " from=cursor moved=0 took="},
+		},
+		{
+			name:  "a cursor read that advanced without a turn",
+			query: "?since=" + since,
+			page:  fleet.TurnsPage{Next: next},
+			want:  []string{"turns=0", " from=cursor moved=1 took="},
+		},
+		{
+			name:  "a cursor read that returned a turn",
+			query: "?since=" + since,
+			page:  fleet.TurnsPage{Turns: []fleet.Turn{{At: at, Text: "words the line must not carry"}}, Next: next},
+			want:  []string{"turns=1", " from=cursor moved=1 took="},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv := turnsServer(t, &turnsDriver{Driver: stub.Driver{DeadlineMs: 500}, page: c.page}, Config{})
+			logs := captureLog(t)
+			if resp, body := getTurns(t, srv, testToken, c.query); resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d: %s", resp.StatusCode, body)
+			}
+			line := logs.String()
+			for _, w := range c.want {
+				if !strings.Contains(line, w) {
+					t.Errorf("audit line lacks %q:\n%s", w, line)
+				}
+			}
+			for _, w := range c.wantNot {
+				if strings.Contains(line, w) {
+					t.Errorf("audit line has %q:\n%s", w, line)
+				}
+			}
+			// The cursor is the caller's to hold, and its content is the session's: the
+			// line says only whether it moved.
+			for _, secret := range []string{since, next, "words the line must not carry"} {
+				if strings.Contains(line, secret) {
+					t.Errorf("the audit line carries %q:\n%s", secret, line)
+				}
+			}
+		})
+	}
+}
+
+// The fields are appended after status=, so anything that read the line up to
+// there still reads it, and a refusal's kind and reason still come last.
+func TestTurns_TheNewAuditFieldsComeAfterStatusAndBeforeARefusalsReason(t *testing.T) {
+	d := &turnsDriver{Driver: stub.Driver{DeadlineMs: 500}, err: &fleet.Error{Kind: fleet.ErrorConflict, Message: "turns: this session is parked", Machine: "owner"}}
+	srv := turnsServer(t, d, Config{})
+	logs := captureLog(t)
+	if resp, _ := getTurns(t, srv, testToken, "?since=c"); resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", resp.StatusCode)
+	}
+	line := logs.String()
+	idx := func(sub string) int { return strings.Index(line, sub) }
+	if !(idx(" status=409") >= 0 && idx(" status=409") < idx(" from=cursor") && idx(" from=cursor") < idx(" took=") && idx(" took=") < idx(" kind=conflict")) {
+		t.Errorf("fields out of order: %s", line)
+	}
+	if strings.Contains(line, "moved=") {
+		t.Errorf("a refused read has no moved=: it was never answered: %s", line)
+	}
+}
+
 func TestTurns_NothingNewIsAnEmptyListNotNull(t *testing.T) {
 	d := &turnsDriver{Driver: stub.Driver{DeadlineMs: 500}, page: fleet.TurnsPage{Next: "cur"}}
 	_, body := getTurns(t, turnsServer(t, d, Config{}), testToken, "")

@@ -260,6 +260,16 @@ func timingOf(r *http.Request) (*requestTiming, bool) {
 	return t, ok
 }
 
+// tookSuffix is ` took=<ms>` for a request withTiming started the clock on, and
+// nothing for one it did not: a line that carried a zero would read as a measured
+// instant.
+func tookSuffix(r *http.Request) string {
+	if t, ok := timingOf(r); ok {
+		return " took=" + strconv.FormatInt(driver.Millis(time.Since(t.start)), 10)
+	}
+	return ""
+}
+
 // logMutation writes the audit line of a mutation that ran.
 //
 // # took= and phase.* (muster #450)

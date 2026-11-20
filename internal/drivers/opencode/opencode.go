@@ -891,7 +891,31 @@ func (d *Driver) trackServer(s *server) bool {
 		d.sayStrays("still running when their session ended", s.strayStopped, s.strayLeft)
 	}
 	d.live[s] = struct{}{}
+	if s.proc != nil && s.proc.done != nil {
+		go d.watchExit(s)
+	}
 	return true
+}
+
+// watchExit leaves one line when a server's process ends and this driver did not
+// stop it (muster #506). A session is reported dead on that fact, and a client
+// that closes it on `dead` takes the session's directory with it; before this,
+// nothing recorded how the process ended, so "was it a real exit?" could not be
+// answered afterwards. A close, a park and the service stopping all set
+// server.stopping before they signal the process, so none of them reads as a death.
+// It names the session ids, the exit code or signal and the durations — never what
+// the process wrote.
+func (d *Driver) watchExit(s *server) {
+	<-s.proc.done
+	if s.stopping.Load() {
+		return
+	}
+	detail := d.exitDetail(s)
+	for id, info := range d.knownIDs() {
+		if info.srv == s {
+			d.say("opencode: the runtime process behind session %s exited and this driver had not stopped it (%s)", id, detail)
+		}
+	}
 }
 
 var _ driver.Driver = (*Driver)(nil)

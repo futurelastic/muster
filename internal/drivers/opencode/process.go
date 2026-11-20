@@ -121,6 +121,26 @@ type process struct {
 	// is a channel read anywhere (readiness, State, stop) and Wait is called
 	// exactly once.
 	done chan struct{}
+	// started is when the process was started, and exitedAt when Wait returned. The
+	// second is written before done is closed, so a reader that has seen done closed
+	// reads it without a lock; before that it is not to be read (muster #506).
+	started, exitedAt time.Time
+}
+
+// exitSummary says how the process ended and how long it ran, for the one place a
+// reader asks why a session is dead (muster #506): the runtime's own exit code or
+// the signal that ended it, and the time it was up. Only codes and durations, never
+// what the process wrote. Valid once exited() is true; "" before, or with no Wait
+// to read.
+func (p *process) exitSummary() string {
+	if p == nil || p.cmd == nil || p.cmd.ProcessState == nil || !p.exited() {
+		return ""
+	}
+	how := p.cmd.ProcessState.String() // "exit status 1", "signal: killed"
+	if !p.started.IsZero() && !p.exitedAt.IsZero() {
+		how += ", up " + p.exitedAt.Sub(p.started).Round(time.Second).String()
+	}
+	return how
 }
 
 // exited reports whether the child has already been reaped.
@@ -226,6 +246,12 @@ type server struct {
 
 	once       sync.Once
 	onTeardown func(*server)
+
+	// stopping is set the moment this driver starts stopping the server — a close,
+	// a park, the service shutting down — before the process is signalled. A process
+	// that exits with it still unset exited on its own (muster #506): the one fact
+	// that tells a death from a stop without a reader having to guess from timing.
+	stopping atomic.Bool
 }
 
 // teardown stops the server's process group and removes its session-scoped
@@ -241,6 +267,7 @@ func (s *server) stop(keepPersisted bool) {
 	if s == nil {
 		return
 	}
+	s.stopping.Store(true)
 	s.once.Do(func() {
 		s.proc.stop()
 		// The group stop does not reach a process that left the group (muster #405);
@@ -476,9 +503,10 @@ func spawnServer(bin, workdir, username string, env []string, launch launchFunc,
 	if err != nil {
 		return nil, nil, spawnFailed(spawnStepAttach, fmt.Errorf("opencode: starting server: %w", err))
 	}
-	p := &process{cmd: cmd, group: group, done: make(chan struct{})}
+	p := &process{cmd: cmd, group: group, done: make(chan struct{}), started: time.Now()}
 	go func() {
 		_ = cmd.Wait()
+		p.exitedAt = time.Now()
 		close(p.done)
 	}()
 

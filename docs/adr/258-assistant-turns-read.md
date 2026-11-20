@@ -70,7 +70,11 @@ a peer like every other session route.
   not collapsed.
 - **Audit.** Every read leaves a line — caller, session, number of turns,
   outcome — whatever the outcome, and never the text. A refused caller leaves a
-  `DENIED` line.
+  `DENIED` line. *Added 2026-11-20 (#506):* the line also says whether the read
+  carried a cursor (`from=tail|cursor`), whether an answered cursor read moved
+  (`moved=0|1`) and how long it took (`took=<ms>`). `turns=` counts the page, and a
+  cursor read is told only what is new, so a long run of `turns=0` reads could not be
+  told from turns that had gone missing; the cursor itself is still never logged.
 
 It is unrelated to `SessionState.turns`, the liveness count of #111: that field
 is a number the runtime wrote about itself, and this route is text the agent

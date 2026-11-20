@@ -776,8 +776,7 @@ func (d *Driver) readState(ctx context.Context, ref fleet.SessionRef) (fleet.Ses
 	case phaseParked:
 		return d.parkedState(known), nil
 	case phaseExited:
-		return fleet.InferredState(fleet.StatusDead,
-			"the session's runtime process has exited", nil), nil
+		return fleet.InferredState(fleet.StatusDead, d.exitedEvidence(srv), nil), nil
 	}
 	ctx, cancel := d.bounded(ctx)
 	defer cancel()
@@ -855,6 +854,36 @@ func (d *Driver) readState(ctx context.Context, ref fleet.SessionRef) (fleet.Ses
 		st.LastTurn = known.interrupted // muster #282
 	}
 	return st, nil
+}
+
+// exitedEvidence is what a session whose runtime process has exited is told, and
+// what a client that closes it on `dead` is left holding when the session's
+// directory is gone (muster #506): the fact, then how the process ended — the exit
+// code or the signal — how long it had been up and how long after the session
+// last did anything it went. Codes and durations only, never what it wrote.
+func (d *Driver) exitedEvidence(srv *server) string {
+	const fact = "the session's runtime process has exited"
+	if detail := d.exitDetail(srv); detail != "" {
+		return fact + " (" + detail + ")"
+	}
+	return fact
+}
+
+// exitDetail is exitedEvidence's parenthesis: "" until the process has exited.
+func (d *Driver) exitDetail(srv *server) string {
+	if srv == nil {
+		return ""
+	}
+	detail := srv.proc.exitSummary()
+	if detail == "" {
+		return ""
+	}
+	if last := srv.lastActive.Load(); last > 0 {
+		if quiet := srv.proc.exitedAt.Sub(time.Unix(0, last)); quiet >= 0 {
+			detail += ", " + quiet.Round(time.Second).String() + " after the session last did anything"
+		}
+	}
+	return detail
 }
 
 // copyTurnEnd returns a copy a caller may hold: a kept one is shared.
@@ -1241,7 +1270,7 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 		case d.phaseOf(info.srv) == phaseParked:
 			st = d.parkedState(info) // muster #421: idle, from memory; a listing never starts a process
 		case d.phaseOf(info.srv) == phaseExited:
-			st = fleet.InferredState(fleet.StatusDead, "the session's runtime process has exited", nil)
+			st = fleet.InferredState(fleet.StatusDead, d.exitedEvidence(info.srv), nil)
 		case r.err != nil:
 			// Session identity is known (this driver's own cache); which of
 			// them are busy is not. Degraded, not unreachable — this machine
