@@ -1172,6 +1172,13 @@ the first three keep working for one release and are **deprecated** in its favou
 `isolateConfiguration` is the spelling a relay forwards.
 `unattended` needs `send` as well as `create`; the rest needs only `create`.
 
+**A toolchain under the home** (#501): a `readPaths` grant makes a directory readable, not found. On the
+opencode runtime a directory the posture grants reaches the session's `PATH` through the create's own
+`env.PATH`, which **replaces** the built `PATH` (keep the system directories the session still needs),
+and a tool that looks for its data under `HOME` needs that told too: a rustup-managed `cargo` ran
+inside a sandboxed session with `readPaths` of `<home>/.cargo/bin` and `<home>/.rustup`, and an `env`
+of `PATH` and `RUSTUP_HOME=<home>/.rustup`. Without `RUSTUP_HOME` it looks in the session's own home.
+
 **A package-cache seed** (#432) is how many sessions share one warm cache without sharing a writable
 one. Every isolated session has its own `HOME`, so each downloads and unpacks its own language caches;
 on one machine 45 sessions held 23.35 GiB in their `home/` and `xdg/` directories, mostly Go modules,
