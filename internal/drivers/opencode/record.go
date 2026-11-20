@@ -170,6 +170,16 @@ func (d *Driver) openRead(ctx context.Context, req fleet.Request, ref fleet.Sess
 		return nil, time.Time{}, d.parkedError(what)
 	}
 	srv := known.srv
+	if d.phaseOf(srv) == phaseExited {
+		// muster #506: the fact State reports, not "no answer from the server": a
+		// caller told the server is unreachable retries, and one told the session is
+		// empty reads a zero — neither is what happened.
+		return nil, time.Time{}, &fleet.Error{
+			Kind:    fleet.ErrorConflict,
+			Message: what + ": " + d.exitedEvidence(srv) + ", so there is nothing to read it from",
+			Machine: d.machine,
+		}
+	}
 
 	var sess wireSession
 	if err := d.do(ctx, srv, "GET", "/session/"+url.PathEscape(ref.ID), nil, &sess); err != nil {

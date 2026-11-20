@@ -54,15 +54,38 @@ func handleTurns(svc *Service) http.HandlerFunc {
 		id := r.PathValue("id")
 		query := r.URL.Query()
 
+		// The clock starts when the read is admitted, so the audit line can say
+		// how long it took (muster #506).
+		r = withTiming(r)
+
 		// Every read of session content leaves a line — the caller, the session
-		// and how many turns left — whatever the outcome. Never the text.
+		// and how many turns left — whatever the outcome. Never the text, and never
+		// the cursor: only whether the caller sent one, and whether it moved.
+		//
+		// # from= and moved= (muster #506)
+		//
+		// turns= is the size of THIS page, not of the conversation. A caller that
+		// polls with `since` is told only what is new, so a run of turns=0 on cursor
+		// reads is the right answer for a session that has said nothing since — and
+		// the line used to read exactly like a tail read that came back empty, the
+		// regression it is not. from=cursor|tail says which kind of read this was;
+		// moved=1|0 (cursor reads that were answered) says whether next differs from
+		// the since the caller sent, so a poll that found nothing new is told from
+		// one that advanced even when it carried no turn (a message that was passed
+		// over moves it). Both are booleans about the cursor, never its value.
+		from := "tail"
+		if query.Get("since") != "" {
+			from = "cursor"
+		}
+		moved := ""
 		aw := &auditWriter{ResponseWriter: w}
 		w = aw
 		count := 0
 		pending := 0
 		defer func() {
-			log.Printf("audit: actor=%q verb=read-turns route=%s target=%s/%s turns=%d pending=%d outcome=%s status=%d%s",
-				callerFrom(r).Principal, routeOf(r), machine, id, count, pending, outcomeOf(aw.status), aw.status, aw.refusal.fields())
+			log.Printf("audit: actor=%q verb=read-turns route=%s target=%s/%s turns=%d pending=%d outcome=%s status=%d from=%s%s%s%s",
+				callerFrom(r).Principal, routeOf(r), machine, id, count, pending, outcomeOf(aw.status), aw.status,
+				from, moved, tookSuffix(r), aw.refusal.fields())
 		}()
 
 		q := fleet.TurnsQuery{Since: query.Get("since")}
@@ -118,6 +141,12 @@ func handleTurns(svc *Service) http.HandlerFunc {
 		count = len(page.Turns)
 		if page.Pending != nil {
 			pending = 1
+		}
+		if q.Since != "" {
+			moved = " moved=0"
+			if page.Next != q.Since {
+				moved = " moved=1"
+			}
 		}
 		writeJSON(w, http.StatusOK, page)
 	}

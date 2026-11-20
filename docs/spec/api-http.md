@@ -1818,8 +1818,12 @@ until `next` stops moving. A turn longer than 64 KiB is cut and carries
 on `DELETE`; omitted, the read has the weaker id-only guarantee. **Authority:**
 with a principal table the `send` grant — the one `input` and `respond` require —
 and not `relay` for a peer target; the owning machine applies its own table to the
-asserted caller. Each read is audited (caller, session, number of turns, outcome),
-never the text. Unrelated to `SessionState.turns`, the liveness count.
+asserted caller. Each read is audited (caller, session, number of turns **in that
+page**, outcome, whether the read carried a cursor — `from=tail|cursor` — and, for a
+cursor read that was answered, whether the cursor moved — `moved=0|1` — and `took`
+in milliseconds), never the text and never the cursor. A read with `since` returns
+only what is new, so `turns=0` on a cursor read means nothing new, not turns lost.
+Unrelated to `SessionState.turns`, the liveness count.
 
 ```
 GET /v1/machines/{machine}/sessions/{id}/record?since=&limit=&startedAt=&runtime=

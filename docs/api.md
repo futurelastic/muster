@@ -706,10 +706,14 @@ finished is `state`. Not to be confused with `state.turns`, the liveness count.
 | `startedAt` | The `startedAt` you saw. A recycled id is `409` instead of someone else's words. |
 
 `next` is returned even when `turns` is empty, so a poller always has a place to
-resume; call again until it stops moving. A cursor from another conversation (a
+resume; call again until it stops moving. A poller that keeps `next` and sends it as
+`since` sees each turn once and `turns: []` in between — that is the right answer,
+not a loss; the same session read without `since` returns its turns again. A cursor from another conversation (a
 `/clear`, a relaunch) is `409` — read without `since` to start again. So is a read of a
 **parked** `opencode` session (#421): its message says it is parked, and reading
 without `since` does not help — send it input to start it again, then read. A session
+whose `opencode` process has exited (it reads `dead`, and its `evidence` says how it
+ended and for how long it was up) is `409` with that fact, never an empty page. A session
 whose conversation record cannot be identified yet is `404` with `retryable`,
 which is not the same as an agent that has said nothing (`200`, `turns: []`).
 A turn over 64 KiB is cut and marked `"truncated": true`.
@@ -759,8 +763,15 @@ the agent's own prose drawn directly above the dialog, read off the screen.
 
 Needs the `send` grant under a principal table (the one `input` and `respond`
 use; there is no separate grant) and not `relay` for a peer target. Each read is
-audited — who, which session, how many turns, whether a `pending` entry left
-(`pending=0|1`), never the text. **The text is
+audited — who, which session, how many turns *that page* held (`turns=`), whether
+a `pending` entry left (`pending=0|1`), whether the read carried a cursor
+(`from=tail|cursor`), for one that did and was answered whether the cursor moved
+(`moved=0|1`), and how long it took (`took=<ms>`) — never the text and never the
+cursor. `turns=` is the size of the page, not of the conversation: a poller that
+sends `since` is told only what is new, so a run of `turns=0 from=cursor moved=0`
+lines is a session that has said nothing since, not turns that were lost. A read
+without `since` (`from=tail`) returns the most recent turns the record holds again,
+however often it is made. **The text is
 whatever the agent chose to write**: an agent that echoes a secret into its own
 prose has put it where this route can return it. Reason it is allowed, and what
 it costs: `docs/adr/258-assistant-turns-read.md`.

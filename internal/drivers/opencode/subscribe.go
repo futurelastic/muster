@@ -868,7 +868,7 @@ func (d *Driver) announceProcessGone(srv *server) {
 			Machine: d.machine,
 			Kind:    fleet.EventSessionClosed,
 			Payload: fleet.SessionStatePayload{Ref: ref, State: fleet.InferredState(fleet.StatusDead,
-				"the session's runtime process has exited", nil), FinalUsage: d.finalOfLive(id, cred)},
+				d.exitedEvidence(srv), nil), FinalUsage: d.finalOfLive(id, cred)},
 		})
 	}
 }
