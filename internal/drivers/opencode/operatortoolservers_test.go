@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -31,9 +33,38 @@ const localServer = `{"type":"local","command":["/usr/local/bin/cards","--stdio"
 const remoteServer = `{"type":"remote","url":"https://tools.example/mcp",
   "headers":{"Authorization":"Bearer {env:ISSUES_TOKEN}","X-Key":"{env:ISSUES_KEY}"},"timeout":5000}`
 
+// posixPath is a JSON string that is a POSIX-looking absolute path. A setting in these
+// tests names paths that way for readability; where the host's own rule says such a
+// path is not absolute (Windows: no drive), portable puts a path that is, in its place.
+var posixPath = regexp.MustCompile(`"(/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*)"`)
+
+func portable(setting string) string {
+	if runtime.GOOS != "windows" {
+		return setting
+	}
+	return posixPath.ReplaceAllStringFunc(setting, func(m string) string {
+		return jsonString(portablePath(strings.Trim(m, `"`)))
+	})
+}
+
+// portablePath is p as an absolute path by the host's own rule.
+func portablePath(p string) string {
+	if runtime.GOOS != "windows" {
+		return p
+	}
+	return filepath.Join(os.TempDir(), filepath.FromSlash(p))
+}
+
+// jsonString is s as a JSON string literal, so a Windows path's backslashes survive
+// being written into a setting.
+func jsonString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
 func mustParseToolServers(t *testing.T, body string) OperatorToolServers {
 	t.Helper()
-	got, err := ParseOperatorToolServers(json.RawMessage(body))
+	got, err := ParseOperatorToolServers(json.RawMessage(portable(body)))
 	if err != nil {
 		t.Fatalf("ParseOperatorToolServers: %v", err)
 	}
@@ -46,7 +77,7 @@ func TestOperatorToolServers_TheSettingIsParsedAsWritten(t *testing.T) {
 		t.Fatalf("servers = %d, want 2", got.Len())
 	}
 	cards, issues := got.servers[0], got.servers[1] // sorted by name
-	if cards.name != "cards" || !cards.local || cards.command[1] != "--stdio" || cards.cwd != "/var/lib/cards" || cards.timeoutMs != 10000 {
+	if cards.name != "cards" || !cards.local || cards.command[1] != "--stdio" || cards.cwd != portablePath("/var/lib/cards") || cards.timeoutMs != 10000 {
 		t.Errorf("cards = %+v", cards)
 	}
 	if !reflect.DeepEqual(cards.creds, []string{"CARDS_KEY"}) {
@@ -123,7 +154,7 @@ func TestOperatorToolServers_ASettingThatCannotBeUsedIsRefusedWithTheReason(t *t
 		{"a bad permission mode", `{"cards":{"type":"local","command":["/bin/x"],"appliesTo":{"permissionModes":["plan"]}}}`, `not "default" or "bypass"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := ParseOperatorToolServers(json.RawMessage(tc.setting))
+			_, err := ParseOperatorToolServers(json.RawMessage(portable(tc.setting)))
 			if err == nil {
 				t.Fatal("ParseOperatorToolServers succeeded; want a refusal")
 			}
@@ -190,7 +221,7 @@ func TestOperatorToolServers_WhatReachesTheSessionIsReSerialisedAndCarriesNothin
 		t.Fatal(err)
 	}
 	cards, issues := out["cards"], out["issues"]
-	if cards["type"] != "local" || cards["enabled"] != true || cards["cwd"] != "/var/lib/cards" || cards["timeout"] != float64(10000) {
+	if cards["type"] != "local" || cards["enabled"] != true || cards["cwd"] != portablePath("/var/lib/cards") || cards["timeout"] != float64(10000) {
 		t.Errorf("cards = %v", cards)
 	}
 	if env, _ := cards["environment"].(map[string]any); env["CARDS_KEY"] != "{env:CARDS_KEY}" {
@@ -290,9 +321,10 @@ func settingFor(command string, extra string) string {
 
 func TestOperatorToolServers_ASessionGetsTheServersWhoseSelectorMatches(t *testing.T) {
 	exe := executable(t)
-	d := bareDriver(mustParseToolServers(t, `{"everyone":{"type":"local","command":["`+exe+`"]},
-		"reviewers":{"type":"local","command":["`+exe+`"],"appliesTo":{"agents":["reviewer"]}},
-		"bypassers":{"type":"local","command":["`+exe+`"],"appliesTo":{"permissionModes":["bypass"]}}}`))
+	x := jsonString(exe)
+	d := bareDriver(mustParseToolServers(t, `{"everyone":{"type":"local","command":[`+x+`]},
+		"reviewers":{"type":"local","command":[`+x+`],"appliesTo":{"agents":["reviewer"]}},
+		"bypassers":{"type":"local","command":[`+x+`],"appliesTo":{"permissionModes":["bypass"]}}}`))
 	names := func(spec fleet.SessionSpec) []string {
 		cfg, err := d.operatorToolServersFor(spec, map[string]string{})
 		if err != nil {
@@ -325,7 +357,7 @@ func TestOperatorToolServers_AServerThatCannotBeGivenToTheSessionRefusesTheStart
 	if err := os.WriteFile(notExecutable, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	withCred := `{"cards":{"type":"local","command":["` + exe + `"],"environment":{"CARDS_KEY":"{env:CARDS_KEY}"}}}`
+	withCred := `{"cards":{"type":"local","command":[` + jsonString(exe) + `],"environment":{"CARDS_KEY":"{env:CARDS_KEY}"}}}`
 	for _, tc := range []struct {
 		name    string
 		setting string
@@ -434,7 +466,7 @@ func TestOperatorToolServers_AnIsolatedSessionIsGivenTheServerAndTheRuntimeConne
 	if err := os.WriteFile(key, []byte("from-the-machine"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	setting := `{"cards":{"type":"local","command":["` + exe + `"],"environment":{"CARDS_KEY":"{env:CARDS_KEY}"}}}`
+	setting := `{"cards":{"type":"local","command":[` + jsonString(exe) + `],"environment":{"CARDS_KEY":"{env:CARDS_KEY}"}}}`
 	d, _ := toolServerDriver(t, setting,
 		WithSessionEnv([]sessionenv.Entry{{Name: "CARDS_KEY", FromFile: key, Required: true}}))
 
@@ -473,7 +505,7 @@ func TestOperatorToolServers_AMachineWithNoneIsUnchanged(t *testing.T) {
 
 func TestOperatorToolServers_ASessionThatNoSelectorMatchesGetsNoMcpEntry(t *testing.T) {
 	skipOnWindows(t, "starts the stand-in runtime as a real child process")
-	d, _ := toolServerDriver(t, `{"cards":{"type":"local","command":["`+executable(t)+`"],"appliesTo":{"agents":["reviewer"]}}}`)
+	d, _ := toolServerDriver(t, `{"cards":{"type":"local","command":[`+jsonString(executable(t))+`],"appliesTo":{"agents":["reviewer"]}}}`)
 	sess := mustCreate(t, d, "k1", fleet.SessionSpec{Prompt: "go"})
 	if _, ok := sessionConfigOf(t, d, sess.ID)["mcp"]; ok {
 		t.Error("a session no selector matches got an mcp entry")
@@ -487,7 +519,7 @@ func TestOperatorToolServers_AServerTheRuntimeDoesNotConnectRefusesTheCreateAndS
 	skipOnWindows(t, "starts the stand-in runtime as a real child process")
 	for _, status := range []string{"failed", "needs_auth", "disabled"} {
 		t.Run(status, func(t *testing.T) {
-			d, root := toolServerDriver(t, `{"cards":{"type":"local","command":["`+executable(t)+`"]}}`)
+			d, root := toolServerDriver(t, `{"cards":{"type":"local","command":[`+jsonString(executable(t))+`]}}`)
 			cwd := t.TempDir()
 			if err := os.WriteFile(filepath.Join(cwd, ".fake-mcp-status.json"), []byte(`{"cards":"`+status+`"}`), 0o600); err != nil {
 				t.Fatal(err)
@@ -538,7 +570,7 @@ func TestOperatorToolServers_ARelaunchGetsTheServersAsTheyAreThenAndIsRefusedWhe
 	skipOnWindows(t, "starts the stand-in runtime as a real child process")
 	exe := executable(t)
 	state := t.TempDir()
-	setting := mustParseToolServers(t, `{"cards":{"type":"local","command":["`+exe+`"]}}`)
+	setting := mustParseToolServers(t, `{"cards":{"type":"local","command":[`+jsonString(exe)+`]}}`)
 	d1 := newStateDriver(t, state, WithOperatorToolServers(setting))
 	cwd := t.TempDir()
 	sess := mustCreate(t, d1, "k1", fleet.SessionSpec{Prompt: "go", Cwd: fleet.AbsolutePath(cwd)})
