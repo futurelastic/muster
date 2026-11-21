@@ -432,6 +432,22 @@ an `unavailable` row, every peer's row) and **absent never means none held**; `s
 `source` are open sets, so treat a state you do not know as not usable. `grants` stays as
 it is. See `docs/spec/api-http.md`.
 
+**`sandboxPolicy` says which of the operator's sandbox rules reach the runtime** (#438): a list of
+`{mode, appliesTo?, readPaths, writePaths, network, enforceable}`, one per rule of the machine's
+`createPolicy` that sets a `sandbox` and whose scope names this runtime or none, **in the order they
+are tried** (the first that matches a create decides). `mode` is `default` (given to a create that names
+no `sandbox`, which may keep its own) or `required` (every create runs under this profile or a narrower one);
+treat a mode you do not know as `required`. `appliesTo` is `{agents?, markers?}` and is absent for a rule
+that applies to every create on the runtime; whether one applies to a given create is that create's agent
+(by `agent`, or an `agentSpec`'s name) and marker. `readPaths` and `writePaths` are the grants in
+addition to the working directory and the session's own directory, `network` is `open` or `closed`, and
+`enforceable` says whether **this runtime can enforce the profile now**: a `required` rule that is not is
+a create refused `501` `unsupported` (`reason: "sandbox-required"`), and a `default` that is not is not
+applied. The key is absent where no rule reaches the runtime (and on a build that predates it), which
+means a create is confined only when it asks to be; a peer's row carries what that peer reports, and an
+`unavailable` row has none. It is the operator's declaration, so it is restart-only: the list does not
+change while the service runs. See `docs/install.md`, *What a create may be given*.
+
 **Link and unlink a runtime's credentials** (#498) over `/v1/runtimes/{runtime}/credentials/{provider}/…`,
 behind the **`credentials`** grant, which nothing implies (not `read`, not the legacy
 all-verbs flags, not what `muster service install` enrols, and a signed machine list that
@@ -1229,6 +1245,17 @@ A runtime that cannot enforce all of it has no `sandbox` entry in `GET /v1/runti
 actually in force. Needs only `create`. Two things are yours: seed the repository's trunk
 reference before the session starts, and treat the working directory as untrusted afterwards — run
 git on it only inside the same profile. See session-abstraction.md §2.1.
+
+**A machine may make `sandbox` the default, or require it** (muster #438). A client that omits
+`sandbox` is not necessarily unconfined: the operator's `createPolicy` (docs/install.md) may give a
+create in scope a profile of its own, or hold every create in scope to one. Under a **required** policy
+a `sandbox` of your own may narrow the machine's profile (a network that is closed where it is open, a
+path inside a granted one, fewer paths; a `network` you leave out is the machine's) and never widen it: a wider one is `400` with
+`reason: "sandbox-required"`, naming the grant and what would be accepted. A runtime that cannot enforce a
+required profile answers `501` `unsupported` with the same reason, and never starts the session weaker.
+Read what applies before you create: the `sandboxPolicy` list on each row of `GET /v1/runtimes`
+(below) says, per runtime, which rules reach it, in the order they are tried, and whether the runtime can
+enforce each now. `state.sandbox` still reports the profile actually in force, whoever chose it.
 
 *The mechanism is named in the capability* (`sandbox.mechanism`): `macos-sandbox-exec` on macOS,
 and `linux-landlock-seccomp` on Linux (muster #439, [ADR 439](adr/439-the-linux-sandbox-is-landlock-and-seccomp-launched-by-the-service-binary.md)).

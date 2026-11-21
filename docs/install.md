@@ -948,25 +948,40 @@ that. So the operator chooses, in the file `FLEET_CONFIG` names:
 
 ### What a create may be given: `createPolicy`
 
-A client that sends a portable agent definition (`agentSpec`, `docs/api.md`) says how much the
-session may do unattended in its `access`: `ask`, `allow` (unconfined) or `sandboxed`. The client
-cannot know what **this host** can enforce, so the operator decides, in the file `FLEET_CONFIG`
-names, with a list of rules:
+A create is judged on a machine by what **that machine** can enforce, which the client cannot know,
+so the operator decides, in the file `FLEET_CONFIG` names, with a list of rules. A rule sets one or
+both of two keys: an `access` for a portable agent definition, and a `sandbox` for the create.
 
 ```json
 {
   "createPolicy": [
     { "access": "sandboxed", "appliesTo": { "agents": ["untrusted-reviewer"] } },
-    { "access": "allow",     "appliesTo": { "runtimes": ["opencode"], "agents": ["researcher"] } }
+    { "access": "allow",     "appliesTo": { "runtimes": ["opencode"], "agents": ["researcher"] } },
+    { "appliesTo": { "agents": ["untrusted-reviewer"] },
+      "sandbox": { "mode": "required", "writePaths": ["/srv/work"], "network": "closed" } },
+    { "sandbox": { "mode": "default", "readPaths": ["/srv/shared"] } }
   ]
 }
 ```
 
-- **A rule names an `access` and an optional `appliesTo`** with `runtimes`, `agents` and `markers`,
-  the same shape and the same matching as a `sessionEnv` entry's; `agents` also matches an
-  `agentSpec`'s name. **The first rule whose scope matches a create decides**, in file order. A rule
-  written after one that already matches everything it could is refused at start, naming it, as is a
-  misspelt runtime id or an `access` that is not one of the three.
+- **`appliesTo` is optional**, with `runtimes`, `agents` and `markers`: the same shape and the same
+  matching as a `sessionEnv` entry's, and `agents` also matches an `agentSpec`'s name. **For each key,
+  the first rule that sets it and whose scope matches a create decides**, in file order. The keys are
+  decided on their own: the `access` rule that matched says nothing about the sandbox, so a later rule
+  that sets one still reaches the same create. A rule written after one that already decides every create
+  it could match is refused at start, naming it (and which key), as is a rule that sets nothing, a
+  misspelt runtime id, an `access` that is not one of the three or a `sandbox` that is not well-formed.
+- **It is read at start**, like `sessionEnv` and `providerCredentials`, so it is **restart-only**: a live
+  edit is refused as needing a restart. `muster doctor` shows a rule that cannot be one (`config.load`)
+  and, for the sandbox, whether this host can enforce it (`sandbox.policy`, below).
+- **It applies at the create.** A session already running, and one a restart brings back, keeps the
+  profile it was created with.
+
+#### `access`: how much a portable agent definition may do unattended
+
+A client that sends a portable agent definition (`agentSpec`, `docs/api.md`) says how much the
+session may do unattended in its `access`: `ask`, `allow` (unconfined) or `sandboxed`.
+
 - **The operator's value wins over the create's**, in both directions: it raises `access` on a host that
   cannot enforce a sandbox (`allow` for one named agent, where the alternative is a session that cannot
   be made safe) and it confines an agent a client asked to leave open. The create's own `posture`,
@@ -983,10 +998,46 @@ names, with a list of rules:
   at the create and again at every relaunch, so a rule that has since been withdrawn does not leave a
   parked session coming back unconfined. The terminal runtime has no such rule: `allow` is the
   `send`-gated bypass it has always had.
-- **It is read at start**, like `sessionEnv` and `providerCredentials`: a live edit is refused as
-  needing a restart. `muster doctor` (`config.load`) shows a rule that cannot be one.
-- **The sandbox default of a per-machine create (#438) belongs here too**, as another key on the same
-  rule, so an operator learns one shape; nothing in this key anticipates its spelling.
+
+#### `sandbox`: a default or a requirement for the sessions a machine starts
+
+The `sandbox` profile of a create (`docs/api.md`) is opt-in per create, and a client that never sends it
+gets unconfined sessions even where the runtime offers a working sandbox. A `sandbox` rule key makes it
+the machine's own decision:
+
+```json
+{ "sandbox": { "mode": "required", "readPaths": ["/srv/data"], "writePaths": ["/srv/work"], "network": "closed" } }
+```
+
+- **`mode`** is required and is `default` or `required`. **`readPaths`**, **`writePaths`** and
+  **`network`** (`open`, the default, or `closed`) are the grants the profile carries **in addition to**
+  what every profile has: the session's working directory and its own private directory. They are judged
+  like a create's own `sandbox` (absolute, clean paths; no shared temporary directory; no root). A package
+  cache is not a policy grant (the key is refused); it is asked for per create.
+- **`default`**: a create that names no `sandbox` (and no `posture` that confines) gets this profile. A
+  create that names its own keeps it, wider or narrower — a default is what a caller who did not ask is
+  given, not a limit on one who did.
+- **`required`**: every create in scope runs under this profile or a narrower one. A create that names
+  none gets it. A create that names its own is accepted **only if it grants nothing the profile does not**:
+  its network is no more open (one that names no `network` is given the profile's, not read as `open`), every writable path lies inside a writable path of the profile, and every
+  readable path inside a readable or writable one (a `shared` package cache is a write, a `private` one a
+  read of its seed). Anything wider is `400` with `reason: "sandbox-required"`, naming the grant and the
+  paths the machine would accept. A `posture` that confines is the create's own sandbox and is judged the
+  same way; an agent definition's `knowledge.home` is a path grant like any other, so under `required` it
+  must lie inside the profile. Containment is on the path as written: a symbolic link inside a granted
+  directory is not followed, so keep a directory you grant free of links that leave it.
+- **A runtime that cannot enforce a `required` profile refuses the create** `501` `unsupported`, with
+  `reason: "sandbox-required"`, and never starts the session weaker or unconfined. That includes a runtime
+  with no sandbox on this host (`sandboxUnavailable` in `GET /v1/runtimes` says why), the terminal runtime
+  with `FLEET_TMUX_SANDBOX=off`, and a `closed` network on a mechanism that cannot close it. A `default` that
+  the runtime cannot enforce is **not applied** instead: a create that asked for nothing is not refused for
+  lacking one, and runs as it would have. Write `required` where you want the refusal.
+- **A relayed create** is not judged here: the machine that runs the session applies its own policy.
+- **It is reported** on `GET /v1/runtimes`, as `sandboxPolicy` on each runtime row it reaches (every rule
+  whose scope names the runtime or none, in the order they are tried, with whether the runtime can enforce
+  it now), and by `muster doctor` as `sandbox.policy`: `pass` when every enabled runtime a rule reaches can
+  enforce it, `warn` when only a `default` cannot be applied somewhere, `fail` when a `required` one cannot
+  (every create in its scope is then refused). The startup log line names each rule.
 
 ### Models a client may offer for a create
 
@@ -1123,7 +1174,10 @@ It reads the host check the capability reads, so the two cannot disagree, and it
 
 On macOS the facts are whether `/usr/bin/sandbox-exec` is present and whether a profile was applied
 to a throwaway process, which is what finds a service that itself runs inside a sandbox. On Linux the
-self-test starts a child, so `--skip=sandbox.host` skips the row and does not run it.
+self-test starts a child, so `--skip=sandbox.host` skips the row and does not run it. The row
+`sandbox.policy` (muster #438) judges the operator's sandbox rules against that same report and
+`FLEET_TMUX_SANDBOX`; it measures the host only when a rule exists, and it shares the one measurement
+with `sandbox.host` (see *What a create may be given*).
 
 What a session on Linux gets that a macOS one does not, and the reverse: it cannot create a unix
 socket at all (a pre-connected pair still works), `closed` means no outbound connection even to

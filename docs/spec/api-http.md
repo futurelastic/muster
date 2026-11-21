@@ -48,7 +48,7 @@ served, and the federated ones have been exercised peer to peer.
 | `unauthorized` | 401 / 403 | Caller not permitted for this verb on this machine; or a principal pinned to this machine that named another (`reason: "local-only"`, §5) — no grant would help |
 | `not_found` | 404 | The machine answered, and there is no such session |
 | `conflict` | 409 | Idempotency key reused with a different body; a replayed key whose session has since ended (`reason: "replay-of-ended-session"`, §3.3); or a destructive request whose `startedAt` disagrees with the live session (§5.4) — the request is well formed, the caller's belief is stale |
-| `unsupported` | 501 | Driver lacks the capability (§4.3 of the model) — for a portable agent definition, `reason: "agent-spec-unsupported"`; or a runtime this machine's operator enabled has no working driver and no retry under way (`reason: "runtime-unavailable"`, §3.1); or, on macOS, a create that would start the terminal runtime's session server from a context other than `Background` (`reason: "unsafe_server_context"`, `retryable: false`, §3.1); or a create whose `posture` the resolved runtime cannot enforce (`reason: "posture-unenforceable"`, `retryable: false`, §3.2); or the record route on a machine whose operator refused it (`reason: "record-off"`, §3.2) — no grant would help; or a create whose runtime could not be started because its executable (or the sandbox launcher, or the directory it starts in) is missing or may not be run on this machine (`retryable: false`, §3.3) — nothing in the request was wrong, and it stays so until the machine is put right |
+| `unsupported` | 501 | Driver lacks the capability (§4.3 of the model) — for a portable agent definition, `reason: "agent-spec-unsupported"`; or a runtime this machine's operator enabled has no working driver and no retry under way (`reason: "runtime-unavailable"`, §3.1); or, on macOS, a create that would start the terminal runtime's session server from a context other than `Background` (`reason: "unsafe_server_context"`, `retryable: false`, §3.1); or a create whose `posture` the resolved runtime cannot enforce (`reason: "posture-unenforceable"`, `retryable: false`, §3.2); or a create on a machine whose operator REQUIRES a sandbox the resolved runtime cannot enforce (`reason: "sandbox-required"`, `retryable: false`, §3.2); or the record route on a machine whose operator refused it (`reason: "record-off"`, §3.2) — no grant would help; or a create whose runtime could not be started because its executable (or the sandbox launcher, or the directory it starts in) is missing or may not be run on this machine (`retryable: false`, §3.3) — nothing in the request was wrong, and it stays so until the machine is put right |
 | `unreachable` | 504 | **The machine did not answer.** Nothing is known. Also a call that would change one of this machine's own sessions, made while it is still reconciling what it found at start (`reason: "reconciling"`, `retryable: true`, with `Retry-After`; reads are answered); a runtime that is enabled and still being retried (`reason: "runtime-unavailable"`, `retryable: true`, §3.1); and a call that ran out of time — the request's deadline, a step's own budget (the message names it, §3.3), or a caller that hung up — with `retryable: true`, **never `invalid`**: running out of time refuses nothing the caller asked for. Likewise a runtime that **failed** on this machine without refusing anything: one that exited before it answered on every start attempt, that answered a request with a 5xx, or that could not be started at all for want of a process, memory, descriptor, port or sandbox prefix — `retryable: true`, never `invalid` (the machine could not do it now; a client that treats a 400 as final stops asking). The message names the status, the attempts or the step that failed, and never the runtime's own text, its path, a directory or an address |
 
 **`not_found` and `unreachable` must never be conflated.** One means the fleet
@@ -81,6 +81,11 @@ unless a case documents one. Two cases do today:
 - `posture-unenforceable` on an `unsupported` (muster #344) — a `create` whose
   `posture` the runtime it resolved cannot enforce; `message` names what is
   missing. `retryable: false`; see §3.2.
+- `sandbox-required` on an `unsupported` or an `invalid` (muster #438) — a `create` on
+  a machine whose operator requires a sandbox (`createPolicy`, docs/install.md): the
+  `unsupported` is a runtime that cannot enforce the required profile, the `invalid` a
+  create whose own `sandbox` (or confining `posture`) grants more than the profile does.
+  `retryable: false`; `message` names the grant and what would be accepted. See §3.2.
 - `not-revivable` on a `conflict` (muster #427) — a `revive` of a session that is
   not one a revive can bring back: it is running, or it is `unknown` for a cause
   the environment has nothing to do with, or the runtime no longer holds it.
@@ -222,7 +227,13 @@ GET /v1/runtimes
                      "credentials": [ { "provider": "openai",      ← which provider credentials this machine can give a
                                         "kind": "api-key",            session (#497); absent when the runtime cannot say,
                                         "source": "operator-env",     this machine's own rows only
-                                        "state": "usable" } ] },
+                                        "state": "usable" } ],
+                     "sandboxPolicy": [ { "mode": "required",   ← the operator's sandbox rules that reach this
+                                          "appliesTo": { "agents": ["…"] },   runtime, in the order tried (#438);
+                                          "readPaths": ["/abs"],              absent when none; appliesTo
+                                          "writePaths": ["/abs"],             absent for a rule on every create
+                                          "network": "closed",
+                                          "enforceable": true } ] },
                    { "machine": "...", "runtime": "...",         ← enabled, no working driver
                      "status": "unavailable",
                      "cause": "probe-timeout",
@@ -1667,6 +1678,22 @@ that runs the session applies its own operator policy to `access` (`createPolicy
 wins) and lowers it onto `permissionMode` and an unattended `posture` — `allow` and `sandboxed` need the
 `send` grant whoever chose them — so a host that cannot enforce the result refuses with the reason
 that field already gives (`posture-unenforceable`) and never weakens it.
+
+**A machine's operator may give `sandbox` a default or require it** (muster #438). The `createPolicy` of
+the machine's configuration (docs/install.md) may carry a `sandbox` rule — `mode` `default` or `required`,
+the grants it adds (`readPaths`, `writePaths`, `network`) and a scope shaped like a `sessionEnv` entry's —
+and it is applied to a create this machine serves, **after** `posture` is lowered, so a sandbox a posture
+asked for is the create's own. A create that names no sandbox gets the matching rule's profile. Under
+`default` a create's own sandbox stands, wider or narrower. Under `required` it is accepted only when it
+grants nothing the profile does not: a network that is no more open (a create that names none is given the profile's), every writable path inside a writable
+path of the profile, every readable path inside a readable or writable one, a `shared` package cache counting
+as a write and a `private` one as a read; the comparison is on the paths as written. A wider one is
+refused `invalid` with `reason: "sandbox-required"`. A runtime that cannot enforce a `required` profile (no
+mechanism, or one that cannot close the network) refuses the create `unsupported` with the same reason before
+anything is started, and a `default` it cannot enforce is not applied. Each runtime row of `GET /v1/runtimes`
+reports the rules that reach it (`sandboxPolicy`, §3.1). A create relayed to a peer is not judged here:
+the machine that runs the session applies its own policy. The policy is read at start; changing it needs
+a restart.
 
 **`permissionMode` requests the permission posture the session starts in** (muster #329).
 The create set is `default`, `acceptEdits`, `plan`, `auto` and `bypass` — the five modes

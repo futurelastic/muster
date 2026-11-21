@@ -177,6 +177,16 @@ sandboxed agent on a runtime that cannot confine is `posture-unenforceable`) and
 agent by name; the operator's value wins over the create's, and a value neither can honour refuses
 the create with the reason.
 
+**A machine may make a sandbox the default, or require one** (muster #438). The operator's `createPolicy`
+(docs/install.md) may carry a `sandbox` rule for a runtime, agent or marker: a profile given to a create that
+names none (`default`), or one every create is held to (`required`). The same rule as everywhere in this
+section holds: a `required` profile a runtime cannot enforce refuses the create `unsupported` and is never
+started weaker, and a create's own profile is accepted under it only when it grants nothing the required one
+does not — it may narrow, never widen, which is a profile comparison and so is defined by the grants
+(§2.1's `readPaths`, `writePaths`, `network`) and not by the mechanism. A `default` that cannot be
+enforced is not applied, because a create that asked for nothing is not refused for lacking it. The policy
+is a statement about THIS machine's sessions: a create relayed to a peer is judged by the peer's.
+
 **`isolateEnvironment` is a requirement, not a hint** (muster #280). It asks that the
 session's process carry ONLY a built environment — a small documented base, this machine's
 `sessionEnv` entries that apply (#94), and the create's own `env` — and nothing inherited from the
