@@ -2724,6 +2724,10 @@ table above, **absent meaning "as its runtime says"**.
   a remote driver always implements it as a relay, and a driver with no state directory implements
   it where nothing is ever left to revive. It reports what the **runtime's driver** can do for a
   session it holds a record of; a peer's value passes through the relay unchanged.
+- **`supportsAgentSpec`**: see §2.1 `agentSpec`. Declared yes: the driver translates a portable agent
+  definition into its runtime's own form for one session, and a create carrying one is not refused for
+  want of it. Declared no: every such create is refused `unsupported`, reason `agent-spec-unsupported`,
+  and the client falls back to `agent` by name. Absent is not declared, which is not "cannot" (muster #509).
 
 **`deliversToInbox` answers "is the inbox path even wired here", never "will
 this call use it"** (muster #119, #122). Send's own per-target capability

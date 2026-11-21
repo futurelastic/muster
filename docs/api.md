@@ -506,6 +506,12 @@ answered, not that the peer cannot.
 | `revives` | `true` (muster #427): `POST …/revive` can bring back a session a restart left `unknown` for want of its caller's environment (a given session can still be `409` `not-revivable`) | `false`: every call is `501` |
 | `permissionModeChange` | `{"live": true, "via": "keys"}`: a running session's mode changes through `POST …/keys` `BTab`, read back in `state.permissionMode` | `{"live": false}`: the mode is fixed at create; choose it from `createPermissionModes` |
 
+**`supportsAgentSpec`** (#509) is declared the same way: `true` means the runtime translates a
+portable agent definition (`agentSpec`, create above), `false` means every create carrying one is `501`
+with `reason: "agent-spec-unsupported"`, and absent means not declared (an older peer, or one not
+reached). Both local runtimes declare `true` where they can (the terminal runtime needs a state
+directory and its default command builder; opencode not in shared mode).
+
 The terminal runtime, with its record root configured, declares all four yes
 (`respond` lists every kind and `unclassified: true`; `permissionModeChange` is
 `keys`). `opencode` declares `readsTurns`, `readsRecord` and `reportsConversation` yes, `respond`
@@ -998,7 +1004,7 @@ carries `Cache-Control: no-store`.
 
 ```json
 {
-  "runtime": "", "cwd": "/abs/path", "agent": "", "model": "", "effort": "",
+  "runtime": "", "cwd": "/abs/path", "agent": "", "agentSpec": null, "model": "", "effort": "",
   "name": "", "prompt": "", "contextRef": "/abs/path", "marker": "",
   "remoteControl": true, "trustCwd": false, "env": {}, "isolateEnvironment": false, "isolateConfiguration": false, "sandbox": null,
   "resume": "", "conversationId": "", "permissionMode": "", "consents": [],
@@ -1104,6 +1110,65 @@ without `:`, values up to 128 bytes. Opaque to the service: it stores them and
 filters on them, and never interprets them. Over the bounds is a `400` naming
 the limit. Sending them needs only `create`. Relayed to a peer that predates
 labels, the create is refused `unsupported` before anything is started there.
+
+**`agentSpec`** (#509) sends an agent's whole definition with the create, where `agent` names one
+the runtime must already know. Each runtime translates it into its own form **for that session
+only**; nothing is written into any account's or project's configuration, so there is no copy to
+keep in step. A client that keeps one definition per persona sends it as it is, whichever runtime
+and model the person picks:
+
+```json
+"agentSpec": {
+  "name": "researcher",
+  "description": "finds things out",
+  "prompt": "You are a researcher. …",
+  "instructions": ["…shared team rules, in order…"],
+  "knowledge": { "index": "/abs/memory/MEMORY.md", "home": "/abs/memory", "write": false },
+  "model": "provider/model-id",
+  "access": "ask"
+}
+```
+
+- **`name`** is what the session reports as its `agent`; it need not exist anywhere beforehand.
+  Lower-case letters, digits and hyphens, at most 64. The runtime's own agent names (opencode's
+  `build`, `plan`, …) and a name this machine's operator agents already define are refused, rather than
+  merged over.
+- **`prompt` and `instructions`** reach the runtime as the agent's system prompt and instruction
+  layers, in that order. Never on a command line, and for opencode never inside its configuration
+  either (its configuration expands `{file:…}` and `{env:…}` in a string; the text is written to
+  owner-only files the configuration points at, and is not expanded). At most 64 KiB each, 32
+  instructions, 256 KiB in all.
+- **`knowledge`** is the agent's memory home, as absolute paths **you** choose; the service assumes no
+  layout. `index` must be a file inside `home`. The index is **read live from the file at every
+  create** (and every opencode relaunch), up to 256 KiB, never a copy kept across sessions; the agent is
+  told the home path and given the index as it stood then, and a running session keeps what it started
+  with. A file that cannot be used refuses the create, with the reason and never the content.
+  The home is granted to the session under any sandbox or posture: readable, and writable when `write`
+  is `true`. Naming a home is the same trust as `sandbox.readPaths`, `sandbox.writePaths` and
+  `contextRef`.
+- **`model`** is a hint like `model`, checked where the runtime checks models; send one of the two.
+- **`access`** is how much the session may do unattended: `ask` (the runtime's ordinary posture),
+  `allow` (acts without asking, **unconfined**) or `sandboxed` (acts without asking, inside the
+  operating-system sandbox). `allow` and `sandboxed` need `send` on top of `create`. They are lowered
+  onto fields this API already has (`permissionMode` and an unattended `posture`), so a host that cannot
+  enforce one **refuses** it (`sandboxed` on a runtime that cannot confine is `501`
+  `posture-unenforceable`) and never weakens it. opencode runs `allow` unconfined only where the
+  operator's policy says so (below); ask for `sandboxed` there.
+- **A per-machine operator policy may set or raise `access`** for an agent by name
+  (`createPolicy`, docs/install.md), for instance `allow` on a host with no enforceable sandbox. The
+  operator's value wins over yours, `GET …/sessions/{id}` shows what was applied
+  (`state.permissionMode`, `sandbox`), and a value neither of you can honour refuses the create with the
+  reason. A rule is keyed on a name the client chose, so the session it grants still needs `send`.
+
+`agent` and `agentSpec` together are `400`; so are `agentSpec.model` with `model`, and
+`agentSpec.access` with `permissionMode`, `posture` or `sandbox` (one question, two answers; send the
+definition's `access` or the fields, not both). `isolateEnvironment` and `isolateConfiguration` go
+alongside. **A runtime that does not translate a definition answers `501` with
+`reason: "agent-spec-unsupported"`** — `capabilities.supportsAgentSpec` in `/v1/runtimes` says so before
+you ask: **fall back to `agent` by name** on a declared `false`, or on that reason. Absent is *not
+declared*, never "cannot". Across a peer, the definition travels untouched and the machine that runs
+the session applies its own policy; a peer that predates the field is never sent one. A `resume` does
+not carry the definition forward: send it again.
 
 **`isolateEnvironment`** (#280) requires that the session carry only a built
 environment — a small documented base, this machine's `sessionEnv`, and your `env` — and

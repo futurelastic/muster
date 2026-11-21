@@ -623,7 +623,7 @@ to it.
   the start applies, the service keeps the last good table, logs the reason, and
   records it for `muster doctor` (row `config.reload`: `warn`, with the reason).
   Fix the file and the next check applies it.
-- Only the two tables move. `trustRoots`, `defaultRuntime`, `sessionEnv`, `providerCredentials`,
+- Only the two tables move. `trustRoots`, `defaultRuntime`, `sessionEnv`, `providerCredentials`, `createPolicy`,
   `opencode` (which file holds [the machine's opencode agents](#agents-every-opencode-session-on-this-machine-receives), and which files are
   [its instruction files](#instruction-files-every-opencode-session-on-this-machine-receives)),
   `models` ([the model lists a client may offer](#models-a-client-may-offer-for-a-create)),
@@ -633,7 +633,7 @@ to it.
   principals and peers included — is applied until the service restarts. The
   refusal also says whether the restart it points to would work: it runs the same
   file checks as `muster doctor`'s `config.load` row and as the start itself (the
-  principal table, trust roots, `sessionEnv`, `providerCredentials`, `opencode.agents`, `opencode.instructions`, `models`, a `defaultRuntime` the machine does
+  principal table, trust roots, `sessionEnv`, `providerCredentials`, `createPolicy`, `opencode.agents`, `opencode.instructions`, `models`, a `defaultRuntime` the machine does
   not run, `maxInputBytes`, the retention days, a `machineList` in mode `only`
   that does not verify, the peer list), and ends either "the file passes start-up
   validation" or "a restart would fail: <the start-up error>". Read that before
@@ -945,6 +945,48 @@ that. So the operator chooses, in the file `FLEET_CONFIG` names:
   without one the routes answer 501. `docs/api.md` and `docs/spec/api-http.md` §3.1.3.
 - The declaration is read at start and changing it needs a restart, like `sessionEnv`;
   a reload that changes it is refused whole.
+
+### What a create may be given: `createPolicy`
+
+A client that sends a portable agent definition (`agentSpec`, `docs/api.md`) says how much the
+session may do unattended in its `access`: `ask`, `allow` (unconfined) or `sandboxed`. The client
+cannot know what **this host** can enforce, so the operator decides, in the file `FLEET_CONFIG`
+names, with a list of rules:
+
+```json
+{
+  "createPolicy": [
+    { "access": "sandboxed", "appliesTo": { "agents": ["untrusted-reviewer"] } },
+    { "access": "allow",     "appliesTo": { "runtimes": ["opencode"], "agents": ["researcher"] } }
+  ]
+}
+```
+
+- **A rule names an `access` and an optional `appliesTo`** with `runtimes`, `agents` and `markers`,
+  the same shape and the same matching as a `sessionEnv` entry's; `agents` also matches an
+  `agentSpec`'s name. **The first rule whose scope matches a create decides**, in file order. A rule
+  written after one that already matches everything it could is refused at start, naming it, as is a
+  misspelt runtime id or an `access` that is not one of the three.
+- **The operator's value wins over the create's**, in both directions: it raises `access` on a host that
+  cannot enforce a sandbox (`allow` for one named agent, where the alternative is a session that cannot
+  be made safe) and it confines an agent a client asked to leave open. The create's own `posture`,
+  `sandbox` and `permissionMode` cannot stand beside a rule that matches (`400`, naming the policy):
+  quietly dropping a stricter request for a looser value would be a downgrade nobody chose.
+- **A value this host cannot honour refuses the create with the reason**, and is never weakened:
+  `sandboxed` on a runtime that cannot confine is `501` `posture-unenforceable`.
+- **It does not skip the grant.** A session that acts without asking (`allow` or `sandboxed`) needs
+  `send` on top of `create` whoever chose that value. A rule is keyed on an agent name the *client*
+  picks, so it must not hand a principal that may only start sessions a session that needs no permission.
+- **opencode runs `allow` with no sandbox only through this policy.** Its own rule is that it
+  pre-approves every tool only inside a boundary something other than the approval enforces, so a
+  create asking for `allow` is refused there unless a rule gives that agent `allow`; the driver checks
+  at the create and again at every relaunch, so a rule that has since been withdrawn does not leave a
+  parked session coming back unconfined. The terminal runtime has no such rule: `allow` is the
+  `send`-gated bypass it has always had.
+- **It is read at start**, like `sessionEnv` and `providerCredentials`: a live edit is refused as
+  needing a restart. `muster doctor` (`config.load`) shows a rule that cannot be one.
+- **The sandbox default of a per-machine create (#438) belongs here too**, as another key on the same
+  rule, so an operator learns one shape; nothing in this key anticipates its spelling.
 
 ### Models a client may offer for a create
 

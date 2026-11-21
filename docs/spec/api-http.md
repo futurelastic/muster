@@ -48,7 +48,7 @@ served, and the federated ones have been exercised peer to peer.
 | `unauthorized` | 401 / 403 | Caller not permitted for this verb on this machine; or a principal pinned to this machine that named another (`reason: "local-only"`, §5) — no grant would help |
 | `not_found` | 404 | The machine answered, and there is no such session |
 | `conflict` | 409 | Idempotency key reused with a different body; a replayed key whose session has since ended (`reason: "replay-of-ended-session"`, §3.3); or a destructive request whose `startedAt` disagrees with the live session (§5.4) — the request is well formed, the caller's belief is stale |
-| `unsupported` | 501 | Driver lacks the capability (§4.3 of the model); or a runtime this machine's operator enabled has no working driver and no retry under way (`reason: "runtime-unavailable"`, §3.1); or, on macOS, a create that would start the terminal runtime's session server from a context other than `Background` (`reason: "unsafe_server_context"`, `retryable: false`, §3.1); or a create whose `posture` the resolved runtime cannot enforce (`reason: "posture-unenforceable"`, `retryable: false`, §3.2); or the record route on a machine whose operator refused it (`reason: "record-off"`, §3.2) — no grant would help; or a create whose runtime could not be started because its executable (or the sandbox launcher, or the directory it starts in) is missing or may not be run on this machine (`retryable: false`, §3.3) — nothing in the request was wrong, and it stays so until the machine is put right |
+| `unsupported` | 501 | Driver lacks the capability (§4.3 of the model) — for a portable agent definition, `reason: "agent-spec-unsupported"`; or a runtime this machine's operator enabled has no working driver and no retry under way (`reason: "runtime-unavailable"`, §3.1); or, on macOS, a create that would start the terminal runtime's session server from a context other than `Background` (`reason: "unsafe_server_context"`, `retryable: false`, §3.1); or a create whose `posture` the resolved runtime cannot enforce (`reason: "posture-unenforceable"`, `retryable: false`, §3.2); or the record route on a machine whose operator refused it (`reason: "record-off"`, §3.2) — no grant would help; or a create whose runtime could not be started because its executable (or the sandbox launcher, or the directory it starts in) is missing or may not be run on this machine (`retryable: false`, §3.3) — nothing in the request was wrong, and it stays so until the machine is put right |
 | `unreachable` | 504 | **The machine did not answer.** Nothing is known. Also a call that would change one of this machine's own sessions, made while it is still reconciling what it found at start (`reason: "reconciling"`, `retryable: true`, with `Retry-After`; reads are answered); a runtime that is enabled and still being retried (`reason: "runtime-unavailable"`, `retryable: true`, §3.1); and a call that ran out of time — the request's deadline, a step's own budget (the message names it, §3.3), or a caller that hung up — with `retryable: true`, **never `invalid`**: running out of time refuses nothing the caller asked for. Likewise a runtime that **failed** on this machine without refusing anything: one that exited before it answered on every start attempt, that answered a request with a 5xx, or that could not be started at all for want of a process, memory, descriptor, port or sandbox prefix — `retryable: true`, never `invalid` (the machine could not do it now; a client that treats a 400 as final stops asking). The message names the status, the attempts or the step that failed, and never the runtime's own text, its path, a directory or an address |
 
 **`not_found` and `unreachable` must never be conflated.** One means the fleet
@@ -191,6 +191,7 @@ GET /v1/runtimes
                                        "readsTurns": true,          ← these seven are absent when the runtime
                                        "readsRecord": true,            did not declare them: NOT DECLARED,
                                        "recordFormat": 1,              never "cannot" (#379, #441, #444);
+                                       "supportsAgentSpec": true,      ← absent = NOT DECLARED too (#509)
                                        "reportsConversation": true,    recordFormat is present exactly when
                                                                        readsRecord is true
                                        "revives": true,             ← POST …/revive can bring back a session a
@@ -1311,6 +1312,9 @@ and no mainstream HTTP client defaults to protecting you from that.
 POST /v1/machines/{machine}/sessions
 Idempotency-Key: <caller-supplied, required>
 { "runtime": "...", "cwd": "/abs/path", "agent": "...", "model": "...",
+  "agentSpec": {"name": "...", "prompt": "...", "instructions": ["..."],
+                "knowledge": {"index": "/abs/m/MEMORY.md", "home": "/abs/m"},
+                "model": "...", "access": "ask"},   ← instead of `agent` (#509)
   "effort": "...", "name": "...", "marker": "...", "remoteControl": true,
   "prompt": "...", "contextRef": "/abs/path", "trustCwd": false,
   "env": {"NAME": "value"}, "isolateEnvironment": true, "isolateConfiguration": true,
@@ -1615,6 +1619,21 @@ it would make two conversations share one transcript. Unlike `resume`, a
 driver that honours it reports the id back as `conversation` on the `201`
 itself, `source: "captured"` — see the create endpoint's own note above for
 why that is the whole point of the field.
+
+**`agentSpec` carries an agent's definition where `agent` names one that must already exist** (muster
+#509; session-abstraction.md §2.1 has the shape and the limits). Each driver translates it into its
+runtime's own form for that one session; nothing is written into an account's or project's
+configuration. It is refused `invalid` together with `agent`, together with a second `model`, and with
+`permissionMode`, `posture` or `sandbox` when it names an `access`; a malformed one is `invalid` on any
+machine, naming the field. A runtime that has not declared `capabilities.supportsAgentSpec: true`
+refuses it `unsupported` with `reason: "agent-spec-unsupported"`, before any side effect, which is the
+cue to fall back to `agent` by name; a relay to a peer runtime that has not declared it is refused the
+same way before anything is sent, because a peer on an older build would drop the field and start a
+session that follows none of the definition. The definition travels to a peer untouched: the machine
+that runs the session applies its own operator policy to `access` (`createPolicy`, the operator's value
+wins) and lowers it onto `permissionMode` and an unattended `posture` — `allow` and `sandboxed` need the
+`send` grant whoever chose them — so a host that cannot enforce the result refuses with the reason
+that field already gives (`posture-unenforceable`) and never weakens it.
 
 **`permissionMode` requests the permission posture the session starts in** (muster #329).
 The create set is `default`, `acceptEdits`, `plan`, `auto` and `bypass` — the five modes

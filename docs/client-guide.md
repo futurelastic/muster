@@ -161,6 +161,12 @@ conservative floor for a peer that has not answered yet, not that peer's real
 answer. Treating `assumed` as fact is how a briefly unreachable machine becomes
 a permanently incapable one in your UI.
 
+**A client that keeps its own agent definitions reads one more: `supportsAgentSpec`** (#509). On a
+declared `true` send the definition with the create (`agentSpec`, docs/api.md) and write no agent file
+on the host; on a declared `false`, or on a `501` with `reason: "agent-spec-unsupported"`, fall back to
+naming an agent the runtime already has with `agent`. Absent is *not declared*: do not conclude the
+runtime cannot, and do not send a definition to a peer you have not read it from.
+
 **A viewer that lets a person type into a session reads four more**, and they
 behave differently from the booleans above: each is **absent when the runtime did
 not declare it**, and absent is *not* `false`. `readsTurns` (does `…/turns`
