@@ -68,6 +68,35 @@ const (
 	recreateRelaunchFailed
 )
 
+// NeedingRecreation implements driver.RecreationReporter (muster #510): how many
+// sessions the start that built this driver left listed unknown for want of their
+// callers' environment, and how many of those still are.
+//
+// left is the figure resume logged at that start and never changes. waiting is read
+// live from what the driver knows, and counts the sessions whose cause is the one a
+// revive clears: a revive takes a session out of it (revive.go sets its cause to
+// none), and so does a close (the session is forgotten). It cannot exceed left,
+// because resume is the only place that cause is set, and no session created since
+// can be in it: a create starts a server, and a session with a server is never
+// counted. A session whose relaunch failed for another reason is in neither count:
+// supplying the environment would not bring it back, and its listing carries the
+// reason.
+//
+// A count and nothing else: the figure names no session, no directory, and no
+// variable, so it is as safe on a public endpoint as the restart log line it repeats.
+func (d *Driver) NeedingRecreation() (left, waiting int) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	for _, k := range d.seen {
+		if k.recreate == recreateCallerEnv {
+			waiting++
+		}
+	}
+	return d.restartLeft, waiting
+}
+
+var _ driver.RecreationReporter = (*Driver)(nil)
+
 // Revive implements driver.Reviver.
 func (d *Driver) Revive(ctx context.Context, req fleet.Request, ref fleet.SessionRef, spec driver.ReviveSpec) (fleet.Session, error) {
 	if d.shared != nil || d.store == nil {

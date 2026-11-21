@@ -179,6 +179,26 @@ distinguishable from "we are different vintages".
 `build` fields: `known`, `revision` (a commit sha), `modified`, `time`, `go`,
 and `version`.
 
+**`needsRecreation` is what the last start left waiting for its callers** (#510). A
+restart cannot relaunch a session whose create carried caller-supplied `env`, because the
+values are never kept: the session is listed `unknown` — "needs re-creation" — until its
+caller revives it (`POST …/{id}/revive`) or closes it. The key is a map from runtime id to
+`{leftAtStart, stillWaiting}`:
+
+```json
+"needsRecreation": { "opencode": { "leftAtStart": 3, "stillWaiting": 2 } }
+```
+
+`leftAtStart` is how many sessions the start left that way, fixed until the next start;
+`stillWaiting` is how many of those still are. A revive or a close takes one out of it, so it
+falls towards `0`, and an entry at `stillWaiting: 0` stays (a monitor sees the cost was met,
+rather than the key vanishing). It is a **count only** — no ids, names or variable names; the
+listing (`status=unknown`) says which. A session that is `unknown` for another cause (its
+relaunch failed, its context file is gone) is not counted: supplying the environment would not
+bring it back. **The key is absent when the last start left nothing**, and for a runtime that
+keeps no sessions across a restart. A build that predates #510 has no key either, so absence
+means "none left" only once `build` says the service carries it.
+
 **`build.version` is the release the running code descends from** — the output
 of `git describe --tags` at the built commit, stamped at link time by
 `scripts/deploy.sh` (#161). It is what a client checks to enforce a minimum
@@ -2051,6 +2071,10 @@ each one with the values it already holds.
   nothing to do with (its relaunch failed for a reason a later start may clear, its record cannot
   be read, its context file is gone), its directory is gone, or the runtime started and no longer
   holds the session. A second revive of the same session is the first of these.
+- **What a restart left, and how much of it is still waiting, is on `GET /v1/health`** as
+  `needsRecreation` (#510): `leftAtStart` is how many sessions the start left `unknown` for want of
+  their callers' environment, and `stillWaiting` falls by one with each revive (or close). A
+  supervisor can poll it to know when it has brought them all back, without listing sessions.
 - **A lost response is read, not repeated.** If the connection dropped after you sent the revive,
   `GET` the session: `idle` with `conversation.known: true` is the success you missed, and a repeat
   would be `409 not-revivable`.

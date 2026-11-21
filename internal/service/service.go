@@ -1279,6 +1279,58 @@ func (s *Service) counterSnapshot() map[fleet.RuntimeId]map[string]int64 {
 	return out
 }
 
+// recreationHealth is one runtime's entry under `needsRecreation` on GET /v1/health
+// (muster #510): what the last start of the service cost in sessions that could not
+// be relaunched for want of their callers' environment. Two counts and nothing that
+// names a session, a directory or a variable.
+type recreationHealth struct {
+	// LeftAtStart is how many sessions the start left listed `unknown`, needing
+	// re-creation. Fixed until the next start.
+	LeftAtStart int `json:"leftAtStart"`
+	// StillWaiting is how many of those are still so: a revive or a close takes a
+	// session out of it, so it falls from LeftAtStart towards zero.
+	StillWaiting int `json:"stillWaiting"`
+}
+
+// recreationSnapshot answers #510: what each local driver's last start left needing
+// re-creation, read through driver.RecreationReporter and keyed by runtime like
+// counterSnapshot.
+//
+// A driver that does not implement the interface is left out, and so is one whose
+// last start left nothing: "nothing to count" is reported as absence, the same as a
+// machine that never used a feature, so a monitor that polls health and finds the key
+// knows something was left. It is nil, not an empty map, when no driver has anything,
+// so the key is absent from the response and a build with a runtime that never
+// restarts anything answers exactly as it did before. Zero is never reported as a
+// reading: a session revived or closed after the start leaves LeftAtStart above zero
+// and StillWaiting at zero, which is the entry a monitor wants to see go quiet.
+func (s *Service) recreationSnapshot() map[fleet.RuntimeId]recreationHealth {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out map[fleet.RuntimeId]recreationHealth
+	for rt, d := range s.local {
+		reporter, ok := d.(driver.RecreationReporter)
+		if !ok {
+			continue
+		}
+		left, waiting := reporter.NeedingRecreation()
+		if left <= 0 {
+			continue
+		}
+		if waiting < 0 {
+			waiting = 0
+		}
+		if waiting > left {
+			waiting = left
+		}
+		if out == nil {
+			out = map[fleet.RuntimeId]recreationHealth{}
+		}
+		out[rt] = recreationHealth{LeftAtStart: left, StillWaiting: waiting}
+	}
+	return out
+}
+
 // ErrAmbiguousSession documents the finding recorded in the root package's
 // doc comment: the single-session URL shape (api-http.md §3.3) carries no
 // runtime segment, but SessionRef.ID is scoped to (machine, runtime), not
