@@ -81,6 +81,10 @@ unless a case documents one. Two cases do today:
 - `posture-unenforceable` on an `unsupported` (muster #344) — a `create` whose
   `posture` the runtime it resolved cannot enforce; `message` names what is
   missing. `retryable: false`; see §3.2.
+- `not-revivable` on a `conflict` (muster #427) — a `revive` of a session that is
+  not one a revive can bring back: it is running, or it is `unknown` for a cause
+  the environment has nothing to do with, or the runtime no longer holds it.
+  `retryable: false`; `message` says which. See §3.3, `revive`.
 - `machine-list-*` on `invalid`, `unsupported`, `not_found` and `conflict`
   (muster #352) — the machine-list routes' own refusals, one reason per failed
   check (§3.1, *The machine list*). The kind says whose fault it is; the reason
@@ -184,11 +188,14 @@ GET /v1/runtimes
                                        "validatesModel": true,
                                        "remoteControl": { "toggle": true,
                                                           "off": true },
-                                       "readsTurns": true,          ← these six are absent when the runtime
+                                       "readsTurns": true,          ← these seven are absent when the runtime
                                        "readsRecord": true,            did not declare them: NOT DECLARED,
                                        "recordFormat": 1,              never "cannot" (#379, #441, #444);
                                        "reportsConversation": true,    recordFormat is present exactly when
                                                                        readsRecord is true
+                                       "revives": true,             ← POST …/revive can bring back a session a
+                                                                       restart left `unknown` (#427); absent =
+                                                                       not declared
                                        "respond": { "kinds": ["tool-permission"],
                                                     "unclassified": false },
                                        "permissionModeChange": { "live": false },
@@ -2426,9 +2433,84 @@ the original caller held `remote-control` as an assertion the owning machine
 honours only from a configured peer that itself holds `remote-control`; the
 peer's own grant never stands in for the caller's.
 
+```
+POST /v1/machines/{machine}/sessions/{id}/revive?runtime=
+{ "env": { "NAME": "value", … },
+  "contextRef": "/absolute/path"? }
+→ 200 Session                  (the same id, `state.status: idle`, `conversation.known: true`)
+→ 400 invalid if "env" is missing or empty, names a variable other than the ones the
+      session was created with, or names one the service owns or a delivery module
+      reserves; or "contextRef" is not the file the session was created with; or a
+      field this verb does not define is present
+→ 401 unauthorized without the `create` grant (and, for a session created in the
+      permission-bypass posture, without `send`)
+→ 404 not_found if the machine has no session with that id
+→ 409 conflict, reason `not-revivable`, not retryable — the session is not one a revive
+      can bring back (see below)
+→ 409 conflict if `startedAt` is supplied and is not the live session's (§5.4)
+→ 501 unsupported if the runtime does not declare `capabilities.revives`, the sandbox
+      the session was created in can no longer be enforced, or the runtime's program is
+      missing
+→ 504 unreachable (retryable) if the runtime could not be started now, or time ran out
+```
+
+**Brings a session a restart left `unknown` back, given the environment its caller
+created it with** (muster #427). A session created with caller-supplied environment is
+never relaunched by a restart: the values were never kept (no secret is ever
+persisted, muster #282), and a session relaunched with less than it was created
+with would be a different session wearing the same id. It is listed `unknown`, "needs
+re-creation", and until this verb the only thing a caller could do to it was close it,
+although its conversation was intact in the runtime's own store. The caller still has
+the values; this verb takes them again, relaunches the session's own server in its own
+directory with them, confirms the runtime finds the session **by id**, and the session
+resumes with its conversation. **Nothing is persisted**: the values reach one process's
+environment and nowhere else — not the session's record, a log line, an event, an audit
+line or an error message — so the next restart lists the session `unknown` again, and
+the session can be revived again.
+
+`env` is the same object a create takes and is **required**: a revive without it is
+refused, because that is a relaunch with less than the session had. It must name
+**exactly the variables the create named** — fewer is less environment, more is a
+different session — and is refused, naming the names and never a value, when it does
+not. The values cannot be checked and are the caller's word, as at create. Every rule a
+create applies to `env` applies: a variable the service owns, or a delivery module
+reserves, is `400`. `contextRef`, when sent, must be the file the create named; it is a
+check, not a way to change the session's context, and is refused otherwise. The
+recorded file is read again, and the revived session carries it.
+
+**What is revivable.** A session listed `unknown` with the needs-re-creation reason
+because its create carried caller-supplied environment, on a driver that declares
+`capabilities.revives`. Anything else is `409` with reason `not-revivable`, nothing
+started, and a `message` that says which: the session is running (there is nothing to
+bring back — and a client whose response to a revive was lost reads the session, where
+`idle` with `conversation.known` is the success it missed), it is `unknown` for a cause
+the environment has nothing to do with (its relaunch failed for a reason a later start
+may clear, its record cannot be read, its context file is gone), its directory is gone,
+or the runtime started and no longer holds the session. A second revive of the same
+session while the first runs, or after it, is the first of these.
+
+The session reads `idle`. One that was in the middle of a turn when the service stopped
+reads `idle` with `lastTurn.outcome: "interrupted"`, as any relaunched session does.
+
+**One session, one lifecycle.** A revive and a `close` of the same session do not
+interleave: the close waits for a revive in progress and then closes the session it
+started; a close that wins first removes the session, and the revive that was waiting
+answers `404`. A `send` to the session before the revive has finished is refused as it
+is for any `unknown` session.
+
+It needs the **`create` grant** (§5): it starts a process on this machine with
+caller-supplied environment, which is what the create grant means. A session created in
+the permission-bypass posture is started only for a caller who also holds **`send`**, the
+pairing a create asking for that posture has, so a principal that may only create cannot
+start what only a sender could have created. A call to a peer additionally needs `relay`,
+and the peer applies its own `create` and `send` to this service's credential; the
+environment is forwarded exactly as a create's is. A peer on a build without the route
+answers with its router's bare `404`; a relaying service **must** report that as
+`unsupported`, never as `not_found`.
+
 `runtime` is an **optional** query parameter on every single-session endpoint
 (`GET`, `input`, `respond`, `discard`, `rename`, `labels`, `keys`, `interrupt`,
-`DELETE`) and on `POST …/sessions` (`create`, in the JSON body as
+`revive`, `DELETE`) and on `POST …/sessions` (`create`, in the JSON body as
 `"runtime"`). A session `id` is scoped to `(machine, runtime)` — not to
 `machine` alone (session-abstraction.md §2.2) — so two runtimes on one
 machine may legally reuse an id, which this URL cannot otherwise
@@ -3606,7 +3688,7 @@ the only one, which is why the list has no `since=`.
   configuration in which authentication is off — not for loopback, not for
   development.
 - Permissions are **per verb, per machine**. `list` and `state` may be granted
-  broadly; `create`, `input`, `interrupt`, `close`, `rename`, `discard`, `keys`,
+  broadly; `create` (which also gates `revive`, muster #427), `input`, `interrupt`, `close`, `rename`, `discard`, `keys`,
   `label`, `remote-control`, `push-list`, `debug`, `record`, `credentials` and `acting-person` are granted per peer and default to denied. That default is deliberate
   and applies to a fresh deployment as much as an established one — no grant is
   implied by anything else, including a runtime advertising the capability the

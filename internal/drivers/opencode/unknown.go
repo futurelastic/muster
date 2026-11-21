@@ -58,7 +58,8 @@ import (
 // `unknown` (a restart found it and could not relaunch it) or `dead` (its server exited
 // since it was created, and nothing has closed it). The doctor cannot tell them apart
 // from a record, and the remedy is the same — its caller closes it — so the row says
-// both. What it can never be is a session that is merely idle: a session created with
+// both. (An `unknown` one has a second remedy the row does not need to name: its
+// caller can revive it by supplying the environment again, revive.go, muster #427.) What it can never be is a session that is merely idle: a session created with
 // caller-supplied environment is never parked (park.go), so a record that says so and
 // has no server is not a live session waiting for its next input. A session of the
 // second class is `unknown` in the running service, and listed so with its reason.

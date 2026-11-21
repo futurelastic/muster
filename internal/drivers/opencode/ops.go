@@ -990,8 +990,10 @@ func (d *Driver) Interrupt(ctx context.Context, req fleet.Request, ref fleet.Ses
 // every session's, and a failed read is no licence to guess about one.
 func (d *Driver) Close(ctx context.Context, req fleet.Request, ref fleet.SessionRef) (fleet.Ack, error) {
 	// muster #421: under the session's lock, so a close and a park or a start of the
-	// same session do not interleave.
-	defer d.lockSession(ref.ID)()
+	// same session do not interleave. muster #427: taken with or without an idle
+	// bound, because a revive starts a server in the session's directory and a close
+	// must not remove it from under one.
+	defer d.lockLifecycle(ref.ID)()
 	prior, seen := d.wasSeen(ref.ID)
 	if !seen {
 		return fleet.Ack{}, fmt.Errorf("%w: %q", fleet.ErrNoSuchSession, ref.ID)

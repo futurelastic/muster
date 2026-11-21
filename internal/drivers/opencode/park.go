@@ -68,8 +68,10 @@ import (
 // under that session's lock (lockSession); the sweep takes it with TryLock and
 // skips a session that is busy being written to. Lock order: the session lock
 // first, then d.mu, d.subMu and the leaf locks below it; nothing takes a session
-// lock while holding one of those. With the bound unset the lock is not taken at
-// all, so a driver without the knob behaves exactly as it did.
+// lock while holding one of those. With the bound unset the lock is not taken by
+// writes, so a driver without the knob behaves as it did — except that Close and a
+// revive (revive.go, muster #427) take it either way (lockLifecycle), the only two
+// operations whose interleaving with each other would lose a directory.
 //
 // A send that races the sweep is safe whichever wins: if the park holds the lock,
 // the send waits, finds the session parked and revives it; if the send holds it,
@@ -228,6 +230,16 @@ func (d *Driver) lockSession(id string) func() {
 	if d.idleStop <= 0 {
 		return func() {}
 	}
+	return d.lockLifecycle(id)
+}
+
+// lockLifecycle takes the session's lifecycle lock whether or not a bound is set,
+// and returns its release. It is for the two writes that change what a session IS
+// and not only whether it is running: a revive (muster #427), which gives a session
+// a server it did not have, and a close, which must not remove the directory a
+// revive is starting a server in. With a bound set it is the same mutex lockSession
+// takes, so the order of locks does not change.
+func (d *Driver) lockLifecycle(id string) func() {
 	if _, known := d.wasSeen(id); !known {
 		// Nothing to protect, and no lock to make for an id a client invented: the
 		// caller finds the session unknown and says so.

@@ -545,7 +545,9 @@ order of this page and the order of its output are the same.
      could not relaunch them — the next start that can takes the mark off), each
      with its age and the size of the directory it holds, a `warn` that removes nothing:
      closing the session is what removes its record and directory, and that stays with
-     the caller that created it; row
+     the caller that created it (a session created with caller-supplied environment can
+     instead be brought back by that caller with `POST …/revive`, which hands the
+     environment over again and keeps the conversation); row
      `runtime.opencode.providers` shows which providers, and which models of them,
      `FLEET_OPENCODE_PROVIDERS` lets a session use, and fails on an entry the service
      will refuse to start on; row `runtime.opencode.grant` reports a ChatGPT sign-in

@@ -2079,6 +2079,7 @@ close(req, ref)                -> Ack
 rename(req, ref, to)           -> RenameAck
 discard(req, ref, digest, force?) -> Ack
 keys(req, ref, key, expect)    -> DeliveryReceipt
+revive(req, ref, env, contextRef?) -> Session   (optional; DriverCapabilities.revives)
 list(req, filter?)             -> Collection<Session>
 subscribe(req, filter?)        -> EventStream
 ```
@@ -2091,6 +2092,34 @@ session is closed through the service or no longer appears in a complete, unfilt
 on a filtered or failed one (§5.7). A `Session` read from a service that stores labels always
 carries `labels`, `{}` when there are none; one read from a service that predates them carries no
 such key, and that absence is how a relaying service tells the two apart.
+
+**`revive` is the caller giving a session's environment back** (muster #427; api-http.md §3.3,
+`POST …/revive`). A session created with caller-supplied `env` is never relaunched by a restart:
+the values were never kept, and one relaunched with less would be a different session wearing the
+same id (§7.5, §12). It is listed `unknown`, "needs re-creation", with its conversation intact in
+the runtime's own store. `revive` takes the same `env` (and optionally the `contextRef`) a create
+takes, relaunches the session's own server in its own directory with it, confirms the runtime finds
+the session **by id**, and returns the session: the same id, the same `startedAt`, `idle` (with
+`lastTurn.outcome: "interrupted"` if a turn was cut short), `conversation.known: true`. It is the one
+transition out of `unknown` that a caller causes rather than a reconciliation, and it is only
+the caller's to cause, because only the caller holds the values.
+
+- **Nothing is persisted.** The values reach one process's environment and nowhere else: not the
+  record, a log, an event, an audit line or an error message. The next restart lists the session
+  `unknown` again, and it can be revived again.
+- **What is revivable is a closed question.** A session listed `unknown` for the needs-re-creation
+  reason of a create that carried `env`, and no other: not a running session, and not one that is
+  `unknown` because its relaunch failed, its record cannot be read or its context file is gone —
+  supplying the environment changes none of those. A driver refuses the rest as a conflict
+  (`not-revivable`, api-http.md §2) and starts nothing.
+- **The environment must be the one the session had.** It must name exactly the variables the create
+  named: fewer is a session relaunched with less, more is a different one. The values cannot be
+  checked and are the caller's word, as at create.
+- **It does not interleave with a close.** Both take the session's lifecycle lock, so a revive and a
+  close of one session are ordered, and a second revive finds the first's session running.
+- **A driver without the means refuses** (§5.6) — `unsupported`, `capabilities.revives` not
+  declared — rather than approximate one: a driver that keeps no record of its sessions has none to
+  relaunch.
 
 **`keys` delivers one raw key event** — `Up`/`Down`/`Left`/`Right`/`Enter`/
 `Escape`, and `BTab` (Shift+Tab, which cycles the runtime's permission mode and
@@ -2325,6 +2354,7 @@ DriverCapabilities {
   readsRecord?    : boolean   // GET …/record reads this runtime's record (§2.16, muster #441); absent = NOT DECLARED, never "cannot"; false = every call is `unsupported`; true does not say this machine serves the route — an operator's switch answers `unsupported` with reason `record-off`
   recordFormat?   : number    // the RecordPage `format` this runtime's record is read in (§2.16, muster #444); present exactly when `readsRecord` is true; absent = NOT DECLARED (an older peer, one not reached, or a runtime that cannot read a record), never a format of 0
   reportsConversation?: boolean // looks for the runtime's record of a session's conversation (`conversation`, §2.9); absent = not declared; false = an absent `conversation` will never arrive; true = the driver looks, so an absent one is "not yet" (muster #379)
+  revives?        : boolean   // POST …/revive can bring back a session a restart left `unknown` for want of its caller's environment (§3, muster #427); absent = not declared; false = every call is `unsupported`; true does not promise any one session can be revived — only one listed `unknown` for that reason, which the call says when it is not (`not-revivable`)
   respond?        : { kinds: PromptKind[], unclassified: boolean } // which prompts `respond` (§3) answers: one whose `kind` is listed, or one carrying NO kind when `unclassified` is true; absent = not declared; {kinds:[],unclassified:false} = answers none (muster #379)
   permissionModeChange?: { live: boolean, via?: string } // whether a RUNNING session's permission mode can be changed: live false = fixed at create (choose it from `createPermissionModes`), live true names the mechanism in `via` (`keys` today: one BTab press advances the mode, read back from `permissionMode`); absent = not declared (muster #379)
   deliveryModules? : DeliveryModuleStatus[]   // optional external delivery modules enabled here (§2.15); absent = none
@@ -2559,7 +2589,8 @@ leftovers the service removes by itself, and removing it is a person's decision.
 A directory that *does* have a record can still be held for good (#445). A session whose create
 carried caller-supplied environment cannot be relaunched by a restart, because the values were never
 kept; it is adopted and listed `unknown` (§7.5), with its record and its directory, until the caller that
-created it closes it — or `dead`, if its server exited since — and a caller that never comes back leaves
+created it closes it or revives it by supplying the environment again (§3, `revive`, muster #427) — or
+`dead`, if its server exited since — and a caller that never comes back leaves
 the whole runtime store and package cache behind. `muster doctor` lists such sessions that run no server in
 the `runtime.opencode.sessions` row, oldest first,
 each with its id, its age and the size of its directory, and only as a warning: it removes nothing, and
@@ -2643,6 +2674,11 @@ table above, **absent meaning "as its runtime says"**.
   opencode runtime `deliversRawKeys` is false and the mode is chosen at create from
   `createPermissionModes`. `via` is an open set; a later verb adds a member without a wire break.
 - **`reportsConversation`**: see §2.9 for what a declared-yes driver reports.
+- **`revives`** (muster #427) follows the same three-valued rule as the fields above, and is per
+  runtime. It is declared, not derived from whether the driver implements the optional interface:
+  a remote driver always implements it as a relay, and a driver with no state directory implements
+  it where nothing is ever left to revive. It reports what the **runtime's driver** can do for a
+  session it holds a record of; a peer's value passes through the relay unchanged.
 
 **`deliversToInbox` answers "is the inbox path even wired here", never "will
 this call use it"** (muster #119, #122). Send's own per-target capability
@@ -3485,6 +3521,12 @@ so the failure is reported alongside the counts rather than swallowed.
 on every event trigger; persisting each would turn a cheap enumeration into a
 write amplifier for no benefit, since what reconciliation needs — which sessions
 exist and when they were first seen — only changes when one appears or leaves.
+
+**A session listed `unknown` for want of its caller's environment is brought back by its caller,
+never by the service** (muster #427). Reconciliation holds no secret to relaunch it with and keeps
+none; the session stays listed, with its record and directory, until its caller revives it (§3) or
+closes it. Rule 4 is untouched: nothing is destroyed, and a revive that fails leaves the session
+exactly as the restart left it.
 
 See Appendix A, F30 for the ordering bug that made an earlier version report
 everything as adopted, always.

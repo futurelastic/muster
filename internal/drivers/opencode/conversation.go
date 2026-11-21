@@ -38,6 +38,14 @@ func confirmedAfterRestart(id string) *fleet.ConversationRef {
 		"captured when the session was created, and confirmed after the service restarted: the relaunched runtime answered a read by this id")
 }
 
+// confirmedAfterRevive is the answer for a session its caller brought back with
+// the environment it was created with (muster #427): the relaunched runtime
+// answered a read by this id, which is the confirmation the restart could not give.
+func confirmedAfterRevive(id string) *fleet.ConversationRef {
+	return fleet.ResolvedConversation(id, fleet.ConversationCaptured,
+		"captured when the session was created, and confirmed when its caller revived it after a restart: the relaunched runtime answered a read by this id")
+}
+
 // unconfirmed is the answer for a session whose id could not be confirmed after
 // a restart. reason is why, in the driver's own words; it is never the id.
 func unconfirmed(reason string) *fleet.ConversationRef {
