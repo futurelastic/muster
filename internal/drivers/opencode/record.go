@@ -170,6 +170,11 @@ func (d *Driver) openRead(ctx context.Context, req fleet.Request, ref fleet.Sess
 		return nil, time.Time{}, d.parkedError(what)
 	}
 	srv := known.srv
+	if d.phaseOf(srv) == phaseWedged {
+		// muster #513: its runtime failed every request and is being replaced; the
+		// history is in the store the new process will read, so the read can be repeated.
+		return nil, time.Time{}, d.wedgedError(what)
+	}
 	if d.phaseOf(srv) == phaseExited {
 		// muster #506: the fact State reports, not "no answer from the server": a
 		// caller told the server is unreachable retries, and one told the session is

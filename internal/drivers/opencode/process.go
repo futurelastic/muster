@@ -256,6 +256,15 @@ type server struct {
 	// that exits with it still unset exited on its own (muster #506): the one fact
 	// that tells a death from a stop without a reader having to guess from timing.
 	stopping atomic.Bool
+
+	// wedge is non-nil once this driver decided the server is broken and is about to
+	// replace it (muster #513; wedge.go). Like park, it is stored BEFORE the process is
+	// stopped, so whoever sees the process gone also sees why, and a stopped server
+	// never runs again. health is what that decision is made from; restarting makes
+	// sure one goroutine decides it.
+	wedge      atomic.Pointer[wedgeNote]
+	health     wedgeHealth
+	restarting atomic.Bool
 }
 
 // teardown stops the server's process group and removes its session-scoped

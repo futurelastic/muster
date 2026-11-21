@@ -422,6 +422,9 @@ type Driver struct {
 	idleStopCh     chan struct{}
 	idleDone       chan struct{}
 	idleStopOnce   sync.Once
+	// wedgeWG counts the goroutines replacing a server that answers 5xx for ever
+	// (muster #513; wedge.go): Shutdown waits for them, so none outlives the driver.
+	wedgeWG sync.WaitGroup
 	// life holds one lifecycle lock per session (park.go); lifeMu guards the map and
 	// is a leaf.
 	lifeMu sync.Mutex
@@ -901,6 +904,7 @@ func (d *Driver) Shutdown() error {
 	// directories while they are being stopped (muster #419).
 	d.stopDirSweep()
 	d.stopIdleSweep()      // muster #421: a park in progress finishes first
+	d.wedgeWG.Wait()       // muster #513: and so does a replacement in progress
 	d.stopCatalogRefresh() // muster #496: and so does the start-up read, with the server it may have started
 	d.endSubscriptions()
 	if d.grantCancel != nil {

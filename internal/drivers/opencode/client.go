@@ -188,6 +188,7 @@ func (d *Driver) do(ctx context.Context, srv *server, method, path string, body,
 		}
 	}
 	defer resp.Body.Close()
+	d.noteAnswer(srv, path, resp.StatusCode) // muster #513: the one place every answer passes
 
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized:
