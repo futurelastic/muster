@@ -530,7 +530,12 @@ with how much the machine is carrying, so the busiest machine is the one most
 likely to be declared dead. One measured case came back **98 seconds** after
 the restart and was healthy from then on; the single-probe script had already
 printed the most alarming message it has ("the service did not come back up")
-and exited 1, inviting a rollback of a deploy that was already fine. `scripts/deploy.sh`
+and exited 1, inviting a rollback of a deploy that was already fine. (Since muster #508
+the service opens its port before that reconciliation rather than after it, so a probe
+is answered about as soon as the fixed start-up steps have run; until the reconciliation
+has finished, a call that changes a session is refused with a retryable `504` whose
+reason is `reconciling`. The startup log says when: `reconciled — … took=<ms>`, then
+`changes to sessions are accepted`.) `scripts/deploy.sh`
 now polls to a deadline (`FLEET_VERIFY_TIMEOUT`, default 180s — chosen with
 slack above that 98s measurement) instead of probing once, and distinguishes
 "not up yet" (an interim notice while still inside the deadline — expected,

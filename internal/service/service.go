@@ -138,6 +138,10 @@ type Service struct {
 	sweeping   bool
 	sweepAgain bool
 
+	// reconcilingSince is the unix-nano time SetReconciling(true) was called, and
+	// zero when no startup reconcile is pending (startup.go, muster #508).
+	reconcilingSince atomic.Int64
+
 	// events is the service-wide event plane: §7.3's cursor and epoch live
 	// here because they are per service instance, not per driver.
 	events *hub

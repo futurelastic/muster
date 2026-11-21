@@ -299,6 +299,11 @@ func mutating(svc *Service, cfg Config, next http.HandlerFunc) http.HandlerFunc 
 				writeError(w, denied)
 				return
 			}
+			// After the grant check, so a caller who may not do this still hears
+			// that, and before anything runs (muster #508).
+			if refuseWhileReconciling(w, svc, target) {
+				return
+			}
 			// Run first, then log what actually happened. Logging the
 			// authorization decision as though it were the outcome made a
 			// destroy and a refusal indistinguishable in the trail.
@@ -323,6 +328,9 @@ func mutating(svc *Service, cfg Config, next http.HandlerFunc) http.HandlerFunc 
 		}
 		if !allowed {
 			writeError(w, &fleet.Error{Kind: fleet.ErrorUnauthorized, Message: why, Machine: target})
+			return
+		}
+		if refuseWhileReconciling(w, svc, target) {
 			return
 		}
 		gw := &generationWriter{ResponseWriter: w, svc: svc}

@@ -426,3 +426,253 @@ func TestReconcileUnreachableListingJudgesNothing(t *testing.T) {
 		t.Errorf("remembered set went from %d to %d records on a failed read", len(before), len(after))
 	}
 }
+
+// muster #508: a reconcile that holds the port closed for a minute used to say
+// only that it had finished. The line now says how long it took and where the
+// time went, the listing's own steps among them.
+func TestReconcileReportsTookAndPhases(t *testing.T) {
+	d := stateDriver(t, twoSessions(), t.TempDir())
+	got, err := d.Reconcile(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := got.String()
+	for _, want := range []string{
+		" took=", "phase.records=", "phase.list.enumerate=", "phase.list.classify=",
+		"phase.list=", "phase.starttimes=", "phase.classify=", "phase.save=",
+	} {
+		if !strings.Contains(line, want) {
+			t.Errorf("reconcile line lacks %q: %s", want, line)
+		}
+	}
+	// The steps are named in the order they finished, the listing's own before
+	// the listing as a whole, so the line reads as a timeline.
+	order := []string{"phase.records=", "phase.list.enumerate=", "phase.list=", "phase.starttimes=", "phase.classify=", "phase.save="}
+	last := -1
+	for _, name := range order {
+		at := strings.Index(line, name)
+		if at < last {
+			t.Fatalf("%q is out of order in: %s", name, line)
+		}
+		last = at
+	}
+	if got.Took <= 0 {
+		t.Errorf("Took = %v, want a measured duration", got.Took)
+	}
+}
+
+// A reconcile that carries no phases of its own to a caller leaves ordinary
+// reads exactly as they were: a List with no recorder on its context notes
+// nothing and returns what it always did.
+func TestListWithoutARecorderIsUnchanged(t *testing.T) {
+	d := stateDriver(t, twoSessions(), t.TempDir())
+	got, err := d.List(context.Background(), fleet.SystemRequest(), listAll())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(got.Items()); n != 2 {
+		t.Fatalf("List returned %d sessions, want 2", n)
+	}
+}
+
+// threeSessions is the live set a restart finds when beta ended while the
+// service was down and gamma started: alpha stays, beta is gone, gamma is new.
+func alphaAndGamma() *fakeMux {
+	return &fakeMux{
+		sessions: []fakeSession{
+			{name: "alpha💬", paneID: "%1", cwd: "/work/alpha", pid: 100, created: 1785600000, title: "2_1_220"},
+			{name: "gamma", paneID: "%3", cwd: "/work/gamma", pid: 300, created: 1785600002, title: "2_1_220"},
+		},
+		captures: map[string]string{
+			"%1": idleFixtureFor("alpha"),
+			"%3": fixtureUnsent,
+		},
+	}
+}
+
+// remembered runs one healthy reconcile on a directory, so the records hold
+// alpha and beta, and returns the directory.
+func remembered(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if _, err := stateDriver(t, twoSessions(), dir).Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func sessionsBytes(t *testing.T, dir string) []byte {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(dir, sessionsFileName+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+// muster #508, and F30 once more: with the listeners open before the reconcile
+// has finished, a client's read can land first. An ordinary read records the live
+// set, so without a baseline taken beforehand the reconcile would compare the
+// world against a record its own client had just written — every session adopted,
+// beta never reported vanished, gamma never reported orphaned.
+func TestReconcileBaselineTakenBeforeAReadSurvivesAReadWhilePending(t *testing.T) {
+	dir := remembered(t)
+
+	d := stateDriver(t, alphaAndGamma(), dir)
+	d.BeginReconcile()
+	// The client's read, served while the reconcile is still pending.
+	if _, err := d.List(context.Background(), fleet.SystemRequest(), listAll()); err != nil {
+		t.Fatal(err)
+	}
+	got, err := d.Reconcile(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Vanished) != 1 || got.Vanished[0].ID != "beta" {
+		t.Errorf("vanished = %v, want beta alone: %s", got.Vanished, got)
+	}
+	if len(got.Orphaned) != 1 || got.Orphaned[0].ID != "gamma" {
+		t.Errorf("orphaned = %v, want gamma alone: %s", got.Orphaned, got)
+	}
+	if len(got.Adopted) != 1 || got.Adopted[0].ID != "alpha💬" {
+		t.Errorf("adopted = %v, want alpha alone: %s", got.Adopted, got)
+	}
+
+	// The control, to show the test can fail: the same sequence with no
+	// baseline taken is the F30 failure, and the read has already written gamma.
+	dir = remembered(t)
+	c := stateDriver(t, alphaAndGamma(), dir)
+	if _, err := c.List(context.Background(), fleet.SystemRequest(), listAll()); err != nil {
+		t.Fatal(err)
+	}
+	lost, err := c.Reconcile(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lost.Orphaned) != 0 {
+		t.Fatalf("control: a read before an unprotected reconcile no longer hides gamma (%s); this test no longer proves anything", lost)
+	}
+}
+
+// While the reconcile is pending a listing is answered and writes nothing: the
+// reconcile is the record store's one writer for the window, so its final save
+// cannot lose, or be lost to, a write made by a read.
+func TestListWhilePendingWritesNoRecords(t *testing.T) {
+	dir := remembered(t)
+	before := sessionsBytes(t, dir)
+	modBefore := statMod(t, dir)
+
+	d := stateDriver(t, alphaAndGamma(), dir)
+	d.BeginReconcile()
+	got, err := d.List(context.Background(), fleet.SystemRequest(), listAll())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(got.Items()); n != 2 {
+		t.Fatalf("the read was not answered: %d sessions, want 2", n)
+	}
+	if after := sessionsBytes(t, dir); string(after) != string(before) {
+		t.Errorf("a listing wrote the record store while the reconcile was pending:\n%s\n->\n%s", before, after)
+	}
+	if !statMod(t, dir).Equal(modBefore) {
+		t.Errorf("the record file was rewritten while the reconcile was pending")
+	}
+}
+
+// The hold ends with the reconcile: reads record again, and the result of the
+// reconcile is what the store then holds.
+func TestReadsWriteRecordsAgainAfterReconcile(t *testing.T) {
+	dir := remembered(t)
+	d := stateDriver(t, alphaAndGamma(), dir)
+	d.BeginReconcile()
+	if _, err := d.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if d.reconciling.Load() {
+		t.Fatal("the hold outlived the reconcile")
+	}
+	st, err := state.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recs := (&Driver{store: st}).loadRecords(); len(recs) != 2 || recs["gamma"].Cwd != "/work/gamma" || recs["beta"].Cwd != "" {
+		t.Fatalf("the reconcile's result was not saved: %+v", recs)
+	}
+
+	// A session that appears after the reconcile is recorded by an ordinary read.
+	f := alphaAndGamma()
+	f.sessions = append(f.sessions, fakeSession{name: "delta", paneID: "%4", cwd: "/work/delta", pid: 400, created: 1785600003, title: "2_1_220"})
+	f.captures["%4"] = fixtureUnsent
+	d2 := stateDriver(t, f, dir)
+	if _, err := d2.List(context.Background(), fleet.SystemRequest(), listAll()); err != nil {
+		t.Fatal(err)
+	}
+	if recs := (&Driver{store: st}).loadRecords(); recs["delta"].Cwd != "/work/delta" {
+		t.Errorf("a read after the reconcile did not record the new session: %+v", recs)
+	}
+}
+
+// A reconcile that fails saved nothing and must not leave the store held: reads
+// would never record again for the life of the process.
+func TestReconcileErrorClearsPending(t *testing.T) {
+	dir := remembered(t)
+	st, err := state.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := sessionsBytes(t, dir)
+	exec, _ := flakyListPanes(twoSessions(), 1)
+	d := New("testbox", withExec(exec), withNonce(func() string { return testNonce }), WithState(st))
+	d.BeginReconcile()
+	if _, err := d.Reconcile(context.Background()); err == nil {
+		t.Fatal("an unreadable listing must be an error")
+	}
+	if d.reconciling.Load() {
+		t.Error("a failed reconcile left the record store held")
+	}
+	if after := sessionsBytes(t, dir); string(after) != string(before) {
+		t.Error("a failed reconcile changed the remembered set")
+	}
+}
+
+// The reconcile's own caller sets the bound. A listing that outlives a bound the
+// caller put on the whole reconcile leaves the start-time read nothing to run in:
+// it fails at once and every session reads as "not judged" — what a start on a
+// machine with many sessions measured (muster #508). With no bound of its own on
+// the context, each read takes the driver's, fresh.
+func TestReconcileStartTimeReadNeedsABoundOfItsOwn(t *testing.T) {
+	slow := func(f *fakeMux) execFunc {
+		var n atomic.Int32
+		return func(ctx context.Context, name string, args ...string) ([]byte, error) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if len(args) > 0 && args[0] == "list-panes" && n.Add(1) == 1 {
+				time.Sleep(150 * time.Millisecond) // a listing that ignores the caller's bound
+			}
+			return f.exec(ctx, name, args...)
+		}
+	}
+	run := func(ctx context.Context) Reconciliation {
+		dir := remembered(t)
+		st, err := state.Open(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		d := New("testbox", withExec(slow(twoSessions())), withNonce(func() string { return testNonce }), WithState(st))
+		got, err := d.Reconcile(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+
+	bounded, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancel()
+	if got := run(bounded); got.Unjudged != 2 || !strings.Contains(got.ReadErr, "deadline exceeded") {
+		t.Errorf("under a caller bound the listing outlives, the start-time read should have none left: %s", got)
+	}
+	if got := run(context.Background()); got.Unjudged != 0 || got.ReadErr != "" {
+		t.Errorf("with no bound on the context the start-time read must judge identity: %s", got)
+	}
+}

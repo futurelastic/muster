@@ -468,6 +468,7 @@ func main() {
 	// code crashed. See fleet.Build.
 	selfBuild := fleet.SelfBuild()
 	log.Printf("muster: build %s (%s)", selfBuild.Short(), selfBuild.Go)
+	startedAt := time.Now()
 
 	// A principal table, when configured, decides everything about who may
 	// do what (§6). Without one the service runs in single-token mode,
@@ -1109,52 +1110,23 @@ func main() {
 	// --- reconciliation (§12) ------------------------------------------
 	//
 	// Startup is reconciliation, not initialisation: sessions outlive the
-	// service that manages them. Nothing is destroyed here, and nothing
-	// can be — this only reports what was found, which is the whole of
-	// rule 4 ("a session the service cannot explain is a session for a
-	// human to look at, not one to clean up").
-	if rec, ok := localDriver.(interface {
+	// service that manages them. The reconcile itself runs below, in the
+	// background, AFTER the listeners are open (muster #508): on a machine with
+	// about a hundred sessions it takes over a minute, and the port used to stay
+	// closed for all of it. What has to happen BEFORE the first request can be
+	// accepted is only this: the baseline it will classify against is read, and the
+	// record store is held (BeginReconcile), because an ordinary read records the
+	// live set and the reconcile must not compare the world against what its own
+	// clients just wrote (F30). And a call that would change a session is refused,
+	// retryably, until the result is applied (service.SetReconciling).
+	_, reconciles := localDriver.(interface {
 		Reconcile(context.Context) (tmux.Reconciliation, error)
-	}); ok {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		got, err := rec.Reconcile(ctx)
-		cancel()
-		if err != nil {
-			log.Printf("muster: reconciliation failed: %v", err)
-		} else {
-			log.Printf("muster: reconciled — %s", got)
-			// Orphans and disappearances are named individually. §12 rule 4
-			// forbids acting on them, which makes reporting them the entire
-			// value: a session this service cannot explain is one for a
-			// human to look at, and a human cannot look at a count.
-			for _, s := range got.Orphaned {
-				log.Printf("muster:   orphaned %q cwd=%s (%s)", s.ID, s.Cwd, s.State.Evidence)
-			}
-			for _, s := range got.Vanished {
-				log.Printf("muster:   vanished %q (%s)", s.ID, s.State.Evidence)
-			}
-			// #185: an adopted session's delivery lane stays, to be re-attached
-			// when its module is ready; a vanished one's is closed and dropped.
-			if lr, ok := localDriver.(interface{ ReconcileLanes(tmux.Reconciliation) }); ok {
-				lr.ReconcileLanes(got)
-			}
+	})
+	if reconciles {
+		if b, ok := localDriver.(interface{ BeginReconcile() }); ok {
+			b.BeginReconcile()
 		}
-	}
-
-	// #185: start the delivery modules last among the startup work, without
-	// blocking: each child comes up on its own schedule and a create that lands
-	// first takes the built-in lane.
-	if sm, ok := localDriver.(interface{ StartDeliveryModules() }); ok {
-		sm.StartDeliveryModules()
-	}
-
-	// Sessions that ended while this service was down are found missing by
-	// one complete local read, and get their closed-session record (#179).
-	// Runs for every runtime, reconciling driver or not.
-	{
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		svc.SweepLocal(ctx)
-		cancel()
+		svc.SetReconciling(true)
 	}
 
 	// Bind narrowly by default (§6.1: "Default to loopback. Exposure
@@ -1198,14 +1170,34 @@ func main() {
 		log.Printf("muster: watching the config file for principal and peer changes (SIGHUP applies it now)")
 	}
 
+	// The rest of startup, in order, in the background: the reconcile, the delivery
+	// lanes it decides, the modules, the sweep. Cancelled, and waited for briefly,
+	// at shutdown so nothing here starts a process after the stop below.
+	startupCtx, stopStartup := context.WithCancel(context.Background())
+	startupDone := make(chan struct{})
+	if reconciles {
+		log.Printf("muster: startup: reconciling in the background — reads are served; changes to sessions answer 504 reason=%s until it finishes", fleet.ReasonReconciling)
+	}
+	go func() {
+		defer close(startupDone)
+		finishStartup(startupCtx, svc, localDriver, reconciles, startedAt)
+	}()
+
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
 
+	stopStartup()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	listeners.stop()
 	_ = srv.Shutdown(ctx)
+	// A startup still running has been told to stop; give it a moment so a module
+	// it was about to start is not started after the stop below.
+	select {
+	case <-startupDone:
+	case <-time.After(5 * time.Second):
+	}
 
 	// #185: closing a module's stdin makes it drop its connections and keep
 	// its on-disk state, so the next start can re-attach.

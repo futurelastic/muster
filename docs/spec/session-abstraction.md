@@ -3489,6 +3489,32 @@ exist and when they were first seen — only changes when one appears or leaves.
 See Appendix A, F30 for the ordering bug that made an earlier version report
 everything as adopted, always.
 
+**Serving while reconciling.** A machine carrying many sessions takes a long
+time to reconcile (measured: over a minute at about a hundred), and a service
+that opens its listeners only afterwards refuses every connection for all of it.
+The service therefore listens first and reconciles in the background, which
+makes F30's rule — capture "before" prior to anything that can write it — a
+matter of ordering that has to be kept on purpose:
+
+- The records the reconcile will classify against are read **before the first
+  request can be accepted**, and kept; the reconcile compares against that
+  baseline, not against whatever the store holds when it gets there.
+- Until the reconcile has saved its result, **nothing but the reconcile writes
+  the record store.** A listing served in that window answers from what it reads
+  and persists nothing (not the live set, not statuses, and it repairs no name
+  drift; the first read after the reconcile does those).
+- A call that would **change** one of this machine's own sessions is refused with
+  `unreachable`, `retryable: true`, `reason: "reconciling"` and a `Retry-After`
+  header (api-http.md §2) until the reconcile's result is applied. A change made
+  in that window would write the record the reconcile is still classifying
+  against. Reads are answered throughout, though a first listing on a cold start
+  is as slow as the reconcile's own. A call relayed to a peer is not held.
+- The reconcile is **not abandoned at a deadline.** A result thrown away at a
+  bound would skip the delivery-lane pass and the save, so it runs to completion;
+  each of its reads has the driver's own bound, and the startup line says how long
+  the whole took and which step used the time (`took=` and one `phase.<step>=` per
+  step, in milliseconds).
+
 ---
 
 ## 13. Federation topology
@@ -4248,6 +4274,10 @@ stating as a rule, because the same trap is available anywhere state is both
 read and written on a common path: **a process that compares "before" against
 "after" must capture "before" prior to anything that can write it — including
 its own instrumentation.**
+
+The same rule had to be kept again when the service began to listen before the
+reconcile finished: a client's read could then be the "instrumentation", arriving
+first. §12, *Serving while reconciling*, is how.
 
 ### Phase 5 — answering, and driving a live agent on another machine
 

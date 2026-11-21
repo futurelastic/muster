@@ -75,6 +75,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	fleet "github.com/futurelastic/muster"
@@ -412,6 +413,14 @@ type Driver struct {
 
 	store   *state.Store
 	idemErr error
+
+	// reconciling is true from BeginReconcile until the reconcile has saved its
+	// result; reconcileBase is the record set BeginReconcile read (reconcile.go,
+	// muster #508). While it is set a listing writes nothing to the record store:
+	// the reconcile is that store's one writer for the whole window.
+	reconciling   atomic.Bool
+	reconcileMu   sync.Mutex
+	reconcileBase map[string]sessionRecord
 
 	// gateRemoteControlInput is #272's setting: when true, `input` delivers
 	// /rc and /remote-control only for a caller holding the remote-control or
@@ -2129,6 +2138,10 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 	ctx, cancel := d.bounded(ctx)
 	defer cancel()
 
+	// muster #508: where the time of one listing goes, noted under list.* for a
+	// caller that asked for its phases (the startup reconcile does). A context with
+	// no recorder makes every note below a no-op.
+	phase := time.Now()
 	rows, captures, err := d.enumerateScreensReusing(ctx)
 	if err != nil {
 		// §5.7: a failed read is never an empty result. Report the source
@@ -2168,8 +2181,12 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 	// appear in what this call returns; DrainExits (called by the service
 	// right after this List) is how its captured exit reaches the history
 	// record instead.
+	driver.NotePhase(ctx, "list.enumerate", phase)
+	phase = time.Now()
 	rows = d.reapDeadRows(ctx, rows, captures)
 	d.sweepSandbox(rows) // muster #345: private directories nobody owns any more
+	driver.NotePhase(ctx, "list.reap", phase)
+	phase = time.Now()
 
 	// A pane can have vanished between the listing and the capture (see
 	// enumerate's own comment and #29): that row survives — it is still a
@@ -2184,6 +2201,13 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 			missed++
 		}
 	}
+
+	// muster #508: read ONCE, before the records are loaded. While the startup
+	// reconcile is pending this listing persists nothing (see BeginReconcile). The
+	// flag only ever goes true to false, once, after the reconcile's final save, so
+	// a listing that saw it false loads records written after that save, and one
+	// that saw it true never writes.
+	holding := d.reconciling.Load()
 
 	// Loaded once and shared by noteSessionSet and identityDrift both
 	// (muster #96/#97), rather than reading the store twice per
@@ -2207,7 +2231,10 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 	// keeps it that way rather than reshaping it to serve a second reader.
 	assertedByRun := indexByPaneCreated(priorRecords)
 
-	d.noteSessionSet(rows, priorRecords)
+	if !holding {
+		d.noteSessionSet(rows, priorRecords)
+	}
+	driver.NotePhase(ctx, "list.records", phase)
 
 	sessions := make([]fleet.Session, 0, len(rows))
 
@@ -2240,7 +2267,10 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 	// for the whole listing from the process table and outside the lock (it
 	// is an OS query). Nil when the option is off; agentsOK false when the
 	// read itself failed, which the source status below reports.
+	phase = time.Now()
 	agents, agentsOK := d.processAgents(ctx, rows)
+	driver.NotePhase(ctx, "list.agents", phase)
+	phase = time.Now()
 	d.mu.Lock()
 	for _, r := range rows {
 		c, captured := captures[r.paneID]
@@ -2354,7 +2384,11 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 		obs[k] = v
 	}
 	d.mu.Unlock()
-	d.noteStatuses(obs)
+	driver.NotePhase(ctx, "list.classify", phase)
+	phase = time.Now()
+	if !holding {
+		d.noteStatuses(obs)
+	}
 
 	// muster #97: put back every name this driver asserted and the
 	// runtime no longer carries — whether the rename never reached the
@@ -2363,7 +2397,14 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 	// trusts. After the lock, like the conversation lookups below: each
 	// repair is a real multiplexer call, and nothing here may run under the
 	// lock that guards every session's observed state.
-	d.reassertNames(ctx, rows, drift)
+	// A name drift seen in the window is still said in the read's evidence above;
+	// the repair waits for the first read after the reconcile, as it writes the
+	// record store too.
+	if !holding {
+		d.reassertNames(ctx, rows, drift)
+	}
+	driver.NotePhase(ctx, "list.statuses", phase)
+	phase = time.Now()
 
 	// Locate each session's record in the runtime's own store. This is the
 	// only source on this path that is not the runtime describing itself
@@ -2401,6 +2442,8 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 	// anything the screen flagged: only a session this driver has actually
 	// delivered into ever opens its record for this, so a fleet with
 	// nothing dispatched through Send pays nothing extra here.
+	driver.NotePhase(ctx, "list.conversations", phase)
+	phase = time.Now()
 	for i := range sessions {
 		if reused[sessions[i].ID] {
 			continue
@@ -2410,6 +2453,8 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 		// nothing was dispatched into still spends.
 		sessions[i].State.Usage = d.usageFor(string(sessions[i].Cwd), sessions[i].Conversation)
 	}
+	driver.NotePhase(ctx, "list.turns_usage", phase)
+	phase = time.Now()
 	d.rememberRecords(rows, sessions, reused, now)
 
 	// muster #269: where the screen reader found no label, the runtime's own
@@ -2490,6 +2535,7 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 		creds[i] = rowCredential(rowByName[sessions[i].ID])
 	}
 	d.settleQuota(sessions, creds, now)
+	driver.NotePhase(ctx, "list.recordfacts", phase)
 
 	count := len(sessions)
 	src := fleet.SourceStatus{
