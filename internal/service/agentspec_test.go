@@ -8,6 +8,7 @@ import (
 
 	fleet "github.com/futurelastic/muster"
 	"github.com/futurelastic/muster/internal/createpolicy"
+	"github.com/futurelastic/muster/internal/drivers/remote"
 	"github.com/futurelastic/muster/internal/drivers/stub"
 	"github.com/futurelastic/muster/internal/sessionenv"
 )
@@ -311,5 +312,49 @@ func TestSetCreatePolicy_RefusesARuleThatCannotBeOne(t *testing.T) {
 	}
 	if err := svc.SetCreatePolicy(nil); err != nil {
 		t.Fatalf("no policy is the default: %v", err)
+	}
+}
+
+// A create relayed to a peer carries the definition on untouched: the machine that
+// runs the session translates it and applies ITS operator policy, so this machine
+// neither lowers `access` nor lets its own policy decide a session another machine
+// runs (#509).
+func TestAgentSpecCreate_ARelayedCreateIsNotLoweredHere(t *testing.T) {
+	caps := confiningCaps()
+	caps.SupportsAgentSpec = fleet.Declared(true)
+	peer := newRecordingPeer(t, peerRuntimeRow("peerbox", "opencode", caps, nil))
+
+	// This machine's own policy names the same agent; it must not apply to a
+	// session the peer runs.
+	svc := New("testbox")
+	d := remote.New("peerbox", peer.srv.URL, remote.WithIdentity("peer-token"))
+	if err := svc.RegisterPeerDriver("peerbox", d); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.RefreshCapabilities(t.Context(), peerCaller); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.SetCreatePolicy(createpolicy.Policy{{AppliesTo: sessionenv.Scope{Agents: []string{"researcher"}}, Access: fleet.AgentAccessAllow}}); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(NewMux(svc, Config{Token: testToken, AllowLocalMutations: true, AllowPeerRelay: true}))
+	t.Cleanup(srv.Close)
+
+	code, raw := relayCreate(t, srv, "k-relay", `{"runtime":"opencode","cwd":"/w",`+specBody+`,"access":"sandboxed"}}`)
+	if code != http.StatusCreated {
+		t.Fatalf("%d %s", code, raw)
+	}
+	got := peer.created()
+	if len(got) != 1 {
+		t.Fatalf("the peer was sent %d creates", len(got))
+	}
+	spec, _ := got[0]["agentSpec"].(map[string]any)
+	if spec == nil || spec["name"] != "researcher" || spec["access"] != "sandboxed" {
+		t.Fatalf("the definition did not travel untouched: %v", got[0])
+	}
+	for _, k := range []string{"permissionMode", "sandbox", "posture", "consents"} {
+		if _, has := got[0][k]; has {
+			t.Errorf("this machine lowered the access into %q on a session the peer runs: %v", k, got[0])
+		}
 	}
 }

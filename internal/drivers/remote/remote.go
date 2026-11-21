@@ -1624,6 +1624,13 @@ type createBody struct {
 	// see requireLaunchSettings.
 	Settings json.RawMessage `json:"settings,omitempty"`
 
+	// AgentSpec travels with the create untouched (muster #509): the machine that
+	// runs the session translates it and applies its own operator policy to its
+	// access. Create refuses a peer runtime that has not declared it translates one
+	// — see requireAgentSpec — because an older peer would drop it and start a
+	// session that follows none of the definition.
+	AgentSpec *fleet.AgentSpec `json:"agentSpec,omitempty"`
+
 	// Labels travel with the create (muster #153); Create refuses a peer
 	// that would drop them rather than send them there to be ignored.
 	Labels map[string]string `json:"labels,omitempty"`
@@ -1677,7 +1684,7 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 		}
 	}
 	body := createBody{
-		Runtime: spec.Runtime, Cwd: spec.Cwd, Agent: spec.Agent,
+		Runtime: spec.Runtime, Cwd: spec.Cwd, Agent: spec.Agent, AgentSpec: spec.AgentSpec,
 		Model: spec.Model, Effort: spec.Effort, Name: spec.Name,
 		Prompt: spec.Prompt, ContextRef: spec.ContextRef,
 		TrustCwd: spec.TrustCwd, Env: spec.Env, Resume: spec.Resume,
@@ -1716,6 +1723,11 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 	}
 	if len(spec.Settings) > 0 {
 		if err := d.requireLaunchSettings(ctx, req, spec); err != nil {
+			return fleet.Session{}, err
+		}
+	}
+	if spec.AgentSpec != nil {
+		if err := d.requireAgentSpec(ctx, req, spec.Runtime); err != nil {
 			return fleet.Session{}, err
 		}
 	}
