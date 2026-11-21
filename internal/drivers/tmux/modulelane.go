@@ -291,13 +291,19 @@ func (h *moduleHost) count(module, name string) {
 // background lane pass. It never blocks: a module that is slow to start costs
 // nothing but a create that lands before it is ready, which takes the built-in
 // lane with the reason recorded. Call it once, after Reconcile and
-// ReconcileLanes.
+// ReconcileLanes. After StopDeliveryModules it starts nothing.
 func (d *Driver) StartDeliveryModules() {
 	h := d.mods
 	if h == nil {
 		return
 	}
 	h.once.Do(func() {
+		// Stopped already: the service is shutting down while the startup that
+		// calls this was still running in the background (muster #508). Starting
+		// a child now would leave one nothing will ever stop.
+		if h.ctx.Err() != nil {
+			return
+		}
 		for _, name := range h.order {
 			if c := h.clients[name]; c != nil {
 				c.Start()

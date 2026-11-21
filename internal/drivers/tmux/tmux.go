@@ -75,6 +75,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	fleet "github.com/futurelastic/muster"
@@ -412,6 +413,14 @@ type Driver struct {
 
 	store   *state.Store
 	idemErr error
+
+	// reconciling is true from BeginReconcile until the reconcile has saved its
+	// result; reconcileBase is the record set BeginReconcile read (reconcile.go,
+	// muster #508). While it is set a listing writes nothing to the record store:
+	// the reconcile is that store's one writer for the whole window.
+	reconciling   atomic.Bool
+	reconcileMu   sync.Mutex
+	reconcileBase map[string]sessionRecord
 
 	// gateRemoteControlInput is #272's setting: when true, `input` delivers
 	// /rc and /remote-control only for a caller holding the remote-control or
@@ -2193,6 +2202,13 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 		}
 	}
 
+	// muster #508: read ONCE, before the records are loaded. While the startup
+	// reconcile is pending this listing persists nothing (see BeginReconcile). The
+	// flag only ever goes true to false, once, after the reconcile's final save, so
+	// a listing that saw it false loads records written after that save, and one
+	// that saw it true never writes.
+	holding := d.reconciling.Load()
+
 	// Loaded once and shared by noteSessionSet and identityDrift both
 	// (muster #96/#97), rather than reading the store twice per
 	// listing. Nil when unconfigured — every reader downstream already
@@ -2215,7 +2231,9 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 	// keeps it that way rather than reshaping it to serve a second reader.
 	assertedByRun := indexByPaneCreated(priorRecords)
 
-	d.noteSessionSet(rows, priorRecords)
+	if !holding {
+		d.noteSessionSet(rows, priorRecords)
+	}
 	driver.NotePhase(ctx, "list.records", phase)
 
 	sessions := make([]fleet.Session, 0, len(rows))
@@ -2368,7 +2386,9 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 	d.mu.Unlock()
 	driver.NotePhase(ctx, "list.classify", phase)
 	phase = time.Now()
-	d.noteStatuses(obs)
+	if !holding {
+		d.noteStatuses(obs)
+	}
 
 	// muster #97: put back every name this driver asserted and the
 	// runtime no longer carries — whether the rename never reached the
@@ -2377,7 +2397,12 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 	// trusts. After the lock, like the conversation lookups below: each
 	// repair is a real multiplexer call, and nothing here may run under the
 	// lock that guards every session's observed state.
-	d.reassertNames(ctx, rows, drift)
+	// A name drift seen in the window is still said in the read's evidence above;
+	// the repair waits for the first read after the reconcile, as it writes the
+	// record store too.
+	if !holding {
+		d.reassertNames(ctx, rows, drift)
+	}
 	driver.NotePhase(ctx, "list.statuses", phase)
 	phase = time.Now()
 

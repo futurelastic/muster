@@ -156,8 +156,41 @@ type Reconciliation struct {
 	Phases string
 }
 
+// BeginReconcile takes the baseline Reconcile will classify against, and from
+// here until Reconcile has saved its result keeps every listing from writing the
+// record store (muster #508).
+//
+// A service that opens its listeners before the reconcile has finished answers
+// ordinary reads while it runs, and an ordinary read records the live set when it
+// changes: exactly the trap F30 was about, now reachable from outside. So the
+// rule is kept the way F30 states it — "before" is captured prior to anything that
+// can write it — by moving the capture to before the first request can be
+// accepted, and by making the reconcile the store's single writer until it is
+// done. Call it before the listeners open; a Reconcile with no BeginReconcile
+// before it reads the records itself, as it always did.
+func (d *Driver) BeginReconcile() {
+	base := d.loadRecords()
+	d.reconcileMu.Lock()
+	d.reconcileBase = base
+	d.reconcileMu.Unlock()
+	d.reconciling.Store(true)
+}
+
+// takeReconcileBase is the baseline BeginReconcile read, handed over once.
+func (d *Driver) takeReconcileBase() (map[string]sessionRecord, bool) {
+	d.reconcileMu.Lock()
+	defer d.reconcileMu.Unlock()
+	base := d.reconcileBase
+	d.reconcileBase = nil
+	return base, base != nil
+}
+
 // Reconcile performs §12's startup reconciliation.
 func (d *Driver) Reconcile(ctx context.Context) (Reconciliation, error) {
+	// Lifts the hold BeginReconcile put on the record store, on every way out: a
+	// reconcile that failed saved nothing, and reads must be able to record again.
+	// On the way out of the success path this runs after the save below.
+	defer d.reconciling.Store(false)
 	begun := time.Now()
 	phases := &driver.Phases{}
 	ctx = driver.WithPhases(ctx, phases)
@@ -170,7 +203,10 @@ func (d *Driver) Reconcile(ctx context.Context) (Reconciliation, error) {
 	// still runs and still produces an answer, and the answer is that
 	// everything is fine.
 	phase := time.Now()
-	prior := d.loadRecords()
+	prior, based := d.takeReconcileBase()
+	if !based {
+		prior = d.loadRecords()
+	}
 	driver.NotePhase(ctx, "records", phase)
 
 	phase = time.Now()

@@ -475,3 +475,15 @@ func TestModuleLifecycle_RefusedSameProcessIsNotReplaced(t *testing.T) {
 		t.Errorf("reason = %q, want the ordinary attach failure", got.Reason)
 	}
 }
+
+// muster #508: the startup that starts the modules runs in the background, so a
+// stop can arrive first. A start that follows it must start no child process:
+// nothing would ever stop it.
+func TestStartDeliveryModulesAfterStopStartsNothing(t *testing.T) {
+	r := newModRig(t, rigOptions{noStart: true})
+	r.d.StopDeliveryModules()
+	r.d.StartDeliveryModules()
+	if n := r.fake.Starts(); n != 0 {
+		t.Errorf("a module was started %d time(s) after the host had stopped", n)
+	}
+}

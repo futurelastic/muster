@@ -179,6 +179,16 @@ const ReasonReplayOfEndedSession = "replay-of-ended-session"
 // needs somebody's hands answers unsupported (not retryable).
 const ReasonRuntimeUnavailable = "runtime-unavailable"
 
+// ReasonReconciling marks the unreachable (504, retryable) a mutating call on
+// this machine's own sessions gets while the service is still reconciling what
+// it found at start (api-http.md §2, session-abstraction.md §12, muster #508).
+// The service answers reads from the moment it listens; it refuses to change
+// anything until the reconcile has applied its result, because a session
+// created or renamed in that window would write the record the reconcile is
+// still classifying against. Nothing in the request was wrong: ask again — the
+// Retry-After header says when. A call relayed to a peer is not held by this.
+const ReasonReconciling = "reconciling"
+
 // ReasonUnsafeServerContext marks the unsupported (501, non-retryable) a
 // create returns when it would have to start the terminal-multiplexer server
 // from a macOS desktop (Aqua) context, or from one it cannot read (muster
