@@ -426,3 +426,51 @@ func TestReconcileUnreachableListingJudgesNothing(t *testing.T) {
 		t.Errorf("remembered set went from %d to %d records on a failed read", len(before), len(after))
 	}
 }
+
+// muster #508: a reconcile that holds the port closed for a minute used to say
+// only that it had finished. The line now says how long it took and where the
+// time went, the listing's own steps among them.
+func TestReconcileReportsTookAndPhases(t *testing.T) {
+	d := stateDriver(t, twoSessions(), t.TempDir())
+	got, err := d.Reconcile(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := got.String()
+	for _, want := range []string{
+		" took=", "phase.records=", "phase.list.enumerate=", "phase.list.classify=",
+		"phase.list=", "phase.starttimes=", "phase.classify=", "phase.save=",
+	} {
+		if !strings.Contains(line, want) {
+			t.Errorf("reconcile line lacks %q: %s", want, line)
+		}
+	}
+	// The steps are named in the order they finished, the listing's own before
+	// the listing as a whole, so the line reads as a timeline.
+	order := []string{"phase.records=", "phase.list.enumerate=", "phase.list=", "phase.starttimes=", "phase.classify=", "phase.save="}
+	last := -1
+	for _, name := range order {
+		at := strings.Index(line, name)
+		if at < last {
+			t.Fatalf("%q is out of order in: %s", name, line)
+		}
+		last = at
+	}
+	if got.Took <= 0 {
+		t.Errorf("Took = %v, want a measured duration", got.Took)
+	}
+}
+
+// A reconcile that carries no phases of its own to a caller leaves ordinary
+// reads exactly as they were: a List with no recorder on its context notes
+// nothing and returns what it always did.
+func TestListWithoutARecorderIsUnchanged(t *testing.T) {
+	d := stateDriver(t, twoSessions(), t.TempDir())
+	got, err := d.List(context.Background(), fleet.SystemRequest(), listAll())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(got.Items()); n != 2 {
+		t.Fatalf("List returned %d sessions, want 2", n)
+	}
+}

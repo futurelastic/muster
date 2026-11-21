@@ -146,10 +146,21 @@ type Reconciliation struct {
 	// carried on the result because this driver has no logger of its own; the
 	// startup line that prints the result is what surfaces it.
 	ReadErr string
+	// Took is how long the whole pass took, and Phases says where it went: one
+	// `phase.<name>=<ms>` token per step, in the order they finished, the listing's
+	// own steps (`phase.list.*`) among them. Carried on the result for the same
+	// reason as ReadErr: the startup line that prints it is the only reader. A
+	// reconcile that holds the port closed for a minute used to say only that it
+	// had finished; muster #508.
+	Took   time.Duration
+	Phases string
 }
 
 // Reconcile performs §12's startup reconciliation.
 func (d *Driver) Reconcile(ctx context.Context) (Reconciliation, error) {
+	begun := time.Now()
+	phases := &driver.Phases{}
+	ctx = driver.WithPhases(ctx, phases)
 	// Read what was remembered BEFORE looking at what exists.
 	//
 	// An ordinary read records the live set when it changes, so enumerating
@@ -158,9 +169,13 @@ func (d *Driver) Reconcile(ctx context.Context) (Reconciliation, error) {
 	// orphaned or vanished. The bug is quiet and total: the classification
 	// still runs and still produces an answer, and the answer is that
 	// everything is fine.
+	phase := time.Now()
 	prior := d.loadRecords()
+	driver.NotePhase(ctx, "records", phase)
 
+	phase = time.Now()
 	live, err := d.List(ctx, fleet.SystemRequest(), driver.ListFilter{})
+	driver.NotePhase(ctx, "list", phase)
 	if err != nil {
 		return Reconciliation{}, err
 	}
@@ -191,6 +206,7 @@ func (d *Driver) Reconcile(ctx context.Context) (Reconciliation, error) {
 		rows   []paneRow
 		rowErr error
 	)
+	phase = time.Now()
 	for attempt := 0; attempt < 2; attempt++ {
 		ctxB, cancel := d.bounded(ctx)
 		rows, _, rowErr = d.enumerate(ctxB)
@@ -199,6 +215,8 @@ func (d *Driver) Reconcile(ctx context.Context) (Reconciliation, error) {
 			break
 		}
 	}
+	driver.NotePhase(ctx, "starttimes", phase)
+	phase = time.Now()
 	created := map[string]time.Time{}
 	cwds := map[string]string{}
 	if rowErr == nil {
@@ -275,10 +293,16 @@ func (d *Driver) Reconcile(ctx context.Context) (Reconciliation, error) {
 			"present at "+rec.LastSeen.Format(time.RFC3339)+", absent now"))
 	}
 
+	driver.NotePhase(ctx, "classify", phase)
+
 	// Vanished records are dropped only after being reported. Keeping them
 	// forever would make every restart re-announce the same disappearance;
 	// dropping them before reporting would lose it entirely.
+	phase = time.Now()
 	d.saveRecords(seen)
+	driver.NotePhase(ctx, "save", phase)
+	out.Took = time.Since(begun)
+	out.Phases = phases.Fields()
 	return out, nil
 }
 
@@ -750,6 +774,13 @@ func (r Reconciliation) String() string {
 		len(r.Adopted), len(r.Orphaned), len(r.Vanished))
 	if r.Unjudged > 0 {
 		out += fmt.Sprintf(" unjudged=%d", r.Unjudged)
+	}
+	// Before the free-text tail below, so that stays the end of the line.
+	if r.Took > 0 {
+		out += fmt.Sprintf(" took=%d", driver.Millis(r.Took))
+	}
+	if r.Phases != "" {
+		out += " " + r.Phases
 	}
 	if r.ReadErr != "" {
 		out += fmt.Sprintf(" (start-time read failed, identity not judged: %s)", r.ReadErr)
