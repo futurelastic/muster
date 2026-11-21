@@ -688,3 +688,18 @@ func TestScope_ReachesRuntimeIsTheRuntimeAxisAlone(t *testing.T) {
 		})
 	}
 }
+
+// A portable agent definition (muster #509) names the persona the way a named
+// agent does, so a scope written for one agent reaches the other.
+func TestScopeMatchesAnAgentSpecByItsName(t *testing.T) {
+	scope := Scope{Agents: []string{"researcher"}}
+	if !scope.Matches("opencode", fleet.SessionSpec{AgentSpec: &fleet.AgentSpec{Name: "researcher"}}) {
+		t.Error("an agentSpec named for the scope's agent was not matched")
+	}
+	if scope.Matches("opencode", fleet.SessionSpec{AgentSpec: &fleet.AgentSpec{Name: "other"}}) {
+		t.Error("an agentSpec with another name was matched")
+	}
+	if scope.Matches("opencode", fleet.SessionSpec{}) {
+		t.Error("a create with neither an agent nor an agentSpec was matched by an agent scope")
+	}
+}
