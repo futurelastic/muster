@@ -743,3 +743,46 @@ func TestConfigCanGrantRecord(t *testing.T) {
 		t.Fatalf("principals = %+v, want one holding record and not send", ps)
 	}
 }
+
+// muster #466: opencode.mcp is the operator's tool servers on the same object. The
+// setting stays raw (the driver owns its shape) and compact, so a reformatted file
+// reads as the same setting; the accessor reads as "none" whether the key, the
+// object or the file is absent.
+func TestLoadConfigReadsOpencodeToolServers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	body := `{"principals": [{"name": "op", "token": "tok"}],
+  "opencode": {"instructions": ["/etc/fleet/rules.md"],
+    "mcp": {
+      "cards": {"type": "local", "command": ["/usr/local/bin/cards"],
+                "appliesTo": {"agents": ["reviewer"]}}
+    }}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = `{"cards":{"type":"local","command":["/usr/local/bin/cards"],"appliesTo":{"agents":["reviewer"]}}}`
+	if got := string(cfg.operatorToolServers()); got != want {
+		t.Errorf("operatorToolServers() = %s, want the setting compacted: %s", got, want)
+	}
+	if got := cfg.operatorInstructionFiles(); len(got) != 1 {
+		t.Errorf("operatorInstructionFiles() = %v, want it unchanged beside the tool servers", got)
+	}
+
+	if err := os.WriteFile(path, []byte(`{"principals": [{"name": "op", "token": "tok"}], "opencode": {}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.operatorToolServers(); len(got) != 0 {
+		t.Errorf("operatorToolServers() = %s with no mcp key, want none", got)
+	}
+	var none *fileConfig
+	if got := none.operatorToolServers(); len(got) != 0 {
+		t.Errorf("operatorToolServers() on no config file = %s, want none", got)
+	}
+}

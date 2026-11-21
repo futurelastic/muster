@@ -148,7 +148,12 @@
 //	                       every create), and opencode.instructions (muster
 //	                       issue #504: the absolute paths of instruction files
 //	                       every isolated opencode session receives, read again
-//	                       on every create). When present the
+//	                       on every create), and opencode.mcp (muster issue
+//	                       #466: the tool servers the operator defines, each
+//	                       given to the isolated opencode sessions its
+//	                       appliesTo selector matches; bypass sessions only
+//	                       where it names bypass; a credential only as
+//	                       {env:NAME} from sessionEnv). When present the
 //	                       principal table is authoritative and FLEET_TOKEN /
 //	                       FLEET_ALLOW_* are ignored. Absent means
 //	                       single-token mode.
@@ -889,6 +894,15 @@ func main() {
 		if n := len(cfgFile.operatorInstructionFiles()); n > 0 {
 			log.Printf("muster: opencode operator instruction files configured: %d (#504)", n)
 		}
+		// muster #466: the operator's tool servers. The count only: a name, a command or
+		// an address in a log line is how a credential-adjacent detail leaks.
+		toolServers, err := opencode.ParseOperatorToolServers(cfgFile.operatorToolServers())
+		if err != nil {
+			log.Fatalf("muster: %v", err) // validateConfigExtras refused this already; unreachable
+		}
+		if n := toolServers.Len(); n > 0 {
+			log.Printf("muster: opencode operator tool servers configured: %d (#466)", n)
+		}
 		stopOpencode = svc.StartOptionalRuntime(context.Background(), service.OptionalRuntime{
 			Runtime:    opencode.DefaultRuntime,
 			DeadlineMs: opencode.DefaultDeadlineMs,
@@ -923,6 +937,10 @@ func main() {
 					// session's own directory. The paths are fixed here; each file is read
 					// again on every create. Empty names none.
 					opencode.WithOperatorInstructions(cfgFile.operatorInstructionFiles()),
+					// muster #466: tool servers the operator defines, given to each session
+					// its selector matches. Fixed here; judged again against every create and
+					// relaunch. Empty defines none.
+					opencode.WithOperatorToolServers(toolServers),
 					// muster #398: the driver says, one line per process, when it stops a
 					// server an earlier service left running.
 					opencode.WithLogf(func(format string, args ...any) { log.Printf("muster: "+format, args...) }),

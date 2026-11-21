@@ -338,6 +338,11 @@ type Driver struct {
 	// create and relaunch. Empty means the machine names none.
 	instructionFiles []string
 
+	// toolServers are the operator's tool servers (WithOperatorToolServers, muster
+	// #466): the definitions are fixed here, each is judged again against a session on
+	// every create and relaunch. Empty means the machine defines none.
+	toolServers OperatorToolServers
+
 	// createPolicy is the operator's policy over what a create may be given
 	// (WithCreatePolicy, muster #509). Here it decides one thing: whether a definition
 	// whose access is `allow` may run with no sandbox. Empty grants nothing.
@@ -621,6 +626,21 @@ func WithOperatorInstructions(paths []string) Option {
 // relaunch (agentspec.go). Empty, the default, grants nothing. Ignored in shared mode.
 func WithCreatePolicy(p createpolicy.Policy) Option {
 	return func(d *Driver) { d.createPolicy = p }
+}
+
+// WithOperatorToolServers gives every isolated session on this machine the tool
+// servers the operator defined whose `appliesTo` selector matches it (muster #466):
+// a server the session's own opencode.json lists under the runtime's `mcp` key. Only
+// the operator adds one, a create still cannot, and a bypass session gets one only
+// where the selector names bypass. The definitions are parsed and checked by
+// ParseOperatorToolServers; they are fixed here (a change needs a restart) and each
+// is judged again, against the session, on every create and relaunch. One that
+// cannot be given to a session refuses its create with the reason; one the runtime
+// does not connect is refused too, after the runtime is up. None (the default) adds
+// none. Refused in shared mode, which cannot give one session a server another does
+// not get. operatortoolservers.go has the rest.
+func WithOperatorToolServers(servers OperatorToolServers) Option {
+	return func(d *Driver) { d.toolServers = servers }
 }
 
 // WithLogf gives the driver somewhere to say that it stopped a server no

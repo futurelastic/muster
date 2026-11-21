@@ -1,6 +1,7 @@
 package opencode
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/rand"
 	"encoding/hex"
@@ -65,6 +66,13 @@ func TestMain(m *testing.M) {
 			}
 			_ = c.Close()
 			fmt.Println("dial ok")
+			os.Exit(0)
+		case "__mcp":
+			// muster #466: a tool server the REAL runtime can connect to: a stdio JSON-RPC
+			// server with one tool, `probe`. It records, in the file named by the argument,
+			// whether PROBE_CRED reached its environment, which is how a test sees that a
+			// credential arrived through the session's environment and not any other way.
+			runProbeMCP(os.Args[2])
 			os.Exit(0)
 		case "__stray":
 			// muster #405: a long-lived process standing in for a browser a tool
@@ -194,6 +202,29 @@ func fakeSessionInstructions() (texts []string, listed bool) {
 	return texts, true
 }
 
+// fakeSessionMCP is the stand-in for the runtime reading the `mcp` entries of the
+// session's own opencode.json (muster #466): the names it would try to connect. Like
+// the real runtime it lists nothing else, and the status it reports for each is
+// `connected` unless a test plants .fake-mcp-status.json (name -> status word) in the
+// session's working directory, which is how a server that failed is stood in for.
+func fakeSessionMCP() (names []string) {
+	raw, err := os.ReadFile(filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "opencode", "opencode.json"))
+	if err != nil {
+		return nil
+	}
+	var cfg struct {
+		MCP map[string]json.RawMessage `json:"mcp"`
+	}
+	if json.Unmarshal(raw, &cfg) != nil {
+		return nil
+	}
+	for name := range cfg.MCP {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // fakeInstructionUnreadable is what the stand-in records for an instruction path
 // it could not read.
 const fakeInstructionUnreadable = "<unreadable instruction file>"
@@ -216,6 +247,7 @@ func runFakeOpencode(args []string) {
 		time.Sleep(20 * time.Second)
 	}
 	configuredAgents, agentsListed := fakeSessionAgents(*printLogs)
+	configuredMCP := fakeSessionMCP()
 	user := os.Getenv("OPENCODE_SERVER_USERNAME")
 	pass := os.Getenv("OPENCODE_SERVER_PASSWORD")
 	cwd, _ := os.Getwd()
@@ -287,6 +319,28 @@ func runFakeOpencode(args []string) {
 			list := []wireAgent{}
 			for _, n := range append([]string{"build", "explore", "general", "plan"}, configuredAgents...) {
 				list = append(list, wireAgent{Name: n})
+			}
+			writeJSON(w, list)
+		case path == "/mcp" && r.Method == http.MethodGet && len(configuredMCP) > 0:
+			// Only for a session whose own configuration lists tool servers (muster #466);
+			// every other stand-in session answers 404, which is "could not tell" to the
+			// driver. The runtime's own failed entry carries an error that echoes the
+			// command, which the driver must not repeat; the stand-in does the same.
+			planted := map[string]string{}
+			if raw, err := os.ReadFile(".fake-mcp-status.json"); err == nil {
+				_ = json.Unmarshal(raw, &planted)
+			}
+			list := map[string]map[string]string{}
+			for _, n := range configuredMCP {
+				word := "connected"
+				if w, ok := planted[n]; ok {
+					word = w
+				}
+				entry := map[string]string{"status": word}
+				if word != "connected" {
+					entry["error"] = "SECRET-RUNTIME-ERROR spawn /operator/command ENOENT"
+				}
+				list[n] = entry
 			}
 			writeJSON(w, list)
 		case path == "/session/status":
@@ -459,4 +513,44 @@ func runFakeOpencode(args []string) {
 		os.Exit(4)
 	}
 	_ = http.Serve(ln, mux)
+}
+
+// runProbeMCP is the tool server behind the `__mcp` case above: a minimal Model
+// Context Protocol server over standard input and output.
+func runProbeMCP(report string) {
+	_ = os.WriteFile(report, []byte("cred="+os.Getenv("PROBE_CRED")+"\n"), 0o600)
+	in := bufio.NewScanner(os.Stdin)
+	in.Buffer(make([]byte, 1<<20), 1<<20)
+	out := json.NewEncoder(os.Stdout)
+	for in.Scan() {
+		var msg struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+			Params struct {
+				ProtocolVersion string `json:"protocolVersion"`
+			} `json:"params"`
+		}
+		if json.Unmarshal(in.Bytes(), &msg) != nil || len(msg.ID) == 0 {
+			continue // a notification
+		}
+		var result any
+		switch msg.Method {
+		case "initialize":
+			result = map[string]any{
+				"protocolVersion": msg.Params.ProtocolVersion,
+				"capabilities":    map[string]any{"tools": map[string]any{}},
+				"serverInfo":      map[string]any{"name": "probe", "version": "1"},
+			}
+		case "tools/list":
+			result = map[string]any{"tools": []any{map[string]any{
+				"name": "probe", "description": "a probe tool",
+				"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
+			}}}
+		case "tools/call":
+			result = map[string]any{"content": []any{map[string]any{"type": "text", "text": "ok"}}}
+		default:
+			result = map[string]any{}
+		}
+		_ = out.Encode(map[string]any{"jsonrpc": "2.0", "id": msg.ID, "result": result})
+	}
 }

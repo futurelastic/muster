@@ -625,7 +625,8 @@ to it.
   Fix the file and the next check applies it.
 - Only the two tables move. `trustRoots`, `defaultRuntime`, `sessionEnv`, `providerCredentials`, `createPolicy`,
   `opencode` (which file holds [the machine's opencode agents](#agents-every-opencode-session-on-this-machine-receives), and which files are
-  [its instruction files](#instruction-files-every-opencode-session-on-this-machine-receives)),
+  [its instruction files](#instruction-files-every-opencode-session-on-this-machine-receives), and which
+  [tool servers](#tool-servers-the-operator-gives-opencode-sessions) it defines),
   `models` ([the model lists a client may offer](#models-a-client-may-offer-for-a-create)),
   `maxInputBytes`, `gateRemoteControlInput`, `closedRetentionDays`,
   `inputAuditRetentionDays`, `profilingEndpoint`, `refuseRecordReads` and `machineList` are read at start, so an edit that
@@ -633,7 +634,7 @@ to it.
   principals and peers included — is applied until the service restarts. The
   refusal also says whether the restart it points to would work: it runs the same
   file checks as `muster doctor`'s `config.load` row and as the start itself (the
-  principal table, trust roots, `sessionEnv`, `providerCredentials`, `createPolicy`, `opencode.agents`, `opencode.instructions`, `models`, a `defaultRuntime` the machine does
+  principal table, trust roots, `sessionEnv`, `providerCredentials`, `createPolicy`, `opencode.agents`, `opencode.instructions`, `opencode.mcp`, `models`, a `defaultRuntime` the machine does
   not run, `maxInputBytes`, the retention days, a `machineList` in mode `only`
   that does not verify, the peer list), and ends either "the file passes start-up
   validation" or "a restart would fail: <the start-up error>". Read that before
@@ -750,8 +751,10 @@ own configuration carries under that name: one definition per agent.
   an operator must repair it). That covers a missing or unreadable file, anything
   that is not a JSON object, an agent defined twice, a definition that is not an
   object, a file over 1 MiB, and any top-level key other than `agent`. The last is
-  deliberate: providers, permissions and tool servers are set by the service, and a
-  file that could set them would be a way around that policy. A definition the
+  deliberate: providers and permissions are set by the service, and a file that could
+  set them would be a way around that policy. Tool servers have a setting of their
+  own, with its own bounds ([`opencode.mcp`](#tool-servers-the-operator-gives-opencode-sessions)):
+  a client still cannot add one, but the operator can, there and nowhere else. A definition the
   runtime itself rejects (a `mode` that is not `subagent`, `primary` or `all`, say)
   stops that session's runtime from starting, and the create is refused naming the error
   the runtime logged. A create is never run as the default agent instead. A session
@@ -817,13 +820,102 @@ expects), at most 1 MiB.
   replaces the other. The gated integration test (`FLEET_OPENCODE_INTEGRATION=1`)
   pins that against opencode 1.18.
 - **It is instruction files only.** This setting adds no tool server, permission
-  or provider, and the exclusion that keeps those out of the agents file stays as it
-  is. The text is visible to the session, like any instruction file, and is not a
+  or provider; tool servers are [a setting of their own](#tool-servers-the-operator-gives-opencode-sessions).
+  The text is visible to the session, like any instruction file, and is not a
   secret channel: no secret belongs in it, and it is never logged. The service logs
   only how many files are configured.
 - Claude sessions are unchanged, and the setting has no effect on a shared-mode
   driver (a test seam that talks to a server it did not start), which has no
   configuration of its own to write the files into.
+
+### Tool servers the operator gives opencode sessions
+
+An `opencode` session runs with configuration directories of its own, so it loads no
+tool server the service user keeps, and the agents file above deliberately carries
+none. An operator who wants a tool server in front of the sessions on a machine (an
+interactive-card server, a search server) defines it once in `opencode.mcp` in the
+file `FLEET_CONFIG` names:
+
+```json
+{
+  "opencode": {
+    "mcp": {
+      "cards": {
+        "type": "local",
+        "command": ["/usr/local/bin/cards-mcp", "--stdio"],
+        "environment": { "CARDS_KEY": "{env:CARDS_KEY}" },
+        "appliesTo": { "agents": ["reviewer"] }
+      },
+      "search": {
+        "type": "remote",
+        "url": "https://tools.example/mcp",
+        "headers": { "Authorization": "Bearer {env:SEARCH_TOKEN}" },
+        "timeout": 10000,
+        "appliesTo": { "permissionModes": ["default", "bypass"] }
+      }
+    }
+  }
+}
+```
+
+Each entry is a server the runtime's own `mcp` configuration would take, keyed by
+name (1 to 64 letters, digits, `-` and `_`; the runtime prefixes the tool names the
+server offers with it), plus an `appliesTo` selector. Only the operator adds a tool
+server, and only here: **a create still cannot** (`mcpConfig` stays refused on this
+runtime, because starting a session that also starts tool servers is a larger
+authority than starting a session).
+
+- **Which sessions get it.** `appliesTo` has the shape of a
+  [`sessionEnv`](session-identity.md) entry's (`runtimes`, `agents`, `markers`: a
+  session matches when its runtime is listed and it names one of the agents or
+  markers; an axis left out means any) and one axis of its own, `permissionModes`.
+  **A `bypass` session is excluded unless `permissionModes` names `"bypass"`**: left
+  out, it means `["default"]`. Naming an agent or a marker that happens to run in
+  `bypass` is not naming `bypass`. A remote server acts outside any sandbox by
+  nature, so naming `bypass` for one is the operator accepting that.
+- **It never widens policy.** A definition is checked against a fixed list of keys and
+  written into the session's own configuration under `mcp` and nowhere else. It cannot
+  carry `permission`, `tools`, `agent` or `provider`, `oauth` or `enabled`; each is
+  refused by name. The service sets `enabled` itself (to turn a server off, remove it
+  or narrow its selector) and always writes `oauth: false` for a remote server. The
+  permission posture and the provider policy apply on top, unchanged: a tool server's
+  calls are judged as those of any server a project defines. A local server runs inside
+  the session's sandbox like every other tool.
+- **A credential is a reference, never a value.** `environment` values must be exactly
+  `{env:NAME}`; a header value is `{env:NAME}` or `<scheme> {env:NAME}` (`Bearer
+  {env:NAME}`). The runtime expands the reference from the session's environment,
+  which is where this machine's [`sessionEnv`](session-identity.md) puts the value, so
+  the value is never in the config file, in the session's `opencode.json`, on a command
+  line or in a log. A literal there, a `{file:...}` anywhere, an `{env:...}` in the
+  `command`, `url` or `cwd`, a url carrying a user name, a password or a query, and a
+  reference to a variable the service sets for every session are all refused. Scope the
+  `sessionEnv` entry that supplies the value as narrowly as the server: the entry has
+  no bypass axis of its own.
+- **A local server's `command` is an absolute path**, and a remote server's `url` is
+  `https` (plain `http` only to a loopback address). `timeout` is whole milliseconds, 1
+  to 600000.
+- **The declaration is fixed at start; each session is judged on every create and
+  every relaunch.** Changing the setting is a restart-only edit, and `muster doctor`
+  and a reload check its whole shape. A running session keeps the servers it started
+  with; one created or relaunched later gets the current setting.
+- **A server that cannot be given to a session refuses the create** (`unsupported`: an
+  operator must repair it), naming the server and the problem and never a value: a
+  local executable that is missing or not executable, a referenced variable that no
+  `sessionEnv` entry supplies to that session (or that the create itself supplies), a
+  remote server for a session whose sandbox allows loopback only, any applicable server
+  on a shared-mode driver. After the runtime is up the service asks it whether it
+  connected every server the session was configured with, and refuses the create when
+  one did not; the refusal carries the runtime's status word (`failed`, `needs_auth`,
+  ...) and not its own error text, which repeats the command or the address. A session
+  that cannot be relaunched after a restart for any of these reasons is listed
+  `unknown` with the reason. A session is never started without a tool server it was
+  meant to have.
+- **A project's server of the same name wins, field by field**, as a project's agent
+  does: the operator's definition is the session's global one. A project can already
+  define any server and name any variable in the session's environment, so this adds no
+  authority.
+- The service logs only how many servers are configured, never a name, a command or an
+  address. Claude sessions are unchanged.
 
 ### A ChatGPT subscription for every opencode session
 

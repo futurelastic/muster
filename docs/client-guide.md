@@ -979,6 +979,17 @@ that is missing, unreadable, empty or not text refuses the create (`unsupported`
 with the reason, and for the operator to repair); a session never starts without
 its rules.
 
+**Tool servers on an `opencode` session** (muster #466). `mcpConfig` is refused on
+this runtime: a client cannot add a tool server. The operator of a machine can define
+some (`opencode.mcp` in the machine's configuration file,
+[`install.md`](install.md#tool-servers-the-operator-gives-opencode-sessions)) and say
+which sessions get each by agent, marker or permission mode; a `bypass` session gets
+one only where the operator named `bypass` for it. You pass nothing on the create. The
+runtime lists such a server's tools like any other, under the posture and the provider
+policy the session already has. A server the machine meant for your session that cannot
+be given to it, or that the runtime does not connect, refuses the create
+(`unsupported`, with the server's name and the reason, and for the operator to repair).
+
 **The `model` pin on `opencode` resolves the same way** (muster #373). The model
 is carried in the create body and applies to every turn, but the create response
 never names the model in use, so `pins.model.honoured` is `null` on the create

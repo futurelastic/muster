@@ -124,6 +124,10 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 		// session a variable another does not see, nor to isolate anything.
 		refused["env"] = len(spec.Env) > 0
 		refused["isolateEnvironment"] = spec.IsolateEnvironment
+		// muster #466: nor a tool server only some sessions get.
+		if err := d.checkToolServersShared(spec); err != nil {
+			return fleet.Session{}, err
+		}
 	}
 	if spec.Sandbox != nil {
 		// muster #281: refuse, never degrade. The reason is the capability's own,
@@ -225,6 +229,13 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 	// create and replaced by a default at the first turn. Refused here, on the same
 	// terms and at the same point as a model outside the catalog.
 	if err := d.checkAgent(ctx, srv, spec.Cwd, string(spec.Agent)); err != nil {
+		d.discardServer(srv)
+		return fleet.Session{}, err
+	}
+	// muster #466: the operator's tool servers this session was configured with must be
+	// connected in its own runtime. Refused here on the same terms: before a session
+	// exists, with the process started for it torn down again.
+	if err := d.checkToolServers(ctx, srv, spec.Cwd); err != nil {
 		d.discardServer(srv)
 		return fleet.Session{}, err
 	}
@@ -419,6 +430,12 @@ func (d *Driver) startServerIn(ctx context.Context, spec fleet.SessionSpec, exis
 	if err != nil {
 		return nil, err
 	}
+	// muster #466: the operator's tool servers that apply to this session, judged here
+	// too, before any side effect: one that cannot be given to it refuses the start.
+	toolServers, err := d.operatorToolServersFor(spec, extra)
+	if err != nil {
+		return nil, err
+	}
 	// muster #509: a portable agent definition is read here too, the knowledge index
 	// with it, before any side effect — an unusable one refuses the start.
 	agentDef, err := d.agentSpecFor(spec, existingDir, agents)
@@ -474,6 +491,11 @@ func (d *Driver) startServerIn(ctx context.Context, spec fleet.SessionSpec, exis
 			cleanup()
 			return nil, err
 		}
+		// muster #466: a remote tool server is not reachable from a loopback-only sandbox.
+		if err := d.checkToolServersNetwork(toolServers, plan); err != nil {
+			cleanup()
+			return nil, err
+		}
 		// muster #484: where the toolchain behind `git` is, when the one the host
 		// selected is not readable. Set here, with the other variables the plan
 		// decides, and owned so a create cannot name it.
@@ -515,6 +537,9 @@ func (d *Driver) startServerIn(ctx context.Context, spec fleet.SessionSpec, exis
 	var configOpts []configOption
 	if unconfined {
 		configOpts = append(configOpts, withUnconfinedBypass())
+	}
+	if len(toolServers.rendered) > 0 {
+		configOpts = append(configOpts, withToolServers(toolServers.rendered))
 	}
 	if agentDef != nil {
 		entry, defPaths, err := writeAgentSpecFiles(dir, agentDef)
@@ -574,6 +599,7 @@ func (d *Driver) startServerIn(ctx context.Context, spec fleet.SessionSpec, exis
 		noteWorkdir(srv, plan, string(spec.Cwd))
 	}
 	srv.credential = cred.kind
+	srv.toolServers = toolServers.names()
 	srv.dir = dir
 	if !fresh {
 		// A directory that already held a session is not this call's to remove,
