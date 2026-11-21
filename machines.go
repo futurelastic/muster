@@ -178,6 +178,47 @@ type RuntimeInfo struct {
 	// only on this machine's own rows; absent says nobody reported, never "none
 	// held". An empty list is not sent for the same reason.
 	Credentials []RuntimeCredential `json:"credentials,omitempty"`
+	// SandboxPolicy is the operator's sandbox policy as it reaches this runtime
+	// (muster #438): every rule of the machine's `createPolicy` that sets a
+	// `sandbox` and whose scope names this runtime or none, in the order they are
+	// tried. Whether one applies to a given create is the create's agent and
+	// marker, which is what each entry's AppliesTo says. Present only on a runtime
+	// that has at least one such rule and only on this machine's own rows (a peer's
+	// row carries what that peer reports); absent says no rule reaches it — or a
+	// build that predates the field — and a create is then confined only when it
+	// asks to be.
+	SandboxPolicy []RuntimeSandboxPolicy `json:"sandboxPolicy,omitempty"`
+}
+
+// RuntimeSandboxPolicy is one entry of RuntimeInfo.SandboxPolicy (muster #438).
+type RuntimeSandboxPolicy struct {
+	// Mode is "default" (given to a create that names no sandbox, which may name
+	// its own, wider or narrower) or "required" (every create runs under this or a
+	// narrower profile, or is refused). The set is open on read: a client must
+	// treat a mode it does not know as required.
+	Mode string `json:"mode"`
+	// AppliesTo narrows the rule to creates naming one of these agents or markers.
+	// Absent: it applies to every create on this runtime.
+	AppliesTo *RuntimePolicyScope `json:"appliesTo,omitempty"`
+	// ReadPaths and WritePaths are the directories the profile grants in addition
+	// to the working directory and the session's own directory; writable paths are
+	// also readable. Always present, empty when none.
+	ReadPaths  []AbsolutePath `json:"readPaths"`
+	WritePaths []AbsolutePath `json:"writePaths"`
+	// Network is the posture of the profile: "open" or "closed".
+	Network SandboxNetwork `json:"network"`
+	// Enforceable says whether this runtime can enforce the profile now. A
+	// required rule that is not is a create refused `unsupported`
+	// (reason "sandbox-required"); a default one is not applied, and a create in
+	// scope that names no sandbox runs unconfined.
+	Enforceable bool `json:"enforceable"`
+}
+
+// RuntimePolicyScope is the agent and marker axes of a policy rule's scope; the
+// runtime axis is the row it sits on.
+type RuntimePolicyScope struct {
+	Agents  []string `json:"agents,omitempty"`
+	Markers []string `json:"markers,omitempty"`
 }
 
 // CredentialSource says where a credential the service holds comes from. The set

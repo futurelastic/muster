@@ -443,10 +443,28 @@ func runChecks(ctx context.Context, env doctorEnv) []doctorRow {
 	// Beside the runtime rows because it is the host's half of what the runtime
 	// capability declares. On Linux it starts a child to confine, so a row named in
 	// --skip is not computed at all.
+	var hostReport *sandbox.HostReport
+	measureHost := func() *sandbox.HostReport {
+		if hostReport == nil {
+			hostReport = doctorSandboxHost()
+		}
+		return hostReport
+	}
 	if c.skipped("sandbox.host") {
 		c.add(doctorRow{ID: "sandbox.host"})
 	} else {
-		c.add(checkSandboxHost(doctorSandboxHost()))
+		c.add(checkSandboxHost(measureHost()))
+	}
+	// The operator's sandbox policy (#438), judged against the same host report. Only
+	// decidable once the file loads; a machine with no sandbox rule measures nothing.
+	switch {
+	case c.skipped("sandbox.policy"):
+		c.add(doctorRow{ID: "sandbox.policy"})
+	case cfgFailed:
+		c.add(doctorRow{ID: "sandbox.policy", Status: statusSkip, Summary: "undecidable until config.load passes", Refs: []int{438}})
+	default:
+		c.add(checkSandboxPolicy(cfg.createPolicy(), enabledRuntimes(runtime, getenv("FLEET_RUNTIME_OPENCODE") == "1"),
+			strings.ToLower(getenv("FLEET_TMUX_SANDBOX")) == "off", measureHost))
 	}
 
 	// --- the service manager's own record (Windows only) -----------------------

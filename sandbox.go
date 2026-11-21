@@ -205,6 +205,95 @@ type SandboxSpec struct {
 	PackageCache *SandboxPackageCache `json:"packageCache,omitempty"`
 }
 
+// ReasonSandboxRequired is the machine-readable reason on a refusal that comes
+// from the operator's sandbox policy (muster #438), on both of its kinds:
+// `unsupported` when the machine requires a sandbox the runtime cannot enforce,
+// and `invalid` when a create's own sandbox is wider than the one the machine
+// requires. A client branches on it instead of parsing the message.
+const ReasonSandboxRequired = "sandbox-required"
+
+// EffectiveNetwork is the network posture the spec means: open when it names none.
+func (s SandboxSpec) EffectiveNetwork() SandboxNetwork {
+	if s.Network == "" {
+		return SandboxNetworkOpen
+	}
+	return s.Network
+}
+
+// Within says why s grants more than limit does, or returns nil when it grants
+// nothing limit does not (muster #438). It is how a machine that REQUIRES a
+// sandbox lets a create narrow the profile and never widen it: a create's own
+// profile is accepted when its network is no more open, and every path it grants
+// lies inside a path the limit grants at the same level or a higher one.
+//
+//   - A writable path must lie inside a writable path of the limit.
+//   - A readable path may lie inside a readable or a writable one: writable
+//     implies readable, so a read-only grant under a writable directory is a
+//     narrowing.
+//   - A package cache is a path grant like any other: a `shared` one is writable
+//     and a `private` one reads its seed.
+//
+// Containment is on the path as written (both sides are absolute and clean, see
+// Validate): a symbolic link inside a granted directory is not followed, so it is
+// the operator's to keep a granted directory free of links that leave it.
+//
+// What the profile always grants — the working directory and the session's own
+// directory — is in no spec, so it is in neither side of this comparison.
+func (s SandboxSpec) Within(limit SandboxSpec) error {
+	if limit.EffectiveNetwork() == SandboxNetworkClosed && s.EffectiveNetwork() != SandboxNetworkClosed {
+		return fmt.Errorf("sandbox.network %q is wider than the %q this machine requires", string(s.EffectiveNetwork()), string(SandboxNetworkClosed))
+	}
+	writable := limit.WritePaths
+	readable := append(append([]AbsolutePath(nil), limit.ReadPaths...), limit.WritePaths...)
+	for _, p := range s.WritePaths {
+		if !pathWithinAny(p, writable) {
+			return fmt.Errorf("sandbox.writePaths: %q is outside the writable paths this machine's sandbox policy grants%s",
+				string(p), grantedList(writable))
+		}
+	}
+	for _, p := range s.ReadPaths {
+		if !pathWithinAny(p, readable) {
+			return fmt.Errorf("sandbox.readPaths: %q is outside the paths this machine's sandbox policy grants%s",
+				string(p), grantedList(readable))
+		}
+	}
+	if pc := s.PackageCache; pc != nil {
+		if pc.Mode == PackageCacheShared {
+			if !pathWithinAny(pc.Path, writable) {
+				return fmt.Errorf("sandbox.packageCache.path: %q is a shared (writable) cache outside the writable paths this machine's sandbox policy grants%s",
+					string(pc.Path), grantedList(writable))
+			}
+		} else if !pathWithinAny(pc.Path, readable) {
+			return fmt.Errorf("sandbox.packageCache.path: %q is outside the paths this machine's sandbox policy grants%s",
+				string(pc.Path), grantedList(readable))
+		}
+	}
+	return nil
+}
+
+// pathWithinAny reports whether p is one of roots or lies under one.
+func pathWithinAny(p AbsolutePath, roots []AbsolutePath) bool {
+	for _, r := range roots {
+		if p == r || strings.HasPrefix(string(p), string(r)+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// grantedList is " (none)" or " (a, b)": the paths a refusal says would have been
+// accepted, so a caller can narrow to one of them instead of guessing.
+func grantedList(paths []AbsolutePath) string {
+	if len(paths) == 0 {
+		return " (none)"
+	}
+	parts := make([]string, len(paths))
+	for i, p := range paths {
+		parts[i] = string(p)
+	}
+	return " (" + strings.Join(parts, ", ") + ")"
+}
+
 // SandboxDeny names a class of access the profile denies by default.
 type SandboxDeny string
 

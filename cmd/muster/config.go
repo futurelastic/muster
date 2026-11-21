@@ -168,20 +168,33 @@ type fileConfig struct {
 		} `json:"appliesTo,omitempty"`
 	} `json:"providerCredentials,omitempty"`
 
-	// CreatePolicy is the operator's policy over what a create may be given
-	// (muster #509): today, the `access` of a portable agent definition
-	// (`agentSpec`). Each rule names an `access` ("ask", "allow" or "sandboxed")
-	// and an optional appliesTo scope shaped exactly like a sessionEnv entry's,
-	// whose `agents` axis also matches an agentSpec's name. The FIRST rule whose
-	// scope matches a create decides, in file order, and its value wins over the
-	// create's own; a rule after one that matches everything it could is refused at
-	// start. It is how an operator lets an agent run unconfined on a host that
-	// cannot enforce a sandbox, or confines one the client asked to leave open. A
-	// value this machine cannot honour refuses the create with the reason and is
-	// never weakened. Config-file-only and per machine, like SessionEnv, and read
-	// at start: changing it needs a restart.
+	// CreatePolicy is the operator's policy over what a create may be given: today
+	// the `access` of a portable agent definition (`agentSpec`, muster #509) and
+	// the sandbox a create runs in (`sandbox`, muster #438). Each rule sets either
+	// or both, with an optional appliesTo scope shaped exactly like a sessionEnv
+	// entry's, whose `agents` axis also matches an agentSpec's name.
+	//
+	// `access` is "ask", "allow" or "sandboxed"; the operator's value wins over the
+	// create's. `sandbox` is {"mode": "default"|"required", "readPaths", "writePaths",
+	// "network": "open"|"closed"}: `default` gives that profile to a create that names
+	// no sandbox, and `required` holds every create in scope to it — a create's own
+	// sandbox may narrow it and never widen it, and a runtime that cannot enforce it
+	// refuses the create `unsupported` instead of starting weaker.
+	//
+	// For each key the FIRST rule that sets it and whose scope matches a create
+	// decides, in file order; a rule, or one key of it, that an earlier rule already
+	// decides for everything it could match is refused at start. A value this machine
+	// cannot honour refuses the create with the reason and is never weakened.
+	// Config-file-only and per machine, like SessionEnv, and read at start: changing
+	// it needs a restart.
 	CreatePolicy []struct {
-		Access    string `json:"access"`
+		Access  string `json:"access,omitempty"`
+		Sandbox *struct {
+			Mode       string   `json:"mode"`
+			ReadPaths  []string `json:"readPaths,omitempty"`
+			WritePaths []string `json:"writePaths,omitempty"`
+			Network    string   `json:"network,omitempty"`
+		} `json:"sandbox,omitempty"`
 		AppliesTo *struct {
 			Runtimes []string `json:"runtimes,omitempty"`
 			Agents   []string `json:"agents,omitempty"`
@@ -495,6 +508,19 @@ func (c *fileConfig) createPolicy() createpolicy.Policy {
 	out := make(createpolicy.Policy, 0, len(c.CreatePolicy))
 	for _, e := range c.CreatePolicy {
 		r := createpolicy.Rule{Access: fleet.AgentAccess(e.Access)}
+		if e.Sandbox != nil {
+			sb := createpolicy.SandboxRule{
+				Mode: createpolicy.SandboxMode(e.Sandbox.Mode),
+				Spec: fleet.SandboxSpec{Network: fleet.SandboxNetwork(e.Sandbox.Network)},
+			}
+			for _, p := range e.Sandbox.ReadPaths {
+				sb.Spec.ReadPaths = append(sb.Spec.ReadPaths, fleet.AbsolutePath(p))
+			}
+			for _, p := range e.Sandbox.WritePaths {
+				sb.Spec.WritePaths = append(sb.Spec.WritePaths, fleet.AbsolutePath(p))
+			}
+			r.Sandbox = &sb
+		}
 		if e.AppliesTo != nil {
 			r.AppliesTo = sessionenv.Scope{Runtimes: e.AppliesTo.Runtimes, Agents: e.AppliesTo.Agents, Markers: e.AppliesTo.Markers}
 		}

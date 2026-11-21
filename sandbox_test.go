@@ -143,3 +143,56 @@ func TestAllowFullCopyWireName(t *testing.T) {
 		}
 	}
 }
+
+// muster #438: a machine that requires a sandbox lets a create narrow it and never
+// widen it. The comparison is on the paths as written, level by level.
+func TestSandboxSpecWithin(t *testing.T) {
+	limit := SandboxSpec{
+		ReadPaths: []AbsolutePath{"/srv/data"}, WritePaths: []AbsolutePath{"/srv/work"}, Network: SandboxNetworkClosed}
+	open := SandboxSpec{Network: SandboxNetworkOpen}
+	cases := []struct {
+		name  string
+		spec  SandboxSpec
+		limit SandboxSpec
+		bad   string // substring of the refusal; empty means within
+	}{
+		{"the same", limit, limit, ""},
+		{"nothing named, against a closed limit, is open", SandboxSpec{}, limit, "sandbox.network"},
+		{"nothing named, against an open limit", SandboxSpec{}, open, ""},
+		{"closed is narrower than open", SandboxSpec{Network: SandboxNetworkClosed}, open, ""},
+		{"open is wider than closed", open, limit, "sandbox.network"},
+		{"a directory under a writable one", SandboxSpec{WritePaths: []AbsolutePath{"/srv/work/job"}, Network: SandboxNetworkClosed}, limit, ""},
+		{"a sibling that shares a prefix", SandboxSpec{ReadPaths: []AbsolutePath{"/srv/data-2"}, Network: SandboxNetworkClosed}, limit, "sandbox.readPaths"},
+		{"a parent", SandboxSpec{ReadPaths: []AbsolutePath{"/srv"}, Network: SandboxNetworkClosed}, limit, "sandbox.readPaths"},
+		{"read under a writable path", SandboxSpec{ReadPaths: []AbsolutePath{"/srv/work/docs"}, Network: SandboxNetworkClosed}, limit, ""},
+		{"write under a read-only path", SandboxSpec{WritePaths: []AbsolutePath{"/srv/data/out"}, Network: SandboxNetworkClosed}, limit, "sandbox.writePaths"},
+		{"a path against a limit that grants none", SandboxSpec{ReadPaths: []AbsolutePath{"/srv/data"}, Network: SandboxNetworkClosed},
+			SandboxSpec{Network: SandboxNetworkClosed}, "(none)"},
+		{"a private cache is a read", SandboxSpec{Network: SandboxNetworkClosed, PackageCache: &SandboxPackageCache{Path: "/srv/data/c"}}, limit, ""},
+		{"a shared cache is a write", SandboxSpec{Network: SandboxNetworkClosed, PackageCache: &SandboxPackageCache{Path: "/srv/data/c", Mode: PackageCacheShared}}, limit, "packageCache"},
+		{"a shared cache under a writable path", SandboxSpec{Network: SandboxNetworkClosed, PackageCache: &SandboxPackageCache{Path: "/srv/work/c", Mode: PackageCacheShared}}, limit, ""},
+		{"a cache outside", SandboxSpec{Network: SandboxNetworkClosed, PackageCache: &SandboxPackageCache{Path: "/srv/c"}}, limit, "packageCache"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := c.spec.Within(c.limit)
+			switch {
+			case c.bad == "" && err != nil:
+				t.Fatalf("refused a profile that is within: %v", err)
+			case c.bad != "" && err == nil:
+				t.Fatalf("accepted a profile that is wider (%s)", c.bad)
+			case c.bad != "" && !strings.Contains(err.Error(), c.bad):
+				t.Fatalf("refusal %q does not name %q", err, c.bad)
+			}
+		})
+	}
+}
+
+func TestSandboxSpecEffectiveNetwork(t *testing.T) {
+	if got := (SandboxSpec{}).EffectiveNetwork(); got != SandboxNetworkOpen {
+		t.Errorf("an unnamed network is %q, want open", got)
+	}
+	if got := (SandboxSpec{Network: SandboxNetworkClosed}).EffectiveNetwork(); got != SandboxNetworkClosed {
+		t.Errorf("EffectiveNetwork = %q", got)
+	}
+}

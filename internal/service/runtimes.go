@@ -389,7 +389,8 @@ func (s *Service) localRuntimeRows(ctx context.Context) []fleet.RuntimeInfo {
 		caps := d.Capabilities()
 		ps := fleet.PostureSupportFrom(caps)
 		up = append(up, fleet.RuntimeInfo{Machine: s.self, Runtime: rt, Capabilities: caps, Status: fleet.RuntimeAvailable, Posture: &ps,
-			Models: modelsOf(d), Grants: grantsOf(d), Credentials: credentialsOf(d)})
+			Models: modelsOf(d), Grants: grantsOf(d), Credentials: credentialsOf(d),
+			SandboxPolicy: s.sandboxPolicyOf(rt, caps)})
 	}
 	return append(append(up, down...), noDriver...)
 }

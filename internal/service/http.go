@@ -1517,6 +1517,17 @@ func handleCreateSession(svc *Service) http.HandlerFunc {
 			body.IsolateConfiguration = mapped.IsolateConfiguration
 		}
 
+		// muster #438: the operator's sandbox policy. After the lowering above, so a
+		// sandbox a posture asked for is the create's own; before anything reads
+		// body.Sandbox. A relayed create carries on untouched: the machine that runs
+		// the session applies its own policy.
+		if via != resolvedPeer {
+			if ferr := svc.applySandboxPolicy(machine, resolvedRuntime, d.Capabilities(), &body); ferr != nil {
+				writeError(w, ferr)
+				return
+			}
+		}
+
 		// #180: refuse env naming a variable this machine's delivery module
 		// reserves, as a 400 naming it. A relaying driver does not report
 		// reserved names; the owning machine's handler checks its own.
