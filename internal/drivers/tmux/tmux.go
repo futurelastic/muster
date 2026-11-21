@@ -390,6 +390,7 @@ type Driver struct {
 	sandboxMu       sync.Mutex
 	sandboxStates   map[string]*fleet.SandboxState
 	sandboxSwept    time.Time
+	agentSpecSwept  time.Time // muster #509: the last sweep of agent definitions, under sandboxMu
 	shell           string
 	bareExec        bool
 	run             execFunc
@@ -1196,6 +1197,9 @@ func (d *Driver) Capabilities() fleet.DriverCapabilities {
 		// capability and the route cannot disagree.
 		RecordFormat:        recordFormatIf(d.conversations != nil),
 		ReportsConversation: fleet.Declared(d.conversations != nil),
+		// muster #509: a portable agent definition is rendered as a plugin directory
+		// the default agent CLI loads for the one session (agentspec.go).
+		SupportsAgentSpec: fleet.Declared(d.supportsAgentSpec()),
 		// respond answers every prompt this driver reports, with or without a
 		// kind: it works from the screen's own option list, and refuses by the
 		// answer's shape rather than by what the prompt is. A kind this driver
@@ -2184,7 +2188,8 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 	driver.NotePhase(ctx, "list.enumerate", phase)
 	phase = time.Now()
 	rows = d.reapDeadRows(ctx, rows, captures)
-	d.sweepSandbox(rows) // muster #345: private directories nobody owns any more
+	d.sweepSandbox(rows)    // muster #345: private directories nobody owns any more
+	d.sweepAgentSpecs(rows) // muster #509: and agent definitions
 	driver.NotePhase(ctx, "list.reap", phase)
 	phase = time.Now()
 
@@ -5049,6 +5054,7 @@ func (d *Driver) killCorroborated(ctx context.Context, ref fleet.SessionRef) (fl
 	d.mods.closeLane(ref.ID)
 	// muster #345: a destroyed session's private directory has no reader left.
 	d.dropSandbox(ref.ID)
+	d.dropAgentSpec(ref.ID) // muster #509: and its agent definition
 	return fleet.Ack{Accepted: true}, nil
 }
 
@@ -5229,6 +5235,15 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 				"refusing rather than start a session that also loads the account's own settings and tool servers",
 			Machine: d.machine,
 		}
+	}
+	// muster #509: a portable agent definition is checked before any side effect, and
+	// its name is then the agent this session is pinned to; the CLI is given the same
+	// name in the plugin's own namespace (prepareAgentSpec).
+	if err := d.checkAgentSpec(spec); err != nil {
+		return fleet.Session{}, err
+	}
+	if spec.AgentSpec != nil {
+		spec.Agent = fleet.AgentId(spec.AgentSpec.Name)
 	}
 	// muster #281, #345: this driver starts sessions through the user's
 	// multiplexer, whose server socket is the very thing a sandbox must keep a
@@ -5490,13 +5505,39 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 	// The builder sees the RESOLVED name, not the requested one — see above.
 	built := spec
 	built.Name = name
+	// muster #509: the definition is rendered into this session's own plugin
+	// directory and the CLI is told to load it; the directory goes again if the
+	// session never starts (agentSpecKept is set once it has).
+	var agentPlugin *agentSpecPrep
+	agentSpecKept := false
+	if spec.AgentSpec != nil {
+		prep, err := d.prepareAgentSpec(spec, name, &built)
+		if err != nil {
+			_ = d.idem.release(key)
+			return fleet.Session{}, err
+		}
+		agentPlugin = prep
+		defer func() {
+			if !agentSpecKept {
+				prep.drop()
+			}
+		}()
+	}
 	argv := d.build(built, contextFile)
+	if agentPlugin != nil {
+		argv = insertAfterProgram(argv, agentPlugin.args)
+	}
 	// muster #345: confine the agent. Wrapped BEFORE the login shell, so the
 	// shell (which only reads the startup files, enters the directory and execs)
 	// stays outside and everything the agent starts is inside.
 	sandboxOK := false
 	if spec.Sandbox != nil {
-		wrapped, drop, err := d.prepareSandbox(spec, name, sandboxProg, sandboxMech, argv)
+		sandboxed := spec
+		if agentPlugin != nil {
+			// The plugin directory, and the knowledge home, are readable inside it.
+			sandboxed.Sandbox = withKnowledgeGrant(spec.Sandbox, *spec.AgentSpec, agentPlugin.dir)
+		}
+		wrapped, drop, err := d.prepareSandbox(sandboxed, name, sandboxProg, sandboxMech, argv)
 		if err != nil {
 			_ = d.idem.release(key)
 			return fleet.Session{}, err
@@ -5572,6 +5613,7 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 		return fleet.Session{}, fmt.Errorf("create: %w", newSessionErr)
 	}
 	sandboxOK = true
+	agentSpecKept = true
 	// The server may be new; do not let a health read keep reporting "no
 	// server" for the rest of the cache window (muster #336).
 	d.forgetServerContext()

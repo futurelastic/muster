@@ -8,9 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"unicode/utf8"
 
 	fleet "github.com/futurelastic/muster"
+	"github.com/futurelastic/muster/internal/agentdef"
 	"github.com/futurelastic/muster/internal/privfs"
 )
 
@@ -169,7 +169,7 @@ func (d *Driver) agentSpecFor(spec fleet.SessionSpec, existingDir string, agents
 	}
 	r := &renderedAgentSpec{def: def}
 	if k := def.Knowledge; k != nil {
-		text, err := readKnowledgeIndex(k.Index)
+		text, err := agentdef.ReadIndex(k.Index)
 		if err != nil {
 			if existingDir != "" {
 				return nil, fmt.Errorf("create: %w", err)
@@ -179,40 +179,6 @@ func (d *Driver) agentSpecFor(spec fleet.SessionSpec, existingDir string, agents
 		r.index = text
 	}
 	return r, nil
-}
-
-// readKnowledgeIndex reads the index a definition names. The error says what is
-// wrong in words a caller can act on; it never quotes the file's content.
-func readKnowledgeIndex(path fleet.AbsolutePath) ([]byte, error) {
-	p := string(path)
-	info, err := os.Stat(p) // follows a link: a client may keep one
-	if err != nil {
-		return nil, fmt.Errorf("agentSpec.knowledge.index cannot be read: %w", err)
-	}
-	// Before opening: opening a named pipe blocks until something writes to it.
-	if !info.Mode().IsRegular() {
-		kind := "not a regular file"
-		if info.IsDir() {
-			kind = "a directory, not a file"
-		}
-		return nil, fmt.Errorf("agentSpec.knowledge.index %q is %s", p, kind)
-	}
-	f, err := os.Open(p)
-	if err != nil {
-		return nil, fmt.Errorf("agentSpec.knowledge.index cannot be read: %w", err)
-	}
-	defer f.Close()
-	raw, err := io.ReadAll(io.LimitReader(f, fleet.AgentKnowledgeMaxIndexBytes+1))
-	if err != nil {
-		return nil, fmt.Errorf("agentSpec.knowledge.index cannot be read: %w", err)
-	}
-	switch {
-	case len(raw) > fleet.AgentKnowledgeMaxIndexBytes:
-		return nil, fmt.Errorf("agentSpec.knowledge.index %q is larger than %d bytes", p, fleet.AgentKnowledgeMaxIndexBytes)
-	case !utf8.Valid(raw):
-		return nil, fmt.Errorf("agentSpec.knowledge.index %q is not UTF-8 text", p)
-	}
-	return raw, nil
 }
 
 // loadAgentSpecDefinition reads the definition the first start of a session kept in
@@ -238,25 +204,6 @@ func loadAgentSpecDefinition(dir string) (fleet.AgentSpec, error) {
 		return def, err
 	}
 	return def, nil
-}
-
-// knowledgeNote is the file the runtime reads the index from: a note naming the
-// home, then the index as this start read it.
-func knowledgeNote(k fleet.AgentKnowledge, index []byte) []byte {
-	var b strings.Builder
-	b.WriteString("# Your memory\n\n")
-	fmt.Fprintf(&b, "Your memory home is `%s`. ", string(k.Home))
-	if k.Write {
-		b.WriteString("This session may read and write files there.")
-	} else {
-		b.WriteString("This session may read files there.")
-	}
-	b.WriteString(" Its index, as it stood when this session started, follows.\n\n---\n\n")
-	b.Write(index)
-	if len(index) > 0 && index[len(index)-1] != '\n' {
-		b.WriteByte('\n')
-	}
-	return []byte(b.String())
 }
 
 // writeAgentSpecFiles puts the definition in dir's own agentspec directory and
@@ -325,7 +272,7 @@ func writeAgentSpecFiles(dir string, r *renderedAgentSpec) (json.RawMessage, []s
 		paths = append(paths, p)
 	}
 	if k := r.def.Knowledge; k != nil {
-		p, err := write(agentSpecKnowledgeFile, knowledgeNote(*k, r.index))
+		p, err := write(agentSpecKnowledgeFile, []byte(agentdef.Note(*k, r.index)))
 		if err != nil {
 			return nil, nil, err
 		}
