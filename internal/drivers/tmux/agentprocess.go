@@ -107,12 +107,12 @@ func agentFromArgs(args string) (string, bool) {
 			return "", false
 		case t == "--agent":
 			if i+1 < len(toks) && safeArgvValue(toks[i+1]) {
-				return toks[i+1], true
+				return stripAgentSpecNamespace(toks[i+1]), true
 			}
 			return "", false
 		case strings.HasPrefix(t, "--agent="):
 			if v := strings.TrimPrefix(t, "--agent="); safeArgvValue(v) {
-				return v, true
+				return stripAgentSpecNamespace(v), true
 			}
 			return "", false
 		}

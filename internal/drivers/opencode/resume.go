@@ -260,11 +260,17 @@ func (d *Driver) noteRelaunch(rec *sessionRecord, failed bool) {
 // spec is the create's request as the record kept it: what a start needs to build
 // the session's environment, sandbox and permission posture again.
 func (r *sessionRecord) spec() fleet.SessionSpec {
-	return fleet.SessionSpec{
+	s := fleet.SessionSpec{
 		Cwd: fleet.AbsolutePath(r.Cwd), Agent: fleet.AgentId(r.SpecAgent), Marker: r.SpecMarker,
 		Model:   r.SpecModel, // muster #458: a relaunch judges "is this session bound for the provider" as the create did
 		Sandbox: r.Sandbox, PermissionMode: r.PermissionMode,
 	}
+	if r.AgentSpec != nil {
+		// muster #509: the name and the access, which an operator rule is scoped and
+		// judged by; the rest of the definition is read from the session's directory.
+		s.AgentSpec = &fleet.AgentSpec{Name: r.AgentSpec.Name, Access: r.AgentSpec.Access}
+	}
+	return s
 }
 
 // checkRelaunchable is what a start of rec's session needs to be true before any
@@ -273,10 +279,12 @@ func (r *sessionRecord) spec() fleet.SessionSpec {
 // and by parkedServerFor, which will not leave parked a session that could not be
 // started.
 func (d *Driver) checkRelaunchable(rec *sessionRecord) error {
-	if rec.PermissionMode != "" && rec.Sandbox == nil {
-		// Cannot arise from a create this driver accepted; a record edited by hand
+	if rec.PermissionMode != "" && rec.Sandbox == nil && !d.policyGrantsAllow(rec.spec()) {
+		// Cannot arise from a create this driver accepted, except one the operator's
+		// policy granted (muster #509) and has since withdrawn; a record edited by hand
 		// is refused rather than relaunched pre-approved with nothing confining it.
-		return fmt.Errorf("its record asks for permission mode %q without a sandbox, which this driver never starts", rec.PermissionMode)
+		return fmt.Errorf("its record asks for permission mode %q without a sandbox, which this driver starts only where "+
+			"the machine's createPolicy grants it to the agent, and it does not (now)", rec.PermissionMode)
 	}
 	if rec.Sandbox != nil {
 		if sup, why := d.sandboxSupportNow(); sup == nil {

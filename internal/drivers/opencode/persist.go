@@ -70,6 +70,12 @@ type sessionRecord struct {
 	EnvNames []string `json:"envNames,omitempty"`
 	// Sandbox is the profile the create asked for: paths and a network posture.
 	Sandbox *fleet.SandboxSpec `json:"sandbox,omitempty"`
+	// AgentSpec is the name and the access of the portable agent definition the
+	// create carried (muster #509), never its text: that is in the session's own
+	// directory (agentspec.go). Optional, so a record from before it existed reads as
+	// "no definition" and the record's version is unchanged; a build that does not
+	// know the field ignores it.
+	AgentSpec *recordedAgentSpec `json:"agentSpec,omitempty"`
 	// PermissionMode is the posture the create asked for ("bypass" or empty), so
 	// a relaunch writes the same configuration and starts with the same argument.
 	PermissionMode string `json:"permissionMode,omitempty"`

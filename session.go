@@ -94,6 +94,14 @@ type SessionSpec struct {
 	Model  string  `json:"model,omitempty"`
 	Effort string  `json:"effort,omitempty"`
 
+	// AgentSpec is a portable agent definition this session runs as (muster
+	// #509): a name, a prompt, ordered instructions, a knowledge home, a model
+	// and an access level, each translated by the driver into its runtime's own
+	// form for this session only. It is the alternative to Agent, which names an
+	// agent the runtime must already know; sending both is refused invalid. See
+	// AgentSpec for what each driver does with it and what it refuses.
+	AgentSpec *AgentSpec `json:"agentSpec,omitempty"`
+
 	Name   string `json:"name,omitempty"`
 	Prompt string `json:"prompt,omitempty"`
 

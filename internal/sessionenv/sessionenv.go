@@ -62,7 +62,9 @@ type Scope struct {
 	// driver serving the create, not a hint the caller sent (a caller that
 	// supplied none still gets a session on the default runtime).
 	Runtimes []string
-	// Agents matches SessionSpec.Agent.
+	// Agents matches SessionSpec.Agent, and the name of SessionSpec.AgentSpec
+	// (muster #509): a portable definition names the persona the same way a
+	// named agent does, so a scope written for one reaches the other.
 	Agents []string
 	// Markers matches SessionSpec.Marker.
 	Markers []string
@@ -87,6 +89,9 @@ func (s Scope) Matches(runtime fleet.RuntimeId, spec fleet.SessionSpec) bool {
 	}
 	for _, a := range s.Agents {
 		if string(spec.Agent) == a {
+			return true
+		}
+		if spec.AgentSpec != nil && spec.AgentSpec.Name == a {
 			return true
 		}
 	}

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	fleet "github.com/futurelastic/muster"
+	"github.com/futurelastic/muster/internal/createpolicy"
 	"github.com/futurelastic/muster/internal/credrule"
 	"github.com/futurelastic/muster/internal/drivers/opencode"
 	"github.com/futurelastic/muster/internal/drivers/tmux"
@@ -166,6 +167,27 @@ type fileConfig struct {
 			Markers  []string `json:"markers,omitempty"`
 		} `json:"appliesTo,omitempty"`
 	} `json:"providerCredentials,omitempty"`
+
+	// CreatePolicy is the operator's policy over what a create may be given
+	// (muster #509): today, the `access` of a portable agent definition
+	// (`agentSpec`). Each rule names an `access` ("ask", "allow" or "sandboxed")
+	// and an optional appliesTo scope shaped exactly like a sessionEnv entry's,
+	// whose `agents` axis also matches an agentSpec's name. The FIRST rule whose
+	// scope matches a create decides, in file order, and its value wins over the
+	// create's own; a rule after one that matches everything it could is refused at
+	// start. It is how an operator lets an agent run unconfined on a host that
+	// cannot enforce a sandbox, or confines one the client asked to leave open. A
+	// value this machine cannot honour refuses the create with the reason and is
+	// never weakened. Config-file-only and per machine, like SessionEnv, and read
+	// at start: changing it needs a restart.
+	CreatePolicy []struct {
+		Access    string `json:"access"`
+		AppliesTo *struct {
+			Runtimes []string `json:"runtimes,omitempty"`
+			Agents   []string `json:"agents,omitempty"`
+			Markers  []string `json:"markers,omitempty"`
+		} `json:"appliesTo,omitempty"`
+	} `json:"createPolicy,omitempty"`
 
 	// Opencode holds this machine's settings for the opencode runtime that are
 	// not environment variables: Agents (muster #396), the path of a JSON file of
@@ -455,6 +477,24 @@ func (c *fileConfig) credentialRules() credrule.Rules {
 	out := make(credrule.Rules, 0, len(c.ProviderCredentials))
 	for _, e := range c.ProviderCredentials {
 		r := credrule.Rule{Provider: e.Provider, Use: fleet.CredentialKind(e.Use)}
+		if e.AppliesTo != nil {
+			r.AppliesTo = sessionenv.Scope{Runtimes: e.AppliesTo.Runtimes, Agents: e.AppliesTo.Agents, Markers: e.AppliesTo.Markers}
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// createPolicy converts the wire shape into internal/createpolicy's own type, the
+// division sessionEnv() keeps: this file knows the JSON shape, the package owns what
+// a valid rule means (createpolicy.Validate is called by the caller).
+func (c *fileConfig) createPolicy() createpolicy.Policy {
+	if c == nil || len(c.CreatePolicy) == 0 {
+		return nil
+	}
+	out := make(createpolicy.Policy, 0, len(c.CreatePolicy))
+	for _, e := range c.CreatePolicy {
+		r := createpolicy.Rule{Access: fleet.AgentAccess(e.Access)}
 		if e.AppliesTo != nil {
 			r.AppliesTo = sessionenv.Scope{Runtimes: e.AppliesTo.Runtimes, Agents: e.AppliesTo.Agents, Markers: e.AppliesTo.Markers}
 		}

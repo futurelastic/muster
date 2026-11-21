@@ -75,6 +75,7 @@ SessionSpec {
   runtime    : RuntimeId          // which driver
   cwd        : AbsolutePath       // working directory
   agent?     : AgentId            // named persona/config
+  agentSpec? : AgentSpec          // a portable agent definition this session runs as, translated by the driver for this session only; mutually exclusive with `agent` (§2.1, muster #509)
   model?     : string
   effort?    : string
   name?      : string             // human-facing label
@@ -132,6 +133,49 @@ conversations share one transcript. A later read whose own resolution
 disagrees with the requested id is a loud, named mismatch, never a silent
 overwrite of one with the other — the same invariant §2.9 already states for
 a replaced process's stale identifier.
+
+**`agentSpec` is a definition the create carries, where `agent` is a name the runtime must already
+know** (muster #509). A client that wants "this persona, on whichever runtime and model the person
+picks" would otherwise render each runtime's native agent format itself and keep the copies in step,
+and a hand-made copy drifts. `agentSpec` sends the definition instead, and each driver translates it
+into its runtime's own form **for that one session only** — nothing is written into any account's or
+project's configuration.
+
+```
+AgentSpec {
+  name          : string             // what the session reports as its agent; need not exist beforehand; lower-case letters, digits, hyphens, at most 64
+  description?  : string             // one line
+  prompt?       : string             // the system prompt; at most 64 KiB
+  instructions? : string[]           // shared rules layered after the prompt, in order; at most 32, each at most 64 KiB, the whole at most 256 KiB
+  knowledge?    : AgentKnowledge     // the agent's memory home
+  model?        : string             // a hint like the top-level `model`, validated where the driver validates models
+  access?       : "ask" | "allow" | "sandboxed"   // how much the session may do unattended; absent = the runtime's ordinary posture
+}
+AgentKnowledge {
+  index : AbsolutePath               // read live from the file at create, never a copy kept across sessions; at most 256 KiB; must be inside `home`
+  home  : AbsolutePath               // told to the agent; readable under any sandbox or posture
+  write?: boolean                    // also grant write under `home`; absent asks for read only
+}
+```
+
+The service assumes no folder layout: `knowledge` is given as absolute paths by the client, whose
+location is its own configuration. `prompt` and `instructions` reach the runtime as the agent's
+system prompt and instruction layers and never as command-line text (§5.3). A driver that cannot
+translate every part of a definition refuses the create `unsupported` with reason
+`agent-spec-unsupported` — `supportsAgentSpec` (§4.3) says so in advance, so a client falls back to
+`agent` by name on a driver without it — and never starts a session that follows less of the
+definition than was sent (§5.6). The same refusal comes from a relay to a peer that predates the
+field.
+
+`agentSpec` and `agent` together are refused `invalid`, as are `agentSpec.model` together with the
+top-level `model`, and `agentSpec.access` together with `permissionMode`, `posture`, `sandbox`,
+`isolateEnvironment` or `isolateConfiguration`: each pair answers one question in two ways. `access`
+is lowered onto the fields every driver already honours — `allow` to permission mode `bypass`,
+`sandboxed` to an unattended posture — so a value this machine cannot enforce is refused (a
+sandboxed agent on a runtime that cannot confine is `posture-unenforceable`) and never weakened. A
+**per-machine operator policy** (`createPolicy`, docs/install.md) may set or raise `access` for an
+agent by name; the operator's value wins over the create's, and a value neither can honour refuses
+the create with the reason.
 
 **`isolateEnvironment` is a requirement, not a hint** (muster #280). It asks that the
 session's process carry ONLY a built environment — a small documented base, this machine's
@@ -2350,6 +2394,7 @@ DriverCapabilities {
   supportsPin     : { model: boolean, effort: boolean, agent: boolean }
   validatesModel  : boolean   // checks `model` against the runtime's own list at create and refuses an unknown id `invalid` (§4.3, muster #287)
   remoteControl?  : { toggle: boolean, off: boolean }   // can turn a RUNNING session's remote control on (and off); absent = cannot (muster #269)
+  supportsAgentSpec?: boolean // translates a portable agent definition (§2.1 `agentSpec`, muster #509) into its runtime's form for one session; absent = NOT DECLARED (an older peer, or one not reached), never "cannot"; a create carrying one to a runtime that has not declared true is refused `unsupported`, reason `agent-spec-unsupported`
   readsTurns?     : boolean   // GET …/turns reads this runtime's assistant turns (§5.8, muster #258, #369); absent = NOT DECLARED (an older peer, or one not reached), never "cannot"; false = every call is `unsupported` (muster #379)
   readsRecord?    : boolean   // GET …/record reads this runtime's record (§2.16, muster #441); absent = NOT DECLARED, never "cannot"; false = every call is `unsupported`; true does not say this machine serves the route — an operator's switch answers `unsupported` with reason `record-off`
   recordFormat?   : number    // the RecordPage `format` this runtime's record is read in (§2.16, muster #444); present exactly when `readsRecord` is true; absent = NOT DECLARED (an older peer, one not reached, or a runtime that cannot read a record), never a format of 0
@@ -2679,6 +2724,10 @@ table above, **absent meaning "as its runtime says"**.
   a remote driver always implements it as a relay, and a driver with no state directory implements
   it where nothing is ever left to revive. It reports what the **runtime's driver** can do for a
   session it holds a record of; a peer's value passes through the relay unchanged.
+- **`supportsAgentSpec`**: see §2.1 `agentSpec`. Declared yes: the driver translates a portable agent
+  definition into its runtime's own form for one session, and a create carrying one is not refused for
+  want of it. Declared no: every such create is refused `unsupported`, reason `agent-spec-unsupported`,
+  and the client falls back to `agent` by name. Absent is not declared, which is not "cannot" (muster #509).
 
 **`deliversToInbox` answers "is the inbox path even wired here", never "will
 this call use it"** (muster #119, #122). Send's own per-target capability

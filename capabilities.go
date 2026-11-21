@@ -411,6 +411,16 @@ type DriverCapabilities struct {
 	// fault.
 	DeliveryModules []DeliveryModuleStatus `json:"deliveryModules,omitempty"`
 
+	// SupportsAgentSpec reports whether this runtime translates a portable agent
+	// definition (SessionSpec.AgentSpec, muster #509) into its own form for one
+	// session. Declared, not derived, for the reason ReadsTurns is: absent means
+	// NOT DECLARED (an older peer, or one not reached), never "cannot", so a
+	// client falls back to `agent` by name only on a declared false and on an
+	// answer of `unsupported` with ReasonAgentSpecUnsupported, never on silence.
+	// A create carrying an agentSpec to a runtime that has not declared true is
+	// refused `unsupported`.
+	SupportsAgentSpec *bool `json:"supportsAgentSpec,omitempty"`
+
 	// ServerContext reports the macOS security-session context this machine's
 	// terminal-multiplexer driver runs in and the context of the multiplexer
 	// server it talks to (muster #336). Absent on every other platform and on

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	fleet "github.com/futurelastic/muster"
+	"github.com/futurelastic/muster/internal/createpolicy"
 	"github.com/futurelastic/muster/internal/credrule"
 	"github.com/futurelastic/muster/internal/drivers/opencode"
 	tmuxdriver "github.com/futurelastic/muster/internal/drivers/tmux"
@@ -759,6 +760,12 @@ func validateConfigExtras(cfg *fileConfig, getenv func(string) string) error {
 	// never apply, stops the start naming it, and shows in the doctor and a reload's
 	// refusal.
 	if err := credrule.Validate(cfg.credentialRules(), knownRuntimeIDs()); err != nil {
+		return err
+	}
+	// The operator's create policy (muster #509): a rule that cannot be one, or can
+	// never apply, stops the start naming it, and shows in the doctor and a reload's
+	// refusal.
+	if err := createpolicy.Validate(cfg.createPolicy(), knownRuntimeIDs()); err != nil {
 		return err
 	}
 	// The operator's opencode agent file (muster #396): only the path is judged

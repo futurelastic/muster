@@ -22,6 +22,7 @@ import (
 	"time"
 
 	fleet "github.com/futurelastic/muster"
+	"github.com/futurelastic/muster/internal/createpolicy"
 	"github.com/futurelastic/muster/internal/delivery"
 	"github.com/futurelastic/muster/internal/driver"
 	"github.com/futurelastic/muster/internal/peerkey"
@@ -185,6 +186,10 @@ type Service struct {
 	// SetMaxInputBytes, meant to be called at most once, at startup, the
 	// same one-shot-config rule defaultRuntime above follows.
 	maxInputBytes int
+
+	// createPolicy is the operator's policy over what a create may be given
+	// (muster #509), set once at startup by SetCreatePolicy (agentspec.go).
+	createPolicy createpolicy.Policy
 
 	// deliveryModuleRoutes is the set of names a caller may write as a send's
 	// `route` to force an external delivery module (#185): exactly the modules

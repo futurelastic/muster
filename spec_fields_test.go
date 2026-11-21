@@ -90,6 +90,10 @@ var specFieldTypes = map[string]any{
 	"IdentityAssertion":  IdentityAssertion{},
 	"PeerStanding":       PeerStanding{},
 
+	// #509: the portable agent definition a create carries.
+	"AgentSpec":      AgentSpec{},
+	"AgentKnowledge": AgentKnowledge{},
+
 	// #185: the optional external delivery module surface.
 	"DeliveryPath":         DeliveryPath{},
 	"DeliveryLane":         DeliveryLane{},

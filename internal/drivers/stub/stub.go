@@ -48,6 +48,7 @@ func (d *Driver) Capabilities() fleet.DriverCapabilities {
 		ReadsTurns:           fleet.Declared(false),
 		ReadsRecord:          fleet.Declared(false),
 		ReportsConversation:  fleet.Declared(false),
+		SupportsAgentSpec:    fleet.Declared(false),
 		Respond:              &fleet.RespondSupport{},
 		PermissionModeChange: &fleet.PermissionModeChangeSupport{},
 		DeadlineMs:           deadline,

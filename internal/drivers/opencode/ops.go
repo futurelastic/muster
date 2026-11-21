@@ -89,6 +89,16 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 	if spec.Cwd == "" {
 		return fleet.Session{}, &fleet.Error{Kind: fleet.ErrorInvalid, Message: "create: cwd is required", Machine: d.machine}
 	}
+	// muster #509: a portable agent definition is checked before any side effect, and
+	// its name is then the agent this session is pinned to — every message names it,
+	// the runtime lists it from the session's own configuration (checkAgent below),
+	// and the record keeps it, exactly as for a named agent.
+	if err := d.checkAgentSpec(spec); err != nil {
+		return fleet.Session{}, err
+	}
+	if spec.AgentSpec != nil {
+		spec.Agent = fleet.AgentId(spec.AgentSpec.Name)
+	}
 	refused := map[string]bool{
 		"effort":    spec.Effort != "",
 		"mcpConfig": len(spec.McpConfig) > 0,
@@ -255,9 +265,12 @@ func (d *Driver) Create(ctx context.Context, req fleet.Request, key string, spec
 			ID: sess.ID, Cwd: string(cwd), Name: sess.Title, Agent: sess.Agent,
 			SpecAgent: string(spec.Agent), SpecMarker: spec.Marker, SpecModel: spec.Model,
 			StartedAtMs: sess.Time.Created, Dir: srv.dir, EnvNames: callerEnvNames,
-			Sandbox: spec.Sandbox, PermissionMode: spec.PermissionMode,
+			Sandbox: spec.Sandbox, PermissionMode: recordedPermissionMode(spec.PermissionMode),
 			// The path, never the text: a restart reads the file again (muster #371).
 			ContextRef: string(spec.ContextRef),
+			// The name and the access of a portable definition, never its text, which is in
+			// the session's own directory (muster #509).
+			AgentSpec: recordAgentSpec(spec),
 		}
 		if srv.sandbox != nil && srv.sandbox.PackageCache != nil {
 			rec.CacheCopy = srv.sandbox.PackageCache.Copy
@@ -406,6 +419,22 @@ func (d *Driver) startServerIn(ctx context.Context, spec fleet.SessionSpec, exis
 	if err != nil {
 		return nil, err
 	}
+	// muster #509: a portable agent definition is read here too, the knowledge index
+	// with it, before any side effect — an unusable one refuses the start.
+	agentDef, err := d.agentSpecFor(spec, existingDir, agents)
+	if err != nil {
+		return nil, err
+	}
+	// A bypass session with no sandbox is started only where the operator's policy
+	// grants it, at a create and again at every relaunch (muster #509).
+	unconfined := spec.PermissionMode == fleet.PermissionModeBypass && spec.Sandbox == nil
+	if unconfined && !d.policyGrantsAllow(spec) {
+		return nil, &fleet.Error{
+			Kind: fleet.ErrorUnsupported, Machine: d.machine,
+			Message: "create: this driver starts a pre-approved session with no sandbox only where this machine's createPolicy " +
+				"grants that access to the agent, and it does not (now)",
+		}
+	}
 	d.mu.RLock()
 	closed := d.closed
 	d.mu.RUnlock()
@@ -483,7 +512,29 @@ func (d *Driver) startServerIn(ctx context.Context, spec fleet.SessionSpec, exis
 		cleanup()
 		return nil, d.invalidStart(err)
 	}
-	if err := writeSessionConfig(dir, bypass, plan, d.providers, agents, instructionPaths); err != nil {
+	var configOpts []configOption
+	if unconfined {
+		configOpts = append(configOpts, withUnconfinedBypass())
+	}
+	if agentDef != nil {
+		entry, defPaths, err := writeAgentSpecFiles(dir, agentDef)
+		if err != nil {
+			driver.NotePhase(ctx, phaseConfig, configuring)
+			cleanup()
+			return nil, d.invalidStart(err)
+		}
+		withDef := make(operatorAgents, len(agents)+1)
+		for k, v := range agents {
+			withDef[k] = v
+		}
+		withDef[agentDef.def.Name] = entry
+		agents = withDef
+		instructionPaths = append(instructionPaths, defPaths...)
+		if k := agentDef.def.Knowledge; k != nil {
+			configOpts = append(configOpts, withReadRoots(string(k.Home)))
+		}
+	}
+	if err := writeSessionConfig(dir, bypass, plan, d.providers, agents, instructionPaths, configOpts...); err != nil {
 		driver.NotePhase(ctx, phaseConfig, configuring)
 		cleanup()
 		return nil, d.invalidStart(err)
