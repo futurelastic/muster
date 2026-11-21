@@ -188,6 +188,25 @@ func externalDirectoryFor(plan *sandboxPlan) externalDirectoryRules {
 	return rules
 }
 
+// configOption adjusts what writeSessionConfig writes beyond the arguments every
+// caller has. Variadic so the callers that never needed one are unchanged.
+type configOption func(*configExtras)
+
+type configExtras struct {
+	// unconfinedBypass allows a bypass session with no sandbox plan: the operator's
+	// policy granted it (muster #509; policyGrantsAllow).
+	unconfinedBypass bool
+	// readRoots are directories a session that is not pre-approved may read without
+	// asking (muster #509: a definition's knowledge home).
+	readRoots []string
+}
+
+func withUnconfinedBypass() configOption { return func(c *configExtras) { c.unconfinedBypass = true } }
+
+func withReadRoots(roots ...string) configOption {
+	return func(c *configExtras) { c.readRoots = append(c.readRoots, roots...) }
+}
+
 // writeSessionConfig writes the session's own opencode.json under dir. Called
 // for a fresh session and again for a relaunch, so the file always matches the
 // record and the operator's current settings.
@@ -201,7 +220,11 @@ func externalDirectoryFor(plan *sandboxPlan) externalDirectoryRules {
 // no such key, so the file is what it was before they existed. The same holds for
 // the operator's instruction files (operatorinstructions.go, muster #504): their
 // copies' paths go under `instructions`, a key nothing else here writes.
-func writeSessionConfig(dir string, bypass bool, plan *sandboxPlan, providers providerPolicy, agents operatorAgents, instructions []string) error {
+func writeSessionConfig(dir string, bypass bool, plan *sandboxPlan, providers providerPolicy, agents operatorAgents, instructions []string, opts ...configOption) error {
+	var extras configExtras
+	for _, o := range opts {
+		o(&extras)
+	}
 	path := filepath.Join(dir, permissionConfigRel)
 	if err := privfs.MkdirAll(filepath.Dir(path)); err != nil {
 		return fmt.Errorf("opencode: creating the session's config directory: %w", err)
@@ -217,18 +240,44 @@ func writeSessionConfig(dir string, bypass bool, plan *sandboxPlan, providers pr
 		cfg["instructions"] = instructions
 	}
 	if bypass {
-		// checkPermissionMode refuses a bypass create with no sandbox, so a nil plan here
-		// is a caller bug. Writing the tool posture without the directory rules
+		// checkPermissionMode refuses a bypass create with no sandbox unless the
+		// operator's policy grants it (muster #509), so a nil plan here without that
+		// grant is a caller bug. Writing the tool posture without the directory rules
 		// would leave a pre-approved session with no boundary at all.
-		if plan == nil {
+		if plan == nil && !extras.unconfinedBypass {
 			return errors.New("opencode: a bypass session needs the sandbox plan its permissions are derived from")
 		}
 		perm := make(map[string]any, len(bypassPermissions)+1)
 		for k, v := range bypassPermissions {
 			perm[k] = v
 		}
-		perm["external_directory"] = externalDirectoryFor(plan)
+		if plan != nil {
+			perm["external_directory"] = externalDirectoryFor(plan)
+		} else {
+			// The operator granted an unconfined session for this agent, and nothing
+			// is the boundary: a path outside the working directory is not asked
+			// about, the same as every other tool is not.
+			perm["external_directory"] = externalDirectoryRules{{pattern: "*", action: "allow"}}
+		}
 		cfg["permission"] = perm
+	} else if len(extras.readRoots) > 0 {
+		// A session that is not pre-approved still asks before it touches a path
+		// outside its working directory, and parks on the ask. A definition's
+		// knowledge home is named by the caller as somewhere the agent reads, so it is
+		// allowed in advance; every other outside path keeps asking (no catch-all rule
+		// is written, so the runtime's own default stays in force).
+		rules := externalDirectoryRules{}
+		for _, root := range extras.readRoots {
+			if root == "" || root == string(filepath.Separator) || strings.ContainsAny(root, "*?") {
+				continue
+			}
+			rules = append(rules, externalDirectoryRule{
+				pattern: strings.TrimRight(root, string(filepath.Separator)) + "/*", action: "allow",
+			})
+		}
+		if len(rules) > 0 {
+			cfg["permission"] = map[string]any{"external_directory": rules}
+		}
 	}
 	raw, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
@@ -261,6 +310,17 @@ func (d *Driver) checkPermissionMode(spec fleet.SessionSpec) error {
 		return refuse("shared mode runs one runtime for every session, so a permission posture cannot be given to one of them")
 	}
 	if spec.Sandbox == nil {
+		// muster #509: the one exception. The operator, who knows what this host can
+		// enforce, may give an agent the unconfined access by name; a caller asking for
+		// it is not enough.
+		if d.policyGrantsAllow(spec) {
+			return nil
+		}
+		if spec.AgentSpec != nil {
+			return refuse("this driver pre-approves every tool only inside a sandbox it enforces, and agentSpec.access " +
+				"\"allow\" asks for none; it is honoured here only where this machine's createPolicy gives that access to this " +
+				"agent, so ask for \"sandboxed\" instead, or have the machine's operator add the rule")
+		}
 		return refuse("this driver pre-approves every tool only inside a sandbox it enforces, and this create asked for none " +
 			"(add a sandbox to the same create, or leave permissionMode out)")
 	}

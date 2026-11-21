@@ -191,6 +191,7 @@ import (
 	"time"
 
 	fleet "github.com/futurelastic/muster"
+	"github.com/futurelastic/muster/internal/createpolicy"
 	"github.com/futurelastic/muster/internal/credrule"
 	"github.com/futurelastic/muster/internal/driver"
 	"github.com/futurelastic/muster/internal/privfs"
@@ -336,6 +337,11 @@ type Driver struct {
 	// muster #504): their paths are fixed here, their content is read again on every
 	// create and relaunch. Empty means the machine names none.
 	instructionFiles []string
+
+	// createPolicy is the operator's policy over what a create may be given
+	// (WithCreatePolicy, muster #509). Here it decides one thing: whether a definition
+	// whose access is `allow` may run with no sandbox. Empty grants nothing.
+	createPolicy createpolicy.Policy
 
 	// sandbox is what this driver can enforce on this host (nil: nothing) and
 	// sandboxWhy says why not, in words a refused create can quote (muster
@@ -601,6 +607,15 @@ func WithOperatorAgents(path string) Option { return func(d *Driver) { d.agentsF
 // into. operatorinstructions.go has the rest.
 func WithOperatorInstructions(paths []string) Option {
 	return func(d *Driver) { d.instructionFiles = append([]string(nil), paths...) }
+}
+
+// WithCreatePolicy gives the driver the operator's create policy (muster #509): the
+// per-machine rules the service also applies to a definition's `access`. The driver
+// reads it for the one decision that is its own — an `access: allow` definition runs
+// with no sandbox only where a rule says so for that agent, at create and at every
+// relaunch (agentspec.go). Empty, the default, grants nothing. Ignored in shared mode.
+func WithCreatePolicy(p createpolicy.Policy) Option {
+	return func(d *Driver) { d.createPolicy = p }
 }
 
 // WithLogf gives the driver somewhere to say that it stopped a server no
@@ -995,6 +1010,10 @@ func (d *Driver) Capabilities() fleet.DriverCapabilities {
 		// environment can be brought back by that caller (muster #427, revive.go).
 		// It needs a record to relaunch from, and an isolated server to relaunch.
 		Revives: fleet.Declared(d.store != nil && d.shared == nil),
+		// muster #509: a portable agent definition is translated into the session's
+		// own opencode.json (agentspec.go). Not in shared mode: one runtime serves
+		// every session there, so a definition could not belong to one of them.
+		SupportsAgentSpec: fleet.Declared(d.shared == nil),
 		// respond: a tool-permission ask only. A runtime question is never
 		// reported as a prompt and respond answers it `unsupported` (permission.go),
 		// and an ask carries a kind, so nothing unclassified is answered.
