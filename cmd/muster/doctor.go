@@ -791,6 +791,14 @@ func validateConfigExtras(cfg *fileConfig, getenv func(string) string) error {
 		}
 		seenInstruction[filepath.Clean(p)] = true
 	}
+	// The operator's opencode tool servers (muster #466): unlike the files above, the
+	// definitions are IN the config file, so their whole shape is judged here, by the
+	// driver's own parser, and the start, the doctor and a reload agree. What a session
+	// is given (an executable, a credential reaching it, the runtime connecting the
+	// server) can only be judged against a session, on every create.
+	if _, err := opencode.ParseOperatorToolServers(cfg.operatorToolServers()); err != nil {
+		return err
+	}
 	// Declared model lists (muster #400): the shape is judged here so the start,
 	// the doctor and a reload agree.
 	if err := validateModelsConfig(cfg.Models); err != nil {

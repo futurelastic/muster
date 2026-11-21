@@ -18,6 +18,7 @@ import (
 
 	fleet "github.com/futurelastic/muster"
 	"github.com/futurelastic/muster/internal/driver"
+	"github.com/futurelastic/muster/internal/sessionenv"
 )
 
 // This file exercises the driver against a REAL opencode server this
@@ -1137,5 +1138,267 @@ func TestIntegration_OperatorInstructionsReachTheModelAsSystemContext(t *testing
 		Cwd: fleet.AbsolutePath(cwd), Name: "three", Model: "standin/m", Prompt: "USER-TEXT-FOUR",
 	}); err == nil {
 		t.Error("a create ran with an instruction file missing")
+	}
+}
+
+// muster #466, against the REAL runtime: a tool server the operator defines reaches an
+// isolated session whose selector matches. The runtime connects it (the driver reads
+// the runtime's own `GET /mcp` and refuses the create when it is not `connected`),
+// lists its tool to the MODEL on the wire, and expands the credential the definition
+// refers to as `{env:NAME}` from the session's environment, which is where this
+// machine's sessionEnv put it, so the value is in no configuration file. A server the
+// runtime cannot connect refuses the create. The session's resolved permission ruleset
+// is the one it has without the server. The tool server is this test binary
+// (fakeopencode_test.go, `__mcp`), the model a local stand-in that records the tools it
+// was offered: no credential and no cost.
+func TestIntegration_OperatorToolServerReachesAMatchingSessionAndNoOther(t *testing.T) {
+	requireOpencodeIntegration(t)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	var offered [][]string // the tool names of each of the session's own requests
+	model := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var body struct {
+			Tools []struct {
+				Function struct {
+					Name string `json:"name"`
+				} `json:"function"`
+			} `json:"tools"`
+		}
+		if json.Unmarshal(raw, &body) == nil && strings.Contains(string(raw), "USER-TEXT-") {
+			var names []string
+			for _, tl := range body.Tools {
+				names = append(names, tl.Function.Name)
+			}
+			mu.Lock()
+			offered = append(offered, names)
+			mu.Unlock()
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		chunk := `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":null}]}`
+		done := `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`
+		_, _ = io.WriteString(w, "data: "+chunk+"\n\ndata: "+done+"\n\ndata: [DONE]\n\n")
+	}))
+	defer model.Close()
+
+	cwd := t.TempDir()
+	config := `{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "standin": {
+      "npm": "@ai-sdk/openai-compatible",
+      "options": { "baseURL": "` + model.URL + `/v1", "apiKey": "not-a-real-key" },
+      "models": { "m": { "name": "M" } }
+    }
+  }
+}`
+	if err := os.WriteFile(filepath.Join(cwd, "opencode.json"), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	report := filepath.Join(t.TempDir(), "report")
+	credFile := filepath.Join(t.TempDir(), "cred")
+	const sentinel = "sentinel-credential-value"
+	if err := os.WriteFile(credFile, []byte(sentinel), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setting := func(name, command string, args ...string) OperatorToolServers {
+		t.Helper()
+		argv, _ := json.Marshal(append([]string{command}, args...))
+		servers, err := ParseOperatorToolServers(json.RawMessage(`{"` + name + `":{"type":"local","command":` + string(argv) +
+			`,"environment":{"PROBE_CRED":"{env:PROBE_CRED}"},"timeout":10000,"appliesTo":{"agents":["build"]}}}`))
+		if err != nil {
+			t.Fatalf("ParseOperatorToolServers: %v", err)
+		}
+		return servers
+	}
+	entries := []sessionenv.Entry{{Name: "PROBE_CRED", FromFile: credFile, Required: true}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	req := fleet.RequestFrom(fleet.Caller{Principal: "integration-test"})
+	d, err := New(ctx, "test-machine", WithSessionRoot(t.TempDir()), WithSessionEnv(entries),
+		WithOperatorToolServers(setting("probesrv", exe, "__mcp", report)))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer d.Shutdown()
+
+	// A session its selector matches: the runtime connected the server (the create
+	// would have been refused otherwise), offers its tool to the model, and the
+	// credential reached the server's process through the environment.
+	sess, err := d.Create(ctx, req, "k-one", fleet.SessionSpec{
+		Cwd: fleet.AbsolutePath(cwd), Name: "one", Agent: "build", Model: "standin/m", Prompt: "USER-TEXT-ONE",
+	})
+	if err != nil {
+		t.Fatalf("Create with the operator's tool server: %v", err)
+	}
+	defer d.Close(ctx, req, sess.SessionRef)
+	deadline := time.Now().Add(45 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := len(offered)
+		mu.Unlock()
+		if n >= 1 {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	mu.Lock()
+	if len(offered) == 0 {
+		mu.Unlock()
+		t.Fatal("the model received no request from the session")
+	}
+	if got := offered[0]; !containsString(got, "probesrv_probe") {
+		t.Errorf("the model was offered %v, want the operator's server's tool probesrv_probe", got)
+	}
+	mu.Unlock()
+	if raw, err := os.ReadFile(report); err != nil || strings.TrimSpace(string(raw)) != "cred="+sentinel {
+		t.Errorf("the tool server's own report = %q (%v), want the credential delivered through the environment", raw, err)
+	}
+	// The setting names the variable, never its value.
+	known, _ := d.wasSeen(sess.ID)
+	if raw, err := os.ReadFile(filepath.Join(known.srv.dir, permissionConfigRel)); err != nil || strings.Contains(string(raw), sentinel) {
+		t.Errorf("the session's configuration carries the credential's value, or cannot be read: %v", err)
+	}
+
+	// A session no selector matches is offered nothing of the operator's.
+	other, err := d.Create(ctx, req, "k-two", fleet.SessionSpec{
+		Cwd: fleet.AbsolutePath(cwd), Name: "two", Agent: "plan", Model: "standin/m", Prompt: "USER-TEXT-TWO",
+	})
+	if err != nil {
+		t.Fatalf("Create for a session the selector does not match: %v", err)
+	}
+	defer d.Close(ctx, req, other.SessionRef)
+	deadline = time.Now().Add(45 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := len(offered)
+		mu.Unlock()
+		if n >= 2 {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	mu.Lock()
+	if len(offered) < 2 {
+		mu.Unlock()
+		t.Fatal("the second session sent the model no request")
+	}
+	if containsString(offered[1], "probesrv_probe") {
+		t.Error("a session the selector does not match was offered the operator's tool")
+	}
+	mu.Unlock()
+
+	// A server the runtime cannot connect refuses the create, naming the status word.
+	bad, err := New(ctx, "test-machine", WithSessionRoot(t.TempDir()), WithSessionEnv(entries),
+		WithOperatorToolServers(setting("deadsrv", exe, "__stray-that-does-not-exist-and-exits")))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer bad.Shutdown()
+	_, err = bad.Create(ctx, req, "k-bad", fleet.SessionSpec{
+		Cwd: fleet.AbsolutePath(cwd), Name: "bad", Agent: "build", Model: "standin/m", Prompt: "USER-TEXT-THREE",
+	})
+	var fe *fleet.Error
+	if !errors.As(err, &fe) || fe.Kind != fleet.ErrorUnsupported || !strings.Contains(fe.Message, `"deadsrv"`) || !strings.Contains(fe.Message, "not connected") {
+		t.Fatalf("Create with a tool server the runtime cannot connect = %v, want an unsupported refusal naming it", err)
+	}
+	if strings.Contains(fe.Message, exe) {
+		t.Errorf("the refusal repeats the command: %s", fe.Message)
+	}
+}
+
+func containsString(list []string, want string) bool {
+	for _, v := range list {
+		if v == want {
+			return true
+		}
+	}
+	return false
+}
+
+// muster #466, against the REAL runtime: the permission ruleset a session resolves is
+// the same with the operator's tool servers in its configuration as without them. The
+// servers sit under `mcp` and never reach `permission`; `debug agent` prints the
+// ruleset the runtime built from the session's own configuration, defaults included,
+// for a bypass posture (the one with the most rules) with and without a server.
+func TestIntegration_OperatorToolServersLeaveTheResolvedPermissionsAlone(t *testing.T) {
+	requireOpencodeIntegration(t)
+	bin, err := exec.LookPath("opencode")
+	if err != nil {
+		t.Skip("no opencode binary on PATH")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolve := func(p string) string {
+		r, err := filepath.EvalSymlinks(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	cwd := resolve(t.TempDir())
+	servers, err := ParseOperatorToolServers(json.RawMessage(`{"probesrv":{"type":"local","command":["` + exe + `","__mcp","` +
+		filepath.Join(t.TempDir(), "report") + `"],"appliesTo":{"permissionModes":["default","bypass"]}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	providers, err := newProviderPolicy([]string{builtinProvider})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// One session directory for both runs: the rules name it, so a second directory
+	// would differ in a way that has nothing to do with the servers.
+	sess := resolve(t.TempDir())
+	for _, sub := range []string{"home", "tmp", "xdg/config", "xdg/data", "xdg/state", "xdg/cache"} {
+		if err := os.MkdirAll(filepath.Join(sess, sub), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	plan := &sandboxPlan{read: dedupe([]string{"/usr", cwd, sess}), write: dedupe([]string{cwd, sess})}
+	ruleset := func(withServers bool) string {
+		var opts []configOption
+		if withServers {
+			opts = append(opts, withToolServers(map[string]any{"probesrv": servers.servers[0].render()}))
+		}
+		if err := writeSessionConfig(sess, true, plan, providers, nil, nil, opts...); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, bin, "--pure", "debug", "agent", "build")
+		cmd.Dir = cwd
+		cmd.Env = []string{
+			"PATH=/usr/bin:/bin", "HOME=" + filepath.Join(sess, "home"), "TMPDIR=" + filepath.Join(sess, "tmp"),
+			"XDG_CONFIG_HOME=" + filepath.Join(sess, "xdg", "config"), "XDG_DATA_HOME=" + filepath.Join(sess, "xdg", "data"),
+			"XDG_STATE_HOME=" + filepath.Join(sess, "xdg", "state"), "XDG_CACHE_HOME=" + filepath.Join(sess, "xdg", "cache"),
+		}
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("opencode debug agent build: %v\n%s", err, stderr.String())
+		}
+		start := strings.Index(string(out), "{")
+		if start < 0 {
+			t.Fatalf("no JSON in the runtime's output:\n%s", out)
+		}
+		var agent struct {
+			Permission json.RawMessage `json:"permission"`
+		}
+		if err := json.NewDecoder(strings.NewReader(string(out)[start:])).Decode(&agent); err != nil || len(agent.Permission) == 0 {
+			t.Fatalf("the runtime's agent output carries no permission ruleset (%v):\n%s", err, out)
+		}
+		return string(agent.Permission)
+	}
+	without, with := ruleset(false), ruleset(true)
+	if without != with {
+		t.Errorf("the resolved permission rules differ with the tool servers in the configuration:\nwithout: %s\nwith:    %s", without, with)
 	}
 }

@@ -59,7 +59,8 @@ import (
 // # What it does not do
 //
 // Instruction files only. No tool server, permission or provider rides this
-// setting (the #396 exclusion stays as it is; tool servers are #466's), and the
+// setting (tool servers are the operator's `opencode.mcp`, operatortoolservers.go,
+// muster #466), and the
 // text is never logged or put in an error: a refusal says which file and what is
 // wrong with it, and nothing of what it holds. The text is visible to the session,
 // like any instruction file: it is not a secret channel.

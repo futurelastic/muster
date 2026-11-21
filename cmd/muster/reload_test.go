@@ -424,6 +424,32 @@ func TestReload_AChangeOfTheOpencodeInstructionFilesIsRestartOnly(t *testing.T) 
 	}
 }
 
+// muster #466: the operator's tool servers are handed to the opencode driver once, at
+// start, so a reload that changes them is refused whole, like the agents file and the
+// instruction files. A file that is only reformatted is not a change.
+func TestReload_AChangeOfTheOpencodeToolServersIsRestartOnly(t *testing.T) {
+	r := newReloadRig(t, rlDoc(rlPrincipal("old", "tok-old", "read")))
+	doc := rlDoc(rlPrincipal("old", "tok-old", "read"), rlPrincipal("new", "tok-new", "read"))
+	// Absolute by the host's own rule: a POSIX-looking path has no drive on Windows.
+	doc["opencode"] = map[string]any{"mcp": map[string]any{"cards": map[string]any{
+		"type": "local", "command": []string{filepath.Join(t.TempDir(), "cards")}}}}
+	putCfg(t, r.path, doc)
+	r.rl.check("test")
+
+	row := checkReloadStatus(r.dir, r.path)
+	if row.Status != statusWarn {
+		t.Fatalf("doctor row = %+v, want a warn naming the refusal", row)
+	}
+	for _, want := range []string{"opencode", "only a restart applies", "the file passes start-up validation"} {
+		if !strings.Contains(row.Detail, want) {
+			t.Errorf("the refusal %q does not say %q", row.Detail, want)
+		}
+	}
+	if code, _ := r.get("/v1/health", "tok-new"); code != 401 {
+		t.Errorf("a principal from the refused file = %d, want 401: nothing from the edit applies", code)
+	}
+}
+
 // muster #396: WHICH file holds the operator's opencode agents is read at start; a
 // reload that changes it is refused whole, like any other restart-only setting.
 // What the file holds is read per create and needs no reload at all.
