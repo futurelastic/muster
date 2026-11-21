@@ -442,6 +442,11 @@ type Driver struct {
 	seen   map[string]knownSession // id -> what this driver has locally cached; see package doc's scope boundary
 	live   map[*server]struct{}    // every server this driver started and has not torn down, session created or not
 	closed bool
+	// restartLeft is how many sessions the start that built this driver left listed
+	// unknown for want of their callers' environment (muster #510): set once, by
+	// resume, before the driver is handed to anyone, and never changed after. What
+	// still waits is read from seen (NeedingRecreation).
+	restartLeft int
 
 	idemMu   sync.Mutex
 	idem     map[string]idemEntry

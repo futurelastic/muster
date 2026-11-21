@@ -747,6 +747,14 @@ func handleHealth(svc *Service) http.HandlerFunc {
 		if modules := svc.deliveryModulesStatus(); modules != nil {
 			body["modules"] = modules
 		}
+		// muster #510: the sessions the last start left needing re-creation for want of
+		// their callers' environment, and how many of those still wait (POST …/revive
+		// brings one back). Present only when a runtime's last start left some, and then
+		// only a count per runtime: no id, name or variable name. A monitor that polls
+		// health sees what an upgrade cost without the restart log or the doctor.
+		if left := svc.recreationSnapshot(); left != nil {
+			body["needsRecreation"] = left
+		}
 		writeJSON(w, http.StatusOK, body)
 	}
 }

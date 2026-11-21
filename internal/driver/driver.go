@@ -415,6 +415,29 @@ type Reviver interface {
 	Revive(ctx context.Context, req fleet.Request, ref fleet.SessionRef, spec ReviveSpec) (fleet.Session, error)
 }
 
+// RecreationReporter is an OPTIONAL capability, same shape as CounterReporter: a
+// driver that can say, from memory, what its last start cost in sessions it could
+// not relaunch for want of their callers' environment, and how many of those still
+// wait (muster #510). It is what GET /v1/health reports as `needsRecreation`, so a
+// monitor that polls health sees an upgrade's cost without reading the restart log
+// or running the doctor against the records.
+//
+// Optional because only a driver that keeps sessions across a restart and cannot
+// keep a caller's environment has anything to count; a driver that does not
+// implement it, and one whose last start left nothing, report nothing.
+//
+// A count and never an id, a name or a variable name: the service answers one
+// number per runtime and a session's identity is its caller's to know.
+type RecreationReporter interface {
+	// NeedingRecreation returns how many sessions the last start of this driver left
+	// listed `unknown` for want of their callers' environment (left), and how many of
+	// those are still so (waiting). A session leaves the second count when its caller
+	// revives it or closes it; neither count ever includes a session created after the
+	// start, which has a server. left is fixed for the life of the driver, and
+	// waiting never exceeds it.
+	NeedingRecreation() (left, waiting int)
+}
+
 // CapturedExit is one session's own process exit, captured by an
 // ExitReporter driver in the same pass that removed the session from its
 // runtime (muster #235). ID is the driver's own session id; the caller

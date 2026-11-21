@@ -71,14 +71,17 @@ func (d *Driver) resume(ctx context.Context) {
 	// log sees: the sessions it could not relaunch for want of their callers'
 	// environment, which each caller can bring back (revive.go) or close. A count and
 	// never an id, a name or a variable.
-	d.mu.RLock()
+	// The same figure is kept for GET /v1/health (NeedingRecreation, muster #510): what
+	// the log says once, a monitor can read for as long as the service runs.
+	d.mu.Lock()
 	left := 0
 	for _, k := range d.seen {
 		if k.recreate == recreateCallerEnv {
 			left++
 		}
 	}
-	d.mu.RUnlock()
+	d.restartLeft = left
+	d.mu.Unlock()
 	if left > 0 {
 		d.say("opencode: %d session(s) were left needing re-creation by this start: their create carried caller-supplied "+
 			"environment, which is never kept; each caller can bring its session back with POST …/revive, or close it", left)

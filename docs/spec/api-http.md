@@ -144,6 +144,8 @@ GET /v1/health
                        "capabilities": { "deadlineMs": 30000,
                                          "source": "assumed" } } ],
         "listSnapshot": { "served": 0, "built": 0, "bypassed": 0 },   ← §3.2, counted since start
+        "needsRecreation": { "<runtime>": { "leftAtStart": 3,   ← only when a runtime's last start left sessions
+                                            "stillWaiting": 2 } },  waiting for their callers' environment (#510)
         "modules": { "enabled": ["relay-a", "relay-b"],   ← only when a delivery module is configured (#414)
                      "loaded": ["relay-a"],
                      "skipped": [ { "name": "relay-b",
@@ -532,6 +534,37 @@ statement about discovery at startup, not about whether the module process is
 answering now; a send's receipt names the route that delivered it
 (`delivery.route`, §3.2). A build that
 predates #414 has no key and a reader treats that as "unknown", not as "fine".
+
+**`needsRecreation` on `GET /v1/health` says what the last start left waiting for its
+callers** (muster #510). A session created with caller-supplied environment is never
+relaunched by a restart (§3.3, `POST …/revive`): it is listed `unknown`, "needs
+re-creation", until its caller revives it or closes it. A restart therefore costs a
+supervisor that passes per-session credentials every one of its sessions, and until this
+key that cost was visible only in the restart log, or in `muster doctor`, which reads the
+records offline and cannot say what a start did. It is a map from runtime id to two
+counts, and nothing else:
+
+- `leftAtStart` — how many sessions the start of this service left `unknown` for want of
+  their callers' environment. It is fixed for the life of the process and is the figure the
+  restart log line gives.
+- `stillWaiting` — how many of those are still so. A **revive** takes a session out of it,
+  and so does a **close**; it falls from `leftAtStart` towards `0` and never exceeds it. A
+  session created since the start is never in either count (it has a server), and a session
+  that is `unknown` for any **other** cause — its relaunch failed, its record cannot be read,
+  its context file is gone — is in neither: supplying the environment would not bring it back,
+  and its listing carries the reason.
+
+**A count and never an id, a name, a path or a variable name**: the response says how many
+sessions wait, and the listing (`GET …/sessions`, `status=unknown`) is what says which.
+**The key is absent when nothing was left**, and so is a runtime's entry: a runtime whose
+driver cannot leave a session waiting (it keeps nothing across a restart), and one whose last
+start left none, say nothing, so a machine that never had the problem answers as it always
+did. An entry whose `stillWaiting` has fallen to `0` is **kept**, not removed: a monitor
+that reads `leftAtStart: 3, stillWaiting: 0` knows the upgrade's cost was met, and one that
+reads the key vanish cannot tell that from a machine that never had any. The next start
+resets both: it counts what *it* left, and a session revived in the meantime is left again
+(the environment is never kept). A build that predates #510 has no key, and a reader treats
+that as "unknown", not as "none".
 
 **`capabilities.serverContext` on a macOS host's terminal runtime names the
 security-session context its sessions run in** (muster #336). Every process in a
