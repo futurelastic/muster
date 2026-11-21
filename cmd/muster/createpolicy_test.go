@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -95,6 +96,9 @@ func TestReload_ACreatePolicyEditNeedsARestart(t *testing.T) {
 // muster #438: the sandbox key of a rule — how the file is read, and what the doctor
 // says of it against the host.
 func TestCreatePolicy_ASandboxRuleIsReadWithItsGrants(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the sandbox grants are POSIX paths, and no sandbox mechanism exists there (windows, #303)")
+	}
 	cfg, env := policyCfg(t, []any{
 		map[string]any{"appliesTo": map[string]any{"agents": []any{"untrusted"}}, "sandbox": map[string]any{
 			"mode": "required", "readPaths": []any{"/srv/data"}, "writePaths": []any{"/srv/work"}, "network": "closed"}},
