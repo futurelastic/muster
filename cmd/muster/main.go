@@ -988,6 +988,15 @@ func main() {
 		}
 		log.Printf("muster: input length limit %d bytes configured (#130)", cfgFile.MaxInputBytes)
 	}
+	// #509: the operator's policy over what a create may be given (today the access
+	// of a portable agent definition). Validated by validateConfigExtras above; read
+	// once, so changing it needs a restart.
+	if policy := cfgFile.createPolicy(); len(policy) > 0 {
+		if err := svc.SetCreatePolicy(policy); err != nil {
+			log.Fatalf("muster: %v", err)
+		}
+		log.Printf("muster: createPolicy configured (%d rules: %s) (#509)", len(policy), policy.Describe())
+	}
 	// #185: the names a caller may force with `route`. The service checks them
 	// in its request-shape switch, before any driver is resolved, so this is
 	// set whether or not the module's executable is present.

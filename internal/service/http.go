@@ -1139,6 +1139,7 @@ type createSessionBody struct {
 	Cwd        fleet.AbsolutePath `json:"cwd"`
 	Agent      fleet.AgentId      `json:"agent"`
 	Model      string             `json:"model"`
+	AgentSpec  *fleet.AgentSpec   `json:"agentSpec"`
 	Effort     string             `json:"effort"`
 	Name       string             `json:"name"`
 	Prompt     string             `json:"prompt"`
@@ -1225,6 +1226,10 @@ func createNeedsSend(body createSessionBody) string {
 		// An unattended posture lowers to permissionMode "bypass" — a session
 		// that acts without asking — so it carries the same grant (#344).
 		return "posture (unattended)"
+	case agentSpecNeedsSend(body.AgentSpec):
+		// A portable agent definition whose access lets the session act without
+		// asking is the same widening, spelled in the definition (#509).
+		return "agentSpec.access"
 	case fleet.PermissionModeNeedsSend(body.PermissionMode):
 		// The explicit ordinary mode (#256) and plan (#329) ask for nothing
 		// beyond a create; acceptEdits, auto and bypass let the agent act
@@ -1370,6 +1375,14 @@ func handleCreateSession(svc *Service) http.HandlerFunc {
 			}
 		}
 
+		// muster #509: a portable agent definition that contradicts the rest of the
+		// request, or is malformed, is a 400 on any machine, before a driver or a
+		// peer is involved.
+		if ferr := checkAgentSpecShape(body, machine); ferr != nil {
+			writeError(w, ferr)
+			return
+		}
+
 		// Two things in this body ask for more than a create.
 		//
 		// A CONSENT (`trustCwd`, `consents`) asks the driver to produce a
@@ -1452,6 +1465,17 @@ func handleCreateSession(svc *Service) http.HandlerFunc {
 			}
 		}
 
+		// muster #509: a portable agent definition this machine serves. Settled
+		// before the posture is lowered because its `access` is lowered through it.
+		// A relayed create carries the definition on untouched: the machine that
+		// runs the session applies its own operator policy to it.
+		if via != resolvedPeer {
+			if ferr := svc.applyAgentSpec(r, machine, resolvedRuntime, d.Capabilities(), &body); ferr != nil {
+				writeError(w, ferr)
+				return
+			}
+		}
+
 		// muster #344: lower the posture onto the per-runtime fields using what
 		// THIS runtime declares, before anything reads them below (the resume
 		// carry, the driver). It comes AFTER the #342 check above: a runtime that
@@ -1530,7 +1554,7 @@ func handleCreateSession(svc *Service) http.HandlerFunc {
 			// deliberately does not repeat a value the path already
 			// carries.
 			Machine: machine, Runtime: body.Runtime, Cwd: body.Cwd,
-			Agent: body.Agent, Model: body.Model, Effort: body.Effort,
+			Agent: body.Agent, AgentSpec: body.AgentSpec, Model: body.Model, Effort: body.Effort,
 			Name: body.Name, Prompt: body.Prompt, ContextRef: body.ContextRef,
 			Marker: body.Marker, RemoteControl: body.RemoteControl,
 			TrustCwd: body.TrustCwd, Env: body.Env, Resume: body.Resume,
