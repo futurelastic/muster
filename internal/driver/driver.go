@@ -381,6 +381,40 @@ type RemoteControlSetter interface {
 	SetRemoteControl(ctx context.Context, req fleet.Request, ref fleet.SessionRef, enabled bool) (fleet.Ack, error)
 }
 
+// ReviveSpec is what a caller hands POST …/revive (muster #427): the
+// environment the session was created with, which no restart keeps, and the
+// context file it was created with.
+type ReviveSpec struct {
+	// Env is the caller-supplied environment, by name. It lives in memory for the
+	// one relaunch and is never written anywhere: not the session's record, not a
+	// log line, not an event, not an error message (muster #282).
+	Env map[string]string
+	// ContextRef, when set, must name the file the create named; it is a check, not
+	// a way to change the session's context. Empty means "the recorded one".
+	ContextRef fleet.AbsolutePath
+	// MayBypass is whether the caller may relaunch a session created in the
+	// permission-bypass posture: the service sets it from the principal's `send`
+	// grant, the same grant a create asking for that posture needs. It is never
+	// carried to a peer, which computes it from its own table.
+	MayBypass bool
+}
+
+// Reviver is an OPTIONAL capability: a driver that can bring a session a restart
+// left `unknown`, "needs re-creation", back to running with the environment its
+// caller supplies again (POST …/revive, muster #427). A driver that cannot
+// answers unsupported at the service and declares no DriverCapabilities.Revives.
+//
+// The session keeps its id, its directory and its conversation: the driver
+// relaunches the session's own server on what it already holds and confirms the
+// runtime finds the session by id. Nothing about the environment is kept, so a
+// restart lists the session `unknown` again. A session that is not listed
+// `unknown` for that reason (one that is running, or whose relaunch failed for a
+// cause that has nothing to do with the environment) is refused with a conflict
+// carrying ReasonNotRevivable, and nothing is started.
+type Reviver interface {
+	Revive(ctx context.Context, req fleet.Request, ref fleet.SessionRef, spec ReviveSpec) (fleet.Session, error)
+}
+
 // CapturedExit is one session's own process exit, captured by an
 // ExitReporter driver in the same pass that removed the session from its
 // runtime (muster #235). ID is the driver's own session id; the caller

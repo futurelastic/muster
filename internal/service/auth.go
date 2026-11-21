@@ -404,6 +404,12 @@ func grantForVerb(r *http.Request) Grant {
 		return GrantLabel
 	case r.Method == http.MethodPost && strings.HasSuffix(path, "/remote-control"):
 		return GrantRemoteControl
+	case r.Method == http.MethodPost && strings.HasSuffix(path, "/revive"):
+		// Starts a process on this machine with caller-supplied environment, which is
+		// what the create grant means: a revive is a create of the same session,
+		// handed its environment again (muster #427). Not a read, which is what an
+		// unlisted route would be.
+		return GrantCreate
 	case r.Method == http.MethodPut && path == "/v1/machine-list":
 		// Not routed through mutating() (it would let any caller in when the
 		// legacy FLEET_ALLOW_MUTATIONS flag is set); pushListGate checks this

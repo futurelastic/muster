@@ -151,6 +151,7 @@ func NewMux(svc *Service, cfg Config) *http.ServeMux {
 	mux.HandleFunc("POST /v1/machines/{machine}/sessions/{id}/keys", withAuth(svc, cfg, mutating(svc, cfg, handleKeys(svc))))
 	mux.HandleFunc("POST /v1/machines/{machine}/sessions/{id}/labels", withAuth(svc, cfg, mutating(svc, cfg, handleLabels(svc))))
 	mux.HandleFunc("POST /v1/machines/{machine}/sessions/{id}/remote-control", withAuth(svc, cfg, mutating(svc, cfg, handleRemoteControl(svc))))
+	mux.HandleFunc("POST /v1/machines/{machine}/sessions/{id}/revive", withAuth(svc, cfg, mutating(svc, cfg, handleRevive(svc))))
 	mux.HandleFunc("DELETE /v1/machines/{machine}/sessions/{id}", withAuth(svc, cfg, mutating(svc, cfg, handleClose(svc))))
 	mux.HandleFunc("GET /v1/events", withAuth(svc, cfg, reading(handleEvents(svc))))
 	// The owner-signed machine list, handed from one machine to another (#352).

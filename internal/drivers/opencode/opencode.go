@@ -94,7 +94,8 @@
 // read. A session whose create carried caller-supplied env cannot be relaunched
 // faithfully — the values were never kept — so it is listed `unknown`, with a
 // reason saying it needs re-creation, rather than relaunched with less than it
-// was given. So is one that cannot be relaunched for any other reason (the
+// was given; its caller may bring it back by handing the environment over again
+// (Revive, revive.go, muster #427) or close it. So is one that cannot be relaunched for any other reason (the
 // sandbox is no longer enforceable, its directory is gone, the runtime lost it):
 // a restart adopts and never silently drops. A turn the service's stop cut short
 // is reported as `lastTurn.outcome: "interrupted"`, not as an ordinary idle.
@@ -472,6 +473,11 @@ type knownSession struct {
 	// unknown is why this session has no running server: it was found on disk
 	// after a restart and could not be relaunched. srv is nil exactly then.
 	unknown string
+	// recreate is the cause behind unknown, as a value and not a sentence: the one
+	// thing a revive (revive.go, muster #427) keys on, so it never has to read the
+	// reason's text. recreateNone for a session that has a server, or that was
+	// never classified.
+	recreate recreateCause
 	// interrupted is set on a relaunched session whose last turn did not finish
 	// before the service stopped. A new turn (Send) clears it.
 	interrupted *fleet.TurnEnd
@@ -985,6 +991,10 @@ func (d *Driver) Capabilities() fleet.DriverCapabilities {
 		// conversation: every session carries the runtime's own id, captured at
 		// create (#378, conversation.go).
 		ReportsConversation: fleet.Declared(true),
+		// revive: a session a restart left `unknown` for want of its caller's
+		// environment can be brought back by that caller (muster #427, revive.go).
+		// It needs a record to relaunch from, and an isolated server to relaunch.
+		Revives: fleet.Declared(d.store != nil && d.shared == nil),
 		// respond: a tool-permission ask only. A runtime question is never
 		// reported as a prompt and respond answers it `unsupported` (permission.go),
 		// and an ask carries a kind, so nothing unclassified is answered.

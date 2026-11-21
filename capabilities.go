@@ -388,6 +388,16 @@ type DriverCapabilities struct {
 	// driver looks, so an absent one is "not yet", and a present one — known or
 	// not — is an answer.
 	ReportsConversation *bool `json:"reportsConversation,omitempty"`
+	// Revives reports whether POST …/revive can bring a session a restart left
+	// `unknown` ("needs re-creation") back, given the environment its create
+	// carried (muster #427). false means every call is unsupported; true does not
+	// promise any one session can be revived: only one listed `unknown` for that
+	// reason can, and the call says so when it is not (409 `not-revivable`).
+	//
+	// Declared, not derived from driver.Reviver, for the reason ReadsTurns gives: a
+	// remote driver always implements the interface as a relay, and a driver with no
+	// state directory implements it where nothing is ever left to revive.
+	Revives *bool `json:"revives,omitempty"`
 	// Respond declares which prompts POST …/respond answers.
 	Respond *RespondSupport `json:"respond,omitempty"`
 	// PermissionModeChange declares whether a RUNNING session's permission mode

@@ -2160,6 +2160,48 @@ func (d *Driver) Labels(ctx context.Context, req fleet.Request, ref fleet.Sessio
 
 var _ driver.LabelRelayer = (*Driver)(nil)
 
+// Revive asks the peer to bring a session its restart left unknown back, with the
+// environment its caller supplies again (POST …/revive, muster #427).
+//
+// The peer applies its own grant (create, and send for a bypass session, from ITS
+// table) and its own checks, so a refusal arrives as the peer's own typed error and
+// is adopted as it is, 409 `not-revivable` included. `MayBypass` is not carried:
+// it is the serving machine's answer about its own principal table, which this
+// machine cannot make for it. The environment crosses the peer link exactly as a
+// create's does and is held nowhere here: it is in the one request this call makes,
+// whose body no log line of this driver prints.
+//
+// A peer that predates the route answers with its router's bare 404, which decodeError
+// alone would read as "no such session": it is reported as unsupported instead,
+// because the session may be perfectly alive and the peer simply has no such verb.
+func (d *Driver) Revive(ctx context.Context, req fleet.Request, ref fleet.SessionRef, spec driver.ReviveSpec) (fleet.Session, error) {
+	ctx, cancel := d.bounded(ctx)
+	defer cancel()
+
+	path := fmt.Sprintf("/v1/machines/%s/sessions/%s/revive",
+		url.PathEscape(string(d.machine)), url.PathEscape(ref.ID))
+	if want := req.Expect.StartedAt; want != nil {
+		path += "?startedAt=" + url.QueryEscape(want.UTC().Format(time.RFC3339Nano))
+	}
+	body := fleet.ReviveRequest{Env: spec.Env, ContextRef: spec.ContextRef}
+	var out fleet.Session
+	path = withRuntimeHint(req, path)
+	if err := d.do(ctx, req, http.MethodPost, path, body, &out); err != nil {
+		if routeMissing(err) {
+			return fleet.Session{}, &fleet.Error{
+				Kind:    fleet.ErrorUnsupported,
+				Message: fmt.Sprintf("peer %s has no revive route (older build)", d.machine),
+				Machine: d.machine,
+			}
+		}
+		return fleet.Session{}, err
+	}
+	// The peer's own answer, whole (§13.2), as a relayed create is.
+	return out, nil
+}
+
+var _ driver.Reviver = (*Driver)(nil)
+
 // SetRemoteControl asks the peer to turn a session's remote control on or off
 // (202, intent only; muster #269).
 //

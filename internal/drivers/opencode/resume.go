@@ -2,6 +2,7 @@ package opencode
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -29,7 +30,9 @@ import (
 //   - unknown, "needs re-creation": the create carried caller-supplied environment
 //     values, which this driver never kept, or named a context file (muster #371)
 //     that can no longer be read. Relaunching it with less than it was created with
-//     would be a different session wearing the same id.
+//     would be a different session wearing the same id. The first of these its
+//     caller can bring back by supplying the environment again (revive.go, muster
+//     #427); the session keeps its id, directory and conversation either way.
 //   - unknown, with the reason it could not be relaunched: the sandbox can no longer
 //     be enforced, a required sessionEnv file is gone, the directory is missing, the
 //     runtime would not start, the runtime no longer has the session. The record and
@@ -64,6 +67,22 @@ func (d *Driver) resume(ctx context.Context) {
 		}(it)
 	}
 	wg.Wait()
+	// muster #427: what this start cost, in one line an operator reading the restart
+	// log sees: the sessions it could not relaunch for want of their callers'
+	// environment, which each caller can bring back (revive.go) or close. A count and
+	// never an id, a name or a variable.
+	d.mu.RLock()
+	left := 0
+	for _, k := range d.seen {
+		if k.recreate == recreateCallerEnv {
+			left++
+		}
+	}
+	d.mu.RUnlock()
+	if left > 0 {
+		d.say("opencode: %d session(s) were left needing re-creation by this start: their create carried caller-supplied "+
+			"environment, which is never kept; each caller can bring its session back with POST …/revive, or close it", left)
+	}
 }
 
 func (d *Driver) resumeOne(ctx context.Context, it loaded) {
@@ -72,7 +91,7 @@ func (d *Driver) resumeOne(ctx context.Context, it loaded) {
 		id := strings.TrimSuffix(filepath.Base(it.file), ".json")
 		if safeID(id) {
 			unknown := fmt.Sprintf("the stored record of this session could not be used (%v); it needs re-creation", it.err)
-			d.markSeen(id, knownSession{unknown: unknown, conversation: unconfirmed(unknown)})
+			d.markSeen(id, knownSession{unknown: unknown, recreate: recreateUnreadable, conversation: unconfirmed(unknown)})
 		}
 		return
 	}
@@ -96,6 +115,7 @@ func (d *Driver) resumeOne(ctx context.Context, it loaded) {
 	}
 	if why := rec.recreateReason(); why != "" {
 		base.unknown = why
+		base.recreate = recreateCallerEnv
 		base.conversation = unconfirmed(why)
 		d.markSeen(rec.ID, base)
 		return
@@ -111,6 +131,7 @@ func (d *Driver) resumeOne(ctx context.Context, it loaded) {
 		if err != nil {
 			base.unknown = "the session could not be relaunched after the restart: its context file can no longer be used, " +
 				"and a session is not relaunched without the context it was created with (" + describeCreateError(err) + "); it needs re-creation"
+			base.recreate = recreateContextGone
 			base.conversation = unconfirmed(base.unknown)
 			d.noteRelaunch(rec, true)
 			d.markSeen(rec.ID, base)
@@ -133,6 +154,7 @@ func (d *Driver) resumeOne(ctx context.Context, it loaded) {
 	srv, interrupted, err := d.relaunch(rctx, rec)
 	if err != nil {
 		base.unknown = "the session could not be relaunched after the restart: " + err.Error()
+		base.recreate = recreateRelaunchFailed
 		base.conversation = unconfirmed(base.unknown)
 		d.noteRelaunch(rec, true)
 		d.markSeen(rec.ID, base)
@@ -152,13 +174,26 @@ func (d *Driver) resumeOne(ctx context.Context, it loaded) {
 // The second holds the session's lifecycle lock and ignores the interrupted turn
 // this returns, because a server is only parked while it has no turn.
 func (d *Driver) relaunch(ctx context.Context, rec *sessionRecord) (*server, *fleet.TurnEnd, error) {
+	return d.relaunchWith(ctx, rec, nil)
+}
+
+// relaunchWith is relaunch with the environment a CALLER supplies this once
+// (muster #427): Revive hands it the values the create carried, which no record
+// keeps (#282), and they reach the server's environment through the same start a
+// create uses, with every refusal that start makes. nil is a relaunch from the
+// record alone, as at a service start and for a parked session. The values live
+// in this call's spec and the process's environment and nowhere else — the record
+// written below changes only what names the process.
+func (d *Driver) relaunchWith(ctx context.Context, rec *sessionRecord, env map[string]string) (*server, *fleet.TurnEnd, error) {
 	if err := d.checkRelaunchable(rec); err != nil {
 		return nil, nil, err
 	}
 	// A server the previous service left running holds this database too; it was
 	// stopped by resumeOne before this was called (muster #398).
 
-	srv, err := d.startServerIn(ctx, rec.spec(), rec.Dir, rec.CacheCopy)
+	spec := rec.spec()
+	spec.Env = env
+	srv, err := d.startServerIn(ctx, spec, rec.Dir, rec.CacheCopy)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -166,7 +201,7 @@ func (d *Driver) relaunch(ctx context.Context, rec *sessionRecord) (*server, *fl
 	if err := d.do(ctx, srv, "GET", "/session/"+url.PathEscape(rec.ID), nil, &sess); err != nil {
 		srv.pauseForShutdown()
 		if isNotFound(err) {
-			return nil, nil, fmt.Errorf("the runtime restarted but no longer has this session in its store")
+			return nil, nil, errRuntimeLostSession
 		}
 		return nil, nil, fmt.Errorf("the runtime restarted but the session could not be read back: %w", err)
 	}
@@ -181,6 +216,22 @@ func (d *Driver) relaunch(ctx context.Context, rec *sessionRecord) (*server, *fl
 		return nil, nil, err
 	}
 	return srv, d.interruptedTurn(ctx, srv, rec.ID), nil
+}
+
+// errRuntimeLostSession is relaunch's answer when the runtime it started does not
+// hold the session: the store under the session's directory has no record of it.
+// A sentinel so a revive (muster #427) can say "not revivable" and not "try again";
+// the text is what the restart's listing has always said.
+var errRuntimeLostSession = errors.New("the runtime restarted but no longer has this session in its store")
+
+// sandboxGoneError is checkRelaunchable's refusal when the session was created in a
+// sandbox this driver can no longer enforce: a fact about this machine and not about
+// the session, which a revive answers as unsupported and not as a conflict.
+type sandboxGoneError struct{ why string }
+
+func (e *sandboxGoneError) Error() string {
+	return fmt.Sprintf("it was created in a sandbox and this driver can no longer enforce one (%s); "+
+		"it is not relaunched unconfined", e.why)
 }
 
 // noteRelaunch keeps rec's record saying what the last start did with the session
@@ -229,8 +280,7 @@ func (d *Driver) checkRelaunchable(rec *sessionRecord) error {
 	}
 	if rec.Sandbox != nil {
 		if sup, why := d.sandboxSupportNow(); sup == nil {
-			return fmt.Errorf("it was created in a sandbox and this driver can no longer enforce one (%s); "+
-				"it is not relaunched unconfined", why)
+			return &sandboxGoneError{why: why}
 		}
 	}
 	if !d.ownsDir(rec.Dir) {

@@ -64,6 +64,10 @@ var sessionOps = []struct {
 		_, err := d.SetRemoteControl(context.Background(), req, fleet.SessionRef{ID: "s1"}, true)
 		return err
 	}},
+	{"Revive", func(d *Driver, req fleet.Request) error {
+		_, err := d.Revive(context.Background(), req, fleet.SessionRef{ID: "s1"}, driver.ReviveSpec{Env: map[string]string{"K": "v"}})
+		return err
+	}},
 	{"Composer", func(d *Driver, req fleet.Request) error {
 		_, err := d.Composer(context.Background(), req, fleet.SessionRef{ID: "s1"})
 		return err
@@ -211,7 +215,7 @@ func TestCreateAndListDoNotCarryTheHint(t *testing.T) {
 	}
 }
 
-// The structural half of the table above, for the day someone adds a fifteenth
+// The structural half of the table above, for the day someone adds a sixteenth
 // builder: a function in this package that builds a session-addressed path
 // (".../sessions/%s...") and never calls withRuntimeHint silently drops the
 // caller's runtime again, one route at a time. The table cannot see a builder

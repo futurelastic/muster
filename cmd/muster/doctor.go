@@ -1805,7 +1805,8 @@ func checkOpencodeSessions(enabled bool, stateDir string, now time.Time, scan fu
 		detail = append(detail, "oldest first: "+list)
 		if callerEnv := len(rep.Sessions) - failed; callerEnv > 0 {
 			detail = append(detail, fmt.Sprintf("%s created with caller-supplied environment, which is never kept: a restart lists such "+
-				"a session unknown and it needs re-creation (one whose server exited since is listed dead)", countOf(callerEnv, len(rep.Sessions))))
+				"a session unknown and it needs re-creation, or its caller can revive it by supplying the environment again "+
+				"(one whose server exited since is listed dead)", countOf(callerEnv, len(rep.Sessions))))
 		}
 		if failed > 0 {
 			detail = append(detail, fmt.Sprintf("%s marked \"relaunch failed\": the last start of the service listed such a session unknown "+

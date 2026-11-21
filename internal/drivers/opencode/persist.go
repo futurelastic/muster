@@ -36,6 +36,8 @@ import (
 // The one thing that cannot be rebuilt is a value the CALLER supplied: this
 // driver never kept it, so a session created with one is listed `unknown`, with
 // the reason, rather than relaunched with less environment than it was given.
+// Its caller can hand the values back (Revive, revive.go, muster #427): they go to
+// the one relaunch and nowhere else, so this record still holds no value.
 
 // recordVersion is the format of the record; a file with another is not
 // understood and is reported rather than guessed at.
@@ -121,13 +123,15 @@ type parkedRecord struct {
 }
 
 // recreateReason is what a session created with caller-supplied env is listed
-// with after a restart.
+// with after a restart. It names the variables and not their values, and it says
+// what a caller can do: supply them again (revive.go, muster #427) or close it.
 func (r *sessionRecord) recreateReason() string {
 	if len(r.EnvNames) == 0 {
 		return ""
 	}
 	return fmt.Sprintf("the session was created with caller-supplied environment (%s), which this driver never "+
-		"keeps, so it cannot be relaunched with the environment it was created with; it needs re-creation",
+		"keeps, so it cannot be relaunched with the environment it was created with; it needs re-creation "+
+		"(or its caller can revive it by supplying that environment again)",
 		strings.Join(r.EnvNames, ", "))
 }
 

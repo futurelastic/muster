@@ -22,7 +22,8 @@ open.
 **Grants.** With a principal table configured, each caller is a named identity
 with its own credential and its own list of grants: `read`, `create`, `send`,
 `interrupt`, `close`, `rename`, `discard`, `keys`, `label`, `remote-control`, `relay`,
-`push-list`, `debug`, `record`, `credentials`.
+`push-list`, `debug`, `record`, `credentials`. (`create` also gates `…/revive`: it starts a process with
+caller-supplied environment, and a bypass-posture session needs `send` as well.)
 Every grant defaults to denied. ⚠️ `record` reads a session's **whole record**, and
 nothing implies it — see `GET …/record` below. ⚠️ `keys` is the one that can **escalate** a session (it delivers
 `BTab`, which cycles the permission mode — see `POST …/keys` below), so grant it
@@ -152,6 +153,7 @@ every configured peer, exactly one hop — peers never recurse.
 | `POST` | `…/{id}/rename` | Change the session's id, and the runtime's own title if it keeps one | `rename` | yes |
 | `POST` | `…/{id}/labels` | Set or delete caller-supplied labels | `label` | yes |
 | `POST` | `…/{id}/remote-control` | Turn a running session's remote control on or off | `remote-control` ⚠️ | yes |
+| `POST` | `…/{id}/revive` | Bring a session a restart left `unknown` back, handing over the environment it was created with | `create` (and `send` for a bypass session) ⚠️ | yes |
 | `DELETE` | `/v1/machines/{machine}/sessions/{id}` | Destroy the session | `close` | yes |
 | `GET` | `/v1/machine-list` | The owner-signed machine list this machine has in force, byte for byte | `read` | this machine only |
 | `PUT` | `/v1/machine-list` | Hand this machine a newer signed machine list; it is written and put in force live | `push-list` | this machine only |
@@ -492,7 +494,7 @@ an unreached peer reports it `assumed` and absent, which says nobody has
 answered, not that the peer cannot.
 
 **What a client that shows a session and lets a person type into it needs
-(#379, #441, #444).** Six capabilities, each per runtime, each **absent when not declared**:
+(#379, #441, #444).** Six capabilities (and `revives`, below, which a supervisor reads rather than a person), each per runtime, each **absent when not declared**:
 
 | `capabilities.…` | declared yes | declared no |
 |---|---|---|
@@ -501,13 +503,14 @@ answered, not that the peer cannot.
 | `recordFormat` | a number (muster #444): the `format` of the pages this runtime's record is read in, today `1`. Present exactly when `readsRecord` is `true`, so a client that holds the formats it can render knows before it reads | absent for a runtime that cannot read a record: there is no format to name |
 | `reportsConversation` | `true`: the driver looks, so `conversation` is an answer when it arrives | `false`: `conversation` will never be set |
 | `respond` | `{"kinds": ["tool-permission"], "unclassified": false}`: `…/respond` answers a prompt whose `kind` is listed, or one with no `kind` when `unclassified` is `true` | `{"kinds": [], "unclassified": false}` |
+| `revives` | `true` (muster #427): `POST …/revive` can bring back a session a restart left `unknown` for want of its caller's environment (a given session can still be `409` `not-revivable`) | `false`: every call is `501` |
 | `permissionModeChange` | `{"live": true, "via": "keys"}`: a running session's mode changes through `POST …/keys` `BTab`, read back in `state.permissionMode` | `{"live": false}`: the mode is fixed at create; choose it from `createPermissionModes` |
 
 The terminal runtime, with its record root configured, declares all four yes
 (`respond` lists every kind and `unclassified: true`; `permissionModeChange` is
 `keys`). `opencode` declares `readsTurns`, `readsRecord` and `reportsConversation` yes, `respond`
 `["tool-permission"]` with `unclassified: false` (its own structured question is
-never offered as a prompt), and `permissionModeChange: {"live": false}`. Both runtimes that
+never offered as a prompt), `permissionModeChange: {"live": false}`, and `revives` yes when it has a state directory. Both runtimes that
 read a record declare `recordFormat: 1`; the test runtime declares `readsRecord: false` and no
 format.
 
@@ -1946,6 +1949,60 @@ confirmation is the session's `state.controlChannel` changing, delivered as a
   itself holds `remote-control`, so a caller who may only `send` through a peer
   cannot ride the peer's grant.
 
+### `POST …/{id}/revive`
+
+```json
+{ "env": { "MODEL_KEY": "…" }, "contextRef": "/absolute/path/to/the/context/file" }
+```
+
+Brings a session a restart left `unknown` — **"needs re-creation"** — back, given the
+environment its create carried. That is what a restart does to every opencode session created
+with caller-supplied `env`: the values were never kept (no secret is ever persisted), and a
+session relaunched with less would be a different session wearing the same id. Its conversation
+is intact in the runtime's own store; until this verb a caller could only close it. The caller
+still has the values, so it hands them back, and the service relaunches **the session's own
+server in its own directory**, confirms the runtime finds the session **by id**, and answers `200`
+with the session: **the same `id` and `startedAt`, `state.status: "idle"`, and
+`conversation.known: true`**, its turns readable (`GET …/turns`). A session that was in the middle
+of a turn when the service stopped reads `idle` with `lastTurn.outcome: "interrupted"`, as any
+relaunched session does.
+
+**Nothing is persisted.** The values reach one process's environment and nowhere else — not the
+session's record, a log line, an event, an audit line or an error message. So the next restart
+lists the session `unknown` again, and the same call revives it again. A supervisor that creates
+sessions with per-session credentials upgrades the service, lists `status=unknown`, and revives
+each one with the values it already holds.
+
+- **`env` is required and must name exactly the variables the create named.** Missing or empty is
+  `400`: that is a relaunch with less than the session had. Fewer names is less environment, more
+  is a different session, and both are `400` naming the names — never a value. The values cannot be
+  checked and are your word, as at create. A variable the service owns (`HOME`, `XDG_*`, …) or a
+  delivery module reserves is `400`, as it is on a create.
+- **`contextRef`, when sent, must be the file the create named** (`400` otherwise). It is a check,
+  not a way to change the session's context; the recorded file is read again.
+- **Only a session listed `unknown` because its create carried `env` is revivable.** Anything
+  else is `409` with `reason: "not-revivable"`, `retryable: false`, and **nothing started**; the
+  `message` says which: the session is running, it is `unknown` for a cause the environment has
+  nothing to do with (its relaunch failed for a reason a later start may clear, its record cannot
+  be read, its context file is gone), its directory is gone, or the runtime started and no longer
+  holds the session. A second revive of the same session is the first of these.
+- **A lost response is read, not repeated.** If the connection dropped after you sent the revive,
+  `GET` the session: `idle` with `conversation.known: true` is the success you missed, and a repeat
+  would be `409 not-revivable`.
+- **It does not interleave with a `close`.** A close waits for a revive in progress and then
+  closes the session it started; a close that wins first removes the session, and the revive that
+  was waiting answers `404`.
+- **`501` `unsupported`** from a runtime that does not declare `capabilities.revives`, when the
+  sandbox the session was created in can no longer be enforced on this host, or when the runtime's
+  program is missing. A peer built before the route answers the same way, never `404`.
+- **`504` `unreachable`, retryable** when the runtime could not be started now or time ran out.
+  Nothing changed; the session is as the restart left it, and asking again is right.
+- **Grant: `create`** — it starts a process on this machine with caller-supplied environment,
+  which is what the create grant means. A session created in the permission-bypass posture is
+  started only for a caller who also holds **`send`**, the pairing a create asking for that
+  posture has. A call to a peer additionally needs `relay`, and the peer applies its own `create`
+  and `send` to your credential.
+
 ### `POST …/{id}/interrupt` and `DELETE …/{id}`
 
 Both express intent and return `202`. Confirmation arrives on the event stream,
@@ -2237,8 +2294,10 @@ answer, not a degraded response.
 other is the absence of one.
 
 A `conflict` may carry `reason` for finer classification than `kind` alone
-gives — e.g. `create`'s own `"replay-of-ended-session"` — plus whatever fields
-that reason needs; check it before parsing `message`.
+gives — e.g. `create`'s own `"replay-of-ended-session"`, or `revive`'s
+`"not-revivable"` (the session is not one a revive can bring back, and asking
+again will not change that) — plus whatever fields that reason needs; check it
+before parsing `message`.
 
 ---
 
