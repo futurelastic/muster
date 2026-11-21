@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/futurelastic/muster/internal/sandbox"
@@ -38,6 +39,12 @@ type logCapture struct {
 	mu      sync.Mutex
 	partial []byte
 	lines   []logLine
+
+	// ioerr counts the lines that named a storage I/O failure (muster #513). A
+	// count and never the text: wedge.go compares it with what it was when the
+	// server last answered a read of the session's store, and learns only that such a
+	// line was written since, not what it said.
+	ioerr atomic.Int64
 }
 
 type logLine struct {
@@ -85,11 +92,27 @@ func (l *logCapture) pushLocked(at time.Time) {
 	if len(l.partial) == 0 {
 		return
 	}
+	if ioerrRE.Match(l.partial) {
+		l.ioerr.Add(1)
+	}
 	l.lines = append(l.lines, logLine{at: at, text: string(l.partial)})
 	l.partial = l.partial[:0]
 	if len(l.lines) > logKeepLines {
 		l.lines = append([]logLine(nil), l.lines[len(l.lines)-logKeepLines:]...)
 	}
+}
+
+// ioerrRE is the runtime's own word for its storage failing underneath it: the
+// SQLite result code and the text it carries.
+var ioerrRE = regexp.MustCompile(`SQLITE_IOERR|disk I/O error`)
+
+// ioerrCount is how many lines so far named a storage I/O failure; zero for a nil
+// capture (shared mode, where the log is not this driver's to read).
+func (l *logCapture) ioerrCount() int64 {
+	if l == nil {
+		return 0
+	}
+	return l.ioerr.Load()
 }
 
 // errorNameRE finds a runtime error identifier: a capitalised word ending in

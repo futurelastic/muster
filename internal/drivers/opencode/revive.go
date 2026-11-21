@@ -66,6 +66,13 @@ const (
 	recreateUnreadable
 	// recreateRelaunchFailed is a session whose relaunch failed at the last start.
 	recreateRelaunchFailed
+	// recreateWedgedCallerEnv is a session whose runtime this driver stopped because
+	// it answered every read of the session's store with a 5xx (muster #513), and
+	// whose create carried caller-supplied environment, so the driver could not start
+	// it again by itself. The second cause a revive clears, and not one a restart
+	// counts: it is not in NeedingRecreation's figure, which is about the start that
+	// built this driver.
+	recreateWedgedCallerEnv
 )
 
 // NeedingRecreation implements driver.RecreationReporter (muster #510): how many
@@ -123,7 +130,7 @@ func (d *Driver) Revive(ctx context.Context, req fleet.Request, ref fleet.Sessio
 	switch {
 	case known.srv != nil:
 		return fleet.Session{}, d.notRevivable("the session is running; there is nothing to bring back")
-	case known.recreate != recreateCallerEnv:
+	case known.recreate != recreateCallerEnv && known.recreate != recreateWedgedCallerEnv:
 		why := known.unknown
 		if why == "" {
 			why = "it is not listed as needing its caller's environment"
@@ -184,7 +191,7 @@ func (d *Driver) Revive(ctx context.Context, req fleet.Request, ref fleet.Sessio
 	d.mu.Lock()
 	cur, still := d.seen[ref.ID]
 	closed := d.closed
-	if still && !closed && cur.srv == nil && cur.recreate == recreateCallerEnv {
+	if still && !closed && cur.srv == nil && (cur.recreate == recreateCallerEnv || cur.recreate == recreateWedgedCallerEnv) {
 		cur.srv = srv
 		cur.unknown = ""
 		cur.recreate = recreateNone

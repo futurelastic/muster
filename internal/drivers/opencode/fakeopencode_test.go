@@ -261,6 +261,20 @@ func runFakeOpencode(args []string) {
 			http.Error(w, "the server cannot read its own directory", http.StatusInternalServerError)
 			return
 		}
+		// muster #513: a server whose connection to its own store broke. The marker is
+		// keyed on this process's pid, so a process started on the same directory
+		// afterwards is healthy, as a fresh runtime is. Only what reads or writes the
+		// session's store fails; the status map, kept in memory, goes on answering.
+		// A marker holding "sqlite" also makes it log the storage failure the real
+		// runtime logs.
+		if marker, err := os.ReadFile(fmt.Sprintf(".fake-wedge-%d", os.Getpid())); err == nil &&
+			strings.HasPrefix(path, "/session") && path != "/session/status" {
+			if *printLogs && strings.Contains(string(marker), "sqlite") {
+				fmt.Fprintln(os.Stderr, "ERROR service=session.prompt SQLiteError: disk I/O error")
+			}
+			http.Error(w, "the store failed", http.StatusInternalServerError)
+			return
+		}
 		switch {
 		case path == "/session" && r.Method == http.MethodGet:
 			writeJSON(w, []wireSession{})

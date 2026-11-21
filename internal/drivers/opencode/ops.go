@@ -833,6 +833,8 @@ func (d *Driver) readState(ctx context.Context, ref fleet.SessionRef) (fleet.Ses
 	switch d.phaseOf(srv) {
 	case phaseParked:
 		return d.parkedState(known), nil
+	case phaseWedged:
+		return d.wedgedState(srv), nil // muster #513: being replaced; nothing is asked of it
 	case phaseExited:
 		return fleet.InferredState(fleet.StatusDead, d.exitedEvidence(srv), nil), nil
 	}
@@ -1329,6 +1331,8 @@ func (d *Driver) List(ctx context.Context, req fleet.Request, filter driver.List
 			st = fleet.UnknownState(fleet.ConfidenceObserved, info.unknown)
 		case d.phaseOf(info.srv) == phaseParked:
 			st = d.parkedState(info) // muster #421: idle, from memory; a listing never starts a process
+		case d.phaseOf(info.srv) == phaseWedged:
+			st = d.wedgedState(info.srv) // muster #513: being replaced
 		case d.phaseOf(info.srv) == phaseExited:
 			st = fleet.InferredState(fleet.StatusDead, d.exitedEvidence(info.srv), nil)
 		case r.err != nil:

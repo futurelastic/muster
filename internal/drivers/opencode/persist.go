@@ -112,6 +112,12 @@ type sessionRecord struct {
 	// it existed reads as "no failed start recorded" and the record's version is
 	// unchanged; a build that does not know the field ignores it.
 	RelaunchFailedAtMs int64 `json:"relaunchFailedAtMs,omitempty"`
+	// Wedge is what this driver did when the session's server answered the session's
+	// store with a 5xx and did not stop (muster #513; wedge.go): when it restarted it,
+	// so the budget survives a service restart, and when it gave up. Optional, so a
+	// record from before it existed reads as "never wedged" and the record's version
+	// is unchanged; a build that does not know the field ignores it.
+	Wedge *wedgeRecord `json:"wedge,omitempty"`
 }
 
 // parkedRecord is the part of a parkNote (park.go) that outlives the service: when

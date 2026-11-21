@@ -174,8 +174,8 @@ func (d *Driver) Subscribe(ctx context.Context, req fleet.Request, filter driver
 	}
 	for srv := range servers {
 		if err := s.attach(srv); err != nil {
-			if d.phaseOf(srv) == phaseParked {
-				continue // parked between the snapshot and the connect (muster #421): nothing to follow
+			if p := d.phaseOf(srv); p == phaseParked || p == phaseWedged {
+				continue // parked (muster #421) or replaced (muster #513) between the snapshot and the connect: nothing to follow
 			}
 			_ = s.Close()
 			return nil, err
@@ -736,8 +736,9 @@ func (d *Driver) busEnded(s *subscription, srv *server, cause error) {
 		case <-s.ctx.Done():
 			return
 		}
-		if srv.park.Load() != nil {
-			// muster #421: stopped on purpose, to be started again by the next input.
+		if srv.stoppedOnPurpose() {
+			// muster #421: stopped on purpose, to be started again by the next input; or
+			// (muster #513) replaced because it answered every read with a 5xx.
 			// Not a gap and not a closed session: the stream was told the session was
 			// idle and it still is. It is attached to the new server when there is one.
 			s.mu.Lock()
@@ -847,8 +848,8 @@ func (d *Driver) announceClosed(srv *server, known knownSession, ref fleet.Sessi
 // process behind them exited without anyone closing it. The sessions stay in the
 // driver's cache, as State and List already report them dead.
 func (d *Driver) announceProcessGone(srv *server) {
-	if srv.park.Load() != nil {
-		return // muster #421: parked on purpose, not gone
+	if srv.stoppedOnPurpose() {
+		return // muster #421: parked on purpose, not gone; muster #513: being replaced
 	}
 	if !srv.gone.CompareAndSwap(false, true) {
 		return

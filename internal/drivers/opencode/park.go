@@ -99,6 +99,11 @@ const (
 	phaseParked
 	// phaseExited: the process is gone and nobody stopped it for the session's sake.
 	phaseExited
+	// phaseWedged: the process answered the session's store with a 5xx until this
+	// driver gave up on it and is replacing it (muster #513; wedge.go). It is a short
+	// window, and the one reader that must not misread it is the one that asks
+	// whether the process has exited: it has, or is about to, on purpose.
+	phaseWedged
 )
 
 // phaseOf classifies srv. The order is the point: a parked server's process has
@@ -109,6 +114,8 @@ func (d *Driver) phaseOf(srv *server) phase {
 		return phaseNone
 	case d.shared != nil:
 		return phaseRunning
+	case srv.wedge.Load() != nil:
+		return phaseWedged
 	case srv.park.Load() != nil:
 		return phaseParked
 	case srv.proc.exited():
@@ -264,6 +271,13 @@ func (d *Driver) liveFor(ctx context.Context, id string) (knownSession, func(), 
 	if err := d.requireLive(k); err != nil {
 		unlock()
 		return knownSession{}, nil, err
+	}
+	if d.phaseOf(k.srv) == phaseWedged {
+		// Only reachable with no idle bound set (nothing then takes the session's lock for
+		// a write, so the replacement is not waited out): the write is refused as a
+		// restart refuses it, retryable, with nothing sent (muster #513).
+		unlock()
+		return knownSession{}, nil, d.wedgedError("this session")
 	}
 	if d.phaseOf(k.srv) == phaseParked {
 		nk, err := d.revive(ctx, id, k)

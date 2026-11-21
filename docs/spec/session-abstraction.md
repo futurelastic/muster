@@ -2152,9 +2152,11 @@ the caller's to cause, because only the caller holds the values.
   record, a log, an event, an audit line or an error message. The next restart lists the session
   `unknown` again, and it can be revived again.
 - **What is revivable is a closed question.** A session listed `unknown` for the needs-re-creation
-  reason of a create that carried `env`, and no other: not a running session, and not one that is
-  `unknown` because its relaunch failed, its record cannot be read or its context file is gone —
-  supplying the environment changes none of those. A driver refuses the rest as a conflict
+  reason of a create that carried `env` — or because the driver stopped its runtime for answering every
+  read of the session's store with a 5xx and could not start it again without that `env` (muster #513;
+  ADR 513) — and no other: not a running session, and not one that is `unknown` because its relaunch
+  failed, its record cannot be read or its context file is gone — supplying the environment changes
+  none of those. A driver refuses the rest as a conflict
   (`not-revivable`, api-http.md §2) and starts nothing.
 - **The environment must be the one the session had.** It must name exactly the variables the create
   named: fewer is a session relaunched with less, more is a different one. The values cannot be
