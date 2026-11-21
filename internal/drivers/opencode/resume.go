@@ -200,6 +200,12 @@ func (d *Driver) relaunchWith(ctx context.Context, rec *sessionRecord, env map[s
 	if err != nil {
 		return nil, nil, err
 	}
+	// muster #466: a relaunch applies the operator's tool servers as they are now, and
+	// is not accepted unless the runtime connected every one it was configured with.
+	if err := d.checkToolServers(ctx, srv, spec.Cwd); err != nil {
+		srv.pauseForShutdown()
+		return nil, nil, err
+	}
 	var sess wireSession
 	if err := d.do(ctx, srv, "GET", "/session/"+url.PathEscape(rec.ID), nil, &sess); err != nil {
 		srv.pauseForShutdown()

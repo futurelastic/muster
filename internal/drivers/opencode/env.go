@@ -50,8 +50,10 @@ import (
 //
 // What isolation cannot do, stated plainly: the model-provider key a session
 // needs is in its environment, and opencode exposes that environment to its
-// tool shell (`env` lists it). Isolation scopes every OTHER credential; it
-// cannot protect the model key itself. Give each lane its own spend-capped key.
+// tool shell (`env` lists it). A credential an operator's tool server takes
+// (muster #466, operatortoolservers.go) is a sessionEnv entry like any other and
+// is in that environment too, as `{env:NAME}` is expanded from it. Isolation
+// scopes every OTHER credential; it cannot protect the model key itself. Give each lane its own spend-capped key.
 // Nor does it confine the filesystem — a session can still read what the
 // service user can; that is the sandbox's job (#281).
 

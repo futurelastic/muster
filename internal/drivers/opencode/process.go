@@ -192,6 +192,10 @@ type server struct {
 	// put on at its start (muster #458); empty when the service chose none. Written
 	// once, before the server is tracked, and read-only after.
 	credential fleet.CredentialKind
+	// toolServers are the names of the operator's tool servers this server's session
+	// was configured with (muster #466), which the status check after the runtime is up
+	// asks about. Written once, before the server is tracked, and read-only after.
+	toolServers []string
 	// logs is the tail of the process's own log (muster #284); nil in shared
 	// mode, where the server is not this driver's to read. Every method on it
 	// tolerates nil.

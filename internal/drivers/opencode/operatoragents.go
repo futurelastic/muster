@@ -29,9 +29,12 @@ import (
 //     {"agent": {"<name>": {<an opencode agent definition>}}} — the same object
 //     opencode.json carries under `agent`, so a file an operator already keeps for
 //     an inline-configuration workaround is usable as it is. Any other top-level
-//     key is refused: a provider, a permission or a tool server in this file would
-//     be a way around the provider policy (provider.go) and the permission posture
-//     (permission.go), which are the driver's to write, not this file's.
+//     key is refused: a provider or a permission in this file would be a way around
+//     the provider policy (provider.go) and the permission posture (permission.go),
+//     which are the driver's to write, not this file's. A tool server is refused here
+//     too, but it is not barred outright: since muster #466 the operator defines tool
+//     servers in a setting of their own (operatortoolservers.go, `opencode.mcp`), with
+//     its own bounds. A client still cannot add one.
 //   - It is read on EVERY create and every relaunch, never cached. The declaration
 //     (which path) is fixed at start, like a sessionEnv entry; what the file holds
 //     is read afresh, so editing an agent needs no restart.
@@ -113,7 +116,7 @@ func parseOperatorAgents(raw []byte) (operatorAgents, error) {
 	if len(extra) > 0 {
 		sort.Strings(extra)
 		return nil, fmt.Errorf("the operator's agent file may carry only an \"agent\" entry, and it also has %s "+
-			"(providers, permissions and tool servers are set by the service, not by this file)", strings.Join(quoteAll(extra), ", "))
+			"(providers and permissions are set by the service, and tool servers by the operator's opencode.mcp setting, not by this file)", strings.Join(quoteAll(extra), ", "))
 	}
 	if agentRaw == nil {
 		return nil, errors.New("the operator's agent file has no \"agent\" entry")

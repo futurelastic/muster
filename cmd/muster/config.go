@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -194,12 +195,14 @@ type fileConfig struct {
 	// agents every isolated opencode session on this machine receives, so an agent
 	// defined once can be named on any create without a change to any repo; and
 	// Instructions (muster #504), the paths of instruction files every such session
-	// receives as the runtime's own `instructions`. Config-file-only and per machine,
-	// like SessionEnv: the declaration (WHICH files) is read at start and changing it
-	// needs a restart, while what the files hold is read afresh on every create, so
-	// editing one needs none. A path must be absolute; its existence is not checked
-	// at start — a file that is missing or unusable when a session is created
-	// refuses that create with the reason. docs/install.md has the files' shape.
+	// receives as the runtime's own `instructions`; and MCP (muster #466), the tool
+	// servers the operator defines for the sessions each one's `appliesTo` selector
+	// matches. Config-file-only and per machine, like SessionEnv: the declaration
+	// (WHICH files, WHICH servers) is read at start and changing it needs a restart,
+	// while what the files hold is read afresh on every create, so editing one needs
+	// none. A path must be absolute; its existence is not checked at start — a file
+	// that is missing or unusable when a session is created refuses that create with
+	// the reason. docs/install.md has the settings' shape.
 	Opencode *opencodeConfig `json:"opencode,omitempty"`
 
 	// Models declares, per runtime id, the model ids a client may offer for a
@@ -353,6 +356,14 @@ func parseConfig(path string, raw []byte) (*fileConfig, error) {
 	if err := c.MachineList.validate(); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
+	// The tool-server setting is compared as written by a reload (restartOnly), so a
+	// reformatted file must not read as a change that needs a restart (muster #466).
+	if c.Opencode != nil && len(c.Opencode.MCP) > 0 {
+		var compact bytes.Buffer
+		if err := json.Compact(&compact, c.Opencode.MCP); err == nil {
+			c.Opencode.MCP = compact.Bytes()
+		}
+	}
 	return &c, nil
 }
 
@@ -413,6 +424,14 @@ type opencodeConfig struct {
 	// are read at start (a change needs a restart), what the files hold is read on
 	// every create, and a file that cannot be used refuses that create.
 	Instructions []string `json:"instructions,omitempty"`
+	// MCP is the operator's tool servers (muster #466): an object of definitions keyed
+	// by server name, each in the shape the runtime's own `mcp` carries plus an
+	// `appliesTo` selector. Kept raw because the opencode driver owns its shape and
+	// refuses what it does not accept by name (ParseOperatorToolServers); the start,
+	// the doctor and a reload all call it, so they agree. Declared like Agents: fixed
+	// at start, a change needs a restart. It never holds a credential: a server takes
+	// one as `{env:NAME}` from this machine's sessionEnv.
+	MCP json.RawMessage `json:"mcp,omitempty"`
 }
 
 // operatorAgentsFile is the path of the operator's opencode agent file, or "" when
@@ -432,6 +451,15 @@ func (c *fileConfig) operatorInstructionFiles() []string {
 		return nil
 	}
 	return c.Opencode.Instructions
+}
+
+// operatorToolServers is the operator's opencode tool-server setting as written, or
+// nil when none is configured. Safe on a nil receiver (no config file at all).
+func (c *fileConfig) operatorToolServers() json.RawMessage {
+	if c == nil || c.Opencode == nil {
+		return nil
+	}
+	return c.Opencode.MCP
 }
 
 // declaredModels is the operator's model list for runtime, or nil when none is

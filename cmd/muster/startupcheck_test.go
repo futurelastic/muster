@@ -112,6 +112,37 @@ func TestValidateConfigExtras_StartupSettings(t *testing.T) {
 			`opencode.instructions lists "/etc/fleet//rules.md" twice`},
 		{"opencode instructions, an empty list", map[string]any{"opencode": map[string]any{"instructions": []string{}}}, tmux_, ""},
 
+		// muster #466: unlike the files above, the operator's tool servers are IN the
+		// config file, so their whole shape is judged at the start, by the driver's own
+		// parser: the start, the doctor and a reload agree.
+		{"opencode mcp, a local server",
+			map[string]any{"opencode": map[string]any{"mcp": map[string]any{"cards": map[string]any{
+				"type": "local", "command": []string{"/usr/local/bin/cards", "--stdio"},
+				"environment": map[string]string{"CARDS_KEY": "{env:CARDS_KEY}"},
+				"appliesTo":   map[string]any{"agents": []string{"reviewer"}, "permissionModes": []string{"default", "bypass"}}}}}}, tmux_, ""},
+		{"opencode mcp, a remote server",
+			map[string]any{"opencode": map[string]any{"mcp": map[string]any{"issues": map[string]any{
+				"type": "remote", "url": "https://tools.example/mcp",
+				"headers": map[string]string{"Authorization": "Bearer {env:ISSUES_TOKEN}"}}}}}, tmux_, ""},
+		{"opencode mcp, an empty object", map[string]any{"opencode": map[string]any{"mcp": map[string]any{}}}, tmux_, ""},
+		{"opencode mcp, a credential written into a header",
+			map[string]any{"opencode": map[string]any{"mcp": map[string]any{"issues": map[string]any{
+				"type": "remote", "url": "https://tools.example/mcp",
+				"headers": map[string]string{"Authorization": "Bearer abc123"}}}}}, tmux_,
+			`opencode.mcp "issues": "headers" "Authorization" is not a reference`},
+		{"opencode mcp, a permission key",
+			map[string]any{"opencode": map[string]any{"mcp": map[string]any{"cards": map[string]any{
+				"type": "local", "command": []string{"/usr/local/bin/cards"},
+				"permission": map[string]string{"bash": "allow"}}}}}, tmux_,
+			`opencode.mcp "cards": "permission" is not accepted`},
+		{"opencode mcp, a relative executable",
+			map[string]any{"opencode": map[string]any{"mcp": map[string]any{"cards": map[string]any{
+				"type": "local", "command": []string{"cards"}}}}}, tmux_,
+			`opencode.mcp "cards": "command"[0] must be the absolute path`},
+		{"opencode mcp, an unusable setting, runtime not enabled",
+			map[string]any{"opencode": map[string]any{"mcp": map[string]any{"cards": map[string]any{"type": "sse"}}}},
+			map[string]string{"FLEET_RUNTIME": "none"}, `opencode.mcp "cards": "type" must be "local" or "remote"`},
+
 		// muster #400: a declared model list is the Claude Code runtime's alone.
 		{"models, the terminal runtime", map[string]any{"models": map[string]any{string(tmux.DefaultRuntime): []string{"opus", "sonnet"}}}, tmux_, ""},
 		{"models, an empty list", map[string]any{"models": map[string]any{string(tmux.DefaultRuntime): []string{}}}, tmux_, ""},

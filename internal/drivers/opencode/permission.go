@@ -199,9 +199,19 @@ type configExtras struct {
 	// readRoots are directories a session that is not pre-approved may read without
 	// asking (muster #509: a definition's knowledge home).
 	readRoots []string
+	// toolServers are the operator's tool servers for this session, rendered, keyed
+	// by name (muster #466). They go under `mcp`, a key nothing else here writes.
+	toolServers map[string]any
 }
 
 func withUnconfinedBypass() configOption { return func(c *configExtras) { c.unconfinedBypass = true } }
+
+// withToolServers writes the operator's rendered tool servers under `mcp` (muster
+// #466). It changes nothing else: the provider keys, the agents, the instructions and
+// the permission block are computed as they are without it, which a test pins.
+func withToolServers(servers map[string]any) configOption {
+	return func(c *configExtras) { c.toolServers = servers }
+}
 
 func withReadRoots(roots ...string) configOption {
 	return func(c *configExtras) { c.readRoots = append(c.readRoots, roots...) }
@@ -219,7 +229,9 @@ func withReadRoots(roots ...string) configOption {
 // #396) go under `agent`, a key nothing else here writes; none configured means
 // no such key, so the file is what it was before they existed. The same holds for
 // the operator's instruction files (operatorinstructions.go, muster #504): their
-// copies' paths go under `instructions`, a key nothing else here writes.
+// copies' paths go under `instructions`, a key nothing else here writes. And for the
+// operator's tool servers (operatortoolservers.go, muster #466): they go under `mcp`,
+// the only key they may write, and never reach the permission block above.
 func writeSessionConfig(dir string, bypass bool, plan *sandboxPlan, providers providerPolicy, agents operatorAgents, instructions []string, opts ...configOption) error {
 	var extras configExtras
 	for _, o := range opts {
@@ -238,6 +250,9 @@ func writeSessionConfig(dir string, bypass bool, plan *sandboxPlan, providers pr
 	}
 	if len(instructions) > 0 {
 		cfg["instructions"] = instructions
+	}
+	if len(extras.toolServers) > 0 {
+		cfg["mcp"] = extras.toolServers
 	}
 	if bypass {
 		// checkPermissionMode refuses a bypass create with no sandbox unless the
