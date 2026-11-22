@@ -1,7 +1,10 @@
 # A wedged runtime store is not a release regression until the rollback's own servers say so
 
-**Issue:** #515 (cause still open — this records what was measured, so the next
-session starts from it and does not bisect the same six commits again)
+**Issue:** #515 (this records how the regression theory was refuted, so nobody
+bisects the same six commits again. **The cause was found afterwards**: a program
+on the host hard-linking the live stores —
+[`515-a-hard-link-to-a-live-runtime-store-wedges-its-writer-for-good-on-macos.md`](515-a-hard-link-to-a-live-runtime-store-wedges-its-writer-for-good-on-macos.md).
+Rules 1 and 2 below still hold; rule 3 is superseded by that entry's rule 2.)
 
 ## What happened
 
@@ -66,15 +69,16 @@ yet ties either to the error.
    in a wedged store (`select max(time_updated) from part`, opened `mode=ro`)
    against the first error in the same server's log says what the server was
    doing when it broke.
-3. **The missing fact is the errno at the instant.** Arm, before the next burst,
-   a plain and an isolated canary that log SQLite and raw file operations with
-   their errno, and `fs_usage -w -f filesys` on the runtime processes keeping only
-   failing calls other than `ENOENT` (it needs root). The next burst then names the
-   failing call; guessing from the symptom did not.
+3. **Superseded.** This rule asked for an errno trace (a plain and an isolated
+   canary, and `fs_usage -w -f filesys` on the runtime processes, root needed) to
+   catch the failing call at the next burst. It was never needed: the host's own log
+   already named the cause, and the failing code is `SQLITE_IOERR_VNODE`, not an
+   errno. Read the system log first; see rule 2 of the entry linked above.
 
 ## Not done, on purpose
 
-No code changed. Nothing measured implicates a line, and a patch aimed at the
-isolation profile, the deleter or the walker would be a guess the trials above do
-not support. The auto-replace of a wedged server (#513) is the mitigation that
-exists; it does not explain the wedge.
+No muster code changed. Nothing measured implicates a muster line, and a patch aimed
+at the isolation profile, the deleter or the walker would have been a guess the
+trials above did not support. That restraint was right: the cause was outside this
+repository. The auto-replace of a wedged server (#513) is the mitigation that
+exists; it recovers a server, it does not remove the cause.
