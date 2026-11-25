@@ -522,6 +522,18 @@ func runChecks(ctx context.Context, env doctorEnv) []doctorRow {
 			Summary: "FLEET_TOKEN is presented for this machine's own peer subscriptions"})
 	case cfgFailed:
 		c.add(doctorRow{ID: "peer.self-credential", Status: statusSkip, Summary: "undecidable until config.load passes"})
+	case allPeersSign(peers):
+		// Every peer is authenticated by a signed request (#350): there is no
+		// token for this machine to present, so FLEET_TOKEN and system:<self>
+		// are not what is missing. What it needs is its signing key, which is
+		// the same question the per-peer credential rows ask of each peer.
+		_, row := keyCredential(getenv, self, peers[0].machine)
+		row.ID = "peer.self-credential"
+		row.Refs = []int{98, 350}
+		if row.Status == statusPass {
+			row.Summary = "every peer is reached by a signed request — " + strings.TrimPrefix(row.Summary, "authenticates by ")
+		}
+		c.add(row)
 	case cfg != nil:
 		if _, ok := cfg.selfCredential(self); ok {
 			c.add(doctorRow{ID: "peer.self-credential", Status: statusPass,
@@ -2391,4 +2403,17 @@ func validateModelsConfig(models map[string][]string) error {
 		}
 	}
 	return nil
+}
+
+// allPeersSign is true when every configured peer is authenticated by a signed
+// request rather than a token (#350). Such a machine has no token credential to
+// present to anyone, so the self-credential row asks about its key instead; one
+// token peer is enough to make it ask about the token too.
+func allPeersSign(peers []doctorPeer) bool {
+	for _, p := range peers {
+		if p.auth != peerAuthKey {
+			return false
+		}
+	}
+	return len(peers) > 0
 }
