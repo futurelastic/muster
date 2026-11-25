@@ -210,6 +210,17 @@ the installer exits 1; when `service install` refused before changing anything (
 short way above), there is nothing to put back, and the installer says the machine was not changed and exits 1. npm
 remains the other way in; [`release-host.md`](release-host.md) says how a final reaches the host.
 
+An app that requires muster runs this installer with `INSTALL_MIN=<X.Y.Z>`, meaning "nothing to do when muster is
+already at least this version". When `~/.local/bin/muster --version` reports that version or a later one, the installer
+prints one line saying so and exits 0 without reading the host, downloading, restarting or replacing anything, even
+when a version is also given as an argument or in `MUSTER_VERSION`. When muster is older, is not installed, or does not
+report a version, it installs as above. A value that is not `X.Y.Z` (a leading `v` is accepted) is an error, exit 1,
+before anything changes:
+
+```sh
+INSTALL_MIN=0.5.0 sh install.sh        # muster 0.21.0 installed: exits 0, leaves 0.21.0 in place
+```
+
 A host that asks for a sign-in answers 401 to an unsigned read, the installer's own download included. Give the
 installer the read token in `DL_TOKEN` and it sends it as a bearer header on every read it makes (the newest-version
 file, the sums, the build). Fetch the installer the same way, through curl's standard input, so the token is never an
