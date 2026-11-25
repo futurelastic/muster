@@ -438,6 +438,50 @@ func TestDoctorSelfCredential98(t *testing.T) {
 	}
 }
 
+// #517: a machine whose peers are all reached by signed requests (#350) has no
+// token to present, so FLEET_TOKEN / system:<self> are not what it lacks — its
+// signing key is. One token peer brings the token question back.
+func TestDoctorSelfCredentialSignedPeers517(t *testing.T) {
+	pub := newPub(t)
+	write := func(peersJSON string) string {
+		raw := `{"principals":[{"name":"sup","token":"a","grants":["read"]},{"name":"m2","publicKey":"` + pub + `","grants":["read"]}],"peers":` + peersJSON + `}`
+		return writeCfg(t, raw)
+	}
+	keyPeer := `{"machine":"m2","url":"http://192.0.2.1:9000","auth":"key"}`
+	tokenPeer := `{"machine":"m3","url":"http://192.0.2.2:9000","token":"p"}`
+
+	withKey := t.TempDir()
+	if _, _, err := ensureMachineKey(filepath.Join(withKey, machineKeyFile)); err != nil {
+		t.Fatal(err)
+	}
+	noKey := t.TempDir()
+
+	cases := []struct {
+		name  string
+		peers string
+		state string
+		want  rowStatus
+	}{
+		{"all peers sign, key present", "[" + keyPeer + "]", withKey, statusPass},
+		{"all peers sign, no key", "[" + keyPeer + "]", noKey, statusFail},
+		{"mixed fleet, no token credential", "[" + keyPeer + "," + tokenPeer + "]", withKey, statusFail},
+		{"token peer only", "[" + tokenPeer + "]", withKey, statusFail},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := testDoctorEnv(map[string]string{
+				"FLEET_MACHINE": "m1", "FLEET_CONFIG": write(tc.peers),
+				"FLEET_RUNTIME": "stub", "FLEET_STATE_DIR": tc.state,
+			})
+			env.Offline = true
+			row := rowByID(t, runChecks(context.Background(), env), "peer.self-credential")
+			if row.Status != tc.want {
+				t.Fatalf("got %+v, want %s", row, tc.want)
+			}
+		})
+	}
+}
+
 func TestDoctorBindAddr(t *testing.T) {
 	cases := map[string]rowStatus{
 		"":               statusWarn,
