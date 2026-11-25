@@ -697,7 +697,7 @@ func (d *dlInstall) previous(t *testing.T, version string) {
 func (d *dlInstall) run(t *testing.T, env map[string]string, args ...string) (string, int) {
 	t.Helper()
 	cmd := exec.Command("sh", append([]string{".github/downloads/install.sh"}, args...)...)
-	cmd.Env = append(os.Environ(), "PATH="+d.bin+":"+os.Getenv("PATH"), "HOME="+d.home, "DL_URL=-", "DL_TOKEN=", "MUSTER_VERSION=", "MUSTER_ADOPT=")
+	cmd.Env = append(os.Environ(), "PATH="+d.bin+":"+os.Getenv("PATH"), "HOME="+d.home, "DL_URL=-", "DL_TOKEN=", "MUSTER_VERSION=", "MUSTER_ADOPT=", "INSTALL_MIN=")
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
@@ -772,6 +772,108 @@ func TestInstallOverAnExistingInstallUpgradesIt(t *testing.T) {
 	out, code := d.run(t, map[string]string{"DL_URL": site.srv.URL}, "0.4.0")
 	if code != 0 || d.installedVersion(t) != "0.4.0" {
 		t.Fatalf("upgrade (%d), installed %q:\n%s", code, d.installedVersion(t), out)
+	}
+}
+
+// INSTALL_MIN is what an app that requires muster passes: a muster that already has that version is left alone.
+func TestInstallMinLeavesAnInstalledMusterThatHasItAlone(t *testing.T) {
+	for _, tc := range []struct{ name, installed, min string }{
+		{"newer than the minimum", "0.21.0", "0.5.0"}, // 21 > 5 by number, not by text
+		{"equal to the minimum", "0.5.0", "0.5.0"},
+		{"minimum with a v", "0.21.0", "v0.5.0"},
+		{"newer major", "1.0.0", "0.99.99"},
+		{"newer patch", "0.5.10", "0.5.9"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newDLInstall(t)
+			d.previous(t, tc.installed)
+			site := serveRelease(t, "0.22.0", fakeMuster("0.22.0", "ok"), "", "")
+			out, code := d.run(t, map[string]string{"DL_URL": site.srv.URL, "INSTALL_MIN": tc.min})
+			if code != 0 {
+				t.Fatalf("exit %d:\n%s", code, out)
+			}
+			if v := d.installedVersion(t); v != tc.installed {
+				t.Errorf("installed version = %q, want %q left in place", v, tc.installed)
+			}
+			if got := d.log(t); got != "" {
+				t.Errorf("muster was asked to install or check the service:\n%s", got)
+			}
+			site.mu.Lock()
+			hits := site.hits
+			site.mu.Unlock()
+			if len(hits) != 0 {
+				t.Errorf("the host was read: %v", hits)
+			}
+			if !strings.Contains(out, "nothing to do") || !strings.Contains(out, "v"+tc.installed) {
+				t.Errorf("one line saying so, got:\n%s", out)
+			}
+		})
+	}
+}
+
+func TestInstallMinInstallsWhenMusterIsOlderOrAbsent(t *testing.T) {
+	for _, tc := range []struct{ name, installed, min string }{
+		{"older", "0.4.0", "0.5.0"},
+		{"older by number, newer by text", "0.5.0", "0.21.0"},
+		{"older patch", "0.5.8", "0.5.9"},
+		{"absent", "", "0.5.0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newDLInstall(t)
+			if tc.installed != "" {
+				d.previous(t, tc.installed)
+			}
+			site := serveRelease(t, "0.22.0", fakeMuster("0.22.0", "ok"), "", "")
+			out, code := d.run(t, map[string]string{"DL_URL": site.srv.URL, "INSTALL_MIN": tc.min})
+			if code != 0 || d.installedVersion(t) != "0.22.0" {
+				t.Fatalf("exit %d, installed %q:\n%s", code, d.installedVersion(t), out)
+			}
+		})
+	}
+}
+
+// A muster that cannot say its version is not "at least" anything.
+func TestInstallMinInstallsOverAMusterThatDoesNotReportAVersion(t *testing.T) {
+	d := newDLInstall(t)
+	p := filepath.Join(d.home, ".local", "bin")
+	if err := os.MkdirAll(p, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(p, "muster"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	site := serveRelease(t, "0.22.0", fakeMuster("0.22.0", "ok"), "", "")
+	out, code := d.run(t, map[string]string{"DL_URL": site.srv.URL, "INSTALL_MIN": "0.5.0"})
+	if code != 0 || d.installedVersion(t) != "0.22.0" {
+		t.Fatalf("exit %d, installed %q:\n%s", code, d.installedVersion(t), out)
+	}
+}
+
+// The minimum is the caller's statement of what it needs: it wins over a version asked for beside it.
+func TestInstallMinAlsoCoversAnExplicitVersion(t *testing.T) {
+	d := newDLInstall(t)
+	d.previous(t, "0.21.0")
+	site := serveRelease(t, "0.22.0", fakeMuster("0.22.0", "ok"), "", "")
+	out, code := d.run(t, map[string]string{"DL_URL": site.srv.URL, "INSTALL_MIN": "0.5.0"}, "0.22.0")
+	if code != 0 || d.installedVersion(t) != "0.21.0" || d.log(t) != "" {
+		t.Fatalf("exit %d, installed %q, calls %q:\n%s", code, d.installedVersion(t), d.log(t), out)
+	}
+}
+
+func TestInstallMinThatIsNotAVersionIsAnError(t *testing.T) {
+	for _, min := range []string{"latest", "0.5", "0.5.x", "1..2", "0.5.", ">=0.5.0"} {
+		t.Run(min, func(t *testing.T) {
+			d := newDLInstall(t)
+			d.previous(t, "0.21.0")
+			site := serveRelease(t, "0.22.0", fakeMuster("0.22.0", "ok"), "", "")
+			out, code := d.run(t, map[string]string{"DL_URL": site.srv.URL, "INSTALL_MIN": min})
+			if code != 1 || !strings.Contains(out, "INSTALL_MIN") {
+				t.Fatalf("exit %d:\n%s", code, out)
+			}
+			if d.installedVersion(t) != "0.21.0" || d.log(t) != "" {
+				t.Errorf("something changed: installed %q, calls %q", d.installedVersion(t), d.log(t))
+			}
+		})
 	}
 }
 

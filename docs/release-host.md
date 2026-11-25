@@ -24,6 +24,10 @@ variable an operator added to the unit (on macOS, its `PATH` too); it gets a new
 machine that serves federation peers keeps its network address the same way: an address the unit already lists is
 kept with no flag (`--serves-peers` is only for introducing one, see `install.md`).
 
+An app that requires muster sets `INSTALL_MIN=<X.Y.Z>`: a muster already at that version or later is left as it is
+(exit 0, nothing read or changed), and an older or absent one is installed as usual; see
+[`install.md`](install.md#from-the-release-host).
+
 A machine that runs muster under a unit of its own (a label an operator made) is taken over once, so that an update
 does not write a second muster beside it: set `MUSTER_ADOPT` to that unit's launchd label, systemd unit name or file
 for the first run (`MUSTER_ADOPT=<label> sh install.sh`), which passes it to `muster service install --adopt`. The

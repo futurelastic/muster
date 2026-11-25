@@ -33,6 +33,12 @@
 #   DL_URL     the host's address, instead of the stamped one (another host, or a test)
 #   DL_TOKEN   a read token for a host that wants one; sent as a bearer header, never on a command line
 #   MUSTER_VERSION   X.Y.Z, when the version is not given as an argument
+#   INSTALL_MIN      X.Y.Z. Set by an app that requires muster: "nothing to do when muster is already at least this
+#                    version". When ~/.local/bin/muster reports that version or a later one, the installer says so,
+#                    exits 0 and changes nothing: it does not look up the newest release, download or restart anything,
+#                    and a version given as an argument or in MUSTER_VERSION is not installed either. When muster is
+#                    older, absent or does not report a version, it installs as usual. A value that is not X.Y.Z is
+#                    an error (exit 1) before anything happens, not a reason to upgrade.
 #   MUSTER_ADOPT     the launchd label, systemd unit name, or file of a unit that already runs muster on this machine
 #                    under a name of its own. Used once: the first run passes it to `muster service install --adopt`,
 #                    which moves that unit's address and FLEET_*, LANG and LC_* variables into the standard unit and
@@ -92,6 +98,47 @@ case "$os/$arch" in
   *) fail "no build for $os/$arch (builds: macOS arm64 and x86_64, Linux x86_64 and arm64)" ;;
 esac
 
+# ver_ge <a> <b>: success when version a is at least version b. Both are X.Y.Z, digits and dots only (checked by the caller).
+ver_ge() {
+  _a=$1 _b=$2
+  while [ -n "$_a" ] || [ -n "$_b" ]; do
+    _x=${_a%%.*} _y=${_b%%.*}
+    [ "${_x:-0}" -gt "${_y:-0}" ] && return 0
+    [ "${_x:-0}" -lt "${_y:-0}" ] && return 1
+    case $_a in *.*) _a=${_a#*.} ;; *) _a= ;; esac
+    case $_b in *.*) _b=${_b#*.} ;; *) _b= ;; esac
+  done
+  return 0
+}
+
+installed=$HOME/.local/bin/$APP
+
+# INSTALL_MIN: an app that requires muster only needs this much, so a muster that has it is left exactly as it is.
+min=${INSTALL_MIN:-}
+if [ -n "$min" ]; then
+  min=${min#v}
+  case $min in
+    [0-9]*.[0-9]*.[0-9]*) ;;
+    *) fail "INSTALL_MIN \"$min\" is not a version (X.Y.Z)" ;;
+  esac
+  case $min in *[!0-9.]* | *..* | *.) fail "INSTALL_MIN \"$min\" is not a version (X.Y.Z)" ;; esac
+  if [ -x "$installed" ] && have=$("$installed" --version 2>/dev/null | head -n 1); then
+    have=$(printf '%s\n' "$have" | awk '{ print $2; exit }')
+    have=${have#v}
+    case $have in
+      [0-9]*.[0-9]*.[0-9]*)
+        case $have in
+          *[!0-9.]* | *..* | *.) ;;
+          *)
+            if ver_ge "$have" "$min"; then
+              echo "muster v$have is installed, which is at least INSTALL_MIN $min: nothing to do"
+              exit 0
+            fi ;;
+        esac ;;
+    esac
+  fi
+fi
+
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
@@ -123,7 +170,6 @@ case $reported in
   *) fail "the downloaded $file reports \"$reported\", not v$version: nothing was installed" ;;
 esac
 
-installed=$HOME/.local/bin/$APP
 had_previous=0
 if [ -x "$installed" ]; then
   cp -p "$installed" "$tmp/previous"
