@@ -610,6 +610,10 @@ service)
     [ "$MODE" = install-fails ] && { echo "the service did not become healthy" >&2; exit 1; }
     [ "$MODE" = install-refuses ] && { echo "this machine already runs muster under a unit of its own. Nothing was changed." >&2; exit 3; }
     [ "$MODE" = install-exits-2 ] && { echo "a usage error" >&2; exit 2; }
+    [ "$MODE" = install-doctor-fails ] && {
+      printf 'muster doctor — build abc1234 · machine local\n\nPASS     config.load            ok\nFAIL     peer.self-credential   no signing key\n\n1 pass · 1 fail\n'
+      echo "muster service install: doctor reported a failure, so the service was not started (the unit and files stay; fix the failing row and run this again)" >&2
+      exit 1; }
     mkdir -p "$HOME/.local/bin"
     cp "$0" "$HOME/.local/bin/muster.tmp" && mv "$HOME/.local/bin/muster.tmp" "$HOME/.local/bin/muster"
     exit 0 ;;
@@ -683,13 +687,15 @@ func newDLInstall(t *testing.T) *dlInstall {
 	return d
 }
 
-func (d *dlInstall) previous(t *testing.T, version string) {
+func (d *dlInstall) previous(t *testing.T, version string) { d.previousMode(t, version, "ok") }
+
+func (d *dlInstall) previousMode(t *testing.T, version, mode string) {
 	t.Helper()
 	p := filepath.Join(d.home, ".local", "bin")
 	if err := os.MkdirAll(p, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(p, "muster"), []byte(fakeMuster(version, "ok")), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(p, "muster"), []byte(fakeMuster(version, mode)), 0o755); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -897,6 +903,87 @@ func TestInstallPutsThePreviousVersionBackWhenTheNewOneDoesNotComeUp(t *testing.
 				t.Errorf("output must say what is running now:\n%s", out)
 			}
 		})
+	}
+}
+
+// muster #521: a `service install` that stops at its doctor gate never started anything. The installer says so, names the
+// failing check, and does not call it "did not come up healthy". The put-back's own reason is shown, not thrown away; and
+// when the previous binary stops at the same gate while the running service is healthy, the output says nothing needs
+// putting back instead of reporting a failed rollback.
+func TestInstallReportsADoctorRefusalAndThePutBacksOwnReason(t *testing.T) {
+	site := serveRelease(t, "0.4.0", fakeMuster("0.4.0", "install-doctor-fails"), "", "")
+
+	t.Run("the previous binary refuses at the same gate", func(t *testing.T) {
+		d := newDLInstall(t)
+		d.previousMode(t, "0.3.0", "install-doctor-fails")
+		out, code := d.run(t, map[string]string{"DL_URL": site.srv.URL}, "0.4.0")
+		if code != 1 {
+			t.Fatalf("exit %d, want 1:\n%s", code, out)
+		}
+		for _, want := range []string{
+			"muster install: v0.4.0 was not started: service install exited 1: doctor reported a failure",
+			"[failed doctor check: peer.self-credential]",
+			"stopped at the same doctor gate",
+			"still healthy and was never stopped, so nothing needs putting back",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("output must say %q:\n%s", want, out)
+			}
+		}
+		for _, not := range []string{"did not come up healthy", "could not put the previous version back", "is installed and running again"} {
+			if strings.Contains(out, not) {
+				t.Errorf("output must not say %q:\n%s", not, out)
+			}
+		}
+		if got := d.log(t); got != "install v0.4.0\ninstall v0.3.0\nstatus v0.3.0" {
+			t.Errorf("calls (the previous binary's status decides whether the service is still healthy):\n%s", got)
+		}
+	})
+
+	t.Run("the previous binary puts itself back", func(t *testing.T) {
+		d := newDLInstall(t)
+		d.previous(t, "0.3.0")
+		out, code := d.run(t, map[string]string{"DL_URL": site.srv.URL}, "0.4.0")
+		if code != 1 || !strings.Contains(out, "v0.4.0 was not started") || !strings.Contains(out, "is installed and running again") {
+			t.Errorf("a refused new version with a working put-back (%d):\n%s", code, out)
+		}
+		if strings.Contains(out, "did not come up healthy") {
+			t.Errorf("a version that never started must not be reported as unhealthy:\n%s", out)
+		}
+	})
+
+	t.Run("the put-back fails for another reason", func(t *testing.T) {
+		d := newDLInstall(t)
+		d.previousMode(t, "0.3.0", "install-fails")
+		out, code := d.run(t, map[string]string{"DL_URL": site.srv.URL}, "0.4.0")
+		if code != 1 {
+			t.Fatalf("exit %d, want 1:\n%s", code, out)
+		}
+		if !strings.Contains(out, "could not put the previous version back: the service did not become healthy;") {
+			t.Errorf("the put-back's own last error line must be in a muster install: line:\n%s", out)
+		}
+		if strings.Contains(out, "nothing needs putting back") {
+			t.Errorf("a put-back that failed for another reason is not 'nothing to put back':\n%s", out)
+		}
+	})
+
+	t.Run("a doctor refusal on the first install", func(t *testing.T) {
+		d := newDLInstall(t)
+		out, code := d.run(t, map[string]string{"DL_URL": site.srv.URL}, "0.4.0")
+		if code != 1 || !strings.Contains(out, "[failed doctor check: peer.self-credential]") || strings.Contains(out, "did not come up healthy") {
+			t.Errorf("first install refused at doctor (%d):\n%s", code, out)
+		}
+	})
+}
+
+// The installer recognises a doctor refusal by the words `service install` ends with; hold them to service.go.
+func TestInstallerAndServiceInstallAgreeOnTheDoctorRefusalWords(t *testing.T) {
+	const phrase = "doctor reported a failure"
+	if !strings.Contains(string(mustRead(t, "cmd/muster/service.go")), phrase) {
+		t.Errorf("cmd/muster/service.go no longer says %q: install.sh would stop reporting a doctor refusal", phrase)
+	}
+	if !strings.Contains(string(mustRead(t, ".github/downloads/install.sh")), "grep -q '"+phrase+"'") {
+		t.Errorf("install.sh no longer matches %q", phrase)
 	}
 }
 

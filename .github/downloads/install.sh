@@ -24,6 +24,11 @@
 # If step 4 or 5 fails and there was an installed muster, it is put back: the saved copy runs its own
 # `service install`, which is the same command in the other direction. The exit status is 1 either way, so a
 # caller (an updater, a person) sees that the version it asked for is not the one running.
+# Each failure says why in a `muster install:` line, for a caller that keeps only those: step 4 failing reads "v<x> was not
+# started: service install exited N: <its last error line> [failed doctor check: <rows>]" (the new version never ran),
+# step 5 failing reads "did not come up healthy" (it ran), and a put-back that fails carries its own last error line. When
+# both binaries stop at the doctor gate the running service was never touched, and the installer says nothing needs putting
+# back (muster #521).
 # One failure of step 4 is not rolled back: `muster service install` exits 3 when it refused before it changed
 # anything (a unit of the operator's beside where the standard unit goes, a refused --adopt, no tmux). There is
 # nothing to undo, and the previous binary's own install could do harm (one older than that refusal writes the
@@ -186,9 +191,31 @@ new_service_install() {
   fi
 }
 
+# why <stdout file> <stderr file>: one line that says why a `service install` failed. The last line it printed on
+# stderr (the error itself, without the "muster service install:" prefix), and the doctor rows that failed, when it ran
+# the doctor (muster #521). A caller that keeps only the `muster install:` lines still gets the cause.
+why() {
+  _err=$(sed -e '/^[[:space:]]*$/d' -e 's/^muster service [a-z]*: //' "$2" 2>/dev/null | tail -n 1)
+  [ -n "$_err" ] || _err=$(sed -e '/^[[:space:]]*$/d' "$1" 2>/dev/null | tail -n 1)
+  [ -n "$_err" ] || _err="it printed nothing"
+  _rows=$(awk '$1 == "FAIL" { printf "%s%s", sep, $2; sep = ", " }' "$1" 2>/dev/null)
+  if [ -n "$_rows" ]; then
+    echo "$_err [failed doctor check: $_rows]"
+  else
+    echo "$_err"
+  fi
+}
+
+# doctor_refused <stderr file>: `service install` stopped at its doctor gate (cmd/muster/service.go says so in this
+# phrase, and a test holds the two together). That is before the service was restarted, so the running one was not touched.
+doctor_refused() { grep -q 'doctor reported a failure' "$1" 2>/dev/null; }
+
 echo "installing muster v$version ($target)"
 new_status=0
-new_service_install || new_status=$?
+# The output is kept so a failure can be reported with its reason, then shown as it was: stdout on stdout, stderr on stderr.
+new_service_install >"$tmp/new.out" 2>"$tmp/new.err" || new_status=$?
+cat "$tmp/new.out"
+cat "$tmp/new.err" >&2
 if [ "$new_status" = 0 ] && "$installed" service status; then
   echo "installed muster v$version ($target), service healthy"
   case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) echo "note: $HOME/.local/bin is not on your PATH" ;; esac
@@ -205,13 +232,25 @@ if [ "$new_status" = "$REFUSED_UNCHANGED" ]; then
   exit 1
 fi
 
-echo "muster install: v$version did not come up healthy." >&2
+new_doctor=0
+if [ "$new_status" != 0 ]; then
+  # `service install` itself failed: the new version never started. Say that, and why.
+  doctor_refused "$tmp/new.err" && new_doctor=1
+  echo "muster install: v$version was not started: service install exited $new_status: $(why "$tmp/new.out" "$tmp/new.err")" >&2
+else
+  # The install finished and `service status` then failed: the new version started and is not healthy.
+  echo "muster install: v$version did not come up healthy." >&2
+fi
 if [ "$had_previous" = 1 ]; then
   echo "muster install: putting back $previous" >&2
-  if "$tmp/previous" service install >/dev/null 2>&1; then
+  if "$tmp/previous" service install >"$tmp/prev.out" 2>"$tmp/prev.err"; then
     echo "muster install: $previous is installed and running again; v$version is not" >&2
+  elif [ "$new_doctor" = 1 ] && doctor_refused "$tmp/prev.err" && "$tmp/previous" service status >/dev/null 2>&1; then
+    # Both stopped at the same gate, before the restart: the service that was running was never stopped.
+    echo "muster install: $previous stopped at the same doctor gate: $(why "$tmp/prev.out" "$tmp/prev.err")" >&2
+    echo "muster install: the service that was running is still healthy and was never stopped, so nothing needs putting back" >&2
   else
-    echo "muster install: could not put the previous version back; run 'muster service status' and see docs/install.md" >&2
+    echo "muster install: could not put the previous version back: $(why "$tmp/prev.out" "$tmp/prev.err"); run 'muster service status' and see docs/install.md" >&2
   fi
 fi
 exit 1
