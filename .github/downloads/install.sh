@@ -13,14 +13,15 @@
 #   2. downloads it and checks it against the version's SHA256SUMS. It does not install anything until the checksum
 #      matches, and then checks the binary names the release it was asked for (`muster --version`);
 #   3. keeps a copy of the muster already installed, if there is one;
-#   4. runs `muster service install` with the NEW binary. That command is the install: it copies the binary to
-#      ~/.local/bin/muster, creates the state directory and a principal table (never overwriting one), writes the
-#      user service's unit, runs `muster doctor` under the unit's environment, restarts the service when the binary
-#      or the unit changed, and waits for /v1/health. A machine that never had muster gets a new service; a machine
+#   4. runs `muster service install` with the NEW binary. That command is the install: it creates the state directory
+#      and a principal table (never overwriting one), writes the user service's unit, runs `muster doctor` under the
+#      unit's environment, then copies the binary to ~/.local/bin/muster, restarts the service when the binary, the
+#      unit or the build the running service reports is not the installed one, and waits for /v1/health. A machine that never had muster gets a new service; a machine
 #      that has one keeps its address (a network address too, when the machine serves federation peers), machine id,
 #      tmux path and operator variables and gets the new binary under it. A machine that runs muster under a unit of
 #      its own (a label an operator made) is taken over once, by naming the unit in MUSTER_ADOPT; see below;
-#   5. runs `muster service status`, which exits 1 unless the unit is present, loaded, running and healthy.
+#   5. runs `muster service status`, which exits 1 unless the unit is present, loaded, running and healthy, and the
+#      healthy service reports the build of the installed binary.
 # If step 4 or 5 fails and there was an installed muster, it is put back: the saved copy runs its own
 # `service install`, which is the same command in the other direction. The exit status is 1 either way, so a
 # caller (an updater, a person) sees that the version it asked for is not the one running.
