@@ -45,6 +45,28 @@ type fakeManager struct {
 	// a second unit, made by an operator under a label of its own, that --adopt
 	// takes over (muster #492)
 	other *fakeOtherUnit
+	// what the installed binary prints for --version (the token after "muster"), and the build the
+	// running service reports: a start or a restart makes the second the first, the way a process
+	// started from the file on disk would (muster #523).
+	version string
+	running string
+	stuckAt string // when set, a start brings up this build whatever the binary says
+}
+
+// launched is what every command that starts the unit does to the build it reports.
+// The caller holds f.mu.
+func (f *fakeManager) launched() {
+	f.running = f.version
+	if f.stuckAt != "" {
+		f.running = f.stuckAt
+	}
+}
+
+// runningBuild is the build the fake service reports at /v1/health.
+func (f *fakeManager) runningBuild() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.running
 }
 
 func (f *fakeManager) run(_ context.Context, env []string, name string, args ...string) ([]byte, error) {
@@ -60,7 +82,7 @@ func (f *fakeManager) run(_ context.Context, env []string, name string, args ...
 		return []byte("PASS     config.load   ok\n"), nil
 	}
 	if len(args) > 0 && args[0] == "--version" {
-		return []byte("muster test-build (abc)\n"), nil
+		return []byte("muster " + f.version + " (abc, go1.26)\n"), nil
 	}
 	if f.failOn != "" && strings.Contains(line, f.failOn) {
 		if f.loadsOnFailure {
@@ -110,8 +132,10 @@ func (f *fakeManager) run(_ context.Context, env []string, name string, args ...
 			return []byte("Bootstrap failed: 5: Input/output error"), errors.New("exit status 5")
 		}
 		f.loaded, f.active = true, true
+		f.launched()
 	case strings.Contains(line, "enable --now"):
 		f.loaded, f.active = true, true
+		f.launched()
 	case line == "launchctl bootout gui/501/com.futurelastic.muster.login":
 		f.loginInGUI = false
 	case line == "launchctl bootout gui/501/com.futurelastic.muster":
@@ -120,6 +144,7 @@ func (f *fakeManager) run(_ context.Context, env []string, name string, args ...
 		f.loaded, f.active = false, false
 	case strings.Contains(line, "launchctl kickstart"), strings.Contains(line, "--user start"), strings.Contains(line, "--user restart"):
 		f.active = true
+		f.launched()
 	case strings.Contains(line, "is-enabled"):
 		if !f.loaded {
 			return nil, errors.New("disabled")
@@ -174,14 +199,14 @@ func newSvcFixture(t *testing.T, goos string) *svcFixture {
 	if err := os.WriteFile(tmux, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	f := &svcFixture{mgr: &fakeManager{goos: goos}, out: &bytes.Buffer{}, errb: &bytes.Buffer{}, exe: exe, tmux: tmux}
+	f := &svcFixture{mgr: &fakeManager{goos: goos, version: "v9.9.9"}, out: &bytes.Buffer{}, errb: &bytes.Buffer{}, exe: exe, tmux: tmux}
 	var token func() string
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/health" || r.Header.Get("Authorization") != "Bearer "+token() {
 			http.Error(w, "no", http.StatusUnauthorized)
 			return
 		}
-		_, _ = w.Write([]byte(`{"build":{"version":"v9.9.9"}}`))
+		_, _ = w.Write([]byte(`{"build":{"version":"` + f.mgr.runningBuild() + `"}}`))
 	}))
 	t.Cleanup(f.srv.Close)
 	p, err := svcLayout(goos, home)
@@ -333,6 +358,157 @@ func TestServiceInstallAfterUpgradeUpdatesBinaryAndRestarts(t *testing.T) {
 	}
 }
 
+// muster #523: an update that stopped short of the restart leaves the installed binary new and the
+// process old, and the next run used to see nothing it had changed and say so.
+func TestServiceInstallRestartsAServiceRunningAnOlderBuild(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			f := newSvcFixture(t, goos)
+			if code := f.install(t); code != 0 {
+				t.Fatalf("install: %d\n%s%s", code, f.out, f.errb)
+			}
+			// What the run that was refused at doctor used to leave behind: the new binary at
+			// its installed path, the service still on the old build, the unit as written.
+			if err := os.WriteFile(f.exe, []byte("binary v2"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(f.p.Bin, []byte("binary v2"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			f.mgr.version = "v9.9.10"
+			f.mgr.reset()
+			if code := f.install(t); code != 0 {
+				t.Fatalf("rerun: %d\n%s%s", code, f.out, f.errb)
+			}
+			out := f.out.String()
+			if strings.Contains(out, "Nothing to change") {
+				t.Errorf("a service on the old build was called unchanged:\n%s", out)
+			}
+			for _, want := range []string{"the service runs v9.9.9, the installed binary is v9.9.10", "restarted", "(build v9.9.10)"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("output lacks %q:\n%s", want, out)
+				}
+			}
+			if got := f.mgr.runningBuild(); got != "v9.9.10" {
+				t.Errorf("the service runs %q after the rerun, want v9.9.10", got)
+			}
+			// And a run after that has nothing left to do.
+			f.mgr.reset()
+			if code := f.install(t); code != 0 || !strings.Contains(f.out.String(), "Nothing to change") {
+				t.Errorf("third run: exit %d\n%s%s", code, f.out, f.errb)
+			}
+			if got := f.mgr.sequence(); len(got) != 1 || got[0] != "doctor" {
+				t.Errorf("third run touched the manager: %v", got)
+			}
+		})
+	}
+}
+
+// The case #523 was measured on, end to end: refused at doctor, the row fixed, run again.
+func TestServiceInstallAfterADoctorRefusalRestartsOnTheRerun(t *testing.T) {
+	f := newSvcFixture(t, "linux")
+	if code := f.install(t); code != 0 {
+		t.Fatalf("install: %d\n%s%s", code, f.out, f.errb)
+	}
+	if err := os.WriteFile(f.exe, []byte("binary v2"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f.mgr.version = "v9.9.10"
+	f.mgr.doctorFail = true
+	f.mgr.reset()
+	if code := f.install(t); code != 1 {
+		t.Fatalf("refused run: exit %d\n%s%s", code, f.out, f.errb)
+	}
+	// The refusal leaves the installed binary and the running service as they were.
+	if b, _ := os.ReadFile(f.p.Bin); string(b) != "binary v1" {
+		t.Errorf("a refused install replaced the installed binary: %q", b)
+	}
+	if got := f.mgr.runningBuild(); got != "v9.9.9" {
+		t.Errorf("the refused run changed the running service to %q", got)
+	}
+	for _, c := range f.mgr.sequence() {
+		if c != "doctor" && !strings.Contains(c, "daemon-reload") {
+			t.Errorf("a refused run reached the manager: %v", f.mgr.sequence())
+		}
+	}
+	f.mgr.doctorFail = false
+	if code := f.install(t); code != 0 {
+		t.Fatalf("rerun: exit %d\n%s%s", code, f.out, f.errb)
+	}
+	if got := f.mgr.runningBuild(); got != "v9.9.10" {
+		t.Errorf("after the rerun the service runs %q, want v9.9.10\n%s", got, f.out)
+	}
+	if strings.Contains(f.out.String(), "Nothing to change") {
+		t.Errorf("the rerun said nothing changed:\n%s", f.out)
+	}
+}
+
+// A restart that does not land on the installed binary is not reported as an update.
+func TestServiceInstallFailsWhenTheRestartDoesNotTake(t *testing.T) {
+	f := newSvcFixture(t, "linux")
+	if code := f.install(t); code != 0 {
+		t.Fatalf("install: %d\n%s%s", code, f.out, f.errb)
+	}
+	if err := os.WriteFile(f.exe, []byte("binary v2"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The binary on disk is v2, but whatever starts is still v9.9.9.
+	f.mgr.version = "v9.9.10"
+	f.mgr.stuckAt = "v9.9.9"
+	if code := f.install(t); code != 1 || !strings.Contains(f.errb.String(), "still reports build v9.9.9") {
+		t.Errorf("exit %d, stderr: %s\nstdout: %s", code, f.errb, f.out)
+	}
+}
+
+// Builds that cannot be compared are not a difference: an unstamped service, an unknown binary.
+func TestBuildsDifferNeedsBothSides(t *testing.T) {
+	v := func(s string) healthBuild { return healthBuild{Version: &s} }
+	for _, tc := range []struct {
+		name      string
+		running   healthBuild
+		installed string
+		want      bool
+	}{
+		{"same tag", v("v0.22.1"), "v0.22.1", false},
+		{"other tag", v("v0.21.0"), "v0.22.1", true},
+		{"same revision", healthBuild{Revision: "0123456789abcdef0123"}, "0123456789ab", false},
+		{"other revision", healthBuild{Revision: "ffffffffffff1111"}, "0123456789ab", true},
+		{"stamped service, unstamped binary", v("v0.21.0"), "0123456789ab", true},
+		{"service names no build", healthBuild{}, "v0.22.1", false},
+		{"binary names no build", v("v0.22.1"), "", false},
+	} {
+		if got := buildsDiffer(tc.running, tc.installed); got != tc.want {
+			t.Errorf("%s: buildsDiffer = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	for line, want := range map[string]string{
+		"muster v0.22.1 (0123456789ab, go1.26)\n": "v0.22.1",
+		"muster 0123456789ab (go1.26)":            "0123456789ab",
+		"muster 0123456789ab+dirty (go1.26)":      "0123456789ab",
+		"muster unknown (go1.26)":                 "",
+		"cannot run it":                           "",
+		"":                                        "",
+	} {
+		if got := installedBuild(line); got != want {
+			t.Errorf("installedBuild(%q) = %q, want %q", line, got, want)
+		}
+	}
+}
+
+// muster #523: status reads the health row against the binary row.
+func TestServiceStatusFailsWhenTheServiceRunsAnOlderBuild(t *testing.T) {
+	f := newSvcFixture(t, "linux")
+	if code := f.install(t); code != 0 {
+		t.Fatalf("install: %d\n%s%s", code, f.out, f.errb)
+	}
+	f.mgr.version = "v9.9.10" // the installed binary is replaced, the process is not
+	code := f.run(t, "status")
+	out := f.out.String()
+	if code != 1 || !strings.Contains(out, "NOT OK") || !strings.Contains(out, "(build v9.9.9)") || !strings.Contains(out, "v9.9.10") {
+		t.Errorf("exit %d, want 1 with a health row naming both builds:\n%s", code, out)
+	}
+}
+
 func TestServiceInstallKeepsAnExistingTable(t *testing.T) {
 	f := newSvcFixture(t, "linux")
 	if err := os.MkdirAll(f.p.ConfigDir, 0o700); err != nil {
@@ -404,7 +580,9 @@ func TestServiceInstallStatusSaysWhetherAnythingWasWritten(t *testing.T) {
 		if code := f.install(t); code != 1 {
 			t.Fatalf("exit %d, want 1\n%s%s", code, f.out, f.errb)
 		}
-		if _, err := os.Stat(f.p.Bin); err != nil {
+		// The binary is copied after doctor passes (muster #523), so the first write a refused
+		// run makes is the state directory, which is what makes the failure not "nothing changed".
+		if _, err := os.Stat(f.p.StateDir); err != nil {
 			t.Errorf("the test no longer reaches a failure after the first write: %v", err)
 		}
 	})
@@ -480,7 +658,7 @@ func TestServiceStatus(t *testing.T) {
 			if code := f.run(t, "status"); code != 0 {
 				t.Fatalf("status exit %d\n%s%s", code, f.out, f.errb)
 			}
-			for _, want := range []string{f.p.Bin, "muster test-build", "v9.9.9", "loaded", "running"} {
+			for _, want := range []string{f.p.Bin, "muster v9.9.9", "v9.9.9", "loaded", "running"} {
 				if !strings.Contains(f.out.String(), want) {
 					t.Errorf("status lacks %q:\n%s", want, f.out)
 				}

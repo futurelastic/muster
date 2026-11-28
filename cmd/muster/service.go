@@ -33,10 +33,13 @@ import (
 //
 // # What it does, and what it deliberately does not
 //
-// It copies the running binary to a fixed per-user path (so an npm upgrade can
-// never change what the unit executes), creates the state directory and a
-// principal table, writes the unit, runs `doctor` under the unit's own
-// environment, loads the unit and checks /v1/health. Multi-machine peers,
+// It creates the state directory and a principal table, writes the unit, runs
+// `doctor` under the unit's own environment, copies the running binary to a
+// fixed per-user path (so an npm upgrade can never change what the unit
+// executes), loads the unit and checks /v1/health. The copy comes after doctor
+// so a refused run leaves the installed binary as it was; the restart is
+// decided by what changed on disk and by whether the build /v1/health reports
+// is the installed binary's (muster #523). Multi-machine peers,
 // inbox delivery and Windows stay manual; the command says where.
 //
 // # The principal table is not empty
@@ -86,9 +89,10 @@ func usageService() string {
 		"domain) on macOS, `systemd --user` on Linux. Idempotent: a second run changes nothing and",
 		"says so; a run after an upgrade updates the installed binary and restarts the service.",
 		"",
-		"  install    copy the binary to ~/.local/bin, create the state directory and a principal",
-		"             table (never overwriting one), write the unit, run `doctor` under the unit's",
-		"             environment, load the unit and check /v1/health",
+		"  install    create the state directory and a principal table (never overwriting one), write",
+		"             the unit, run `doctor` under the unit's environment, copy the binary to",
+		"             ~/.local/bin, load the unit and check /v1/health; a service running another",
+		"             build than the installed binary is restarted",
 		"  --addr     listen address, or a comma-separated list (default " + svcDefaultAddr + "); an address that is not",
 		"             loopback is refused unless --serves-peers declares it (or the unit already has it)",
 		"  --serves-peers  this machine serves federation peers: allow --addr to name a specific interface address",
@@ -1028,7 +1032,7 @@ func (r *svcReport) line(what string, changed bool, detail string) {
 }
 
 func svcInstall(ctx context.Context, e svcEnv, o svcInstallOpts) (err error) {
-	// Up to the line that installs the binary this command only reads: the layout,
+	// Up to the line marked `wrote = true` this command only reads: the layout,
 	// the unit files, the service manager's answers. An error before that line
 	// changed nothing, and says so to the caller with a status of its own (muster
 	// #494). The line is where that stops being true, so a write added above it
@@ -1138,12 +1142,6 @@ func svcInstall(ctx context.Context, e svcEnv, o svcInstallOpts) (err error) {
 	}
 
 	wrote = true // the first write: from here a failure may have left something behind
-	binChanged, err := installBinary(e.Exe, p.Bin)
-	if err != nil {
-		return fmt.Errorf("installing the binary: %w", err)
-	}
-	rep.line("binary", binChanged, p.Bin)
-
 	stateNew, err := ensureDir(p.StateDir)
 	if err != nil {
 		return fmt.Errorf("state directory: %w", err)
@@ -1217,11 +1215,21 @@ func svcInstall(ctx context.Context, e svcEnv, o svcInstallOpts) (err error) {
 	if hasPrincipal(p) {
 		args = append(args, "--principal="+svcPrincipal)
 	}
-	out, derr := e.Run(ctx, svcEnviron(p, s), p.Bin, args...)
+	//
+	// It is the binary being installed that runs, from where it is: the copy at
+	// p.Bin comes after doctor passes, so a refused run leaves the installed binary
+	// as it was and the next run sees the same difference to act on (muster #523).
+	out, derr := e.Run(ctx, svcEnviron(p, s), e.Exe, args...)
 	fmt.Fprintf(e.Out, "\ndoctor, under the unit's environment:\n%s\n", indent(string(out), "  "))
 	if derr != nil {
-		return fmt.Errorf("doctor reported a failure, so the service was not started (the unit and files stay; fix the failing row and run this again)")
+		return fmt.Errorf("doctor reported a failure, so the service was not started and the installed binary was not replaced (the unit and files stay; fix the failing row and run this again)")
 	}
+
+	binChanged, err := installBinary(e.Exe, p.Bin)
+	if err != nil {
+		return fmt.Errorf("installing the binary: %w", err)
+	}
+	rep.line("binary", binChanged, p.Bin)
 
 	// After doctor, so a unit doctor rejected is not one the next login starts.
 	// Written, never loaded here: launchd reads it at the next GUI login.
@@ -1253,19 +1261,42 @@ func svcInstall(ctx context.Context, e svcEnv, o svcInstallOpts) (err error) {
 			return e.managerErr("systemctl --user daemon-reload", out, err)
 		}
 	}
-	if err := e.bringUp(ctx, p, unitChanged || binChanged, rep); err != nil {
-		return err
-	}
 
 	// Asked where the unit really listens (muster #492): a unit on a network
 	// interface answers on its loopback twin, which is always there.
 	token := readToken(p)
 	probe := healthAddr(s.Addr)
+	want := installedBuild(e.binaryVersion(ctx, p.Bin))
+
+	// What was changed on disk is not the only reason to restart (muster #523): a
+	// run that was refused at doctor, or any update that stopped before the
+	// restart, leaves the installed binary new and the process old, and the next
+	// run then sees nothing to change. So the build the running service reports is
+	// asked, and compared with the binary that is installed now.
+	restart := unitChanged || binChanged
+	if !restart && adopted == nil {
+		if st := e.state(ctx); st.Loaded && st.Active {
+			if hb, err := e.probeBuild(ctx, probe, token); err == nil && buildsDiffer(hb, want) {
+				rep.line("build", true, "the service runs "+hb.label()+", the installed binary is "+want+": restarting it")
+				restart = true
+			}
+		}
+	}
+	if err := e.bringUp(ctx, p, restart, rep); err != nil {
+		return err
+	}
+
 	h, herr := e.waitHealthy(ctx, probe, token)
 	if herr != nil {
 		return fmt.Errorf("the service did not become healthy at http://%s/v1/health: %v%s", probe, herr, e.logHint(p))
 	}
-	fmt.Fprintf(e.Out, "  health    ok         http://%s/v1/health%s\n", probe, h)
+	fmt.Fprintf(e.Out, "  health    ok         http://%s/v1/health%s\n", probe, buildDetail(h))
+	// Healthy is not enough: the answer has to come from the binary that was
+	// installed, or the command would report an update that did not take.
+	if buildsDiffer(h, want) {
+		return fmt.Errorf("the service is healthy but still reports build %s, and the installed binary is %s: it did not restart onto the new binary%s",
+			h.label(), want, e.logHint(p))
+	}
 
 	if rep.changes == 0 {
 		fmt.Fprintf(e.Out, "\nNothing to change: muster is already installed, running and healthy.\n")
@@ -1346,28 +1377,47 @@ func readToken(p svcPaths) string {
 	return strings.TrimSpace(string(b))
 }
 
-// probeHealth asks /v1/health once. A 200 is healthy; anything else is an
-// error that says what was seen. The detail is the build version, when the
-// answer carries one.
-func (e svcEnv) probeHealth(ctx context.Context, addr, token string) (detail string, err error) {
+// healthBuild is the build /v1/health reports: the release tag when the service
+// was stamped with one, else the commit it was built from.
+type healthBuild struct {
+	Version  *string
+	Revision string
+}
+
+// label is the one token that names the build, "" when the answer carried none.
+// It is what status and install print, and what the installed binary's
+// --version line is compared with (buildsDiffer).
+func (b healthBuild) label() string {
+	switch {
+	case b.Version != nil:
+		return *b.Version
+	case b.Revision != "":
+		return shortRev(b.Revision)
+	}
+	return ""
+}
+
+// probeBuild asks /v1/health once. A 200 is healthy; anything else is an
+// error that says what was seen. The build is whatever the answer carried.
+func (e svcEnv) probeBuild(ctx context.Context, addr, token string) (healthBuild, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/v1/health", nil)
 	if err != nil {
-		return "", err
+		return healthBuild{}, err
 	}
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	resp, err := e.HTTP.Do(req)
 	if err != nil {
-		return "", err
+		return healthBuild{}, err
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusOK {
 		if token == "" && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
-			return "", fmt.Errorf("the service answers but needs a token, and no %s token file was found", svcPrincipal)
+			return healthBuild{}, fmt.Errorf("the service answers but needs a token, and no %s token file was found", svcPrincipal)
 		}
-		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
+		return healthBuild{}, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 	var h struct {
 		Build struct {
@@ -1376,14 +1426,61 @@ func (e svcEnv) probeHealth(ctx context.Context, addr, token string) (detail str
 		} `json:"build"`
 	}
 	if json.Unmarshal(body, &h) == nil {
-		switch {
-		case h.Build.Version != nil:
-			return " (build " + *h.Build.Version + ")", nil
-		case h.Build.Revision != "":
-			return " (build " + shortRev(h.Build.Revision) + ")", nil
-		}
+		return healthBuild{Version: h.Build.Version, Revision: h.Build.Revision}, nil
 	}
-	return "", nil
+	return healthBuild{}, nil
+}
+
+// binaryVersion is what the binary at path prints for --version, "" when it
+// cannot be run.
+func (e svcEnv) binaryVersion(ctx context.Context, path string) string {
+	out, err := e.Run(ctx, nil, path, "--version")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// probeHealth is probeBuild with the build rendered as the detail printed after
+// a health row: " (build X)", or "" when the answer named none.
+func (e svcEnv) probeHealth(ctx context.Context, addr, token string) (detail string, err error) {
+	b, err := e.probeBuild(ctx, addr, token)
+	if err != nil {
+		return "", err
+	}
+	return buildDetail(b), nil
+}
+
+func buildDetail(b healthBuild) string {
+	if l := b.label(); l != "" {
+		return " (build " + l + ")"
+	}
+	return ""
+}
+
+// installedBuild reads the build token out of a binary's `--version` line:
+// "muster v0.22.1 (abc123, go1.26)" or, unstamped, "muster abc123 (go1.26)". ""
+// when the line is not that shape or the build is unknown: a comparison with it
+// would be a guess, and a guess here restarts a service or fails a status.
+func installedBuild(line string) string {
+	f := strings.Fields(line)
+	if len(f) < 2 || f[0] != "muster" {
+		return ""
+	}
+	t := strings.TrimSuffix(f[1], "+dirty")
+	if t == "unknown" {
+		return ""
+	}
+	return t
+}
+
+// buildsDiffer reports whether the build a running service reports is
+// demonstrably not the installed binary's (muster #523). Either side naming no
+// build is "cannot tell", never "differs": the check exists to catch an old
+// build kept alive, and a false alarm there is a restart nobody asked for.
+func buildsDiffer(running healthBuild, installed string) bool {
+	l := running.label()
+	return l != "" && installed != "" && l != installed
 }
 
 func shortRev(r string) string {
@@ -1393,17 +1490,17 @@ func shortRev(r string) string {
 	return r
 }
 
-func (e svcEnv) waitHealthy(ctx context.Context, addr, token string) (string, error) {
+func (e svcEnv) waitHealthy(ctx context.Context, addr, token string) (healthBuild, error) {
 	deadline := time.Now().Add(e.HealthWait)
 	var last error
 	for {
-		d, err := e.probeHealth(ctx, addr, token)
+		b, err := e.probeBuild(ctx, addr, token)
 		if err == nil {
-			return d, nil
+			return b, nil
 		}
 		last = err
 		if time.Now().After(deadline) || ctx.Err() != nil {
-			return "", last
+			return healthBuild{}, last
 		}
 		time.Sleep(e.HealthPoll)
 	}
@@ -1444,7 +1541,7 @@ func svcRestore(ctx context.Context, e svcEnv) error {
 	if herr != nil {
 		return fmt.Errorf("the service did not become healthy at http://%s/v1/health: %v%s", probe, herr, e.logHint(p))
 	}
-	fmt.Fprintf(e.Out, "  health    ok         http://%s/v1/health%s\n", probe, h)
+	fmt.Fprintf(e.Out, "  health    ok         http://%s/v1/health%s\n", probe, buildDetail(h))
 	if rep.changes == 0 {
 		fmt.Fprintf(e.Out, "\nNothing to change: muster is loaded, running and healthy.\n")
 	}
@@ -1492,8 +1589,8 @@ func svcStatus(ctx context.Context, e svcEnv) error {
 		}
 	}
 	ver := "cannot run it"
-	if out, err := e.Run(ctx, nil, bin, "--version"); err == nil {
-		ver = strings.TrimSpace(string(out))
+	if v := e.binaryVersion(ctx, bin); v != "" {
+		ver = v
 	}
 	_, statErr := os.Stat(bin)
 	row("binary", statErr == nil, bin+"  ("+ver+")")
@@ -1521,11 +1618,18 @@ func svcStatus(ctx context.Context, e svcEnv) error {
 		row("listen", true, "loopback only: "+s.Addr)
 	}
 	probe := healthAddr(s.Addr)
-	d, herr := e.probeHealth(ctx, probe, readToken(p))
-	if herr != nil {
+	hb, herr := e.probeBuild(ctx, probe, readToken(p))
+	switch {
+	case herr != nil:
 		row("health", false, "http://"+probe+"/v1/health: "+herr.Error())
-	} else {
-		row("health", true, "http://"+probe+"/v1/health"+d)
+	case buildsDiffer(hb, installedBuild(ver)):
+		// A service that is up and answering but is not the installed build (muster
+		// #523): an update that stopped short of the restart reads as healthy
+		// everywhere else, so this row is where it shows.
+		row("health", false, "http://"+probe+"/v1/health"+buildDetail(hb)+" is not the installed binary, "+installedBuild(ver)+
+			": the service is still running the build it was started with; muster service install restarts it")
+	default:
+		row("health", true, "http://"+probe+"/v1/health"+buildDetail(hb))
 	}
 	if !ok {
 		return errors.New("one or more checks did not pass")

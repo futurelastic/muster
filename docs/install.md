@@ -26,11 +26,11 @@ npm i -g @futurelastic/muster
 muster service install
 ```
 
-It copies the running binary to `~/.local/bin/muster` (so an npm upgrade never
-changes what the unit executes), creates the state directory
-`~/.local/state/muster` (`0700`) and a principal table in
-`~/.config/muster/config.json`, writes the unit, runs `muster doctor` under the
-unit's own environment and prints it, loads the unit and checks `/v1/health`.
+It creates the state directory `~/.local/state/muster` (`0700`) and a principal
+table in `~/.config/muster/config.json`, writes the unit, runs `muster doctor`
+under the unit's own environment and prints it, then copies the running binary
+to `~/.local/bin/muster` (so an npm upgrade never changes what the unit
+executes), loads the unit and checks `/v1/health`.
 The unit is a launchd job in the user's **Background** domain on macOS and a
 `systemd --user` service on Linux; it sets `FLEET_MACHINE` (the short
 hostname), `FLEET_ADDR` (`127.0.0.1:9470`), `FLEET_STATE_DIR`, `FLEET_CONFIG`
@@ -47,7 +47,11 @@ and restarts the service when it exits.
   the multiplexer server the service started alone when the service stops
   (`KillMode=process`, `AbandonProcessGroup`).
 - **Idempotent.** A second run changes nothing and says `Nothing to change`. After
-  an npm upgrade it replaces the installed binary and restarts the service. A rerun
+  an npm upgrade it replaces the installed binary and restarts the service. It
+  also restarts a service whose `/v1/health` reports a different build from the
+  installed binary's `--version` (an earlier run that stopped before the restart),
+  says so on a `build` line, and fails if the service still reports the old build
+  afterwards (muster #523). A rerun
   without flags keeps the machine id, address and tmux path the unit already has;
   `--machine`, `--addr` and `--tmux` change them.
 - **A variable you added to the unit stays.** Some runtimes are switched on only
@@ -137,8 +141,9 @@ and restarts the service when it exits.
   a directory written; the release installer puts the previous version back from a
   `1` and does not from a `3`. `75` is the update client's "busy" answer from its
   own `busy` command (see "Kept current by the host's update client"), never this one's.
-- **`doctor` fails, the service is not started.** The unit and files stay;
-  fix the failing row and run it again. `--no-start` writes everything and runs
+- **`doctor` fails, the service is not started.** The unit and files stay, and the
+  installed binary is not replaced (the binary being installed is what `doctor`
+  runs); fix the failing row and run it again. `--no-start` writes everything and runs
   `doctor` without loading or starting the unit.
 - **Linux, no one logged in.** A user service runs while its user has a session.
   To have it run at boot, `loginctl enable-linger` (the command prints this; it
@@ -182,7 +187,7 @@ and restarts the service when it exits.
   `GET /v1/health` shows its `serverContext`.
 
 ```sh
-muster service status        # unit present, loaded, running, healthy, which binary; exit 1 unless all hold
+muster service status        # unit present, loaded, running, healthy, which binary, and the health build matches it; exit 1 unless all hold
 muster service restore       # load it into the Background domain (macOS: moving a gui/<uid> copy out), start it, check health
 muster service uninstall     # unload and remove the unit; configuration, tokens, state and binary stay
 muster service uninstall --purge   # ...and delete them (the tokens go too)
